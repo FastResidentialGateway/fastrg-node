@@ -4,6 +4,8 @@
 #include "dbg.h"
 #include "dhcpd/dhcpd.h"
 #include "pppd/pppd.h"
+#include "pppd/nat.h"
+#include "utils.h"
 #include "../northbound/controller/etcd_client.h"
 
 BOOL is_valid_ccb_id(const FastRG_t *fastrg_ccb, int ccb_id)
@@ -289,6 +291,57 @@ STATUS execute_pppoe_hangup(FastRG_t *fastrg_ccb, int ccb_id)
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Failed to generate DHCP disable event for user %d", ccb_id + 1);
         return ERROR;
     }
+
+    return SUCCESS;
+}
+
+STATUS set_snat_port_fwd(FastRG_t *fastrg_ccb, U16 ccb_id, U16 eport,
+    const char *dip, U16 iport)
+{
+    if (!is_valid_ccb_id(fastrg_ccb, ccb_id) || dip == NULL)
+        return ERROR;
+
+    ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
+    if (ppp_ccb->phase != DATA_PHASE) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+            "User %u has not established PPPoE connection, cannot set SNAT port forwarding",
+            ccb_id + 1);
+        return ERROR;
+    }
+
+    U32 dip_be;
+    if (parse_ip(dip, &dip_be) == ERROR) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+            "Invalid destination IP: %s", dip);
+        return ERROR;
+    }
+
+    port_fwd_add(ppp_ccb->port_fwd_table, eport, dip_be, iport);
+
+    FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+        "User %u: SNAT port forward added eport=%u -> %s:%u",
+        ccb_id + 1, eport, dip, iport);
+
+    return SUCCESS;
+}
+
+STATUS remove_snat_port_fwd(FastRG_t *fastrg_ccb, U16 ccb_id, U16 eport)
+{
+    if (!is_valid_ccb_id(fastrg_ccb, ccb_id))
+        return ERROR;
+
+    ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
+
+    if (port_fwd_remove(ppp_ccb->port_fwd_table, eport) == ERROR) {
+        FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
+            "Port forwarding rule not found for user %u, eport=%u",
+            ccb_id + 1, eport);
+        return ERROR;
+    }
+
+    FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+        "User %u: SNAT port forward removed eport=%u",
+        ccb_id + 1, eport);
 
     return SUCCESS;
 }

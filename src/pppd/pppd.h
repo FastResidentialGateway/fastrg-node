@@ -26,11 +26,25 @@
 #define MULTICAST_TAG           4001
 #define TOTAL_SOCK_PORT	        65536
 #define MAX_NAT_ENTRIES         TOTAL_SOCK_PORT << 2
+#define PORT_FWD_TABLE_SIZE     TOTAL_SOCK_PORT  /* direct-indexed by eport (0..65535) */
 
 #define PPPoE_CMD_DISABLE       0
 #define PPPoE_CMD_FORCE_DISABLE 1
 #define PPPoE_CMD_ENABLE        2
 
+/**
+ * @brief SNAT port forwarding entry (direct-indexed by eport)
+ *
+ * The array index IS the external port number, so no eport field needed.
+ * Maps WAN PPPoE IP:eport → LAN dip:iport.
+ * Packed to 16 bytes so total table = 65536 * 16 = 1 MB per ppp_ccb.
+ */
+typedef struct port_fwd_entry {
+    U32            dip;         /**< destination IP on LAN (network byte order) */
+    U16            iport;       /**< internal port on LAN (host byte order) */
+    rte_atomic16_t is_active;   /**< 1 = active, 0 = free */
+    rte_atomic64_t hit_count;   /**< number of packets matched by this rule */
+} __rte_cache_aligned port_fwd_entry_t;
 /**
  * @brief hsi nat table structure
  */
@@ -75,6 +89,7 @@ typedef struct {
     rte_atomic16_t        dp_start_bool;     /* hsi data plane starting boolean flag */
     BOOL                  ppp_processing;    /* boolean flag for checking ppp is disconnecting */
     addr_table_t          addr_table[MAX_NAT_ENTRIES]; /* hsi nat addr table */
+    port_fwd_entry_t      port_fwd_table[PORT_FWD_TABLE_SIZE]; /* SNAT port forwarding, direct-indexed by eport */
     struct rte_timer      pppoe;             /* pppoe timer */
     struct rte_timer      ppp;               /* ppp timer */
     struct rte_timer      nat;               /* nat table timer */

@@ -102,23 +102,6 @@ char *make_eal_args_string(int argc, const char **argv)
     return result; // caller free()
 }
 
-/**
- * parse_ip_range
- * 
- * @brief Parse IP range string to start IP and end IP
- *        Input format: "192.168.1.1~192.168.1.150" or "192.168.1.1-192.168.1.150"
- *        IPs are returned in big-endian format (network byte order)
- * 
- * @param ip_range_str
- *      IP range string (e.g., "192.168.1.1~192.168.1.150")
- * @param ip_start
- *      Pointer to store start IP in big-endian (e.g., 0x0101a8c0)
- * @param ip_end
- *      Pointer to store end IP in big-endian (e.g., 0x9601a8c0)
- * 
- * @return
- *      SUCCESS on success, ERROR on failure
- */
 STATUS parse_ip_range(const char *ip_range_str, U32 *ip_start, U32 *ip_end)
 {
     if (!ip_range_str || !ip_start || !ip_end)
@@ -179,18 +162,6 @@ STATUS parse_ip_range(const char *ip_range_str, U32 *ip_start, U32 *ip_end)
     return SUCCESS;
 }
 
-/**
- * parse_ip
- *
- * @brief Parse IP string to U32 format
- *        Input format: "192.168.1.1"
- * @param ip_addr_str
- *      IP address string (e.g., "192.168.1.1")
- * @param ip_addr
- *      Pointer to store IP address in big-endian (e.g., 0x0101a8c0)
- * @return
- *      SUCCESS on success, ERROR on failure
- */
 STATUS parse_ip(const char *ip_addr_str, U32 *ip_addr)
 {
     if (!ip_addr_str || !ip_addr)

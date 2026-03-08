@@ -716,7 +716,7 @@ int lan_ctrl_rx(void *arg)
                     U16 ori_ident = icmphdr->icmp_ident;
 
                     new_port_id = nat_icmp_learning(eth_hdr, ip_hdr, icmphdr, 
-                        ppp_ccb->addr_table);
+                        ppp_ccb->addr_table, ppp_ccb->port_fwd_table);
                     if (unlikely(new_port_id == 0)) {
                         drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                         continue;
@@ -1303,7 +1303,7 @@ int lan_combined_rx(void *arg)
                     U16 ori_ident = icmphdr->icmp_ident;
 
                     new_port_id = nat_icmp_learning(eth_hdr, ip_hdr, icmphdr,
-                        ppp_ccb->addr_table);
+                        ppp_ccb->addr_table, ppp_ccb->port_fwd_table);
                     if (unlikely(new_port_id == 0)) {
                         drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                         continue;

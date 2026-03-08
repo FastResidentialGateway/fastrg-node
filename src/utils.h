@@ -172,12 +172,12 @@ STATUS parse_ip_range(const char *ip_range_str, U32 *ip_start, U32 *ip_end);
 /**
  * @fn parse_ip
  *
- * @brief Parse IP string to U32 format
+ * @brief Parse IP string to U32 big-endian format
  *        Input format: "192.168.1.1"
  * @param ip_str
  *      IP address string (e.g., "192.168.1.1")
  * @param ip
- *      Pointer to store IP address in U32 format (e.g., 0xc0a80101)
+ *      Pointer to store IP address in big-endian (e.g., 0x0101a8c0)
  * @return
  *      SUCCESS on success, ERROR on failure
  */

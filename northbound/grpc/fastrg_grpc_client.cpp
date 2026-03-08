@@ -1,4 +1,5 @@
 #include <iostream>
+#include <iomanip>
 #include <inttypes.h>
 #include <grpc++/grpc++.h>
 #include <grpcpp/grpcpp.h>
@@ -161,6 +162,80 @@ void fastrg_grpc_dhcp_server_stop(U8 user_id) {
         std::cout << "  Error message: " << status.error_message() << std::endl;
     }
     return;
+}
+
+void fastrg_grpc_hsi_snat_set(U16 user_id, U16 eport, char *dip, U16 iport) {
+    std::cout << "grpc client hsi snat set" << std::endl;
+    SnatConfigRequest request;
+    SnatConfigReply reply;
+    request.set_user_id(user_id);
+    request.set_eport(eport);
+    request.set_dip(dip);
+    request.set_iport(iport);
+    ClientContext context;
+    Status status = fastrg_client->stub_->SetSnatConfig(&context, request, &reply);
+    if (status.ok()) {
+        std::cout << "grpc client hsi snat set ok" << std::endl;
+    } else {
+        std::cout << "grpc client hsi snat set failed: " << std::endl;
+        std::cout << "  Error code: " << status.error_code() << std::endl;
+        std::cout << "  Error message: " << status.error_message() << std::endl;
+    }
+    return;
+}
+
+void fastrg_grpc_hsi_snat_unset(U16 user_id, U16 eport) {
+    std::cout << "grpc client hsi snat unset" << std::endl;
+    SnatConfigRequest request;
+    SnatConfigReply reply;
+    request.set_user_id(user_id);
+    request.set_eport(eport);
+    ClientContext context;
+    Status status = fastrg_client->stub_->RemoveSnatConfig(&context, request, &reply);
+    if (status.ok()) {
+        std::cout << "grpc client hsi snat unset ok" << std::endl;
+    } else {
+        std::cout << "grpc client hsi snat unset failed: " << std::endl;
+        std::cout << "  Error code: " << status.error_code() << std::endl;
+        std::cout << "  Error message: " << status.error_message() << std::endl;
+    }
+    return;
+}
+
+void fastrg_grpc_get_port_fwd_info(U16 user_id) {
+    std::cout << "grpc client getting port forwarding info" << std::endl;
+    PortFwdInfoRequest request;
+    PortFwdInfoReply reply;
+    request.set_user_id(user_id);
+    ClientContext context;
+    Status status = fastrg_client->stub_->GetPortFwdInfo(&context, request, &reply);
+    if (status.ok()) {
+        std::cout << "Port Forwarding entries for User " << reply.user_id() << ":" << std::endl;
+        if (reply.entries_size() == 0) {
+            std::cout << "  (no entries)" << std::endl;
+        } else {
+            std::cout << "  " << std::left
+                      << std::setw(20) << "External DPort"
+                      << std::setw(22) << "Internal Dest IP"
+                      << std::setw(20) << "Internal DPort"
+                      << std::setw(12) << "Hit Count"
+                      << std::endl;
+            std::cout << "  " << std::string(74, '-') << std::endl;
+            for (int i = 0; i < reply.entries_size(); i++) {
+                const PortFwdEntry& entry = reply.entries(i);
+                std::cout << "  " << std::left
+                          << std::setw(20) << entry.eport()
+                          << std::setw(22) << entry.dip()
+                          << std::setw(20) << entry.iport()
+                          << std::setw(12) << entry.hit_count()
+                          << std::endl;
+            }
+        }
+    } else {
+        std::cout << "grpc client get port fwd info failed: " << std::endl;
+        std::cout << "  Error code: " << status.error_code() << std::endl;
+        std::cout << "  Error message: " << status.error_message() << std::endl;
+    }
 }
 
 void fastrg_grpc_get_system_info() {

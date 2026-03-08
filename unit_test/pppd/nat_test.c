@@ -18,9 +18,13 @@ static int pass_count = 0;
 // Mock addr_table for testing
 static addr_table_t test_addr_table[MAX_NAT_ENTRIES];
 
+// Mock port_fwd_table for testing (direct-indexed by port number)
+static port_fwd_entry_t test_port_fwd_table[PORT_FWD_TABLE_SIZE];
+
 static void reset_addr_table(void)
 {
     memset(test_addr_table, 0, sizeof(test_addr_table));
+    memset(test_port_fwd_table, 0, sizeof(test_port_fwd_table));
 }
 
 void test_compute_initial_nat_port(void)
@@ -114,7 +118,7 @@ void test_nat_learning_port_reuse_basic(void)
 
     printf("Test 1: \"%s\"\n", "First learning creates new entry");
     U16 nat_port_1 = nat_learning_port_reuse(&eth_hdr, src_ip, dst_ip, 
-                                              src_port, dst_port, test_addr_table);
+                                              src_port, dst_port, test_addr_table, test_port_fwd_table);
     TEST_ASSERT(nat_port_1 != 0, 
         "First learning returns valid NAT port",
         "got 0 (table full)");
@@ -124,7 +128,7 @@ void test_nat_learning_port_reuse_basic(void)
 
     printf("Test 2: \"%s\"\n", "Same flow returns same NAT port");
     U16 nat_port_2 = nat_learning_port_reuse(&eth_hdr, src_ip, dst_ip, 
-                                              src_port, dst_port, test_addr_table);
+                                              src_port, dst_port, test_addr_table, test_port_fwd_table);
     TEST_ASSERT(nat_port_1 == nat_port_2, 
         "Same flow returns same NAT port",
         "expected %u, got %u", nat_port_1, nat_port_2);
@@ -155,14 +159,14 @@ void test_nat_learning_port_reuse_different_dst(void)
 
     printf("Test 1: \"%s\"\n", "First connection to 8.8.8.8");
     U16 nat_port_1 = nat_learning_port_reuse(&eth_hdr_1, src_ip_1, dst_ip_1, 
-                                              src_port_1, dst_port, test_addr_table);
+                                              src_port_1, dst_port, test_addr_table, test_port_fwd_table);
     TEST_ASSERT(nat_port_1 != 0, 
         "First connection gets NAT port",
         "got 0 (table full)");
 
     printf("Test 2: \"%s\"\n", "Second connection to 1.1.1.1 (different dst, can reuse port)");
     U16 nat_port_2 = nat_learning_port_reuse(&eth_hdr_2, src_ip_2, dst_ip_2, 
-                                              src_port_2, dst_port, test_addr_table);
+                                              src_port_2, dst_port, test_addr_table, test_port_fwd_table);
     TEST_ASSERT(nat_port_2 != 0, 
         "Second connection gets NAT port",
         "got 0 (table full)");
@@ -190,14 +194,14 @@ void test_nat_learning_port_reuse_different_dst(void)
 
     /* First connection: 192.168.0.100:12345 -> 8.8.8.8:53 */
     U16 nat_port_a = nat_learning_port_reuse(&eth_hdr_1, common_src_ip, dst_ip_a, 
-        common_src_port, dst_port_a, test_addr_table);
+        common_src_port, dst_port_a, test_addr_table, test_port_fwd_table);
     TEST_ASSERT(nat_port_a != 0, 
         "Connection A gets NAT port",
         "got 0 (table full)");
 
     /* Second connection: 192.168.0.100:12345 -> 1.1.1.1:80 (different dst) */
     U16 nat_port_b = nat_learning_port_reuse(&eth_hdr_1, common_src_ip, dst_ip_b, 
-        common_src_port, dst_port_b, test_addr_table);
+        common_src_port, dst_port_b, test_addr_table, test_port_fwd_table);
     TEST_ASSERT(nat_port_b != 0, 
         "Connection B gets NAT port",
         "got 0 (table full)");
@@ -238,7 +242,7 @@ void test_nat_learning_port_reuse_conflict(void)
 
     printf("Test 1: \"%s\"\n", "First connection");
     U16 nat_port_1 = nat_learning_port_reuse(&eth_hdr_1, src_ip, dst_ip, 
-                                              src_port, dst_port, test_addr_table);
+                                              src_port, dst_port, test_addr_table, test_port_fwd_table);
     TEST_ASSERT(nat_port_1 != 0, 
         "First connection gets NAT port",
         "got 0 (table full)");
@@ -249,7 +253,7 @@ void test_nat_learning_port_reuse_conflict(void)
 
     printf("Test 2: \"%s\"\n", "Second connection to same destination (potential conflict)");
     U16 nat_port_2 = nat_learning_port_reuse(&eth_hdr_2, src_ip_2, dst_ip, 
-                                              src_port_2, dst_port, test_addr_table);
+                                              src_port_2, dst_port, test_addr_table, test_port_fwd_table);
     TEST_ASSERT(nat_port_2 != 0, 
         "Second connection gets NAT port",
         "got 0 (table full)");
@@ -275,7 +279,7 @@ void test_nat_reverse_lookup(void)
 
     // Create NAT entry
     U16 nat_port = nat_learning_port_reuse(&eth_hdr, src_ip, dst_ip, 
-        src_port, dst_port, test_addr_table);
+        src_port, dst_port, test_addr_table, test_port_fwd_table);
 
     printf("Test 1: \"%s\"\n", "Lookup existing entry");
     addr_table_t *entry = nat_reverse_lookup(nat_port, dst_ip, dst_port, test_addr_table);
@@ -329,9 +333,9 @@ void test_nat_reverse_lookup(void)
 
     /* Create two NAT entries - should share same NAT port */
     U16 nat_port_a = nat_learning_port_reuse(&eth_hdr, common_src_ip, dst_ip_a, 
-        common_src_port, dst_port_a, test_addr_table);
+        common_src_port, dst_port_a, test_addr_table, test_port_fwd_table);
     U16 nat_port_b = nat_learning_port_reuse(&eth_hdr, common_src_ip, dst_ip_b, 
-        common_src_port, dst_port_b, test_addr_table);
+        common_src_port, dst_port_b, test_addr_table, test_port_fwd_table);
 
     TEST_ASSERT(nat_port_a != 0 && nat_port_b != 0, 
         "Both connections get NAT ports",
@@ -427,7 +431,7 @@ void test_nat_udp_learning_wrapper(void)
     };
 
     printf("Test 1: \"%s\"\n", "UDP NAT learning");
-    U16 nat_port = nat_udp_learning(&eth_hdr, &ip_hdr, &udp_hdr, test_addr_table);
+    U16 nat_port = nat_udp_learning(&eth_hdr, &ip_hdr, &udp_hdr, test_addr_table, test_port_fwd_table);
     TEST_ASSERT(nat_port != 0, 
         "UDP learning returns valid NAT port",
         "got 0 (table full)");
@@ -458,7 +462,7 @@ void test_nat_tcp_learning_wrapper(void)
     };
 
     printf("Test 1: \"%s\"\n", "TCP NAT learning");
-    U16 nat_port = nat_tcp_learning(&eth_hdr, &ip_hdr, &tcp_hdr, test_addr_table);
+    U16 nat_port = nat_tcp_learning(&eth_hdr, &ip_hdr, &tcp_hdr, test_addr_table, test_port_fwd_table);
     TEST_ASSERT(nat_port != 0, 
         "TCP learning returns valid NAT port",
         "got 0 (table full)");
@@ -489,13 +493,159 @@ void test_nat_icmp_learning_wrapper(void)
     };
 
     printf("Test 1: \"%s\"\n", "ICMP NAT learning");
-    U16 nat_port = nat_icmp_learning(&eth_hdr, &ip_hdr, &icmp_hdr, test_addr_table);
+    U16 nat_port = nat_icmp_learning(&eth_hdr, &ip_hdr, &icmp_hdr, test_addr_table, test_port_fwd_table);
     TEST_ASSERT(nat_port != 0, 
         "ICMP learning returns valid NAT port",
         "got 0 (table full)");
     TEST_ASSERT(nat_port >= SYS_MAX_PORT && nat_port < TOTAL_SOCK_PORT,
         "NAT port in valid range",
         "expected [%u, %u), got %u", SYS_MAX_PORT, TOTAL_SOCK_PORT, nat_port);
+}
+
+void test_port_fwd_helpers(void)
+{
+    printf("\nTesting port forwarding helpers (port_fwd_add/remove/lookup/nat_port_fwd_reverse_lookup):\n");
+    printf("=========================================\n\n");
+
+    reset_addr_table();
+
+    U16 eport  = 8080;                   /* host byte order */
+    U32 dip    = htonl(0xC0A80065);      /* 192.168.0.101, network byte order */
+    U16 iport  = 80;                     /* host byte order */
+
+    /* ── port_fwd_lookup_by_eport: inactive entry returns NULL ── */
+    printf("Test 1: \"%s\"\n", "lookup inactive entry returns NULL");
+    port_fwd_entry_t *lookup = port_fwd_lookup_by_eport(test_port_fwd_table, eport);
+    TEST_ASSERT(lookup == NULL,
+        "port_fwd_lookup_by_eport: inactive returns NULL",
+        "expected NULL, got %p", (void *)lookup);
+
+    /* ── port_fwd_remove: removing inactive entry returns ERROR ── */
+    printf("Test 2: \"%s\"\n", "remove inactive entry returns ERROR");
+    STATUS s = port_fwd_remove(test_port_fwd_table, eport);
+    TEST_ASSERT(s == ERROR,
+        "port_fwd_remove: inactive entry returns ERROR",
+        "expected ERROR, got %d", s);
+
+    /* ── port_fwd_add: add new entry ── */
+    printf("Test 3: \"%s\"\n", "add new entry");
+    port_fwd_add(test_port_fwd_table, eport, dip, iport);
+    TEST_ASSERT(rte_atomic16_read(&test_port_fwd_table[eport].is_active) == 1,
+        "port_fwd_add: is_active set to 1",
+        "is_active = %d", rte_atomic16_read(&test_port_fwd_table[eport].is_active));
+
+    printf("Test 4: \"%s\"\n", "add: dip and iport stored correctly");
+    TEST_ASSERT(test_port_fwd_table[eport].dip == dip,
+        "port_fwd_add: dip stored correctly",
+        "expected 0x%08X, got 0x%08X", dip, test_port_fwd_table[eport].dip);
+    TEST_ASSERT(test_port_fwd_table[eport].iport == iport,
+        "port_fwd_add: iport stored correctly",
+        "expected %u, got %u", iport, test_port_fwd_table[eport].iport);
+
+    printf("Test 5: \"%s\"\n", "add: hit_count initialised to 0");
+    TEST_ASSERT(rte_atomic64_read(&test_port_fwd_table[eport].hit_count) == 0,
+        "port_fwd_add: hit_count reset to 0",
+        "expected 0, got %" PRId64, rte_atomic64_read(&test_port_fwd_table[eport].hit_count));
+
+    /* ── port_fwd_lookup_by_eport: active entry returns correct pointer ── */
+    printf("Test 6: \"%s\"\n", "lookup active entry returns correct pointer");
+    lookup = port_fwd_lookup_by_eport(test_port_fwd_table, eport);
+    TEST_ASSERT(lookup != NULL,
+        "port_fwd_lookup_by_eport: active entry returns non-NULL",
+        "expected non-NULL, got NULL");
+    TEST_ASSERT(lookup == &test_port_fwd_table[eport],
+        "port_fwd_lookup_by_eport: returns correct entry pointer",
+        "expected %p, got %p", (void *)&test_port_fwd_table[eport], (void *)lookup);
+
+    /* ── port_fwd_add: idempotent – no-op if already active ── */
+    printf("Test 7: \"%s\"\n", "add to already-active entry is a no-op");
+    U32 new_dip   = htonl(0xC0A80099);  /* different IP */
+    U16 new_iport = 9090;
+    port_fwd_add(test_port_fwd_table, eport, new_dip, new_iport);
+    TEST_ASSERT(test_port_fwd_table[eport].dip == dip,
+        "port_fwd_add: no-op preserves original dip",
+        "expected 0x%08X, got 0x%08X", dip, test_port_fwd_table[eport].dip);
+    TEST_ASSERT(test_port_fwd_table[eport].iport == iport,
+        "port_fwd_add: no-op preserves original iport",
+        "expected %u, got %u", iport, test_port_fwd_table[eport].iport);
+
+    /* ── nat_port_fwd_reverse_lookup: match ── */
+    printf("Test 8: \"%s\"\n", "nat_port_fwd_reverse_lookup: match returns SUCCESS");
+    U32 out_dip  = 0;
+    U16 out_iport = 0;
+    STATUS rv = nat_port_fwd_reverse_lookup(test_port_fwd_table,
+        htons(eport), &out_dip, &out_iport);
+    TEST_ASSERT(rv == SUCCESS,
+        "nat_port_fwd_reverse_lookup: active entry returns SUCCESS",
+        "expected SUCCESS, got %d", rv);
+    TEST_ASSERT(out_dip == dip,
+        "nat_port_fwd_reverse_lookup: out_dip matches",
+        "expected 0x%08X, got 0x%08X", dip, out_dip);
+    /* iport stored host byte order; out_iport returned in network byte order */
+    TEST_ASSERT(out_iport == htons(iport),
+        "nat_port_fwd_reverse_lookup: out_iport matches (network byte order)",
+        "expected %u, got %u", htons(iport), out_iport);
+
+    /* ── nat_port_fwd_reverse_lookup: miss (different port) ── */
+    printf("Test 9: \"%s\"\n", "nat_port_fwd_reverse_lookup: inactive port returns ERROR");
+    rv = nat_port_fwd_reverse_lookup(test_port_fwd_table, htons(9999), &out_dip, &out_iport);
+    TEST_ASSERT(rv == ERROR,
+        "nat_port_fwd_reverse_lookup: inactive entry returns ERROR",
+        "expected ERROR, got %d", rv);
+
+    /* ── hit_count increments (simulate data-path) ── */
+    printf("Test 10: \"%s\"\n", "hit_count increments correctly");
+    rte_atomic64_inc(&test_port_fwd_table[eport].hit_count);
+    rte_atomic64_inc(&test_port_fwd_table[eport].hit_count);
+    rte_atomic64_inc(&test_port_fwd_table[eport].hit_count);
+    TEST_ASSERT(rte_atomic64_read(&test_port_fwd_table[eport].hit_count) == 3,
+        "hit_count correctly incremented to 3",
+        "expected 3, got %" PRId64, rte_atomic64_read(&test_port_fwd_table[eport].hit_count));
+
+    /* ── port_fwd_remove: removes active entry, resets hit_count ── */
+    printf("Test 11: \"%s\"\n", "remove active entry returns SUCCESS");
+    s = port_fwd_remove(test_port_fwd_table, eport);
+    TEST_ASSERT(s == SUCCESS,
+        "port_fwd_remove: active entry returns SUCCESS",
+        "expected SUCCESS, got %d", s);
+    TEST_ASSERT(rte_atomic16_read(&test_port_fwd_table[eport].is_active) == 0,
+        "port_fwd_remove: is_active cleared to 0",
+        "is_active = %d", rte_atomic16_read(&test_port_fwd_table[eport].is_active));
+
+    printf("Test 12: \"%s\"\n", "remove: hit_count reset to 0");
+    TEST_ASSERT(rte_atomic64_read(&test_port_fwd_table[eport].hit_count) == 0,
+        "port_fwd_remove: hit_count reset to 0",
+        "expected 0, got %" PRId64, rte_atomic64_read(&test_port_fwd_table[eport].hit_count));
+
+    printf("Test 13: \"%s\"\n", "lookup after remove returns NULL");
+    lookup = port_fwd_lookup_by_eport(test_port_fwd_table, eport);
+    TEST_ASSERT(lookup == NULL,
+        "port_fwd_lookup_by_eport: removed entry returns NULL",
+        "expected NULL, got %p", (void *)lookup);
+
+    /* ── reverse lookup after remove also misses ── */
+    printf("Test 14: \"%s\"\n", "nat_port_fwd_reverse_lookup after remove returns ERROR");
+    rv = nat_port_fwd_reverse_lookup(test_port_fwd_table, htons(eport), &out_dip, &out_iport);
+    TEST_ASSERT(rv == ERROR,
+        "nat_port_fwd_reverse_lookup: removed entry returns ERROR",
+        "expected ERROR, got %d", rv);
+
+    /* ── double-remove returns ERROR ── */
+    printf("Test 15: \"%s\"\n", "double-remove returns ERROR");
+    s = port_fwd_remove(test_port_fwd_table, eport);
+    TEST_ASSERT(s == ERROR,
+        "port_fwd_remove: double-remove returns ERROR",
+        "expected ERROR, got %d", s);
+
+    /* ── re-add after remove works, hit_count starts at 0 ── */
+    printf("Test 16: \"%s\"\n", "re-add after remove works and hit_count is 0");
+    port_fwd_add(test_port_fwd_table, eport, dip, iport);
+    TEST_ASSERT(rte_atomic16_read(&test_port_fwd_table[eport].is_active) == 1,
+        "port_fwd_add: re-add after remove succeeds",
+        "is_active = %d", rte_atomic16_read(&test_port_fwd_table[eport].is_active));
+    TEST_ASSERT(rte_atomic64_read(&test_port_fwd_table[eport].hit_count) == 0,
+        "port_fwd_add: re-add resets hit_count to 0",
+        "expected 0, got %" PRId64, rte_atomic64_read(&test_port_fwd_table[eport].hit_count));
 }
 
 void test_nat_table_almost_full(void)
@@ -525,7 +675,7 @@ void test_nat_table_almost_full(void)
     U16 known_dst_port = htons(53);
 
     U16 known_nat_port = nat_learning_port_reuse(&eth_hdr, known_src_ip, known_dst_ip,
-        known_src_port, known_dst_port, test_addr_table);
+        known_src_port, known_dst_port, test_addr_table, test_port_fwd_table);
 
     TEST_ASSERT(known_nat_port != 0,
         "First entry created successfully",
@@ -593,7 +743,7 @@ void test_nat_table_almost_full(void)
     printf("  New flow: 192.168.0.100:12345 -> 1.1.1.1:80\n");
 
     U16 new_nat_port = nat_learning_port_reuse(&eth_hdr, known_src_ip, new_dst_ip,
-        known_src_port, new_dst_port, test_addr_table);
+        known_src_port, new_dst_port, test_addr_table, test_port_fwd_table);
 
     printf("\nTest 1: \"%s\"\n", "NAT learning with almost full table");
     TEST_ASSERT(new_nat_port != 0,
@@ -643,7 +793,7 @@ void test_nat_table_almost_full(void)
     U16 extra_dst_port = htons(53);
 
     U16 extra_nat_port = nat_learning_port_reuse(&eth_hdr, extra_src_ip, extra_dst_ip,
-        extra_src_port, extra_dst_port, test_addr_table);
+        extra_src_port, extra_dst_port, test_addr_table, test_port_fwd_table);
 
     TEST_ASSERT(extra_nat_port != 0,
         "Extra entry failed to be created as table is full",
@@ -671,6 +821,7 @@ void test_nat(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_nat_udp_learning_wrapper();
     test_nat_tcp_learning_wrapper();
     test_nat_icmp_learning_wrapper();
+    test_port_fwd_helpers();
     test_nat_table_almost_full();
 
     printf("\n");

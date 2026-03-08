@@ -198,7 +198,9 @@ static void cmd_help_parsed(__attribute__((unused)) void *parsed_result,
     cmdline_printf(cl,"usage: \n"
                       "show <hsi|dhcp> to show information\n"
                       "show system <info|stats|xstats> to show system info/stats/xstats\n"
-                      "config <add|del> user <id> vlan <id> pppoe account <account> password <password> dhcp pool <start~end> subnet <mask> gateway <ip> to add/update user configuration\n"
+                      "config <add|del> user <id> pppoe-dhcp vlan <id> account <account> password <password> pool <start~end> subnet <mask> gateway <ip> to add/update/del PPPoE/DHCP configuration\n"
+                      "configure SNAT port forwarding: config <add|del> user <id> snat eport <port> dip <ip> iport <port>\n"
+                      "show user <id> nat port-forwarding to show port forwarding entries\n"
                       "exec hsi <start|stop> <user id | all> to start/stop HSI (PPPoE + DHCP)\n"
                       "exec pppoe <start|stop> <user id | all> to start/stop PPPoE only\n"
                       "exec dhcp-server <start|stop> <user id | all> to start/stop DHCP server only\n"
@@ -226,23 +228,28 @@ struct cmd_config_result {
     cmdline_fixed_string_t 	cmd_str;        /* add/del */
     cmdline_fixed_string_t 	user_str;
     uint16_t 				user_id;
+    cmdline_fixed_string_t 	service_type;   /* pppoe-dhcp/snat */
     cmdline_fixed_string_t 	vlan_str;
     uint16_t 				vlan_id;
-    cmdline_fixed_string_t 	pppoe_str;
     cmdline_fixed_string_t 	account_str;
     cmdline_fixed_string_t 	pppoe_account;
     cmdline_fixed_string_t 	password_str;
     cmdline_fixed_string_t 	pppoe_password;
-    cmdline_fixed_string_t 	dhcp_str;
     cmdline_fixed_string_t 	pool_str;
     cmdline_fixed_string_t 	ip_pool_range;  /* format: 192.168.3.2~192.168.3.5 */
     cmdline_fixed_string_t 	subnet_str;
     cmdline_ipaddr_t 		subnet_mask;
     cmdline_fixed_string_t 	gateway_str;
     cmdline_ipaddr_t 		gateway_ip;
+    cmdline_fixed_string_t 	eport_str;      /* external port */
+    uint16_t 				eport;
+    cmdline_fixed_string_t 	dip_str;        /* destination ip */
+    cmdline_ipaddr_t 		dip;
+    cmdline_fixed_string_t 	iport_str;      /* internal port */
+    uint16_t 				iport;
 };
 
-static void cmd_config_parsed(void *parsed_result,
+static void cmd_config_pppoe_dhcp_parsed(void *parsed_result,
                 struct cmdline *cl,
                 __attribute__((unused)) void *data)
 {
@@ -306,6 +313,37 @@ static void cmd_config_parsed(void *parsed_result,
         pool_end, subnet_str, gateway_str);
 }
 
+static void cmd_config_snat_parsed(void *parsed_result,
+                struct cmdline *cl,
+                __attribute__((unused)) void *data)
+{
+    struct cmd_config_result *res = parsed_result;
+    char dip_str[32] = {0};
+
+    if (strncmp(res->cmd_str, "del", 3) == 0) {
+        /* Call gRPC function to remove the SNAT configuration */
+        fastrg_grpc_hsi_snat_unset(res->user_id, res->eport);
+        return;
+    }
+
+    /* Format destination IP */
+    if (res->dip.family == AF_INET) {
+        snprintf(dip_str, sizeof(dip_str), "%u.%u.%u.%u",
+            (res->dip.addr.ipv4.s_addr) & 0xFF,
+            (res->dip.addr.ipv4.s_addr >> 8) & 0xFF,
+            (res->dip.addr.ipv4.s_addr >> 16) & 0xFF,
+            (res->dip.addr.ipv4.s_addr >> 24) & 0xFF);
+    }
+
+    cmdline_printf(cl, "SNAT Configuration for User %u:\n", res->user_id);
+    cmdline_printf(cl, "  External Port: %u\n", res->eport);
+    cmdline_printf(cl, "  Destination IP: %s\n", dip_str);
+    cmdline_printf(cl, "  Internal Port: %u\n", res->iport);
+
+    /* Call gRPC function to apply SNAT configuration */
+    fastrg_grpc_hsi_snat_set(res->user_id, res->eport, dip_str, res->iport);
+}
+
 cmdline_parse_token_string_t cmd_config_config =
     TOKEN_STRING_INITIALIZER(struct cmd_config_result, config, "config");
 cmdline_parse_token_string_t cmd_config_add_str =
@@ -316,12 +354,14 @@ cmdline_parse_token_string_t cmd_config_user_str =
     TOKEN_STRING_INITIALIZER(struct cmd_config_result, user_str, "user");
 cmdline_parse_token_num_t cmd_config_user_id =
     TOKEN_NUM_INITIALIZER(struct cmd_config_result, user_id, RTE_UINT16);
+
+/* PPPoE/DHCP tokens */
+cmdline_parse_token_string_t cmd_config_service_pppoe_dhcp =
+    TOKEN_STRING_INITIALIZER(struct cmd_config_result, service_type, "pppoe-dhcp");
 cmdline_parse_token_string_t cmd_config_vlan_str =
     TOKEN_STRING_INITIALIZER(struct cmd_config_result, vlan_str, "vlan");
 cmdline_parse_token_num_t cmd_config_vlan_id =
     TOKEN_NUM_INITIALIZER(struct cmd_config_result, vlan_id, RTE_UINT16);
-cmdline_parse_token_string_t cmd_config_pppoe_str =
-    TOKEN_STRING_INITIALIZER(struct cmd_config_result, pppoe_str, "pppoe");
 cmdline_parse_token_string_t cmd_config_account_str =
     TOKEN_STRING_INITIALIZER(struct cmd_config_result, account_str, "account");
 cmdline_parse_token_string_t cmd_config_pppoe_account =
@@ -330,8 +370,6 @@ cmdline_parse_token_string_t cmd_config_password_str =
     TOKEN_STRING_INITIALIZER(struct cmd_config_result, password_str, "password");
 cmdline_parse_token_string_t cmd_config_pppoe_password =
     TOKEN_STRING_INITIALIZER(struct cmd_config_result, pppoe_password, NULL);
-cmdline_parse_token_string_t cmd_config_dhcp_str =
-    TOKEN_STRING_INITIALIZER(struct cmd_config_result, dhcp_str, "dhcp");
 cmdline_parse_token_string_t cmd_config_pool_str =
     TOKEN_STRING_INITIALIZER(struct cmd_config_result, pool_str, "pool");
 cmdline_parse_token_string_t cmd_config_ip_pool_range =
@@ -345,23 +383,38 @@ cmdline_parse_token_string_t cmd_config_gateway_str =
 cmdline_parse_token_ipaddr_t cmd_config_gateway_ip =
     TOKEN_IPV4_INITIALIZER(struct cmd_config_result, gateway_ip);
 
-cmdline_parse_inst_t cmd_config_add = {
-    .f = cmd_config_parsed,  /* function to call */
+/* SNAT tokens */
+cmdline_parse_token_string_t cmd_config_service_snat =
+    TOKEN_STRING_INITIALIZER(struct cmd_config_result, service_type, "snat");
+cmdline_parse_token_string_t cmd_config_eport_str =
+    TOKEN_STRING_INITIALIZER(struct cmd_config_result, eport_str, "eport");
+cmdline_parse_token_num_t cmd_config_eport =
+    TOKEN_NUM_INITIALIZER(struct cmd_config_result, eport, RTE_UINT16);
+cmdline_parse_token_string_t cmd_config_dip_str =
+    TOKEN_STRING_INITIALIZER(struct cmd_config_result, dip_str, "dip");
+cmdline_parse_token_ipaddr_t cmd_config_dip =
+    TOKEN_IPV4_INITIALIZER(struct cmd_config_result, dip);
+cmdline_parse_token_string_t cmd_config_iport_str =
+    TOKEN_STRING_INITIALIZER(struct cmd_config_result, iport_str, "iport");
+cmdline_parse_token_num_t cmd_config_iport =
+    TOKEN_NUM_INITIALIZER(struct cmd_config_result, iport, RTE_UINT16);
+
+cmdline_parse_inst_t cmd_config_add_pppoe_dhcp = {
+    .f = cmd_config_pppoe_dhcp_parsed,  /* function to call */
     .data = NULL,      /* 2nd arg of func */
-    .help_str = "configure subscriber settings: config add user <id> vlan <id> pppoe account <account> password <password> dhcp pool <start~end> subnet <mask> gateway <ip>",
+    .help_str = "configure PPPoE/DHCP settings: config add user <id> pppoe-dhcp vlan <id> account <account> password <password> pool <start~end> subnet <mask> gateway <ip>",
     .tokens = {        /* token list, NULL terminated */
         (void *)&cmd_config_config,
         (void *)&cmd_config_add_str,
         (void *)&cmd_config_user_str,
         (void *)&cmd_config_user_id,
+        (void *)&cmd_config_service_pppoe_dhcp,
         (void *)&cmd_config_vlan_str,
         (void *)&cmd_config_vlan_id,
-        (void *)&cmd_config_pppoe_str,
         (void *)&cmd_config_account_str,
         (void *)&cmd_config_pppoe_account,
         (void *)&cmd_config_password_str,
         (void *)&cmd_config_pppoe_password,
-        (void *)&cmd_config_dhcp_str,
         (void *)&cmd_config_pool_str,
         (void *)&cmd_config_ip_pool_range,
         (void *)&cmd_config_subnet_str,
@@ -372,10 +425,46 @@ cmdline_parse_inst_t cmd_config_add = {
     },
 };
 
-cmdline_parse_inst_t cmd_config_del = {
-    .f = cmd_config_parsed,  /* function to call */
+cmdline_parse_inst_t cmd_config_add_snat = {
+    .f = cmd_config_snat_parsed,  /* function to call */
     .data = NULL,      /* 2nd arg of func */
-    .help_str = "configure subscriber settings: config del user <id>",
+    .help_str = "configure SNAT port forwarding: config add user <id> snat eport <port> dip <ip> iport <port>",
+    .tokens = {        /* token list, NULL terminated */
+        (void *)&cmd_config_config,
+        (void *)&cmd_config_add_str,
+        (void *)&cmd_config_user_str,
+        (void *)&cmd_config_user_id,
+        (void *)&cmd_config_service_snat,
+        (void *)&cmd_config_eport_str,
+        (void *)&cmd_config_eport,
+        (void *)&cmd_config_dip_str,
+        (void *)&cmd_config_dip,
+        (void *)&cmd_config_iport_str,
+        (void *)&cmd_config_iport,
+        NULL,
+    },
+};
+
+cmdline_parse_inst_t cmd_config_del_snat = {
+    .f = cmd_config_snat_parsed,  /* function to call */
+    .data = NULL,      /* 2nd arg of func */
+    .help_str = "delete user SNAT configuration: config del user <id> snat eport <port>",
+    .tokens = {        /* token list, NULL terminated */
+        (void *)&cmd_config_config,
+        (void *)&cmd_config_del_str,
+        (void *)&cmd_config_user_str,
+        (void *)&cmd_config_user_id,
+        (void *)&cmd_config_service_snat,
+        (void *)&cmd_config_eport_str,
+        (void *)&cmd_config_eport,
+        NULL,
+    },
+};
+
+cmdline_parse_inst_t cmd_config_del = {
+    .f = cmd_config_pppoe_dhcp_parsed,  /* function to call */
+    .data = NULL,      /* 2nd arg of func */
+    .help_str = "delete user configuration: config del user <id>",
     .tokens = {        /* token list, NULL terminated */
         (void *)&cmd_config_config,
         (void *)&cmd_config_del_str,
@@ -496,16 +585,62 @@ cmdline_parse_inst_t cmd_exec = {
     },
 };
 
+/****** SHOW USER NAT PORT-FORWARDING ******/
+
+struct cmd_show_port_fwd_result {
+    cmdline_fixed_string_t show_token;
+    cmdline_fixed_string_t user_str;
+    uint16_t               user_id;
+    cmdline_fixed_string_t nat_str;
+    cmdline_fixed_string_t port_fwd_str;
+};
+
+static void cmd_show_port_fwd_parsed(void *parsed_result,
+                struct cmdline *cl,
+                __attribute__((unused)) void *data)
+{
+    struct cmd_show_port_fwd_result *res = parsed_result;
+    fastrg_grpc_get_port_fwd_info(res->user_id);
+}
+
+cmdline_parse_token_string_t cmd_show_port_fwd_show =
+    TOKEN_STRING_INITIALIZER(struct cmd_show_port_fwd_result, show_token, "show");
+cmdline_parse_token_string_t cmd_show_port_fwd_user =
+    TOKEN_STRING_INITIALIZER(struct cmd_show_port_fwd_result, user_str, "user");
+cmdline_parse_token_num_t cmd_show_port_fwd_user_id =
+    TOKEN_NUM_INITIALIZER(struct cmd_show_port_fwd_result, user_id, RTE_UINT16);
+cmdline_parse_token_string_t cmd_show_port_fwd_nat =
+    TOKEN_STRING_INITIALIZER(struct cmd_show_port_fwd_result, nat_str, "nat");
+cmdline_parse_token_string_t cmd_show_port_fwd_pfwd =
+    TOKEN_STRING_INITIALIZER(struct cmd_show_port_fwd_result, port_fwd_str, "port-forwarding");
+
+cmdline_parse_inst_t cmd_show_port_fwd = {
+    .f = cmd_show_port_fwd_parsed,
+    .data = NULL,
+    .help_str = "show user <id> nat port-forwarding: display port forwarding entries for a subscriber",
+    .tokens = {
+        (void *)&cmd_show_port_fwd_show,
+        (void *)&cmd_show_port_fwd_user,
+        (void *)&cmd_show_port_fwd_user_id,
+        (void *)&cmd_show_port_fwd_nat,
+        (void *)&cmd_show_port_fwd_pfwd,
+        NULL,
+    },
+};
+
 /****** CONTEXT (list of instruction) */
 cmdline_parse_ctx_t ctx[] = {
         (cmdline_parse_inst_t *)&cmd_info,
         (cmdline_parse_inst_t *)&cmd_system,
         (cmdline_parse_inst_t *)&cmd_quit,
         (cmdline_parse_inst_t *)&cmd_help,
-        (cmdline_parse_inst_t *)&cmd_config_add,
+        (cmdline_parse_inst_t *)&cmd_config_add_pppoe_dhcp,
+        (cmdline_parse_inst_t *)&cmd_config_add_snat,
+        (cmdline_parse_inst_t *)&cmd_config_del_snat,
         (cmdline_parse_inst_t *)&cmd_config_del,
         (cmdline_parse_inst_t *)&cmd_config_set_subscriber,
         (cmdline_parse_inst_t *)&cmd_exec,
+        (cmdline_parse_inst_t *)&cmd_show_port_fwd,
         (cmdline_parse_inst_t *)&cmd_log,
     NULL,
 };
@@ -563,7 +698,7 @@ int main(int argc, char **argv)
     printf("Connecting to gRPC server at: %s\n", grpc_target);
     fastrg_grpc_client_connect(grpc_target);
 
-    struct cmdline *cl = cmdline_stdin_new(ctx, "FastRG>");
+    struct cmdline *cl = cmdline_stdin_new(ctx, "FastRG> ");
     if (cl == NULL) {
         grpc_shutdown();
         return -1;

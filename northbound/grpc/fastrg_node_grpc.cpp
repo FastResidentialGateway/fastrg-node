@@ -406,6 +406,81 @@ grpc::Status FastRGNodeServiceImpl::DhcpServerStop(::grpc::ServerContext* contex
     return grpc::Status::OK;
 }
 
+grpc::Status FastRGNodeServiceImpl::SetSnatConfig(::grpc::ServerContext* context, const ::fastrgnodeservice::SnatConfigRequest* request, ::fastrgnodeservice::SnatConfigReply* response)
+{
+    cout << "SetSnatConfig called" << endl;
+
+    U16 ccb_id = request->user_id() - 1;
+    U16 eport = request->eport();
+    U16 iport = request->iport();
+    const char *dip = request->dip().c_str();
+
+    if (set_snat_port_fwd(fastrg_ccb, ccb_id, eport, dip, iport) == ERROR) {
+        std::string err = "Error! Failed to set SNAT port forward for user " + std::to_string(ccb_id + 1) +
+            " eport=" + std::to_string(eport) + " dip=" + std::string(dip) + " iport=" + std::to_string(iport);
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+
+    response->set_status("SNAT port forward set successfully");
+
+    return grpc::Status::OK;
+}
+
+grpc::Status FastRGNodeServiceImpl::RemoveSnatConfig(::grpc::ServerContext* context, const ::fastrgnodeservice::SnatConfigRequest* request, ::fastrgnodeservice::SnatConfigReply* response)
+{
+    cout << "RemoveSnatConfig called" << endl;
+
+    U16 ccb_id = request->user_id() - 1;
+    U16 eport = request->eport();
+
+    if (remove_snat_port_fwd(fastrg_ccb, ccb_id, eport) == ERROR) {
+        std::string err = "Error! Failed to remove SNAT port forward for user " + std::to_string(ccb_id + 1) +
+            " eport=" + std::to_string(eport);
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+
+    response->set_status("SNAT port forward removed successfully");
+
+    return grpc::Status::OK;
+}
+
+grpc::Status FastRGNodeServiceImpl::GetPortFwdInfo(::grpc::ServerContext* context, const ::fastrgnodeservice::PortFwdInfoRequest* request, ::fastrgnodeservice::PortFwdInfoReply* response)
+{
+    cout << "GetPortFwdInfo called" << endl;
+
+    U16 user_id = request->user_id();
+    U16 ccb_id = user_id - 1;
+
+    if (user_id == 0 || user_id > fastrg_ccb->user_count) {
+        std::string err = "Error! User " + std::to_string(user_id) + " does not exist";
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, err);
+    }
+
+    ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
+    response->set_user_id(user_id);
+
+    for (int eport = 0; eport < PORT_FWD_TABLE_SIZE; eport++) {
+        if (rte_atomic16_read(&ppp_ccb->port_fwd_table[eport].is_active) == 1) {
+            PortFwdEntry *entry = response->add_entries();
+            entry->set_eport(eport);
+
+            U32 dip = ppp_ccb->port_fwd_table[eport].dip;
+            std::string dip_str = std::to_string((dip) & 0xFF) + "." +
+                std::to_string((dip >> 8) & 0xFF) + "." +
+                std::to_string((dip >> 16) & 0xFF) + "." +
+                std::to_string((dip >> 24) & 0xFF);
+            entry->set_dip(dip_str);
+            entry->set_iport(ppp_ccb->port_fwd_table[eport].iport);
+            entry->set_hit_count(rte_atomic64_read(&ppp_ccb->port_fwd_table[eport].hit_count));
+        }
+    }
+
+    return grpc::Status::OK;
+}
+
 int getNicInfo(NicDriverInfo *nic_info, uint8_t port_id)
 {
     struct rte_eth_dev_info dev_info = {0};
