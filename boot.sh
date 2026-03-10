@@ -66,7 +66,7 @@ popd
 # Uncomment this line to enable downloading controller.proto after release
 download_controller_grpc
 
-pushd $path/lib/dpdk && git checkout v24.11.4 &&meson setup $path/lib/dpdk_build
+pushd $path/lib/dpdk && git checkout v24.11.4 && meson setup $path/lib/dpdk_build
 popd
 pushd $path/lib/dpdk_build
 meson configure -Denable_kmods=true
