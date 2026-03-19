@@ -9,9 +9,15 @@
 #include <pthread.h>
 #include <sched.h>
 #include <sys/stat.h>
+#include <linux/ethtool.h>
 
 #include <rte_eal.h>
 #include <rte_lcore.h>
+#include <rte_ethdev.h>
+#include <rte_ether.h>
+#include <rte_bus.h>
+#include <rte_bus_pci.h>
+#include <rte_version.h>
 
 #include <uuid/uuid.h>
 
@@ -20,16 +26,42 @@
 #include "dbg.h"
 #include "fastrg.h"
 
-void get_all_lcore_id(struct lcore_map *lcore)
+/**
+ * fastrg_calc_rss_queue_count - number of RSS worker queues.
+ * Thread budget: 5 fixed (main + ctrl + wan_ctrl + lan_ctrl + timer)
+ *                + 2 * N data (wan_data + lan_data per RSS queue)
+ * => N = max(1, (cpu_count - 5) / 2)
+ */
+static U16 fastrg_calc_rss_queue_count(unsigned int cpu_count)
 {
+    if (cpu_count <= 5)
+        return 1;
+
+    U16 data_queue_count = (U16)((cpu_count - 5) / 2);
+    return data_queue_count > MAX_DATA_QUEUES ? MAX_DATA_QUEUES : data_queue_count;
+}
+
+void get_all_lcore_id(struct lcore_map *lcore, unsigned int cpu_count)
+{
+    memset(lcore, 0, sizeof(*lcore));
+
+    /* Fixed threads: ctrl, wan_ctrl, lan_ctrl, timer */
     lcore->ctrl_thread = rte_get_next_lcore(rte_lcore_id(), 1, 0);
-    lcore->wan_thread = rte_get_next_lcore(lcore->ctrl_thread, 1, 0);
-    lcore->down_thread = rte_get_next_lcore(lcore->wan_thread, 1, 0);
-    lcore->lan_thread = rte_get_next_lcore(lcore->down_thread, 1, 0);
-    lcore->up_thread = rte_get_next_lcore(lcore->lan_thread, 1, 0);
-    lcore->gateway_thread = rte_get_next_lcore(lcore->up_thread, 1, 0);
-    lcore->timer_thread = rte_get_next_lcore(lcore->gateway_thread, 1, 0);
-    lcore->northbound_thread = rte_get_next_lcore(lcore->timer_thread, 1, 0);
+    lcore->wan_ctrl_thread = rte_get_next_lcore(lcore->ctrl_thread, 1, 0);
+    lcore->lan_ctrl_thread = rte_get_next_lcore(lcore->wan_ctrl_thread, 1, 0);
+    lcore->timer_thread = rte_get_next_lcore(lcore->lan_ctrl_thread, 1, 0);
+
+    /* Dynamic data threads: wan_data[i] + lan_data[i] per RSS queue */
+    U16 rss_count = fastrg_calc_rss_queue_count(cpu_count);
+    lcore->num_data_queues = rss_count;
+
+    unsigned int prev = lcore->timer_thread;
+    for(U16 i=0; i<rss_count; i++) {
+        lcore->wan_data_threads[i] = rte_get_next_lcore(prev, 1, 0);
+        lcore->lan_data_threads[i] = rte_get_next_lcore(lcore->wan_data_threads[i], 1, 0);
+        prev = lcore->lan_data_threads[i];
+    }
+    lcore->northbound_thread = rte_get_next_lcore(prev, 1, 0);
 }
 
 /**
@@ -306,7 +338,7 @@ STATUS create_dir_if_not_exists(const char *dir_path)
     if (tmp[len - 1] == '/')
         tmp[len - 1] = '\0';
 
-    for (p = tmp + 1; *p; p++) {
+    for(p=tmp+1; *p; p++) {
         if (*p == '/') {
             *p = '\0';
             if (mkdir(tmp, 0755) != 0 && errno != EEXIST)
@@ -340,4 +372,53 @@ STATUS parse_vlan_id(const char *vlan_str, U16 *vlan_id)
     *vlan_id = (U16)val;
 
     return SUCCESS;
+}
+
+U16 fastrg_calc_queue_count(unsigned int cpu_count)
+{
+    /* queue 0 (control) + RSS worker queues */
+    return fastrg_calc_rss_queue_count(cpu_count) + 1;
+}
+
+int get_drvinfo(U16 port_id, struct ethtool_drvinfo *drvinfo)
+{
+    struct rte_eth_dev_info dev_info;
+    struct rte_dev_reg_info reg_info;
+    int n;
+
+    if (drvinfo == NULL)
+        return -EINVAL;
+
+    RTE_ETH_VALID_PORTID_OR_ERR_RET(port_id, -ENODEV);
+
+    int ret = rte_eth_dev_fw_version_get(port_id, drvinfo->fw_version,
+                  sizeof(drvinfo->fw_version));
+    if (ret < 0) {
+        printf("firmware version get error: (%s)\n", strerror(-ret));
+    } else if (ret > 0) {
+        printf("Insufficient fw version buffer size, "
+               "the minimum size should be %d\n", ret);
+    }
+
+    memset(&dev_info, 0, sizeof(dev_info));
+    ret = rte_eth_dev_info_get(port_id, &dev_info);
+    if (ret != 0) {
+        printf("get port %d info failed: %s\n", port_id, strerror(-ret));
+        return ret;
+    }
+
+    strlcpy(drvinfo->driver, dev_info.driver_name, sizeof(drvinfo->driver));
+    strlcpy(drvinfo->version, rte_version(), sizeof(drvinfo->version));
+    strlcpy(drvinfo->bus_info, rte_dev_name(dev_info.device), sizeof(drvinfo->bus_info));
+
+    memset(&reg_info, 0, sizeof(reg_info));
+    drvinfo->regdump_len = rte_eth_dev_get_reg_info(port_id, &reg_info) ? reg_info.length : 0;
+
+    n = rte_eth_dev_get_eeprom_length(port_id);
+    drvinfo->eedump_len = n > 0 ? n : 0;
+
+    drvinfo->n_stats = sizeof(struct rte_eth_stats) / sizeof(uint64_t);
+    drvinfo->testinfo_len = 0;
+
+    return 0;
 }

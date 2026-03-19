@@ -23,12 +23,8 @@
 #include "dhcpd/dhcpd.h"
 #include "dp.h"
 
-enum {
-    gen_port_q = 0,
-    up_port_q,
-    down_port_q,
-    ctrl_port_q,
-};
+/* Queue 0 is for control/fallback, queues 1..N are RSS data queues.
+ * Each thread uses its own queue ID for TX to avoid contention. */
 
 static inline void build_icmp_unreach(FastRG_t *fastrg_ccb, struct rte_mbuf *pkt, 
     U16 ccb_id, struct rte_ether_hdr *eth_hdr, vlan_header_t old_vlan_hdr, 
@@ -117,31 +113,25 @@ static inline STATUS insert_pppoes_hdr(FastRG_t *fastrg_ccb, struct rte_mbuf **p
 
 static int encaps_udp(FastRG_t *fastrg_ccb, struct rte_mbuf **single_pkt, 
     struct rte_ether_hdr *eth_hdr, vlan_header_t *vlan_header, 
-    struct rte_ipv4_hdr *ip_hdr, U16 ccb_id)
+    struct rte_ipv4_hdr *ip_hdr, U16 ccb_id, U16 lan_tx_queue)
 {
     struct rte_udp_hdr *udphdr;
     U16                new_port_id;
     int32_t            new_pkt_num = 0;
     U16                vlan_hdr_tci = vlan_header->tci_union.tci_value;
-    struct per_ccb_stats *stats_lan = OPENRG_GET_PER_SUBSCRIBER_STATS(fastrg_ccb, LAN_PORT, ccb_id);
-    struct per_ccb_stats *stats_wan = OPENRG_GET_PER_SUBSCRIBER_STATS(fastrg_ccb, WAN_PORT, ccb_id);
 
     if (unlikely((*single_pkt)->pkt_len > (ETH_MTU - (sizeof(vlan_header_t) + 
             sizeof(pppoe_header_t) + sizeof(ppp_payload_t))))) {
         struct rte_mbuf *pkt = rte_pktmbuf_alloc(direct_pool[0]);
         if (unlikely(pkt == NULL)) {
-            if (likely(stats_lan)) increase_ccb_drop_count(stats_lan, (*single_pkt)->pkt_len);
-            rte_pktmbuf_free((*single_pkt));
+            drop_packet(fastrg_ccb, *single_pkt, LAN_PORT, ccb_id);
             return 0;
         }
         build_icmp_unreach(fastrg_ccb, pkt, ccb_id, eth_hdr, *vlan_header, ip_hdr);
-        if (likely(stats_lan)) {
-            increase_ccb_rx_count(stats_lan, (*single_pkt)->pkt_len);
-            increase_ccb_tx_count(stats_lan, pkt->pkt_len);
-        }
-        rte_eth_tx_burst(LAN_PORT, gen_port_q, &pkt, 1);
-        if (likely(stats_lan)) increase_ccb_drop_count(stats_lan, (*single_pkt)->pkt_len);
-        rte_pktmbuf_free((*single_pkt));
+        count_rx_packet(fastrg_ccb, *single_pkt, LAN_PORT, ccb_id);
+        count_tx_packet(fastrg_ccb, pkt, LAN_PORT, ccb_id);
+        rte_eth_tx_burst(LAN_PORT, lan_tx_queue, &pkt, 1);
+        drop_packet(fastrg_ccb, *single_pkt, LAN_PORT, ccb_id);
         new_pkt_num = 0;
     } else {
         new_pkt_num = 1;
@@ -149,12 +139,10 @@ static int encaps_udp(FastRG_t *fastrg_ccb, struct rte_mbuf **single_pkt,
         ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
 
         /* for nat */
-        //(*single_pkt)->ol_flags |= PKT_TX_IPV4 | PKT_TX_IP_CKSUM | PKT_TX_UDP_CKSUM;
         udphdr = (struct rte_udp_hdr *)(ip_hdr + 1);
         new_port_id = nat_udp_learning(eth_hdr, ip_hdr, udphdr, ppp_ccb->addr_table);
         if (unlikely(new_port_id == 0)) {
-            if (likely(stats_lan)) increase_ccb_drop_count(stats_lan, (*single_pkt)->pkt_len);
-            rte_pktmbuf_free((*single_pkt));
+            drop_packet(fastrg_ccb, *single_pkt, LAN_PORT, ccb_id);
             return 0;
         }
         ip_hdr->src_addr = ppp_ccb->hsi_ipv4;
@@ -164,13 +152,11 @@ static int encaps_udp(FastRG_t *fastrg_ccb, struct rte_mbuf **single_pkt,
         udphdr->dgram_cksum = rte_ipv4_udptcp_cksum(ip_hdr, udphdr);
 
         if (unlikely(insert_pppoes_hdr(fastrg_ccb, single_pkt, ccb_id, vlan_hdr_tci) == ERROR)) {
-            if (likely(stats_lan)) increase_ccb_drop_count(stats_lan, 
-                (*single_pkt)->pkt_len);
-            rte_pktmbuf_free((*single_pkt));
+            drop_packet(fastrg_ccb, *single_pkt, LAN_PORT, ccb_id);
             return 0;
         }
-        if (likely(stats_lan)) increase_ccb_rx_count(stats_lan, (*single_pkt)->pkt_len);
-        if (likely(stats_wan)) increase_ccb_tx_count(stats_wan, (*single_pkt)->pkt_len);
+        count_rx_packet(fastrg_ccb, *single_pkt, LAN_PORT, ccb_id);
+        count_tx_packet(fastrg_ccb, *single_pkt, WAN_PORT, ccb_id);
         increase_pppoes_tx_count(ppp_ccb, (*single_pkt)->pkt_len);
     }
 
@@ -179,14 +165,12 @@ static int encaps_udp(FastRG_t *fastrg_ccb, struct rte_mbuf **single_pkt,
 
 static int encaps_tcp(FastRG_t *fastrg_ccb, struct rte_mbuf **single_pkt, 
     struct rte_ether_hdr *eth_hdr, vlan_header_t *vlan_header, 
-    struct rte_ipv4_hdr *ip_hdr, U16 ccb_id)
+    struct rte_ipv4_hdr *ip_hdr, U16 ccb_id, U16 lan_tx_queue)
 {
     struct rte_tcp_hdr *tcphdr;
     U16                new_port_id;
     int32_t            new_pkt_num = 0;
     U16                vlan_hdr_tci = vlan_header->tci_union.tci_value;
-    struct per_ccb_stats *stats_lan = OPENRG_GET_PER_SUBSCRIBER_STATS(fastrg_ccb, 0, ccb_id);
-    struct per_ccb_stats *stats_wan = OPENRG_GET_PER_SUBSCRIBER_STATS(fastrg_ccb, 1, ccb_id);
 
     if (unlikely((*single_pkt)->pkt_len > (ETH_MTU - (sizeof(vlan_header_t) + 
             sizeof(pppoe_header_t) + sizeof(ppp_payload_t))))) {
@@ -245,18 +229,14 @@ static int encaps_tcp(FastRG_t *fastrg_ccb, struct rte_mbuf **single_pkt,
         #else
         struct rte_mbuf *pkt = rte_pktmbuf_alloc(direct_pool[0]);
         if (unlikely(pkt == NULL)) {
-            if (likely(stats_lan)) increase_ccb_drop_count(stats_lan, (*single_pkt)->pkt_len);
-            rte_pktmbuf_free((*single_pkt));
+            drop_packet(fastrg_ccb, *single_pkt, LAN_PORT, ccb_id);
             return 0;
         }
         build_icmp_unreach(fastrg_ccb, pkt, ccb_id, eth_hdr, *vlan_header, ip_hdr);
-        if (likely(stats_lan)) {
-            increase_ccb_rx_count(stats_lan, (*single_pkt)->pkt_len);
-            increase_ccb_tx_count(stats_lan, pkt->pkt_len);
-        }
-        rte_eth_tx_burst(LAN_PORT, gen_port_q, &pkt, 1);
-        if (likely(stats_lan)) increase_ccb_drop_count(stats_lan, (*single_pkt)->pkt_len);
-        rte_pktmbuf_free((*single_pkt));
+        count_rx_packet(fastrg_ccb, *single_pkt, LAN_PORT, ccb_id);
+        count_tx_packet(fastrg_ccb, pkt, LAN_PORT, ccb_id);
+        rte_eth_tx_burst(LAN_PORT, lan_tx_queue, &pkt, 1);
+        drop_packet(fastrg_ccb, *single_pkt, LAN_PORT, ccb_id);
         new_pkt_num = 0;
         #endif
     } else {
@@ -265,12 +245,10 @@ static int encaps_tcp(FastRG_t *fastrg_ccb, struct rte_mbuf **single_pkt,
         ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
 
         /* for nat */
-        //(*single_pkt)->ol_flags |= PKT_TX_IPV4 | PKT_TX_IP_CKSUM | PKT_TX_TCP_CKSUM;
         tcphdr = (struct rte_tcp_hdr *)(ip_hdr + 1);
         new_port_id = nat_tcp_learning(eth_hdr, ip_hdr, tcphdr, ppp_ccb->addr_table);
         if (unlikely(new_port_id == 0)) {
-            if (likely(stats_lan)) increase_ccb_drop_count(stats_lan, (*single_pkt)->pkt_len);
-            rte_pktmbuf_free((*single_pkt));
+            drop_packet(fastrg_ccb, *single_pkt, LAN_PORT, ccb_id);
             return 0;
         }
         ip_hdr->src_addr = ppp_ccb->hsi_ipv4;
@@ -280,13 +258,11 @@ static int encaps_tcp(FastRG_t *fastrg_ccb, struct rte_mbuf **single_pkt,
         tcphdr->cksum = rte_ipv4_udptcp_cksum(ip_hdr, tcphdr);
 
         if (unlikely(insert_pppoes_hdr(fastrg_ccb, single_pkt, ccb_id, vlan_hdr_tci) == ERROR)) {
-            if (likely(stats_lan)) increase_ccb_drop_count(stats_lan, 
-                (*single_pkt)->pkt_len);
-            rte_pktmbuf_free((*single_pkt));
+            drop_packet(fastrg_ccb, *single_pkt, LAN_PORT, ccb_id);
             return 0;
         }
-        if (likely(stats_lan)) increase_ccb_rx_count(stats_lan, (*single_pkt)->pkt_len);
-        if (likely(stats_wan)) increase_ccb_tx_count(stats_wan, (*single_pkt)->pkt_len);
+        count_rx_packet(fastrg_ccb, *single_pkt, LAN_PORT, ccb_id);
+        count_tx_packet(fastrg_ccb, *single_pkt, WAN_PORT, ccb_id);
         increase_pppoes_tx_count(ppp_ccb, (*single_pkt)->pkt_len);
     }
     return new_pkt_num;
@@ -298,16 +274,12 @@ static int decaps_udp(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt,
 {
     struct rte_udp_hdr *udphdr;
     ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
-    struct per_ccb_stats *stats_lan = OPENRG_GET_PER_SUBSCRIBER_STATS(fastrg_ccb, 0, ccb_id);
-    struct per_ccb_stats *stats_wan = OPENRG_GET_PER_SUBSCRIBER_STATS(fastrg_ccb, 1, ccb_id);
 
-    //single_pkt->ol_flags |= PKT_TX_IPV4 | PKT_TX_IP_CKSUM/* | PKT_TX_UDP_CKSUM*/;
     udphdr = (struct rte_udp_hdr *)(ip_hdr + 1);
     addr_table_t *entry = nat_reverse_lookup(udphdr->dst_port, ip_hdr->src_addr, 
         udphdr->src_port, ppp_ccb->addr_table);
-    if (entry == NULL) {
-        if (likely(stats_wan)) increase_ccb_drop_count(stats_wan, single_pkt->pkt_len);
-        rte_pktmbuf_free(single_pkt);
+    if (unlikely(entry == NULL)) {
+        drop_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
         return 0;
     }
     rte_ether_addr_copy(&fastrg_ccb->nic_info.hsi_lan_mac, &eth_hdr->src_addr);
@@ -317,8 +289,8 @@ static int decaps_udp(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt,
     ip_hdr->hdr_checksum = rte_ipv4_cksum(ip_hdr);
     udphdr->dgram_cksum = 0;
     udphdr->dgram_cksum = rte_ipv4_udptcp_cksum(ip_hdr, udphdr);
-    if (likely(stats_lan)) increase_ccb_tx_count(stats_lan, single_pkt->pkt_len);
-    if (likely(stats_wan)) increase_ccb_rx_count(stats_wan, single_pkt->pkt_len);
+    count_tx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
+    count_rx_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
     increase_pppoes_rx_count(ppp_ccb, single_pkt->pkt_len);
 
     return 1;
@@ -330,16 +302,12 @@ static int decaps_tcp(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt,
 {
     struct rte_tcp_hdr *tcphdr;
     ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
-    struct per_ccb_stats *stats_lan = OPENRG_GET_PER_SUBSCRIBER_STATS(fastrg_ccb, 0, ccb_id);
-    struct per_ccb_stats *stats_wan = OPENRG_GET_PER_SUBSCRIBER_STATS(fastrg_ccb, 1, ccb_id);
 
-    //single_pkt->ol_flags |= PKT_TX_IPV4 | PKT_TX_IP_CKSUM/* | PKT_TX_TCP_CKSUM*/;
     tcphdr = (struct rte_tcp_hdr *)(ip_hdr + 1);
     addr_table_t *entry = nat_reverse_lookup(tcphdr->dst_port, ip_hdr->src_addr, 
         tcphdr->src_port, ppp_ccb->addr_table);
-    if (entry == NULL) {
-        if (likely(stats_wan)) increase_ccb_drop_count(stats_wan, single_pkt->pkt_len);
-        rte_pktmbuf_free(single_pkt);
+    if (unlikely(entry == NULL)) {
+        drop_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
         return 0;
     }
     rte_ether_addr_copy(&fastrg_ccb->nic_info.hsi_lan_mac, &eth_hdr->src_addr);
@@ -349,8 +317,8 @@ static int decaps_tcp(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt,
     ip_hdr->hdr_checksum = rte_ipv4_cksum(ip_hdr);
     tcphdr->cksum = 0;
     tcphdr->cksum = rte_ipv4_udptcp_cksum(ip_hdr, tcphdr);
-    if (likely(stats_lan)) increase_ccb_tx_count(stats_lan, single_pkt->pkt_len);
-    if (likely(stats_wan)) increase_ccb_rx_count(stats_wan, single_pkt->pkt_len);
+    count_tx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
+    count_rx_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
     increase_pppoes_rx_count(ppp_ccb, single_pkt->pkt_len);
 
     return 1;

@@ -438,6 +438,7 @@ int getNicStats(Statistics *stats, uint8_t port_id, FastRG_t *fastrg_ccb)
     stats->set_rx_errors(eth_stats.ierrors);
     stats->set_tx_errors(eth_stats.oerrors);
     stats->set_rx_dropped(eth_stats.imissed);
+
     // per user stats - with RCU protection
     unsigned int lcore_id = 0;
     // gRPC usually runs on non-DPDK lcore

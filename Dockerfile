@@ -29,12 +29,10 @@ RUN mkdir -p /var/log/fastrg && mkdir -p /var/run/fastrg \
     && apt update -y && apt install -y \
        libnuma1 libatomic1 libconfig9 iproute2 \
        libgrpc++1.51t64 libjsoncpp25 libcpprest2.10 \
+       libarchive-dev \
     && apt clean -y && apt autoclean -y && apt autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
 VOLUME /var/log/fastrg
 VOLUME /var/run/fastrg
 VOLUME /etc/fastrg
-
-ENTRYPOINT ["/usr/local/bin/fastrg"]
-CMD ["-l", "0-7", "-n", "4"]

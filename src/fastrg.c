@@ -192,7 +192,7 @@ STATUS fastrg_remove_subscriber_stats(FastRG_t *fastrg_ccb, U16 remove_count, U1
                 FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, 
                     "Cannot allocate memory for per_subscriber_stats[%d]", i);
                 // Cleanup already allocated arrays
-                for (int j=0; j<i; j++)
+                for(int j=0; j<i; j++)
                     fastrg_mfree(new_stats[j]);
                 rte_atomic16_clear(&fastrg_ccb->per_subscriber_stats_updating);
                 return ERROR;
@@ -211,7 +211,7 @@ STATUS fastrg_remove_subscriber_stats(FastRG_t *fastrg_ccb, U16 remove_count, U1
     }
 
     // Step 2: Atomically swap all pointers
-    for (int i = 0; i < PORT_AMOUNT; i++)
+    for(int i=0; i<PORT_AMOUNT; i++)
         __atomic_store_n(&fastrg_ccb->per_subscriber_stats[i], new_stats[i], __ATOMIC_RELEASE);
 
     // Step 3: Wait for RCU grace period before freeing old memory
@@ -472,9 +472,6 @@ void fastrg_stop()
     controller_cleanup(&fastrg_ccb);
 
     rte_ring_free(cp_q);
-    rte_ring_free(uplink_q);
-    rte_ring_free(downlink_q);
-    rte_ring_free(gateway_q);
     close(fastrg_ccb.unix_sock_fd);
     U16 total_ccbs = fastrg_ccb.user_count;
     fastrg_ccb.user_count = 0;
@@ -519,8 +516,8 @@ int fastrg_start(int argc, char **argv)
         goto err;
     }
 
-    if (rte_lcore_count() < 8) {
-        FastRG_LOG(ERR, fastrg_ccb.fp, NULL, NULL, "We need at least 8 cores.\n");
+    if (rte_lcore_count() < 7) {
+        FastRG_LOG(ERR, fastrg_ccb.fp, NULL, NULL, "We need at least 7 cores.\n");
         goto err;
     }
     if (rte_eth_dev_count_avail() < 2) {
@@ -528,11 +525,11 @@ int fastrg_start(int argc, char **argv)
         goto err;
     }
 
-    get_all_lcore_id(&fastrg_ccb.lcore);
+    get_all_lcore_id(&fastrg_ccb.lcore, rte_lcore_count());
 
-    if (rte_eth_dev_socket_id(0) > 0 && rte_eth_dev_socket_id(0) != (int)rte_lcore_to_socket_id(fastrg_ccb.lcore.lan_thread))
+    if (rte_eth_dev_socket_id(0) > 0 && rte_eth_dev_socket_id(0) != (int)rte_lcore_to_socket_id(fastrg_ccb.lcore.lan_data_threads[0]))
         FastRG_LOG(WARN, fastrg_ccb.fp, NULL, NULL, "LAN port is on remote NUMA node to polling thread.\n\tPerformance will not be optimal.\n");
-    if (rte_eth_dev_socket_id(1) > 0 && rte_eth_dev_socket_id(1) != (int)rte_lcore_to_socket_id(fastrg_ccb.lcore.wan_thread))
+    if (rte_eth_dev_socket_id(1) > 0 && rte_eth_dev_socket_id(1) != (int)rte_lcore_to_socket_id(fastrg_ccb.lcore.wan_ctrl_thread))
         FastRG_LOG(WARN, fastrg_ccb.fp, NULL, NULL, "WAN port is on remote NUMA node to polling thread.\n\tPerformance will not be optimal.\n");
 
     /* Read network config */
@@ -595,21 +592,56 @@ int fastrg_start(int argc, char **argv)
     /* initialize packet capture framework */
     rte_pdump_init();
     #endif
-    #if 0
-    struct rte_flow_error error;
-    struct rte_flow *flow = generate_flow(0, 1, &error);
-    if (!flow) {
-        printf("Flow can't be created %d message: %s\n", error.type, error.message ? error.message : "(no stated reason)");
-        rte_exit(EXIT_FAILURE, "error in creating flow");
+
+    /* Install PPPoE-aware RSS flow rules on both ports.
+     * Queue layout per port:
+     *   queue 0          : PPPoE control (Discovery + Session w/o 5-tuple)
+     *   queues 1 .. N-1  : RSS worker queues (5-tuple, PPPoE inner-header aware)
+     * Queue count: 1 + max(1, 1 + (lcore_count - 5) / 2)
+     */
+    {
+        struct rte_flow_error flow_error;
+        U16 total_q = fastrg_calc_queue_count(rte_lcore_count());
+        FastRG_LOG(INFO, fastrg_ccb.fp, NULL, NULL,
+            "Setting up rte_flow rules: %u total queues per port "
+            "(queue 0=ctrl, queues 1..%u=RSS)", total_q, total_q - 1);
+        for(U16 port_id=0; port_id<rte_eth_dev_count_avail(); port_id++) {
+            if (setup_port_flows(&fastrg_ccb, port_id, total_q, &flow_error) != 0) {
+                FastRG_LOG(ERR, fastrg_ccb.fp, NULL, NULL,
+                    "Port %u: flow setup failed (type=%d): %s",
+                    port_id, flow_error.type,
+                    flow_error.message ? flow_error.message : "(no reason)");
+                goto err;
+            }
+        }
     }
-    #endif
+    /* --- Launch fixed threads --- */
     rte_eal_remote_launch((lcore_function_t *)control_plane, (void *)&fastrg_ccb, fastrg_ccb.lcore.ctrl_thread);
-    rte_eal_remote_launch((lcore_function_t *)wan_recvd, (void *)&fastrg_ccb, fastrg_ccb.lcore.wan_thread);
-    rte_eal_remote_launch((lcore_function_t *)downlink, (void *)&fastrg_ccb, fastrg_ccb.lcore.down_thread);
-    rte_eal_remote_launch((lcore_function_t *)lan_recvd, (void *)&fastrg_ccb, fastrg_ccb.lcore.lan_thread);
-    rte_eal_remote_launch((lcore_function_t *)uplink, (void *)&fastrg_ccb, fastrg_ccb.lcore.up_thread);
-    rte_eal_remote_launch((lcore_function_t *)gateway, (void *)&fastrg_ccb, fastrg_ccb.lcore.gateway_thread);
+    rte_eal_remote_launch((lcore_function_t *)wan_ctrl_rx, (void *)&fastrg_ccb, fastrg_ccb.lcore.wan_ctrl_thread);
+    rte_eal_remote_launch((lcore_function_t *)lan_ctrl_rx, (void *)&fastrg_ccb, fastrg_ccb.lcore.lan_ctrl_thread);
     rte_eal_remote_launch((lcore_function_t *)timer_loop, (void *)&fastrg_ccb, fastrg_ccb.lcore.timer_thread);
+
+    /* --- Launch dynamic data threads (one wan_data_rx + one lan_rx per RSS queue) --- */
+    static dp_rx_arg_t wan_data_args[MAX_DATA_QUEUES];
+    static dp_rx_arg_t lan_data_args[MAX_DATA_QUEUES];
+    U16 num_dq = fastrg_ccb.lcore.num_data_queues;
+    FastRG_LOG(INFO, fastrg_ccb.fp, NULL, NULL,
+        "Launching %u wan_data_rx + %u lan_data_rx threads (RSS queues 1..%u)",
+        num_dq, num_dq, num_dq);
+    for(U16 i=0; i<num_dq; i++) {
+        U16 queue_id = i + 1;  /* RSS queues start at 1 */
+        wan_data_args[i].fastrg_ccb = &fastrg_ccb;
+        wan_data_args[i].rx_queue_id = queue_id;
+        wan_data_args[i].tx_queue_id = queue_id;
+        rte_eal_remote_launch((lcore_function_t *)wan_data_rx,
+            (void *)&wan_data_args[i], fastrg_ccb.lcore.wan_data_threads[i]);
+
+        lan_data_args[i].fastrg_ccb = &fastrg_ccb;
+        lan_data_args[i].rx_queue_id = queue_id;
+        lan_data_args[i].tx_queue_id = queue_id;
+        rte_eal_remote_launch((lcore_function_t *)lan_data_rx,
+            (void *)&lan_data_args[i], fastrg_ccb.lcore.lan_data_threads[i]);
+    }
 
     if (northbound(&fastrg_ccb) == ERROR) {
         FastRG_LOG(ERR, fastrg_ccb.fp, NULL, NULL, "Northbound initialization failed");

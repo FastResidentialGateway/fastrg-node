@@ -25,12 +25,9 @@
 #define MBUF_CACHE_SIZE 512
 #define RING_SIZE 		16384
 
-struct rte_ring    *gateway_q, *uplink_q, *downlink_q;
 struct rte_ring    *cp_q, *free_mail_ring;
 struct rte_mempool *direct_pool[PORT_AMOUNT];
 struct rte_mempool *indirect_pool[PORT_AMOUNT];
-
-extern int rte_ethtool_get_drvinfo(U16 port_id, struct ethtool_drvinfo *drv_info);
 
 struct nic_info vendor[] = {
     { "mlx5_pci", NIC_VENDOR_MLX5 },
@@ -57,12 +54,6 @@ void cleanup_mem()
 
 void cleanup_ring()
 {
-    if (downlink_q != NULL)
-        rte_ring_free(downlink_q);
-    if (uplink_q != NULL)
-        rte_ring_free(uplink_q);
-    if (gateway_q != NULL)
-        rte_ring_free(gateway_q);
     if (free_mail_ring != NULL) {
         void *mail_slot;
         while (rte_ring_dequeue(free_mail_ring, &mail_slot) == 0)
@@ -172,22 +163,6 @@ STATUS init_ring(FastRG_t *fastrg_ccb)
         }
     }
 
-    gateway_q = rte_ring_create("rg-function",RING_SIZE,rte_socket_id(),0);
-    if (!gateway_q) {
-        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Cannot create rg-function ring: %s", rte_strerror(rte_errno));
-        goto err;
-    }
-    uplink_q = rte_ring_create("upstream",RING_SIZE,rte_socket_id(),0);
-    if (!uplink_q) {
-        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Cannot create upstream ring: %s", rte_strerror(rte_errno));
-        goto err;
-    }
-    downlink_q = rte_ring_create("downstream",RING_SIZE,rte_socket_id(),0);
-    if (!downlink_q) {
-        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Cannot create downstream ring: %s", rte_strerror(rte_errno));
-        goto err;
-    }
-
     return SUCCESS;
 
 err:
@@ -214,7 +189,7 @@ STATUS init_port(FastRG_t *fastrg_ccb)
     /* Initialize all ports. */
     for(portid=0; portid<PORT_AMOUNT; portid++) {
         memset(&dev_info, 0, sizeof(dev_info));
-        if (rte_ethtool_get_drvinfo(portid, &dev_info)) {
+        if (get_drvinfo(portid, &dev_info)) {
             FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, 
                 "Error getting info for port %i: %s", portid, 
                 rte_strerror(rte_errno));

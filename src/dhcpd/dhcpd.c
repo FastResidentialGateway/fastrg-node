@@ -53,7 +53,7 @@ void adjust_ip_pool(dhcp_ccb_t *dhcp_ccb, U32 new_pool_len)
     if (dhcp_ccb->per_lan_user_pool_len < new_pool_len) {
         alloc_new_pool(dhcp_ccb, new_pool_len);
     } else if (dhcp_ccb->per_lan_user_pool_len > new_pool_len) {
-        for (U32 i=new_pool_len; i<dhcp_ccb->per_lan_user_pool_len; i++) {
+        for(U32 i=new_pool_len; i<dhcp_ccb->per_lan_user_pool_len; i++) {
             if (dhcp_ccb->per_lan_user_pool[i]) {
                 rte_timer_stop_sync(&dhcp_ccb->per_lan_user_pool[i]->lan_user_info.timer);
 
