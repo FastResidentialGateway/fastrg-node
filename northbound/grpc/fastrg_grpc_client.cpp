@@ -1,4 +1,5 @@
 #include <iostream>
+#include <inttypes.h>
 #include <grpc++/grpc++.h>
 #include <grpcpp/grpcpp.h>
 #include <grpcpp/health_check_service_interface.h>
@@ -176,10 +177,38 @@ void fastrg_grpc_get_system_info() {
         std::cout << "  DPDK version: " << reply_fastrg_system.base_info().dpdk_version() << std::endl;
         std::cout << "  DPDK EAL args: " << reply_fastrg_system.base_info().dpdk_eal_args() << std::endl;
         std::cout << "  Number of subscribers: " << reply_fastrg_system.base_info().num_users() << std::endl;
+    } else {
+        std::cout << "grpc client get info failed: " << std::endl;
+        std::cout << "  Error code: " << status.error_code() << std::endl;
+        std::cout << "  Error message: " << status.error_message() << std::endl;
+    }
 
+    context_node_status.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
+    status = fastrg_client->stub_->GetNodeStatus(&context_node_status, request, &reply_node_status);
+    if (status.ok()) {
+        std::cout << "grpc client get node status ok" << std::endl;
+        std::cout << "  Node OS version: " << reply_node_status.node_os_version() << std::endl;
+        std::cout << "  Node uptime (seconds): " << reply_node_status.node_uptime() << std::endl;
+        std::cout << "  Node IP address: " << reply_node_status.node_ip_info() << std::endl;
+        std::cout << "  Health status: " << (reply_node_status.healthy() ? "Healthy" : "Unhealthy") << std::endl;
+    } else {
+        std::cout << "grpc client get node status failed: " << std::endl;
+        std::cout << "  Error code: " << status.error_code() << std::endl;
+        std::cout << "  Error message: " << status.error_message() << std::endl;
+    }
+}
+
+void fastrg_grpc_get_system_stats() {
+    std::cout << "grpc client getting FastRG system stats" << std::endl;
+    google::protobuf::Empty request;
+    FastrgSystemStatsInfo reply;
+    ClientContext context;
+    Status status = fastrg_client->stub_->GetFastrgSystemStats(&context, request, &reply);
+    if (status.ok()) {
+        std::cout << "grpc client get FastRG system stats ok" << std::endl;
         std::cout << "  NICs: " << std::endl;
-        for(int i=0; i<reply_fastrg_system.nics_size() && i<reply_fastrg_system.stats_size(); i++) {
-            const NicDriverInfo& nic_info = reply_fastrg_system.nics(i);
+        for(int i=0; i<reply.nics_size() && i<reply.stats_size(); i++) {
+            const NicDriverInfo& nic_info = reply.nics(i);
             std::cout << "    NIC " << i << ":" << std::endl;
             std::cout << "      Driver name: " << nic_info.driver_name() << std::endl;
             std::cout << "      PCI address: " << nic_info.pci_addr() << std::endl;
@@ -188,7 +217,7 @@ void fastrg_grpc_get_system_info() {
             const uint8_t* mac_bytes = reinterpret_cast<const uint8_t*>(mac_bin.data());
             for(size_t j=0; j<mac_bin.size(); j++)
                 printf("%02x%c", mac_bytes[j], (j == mac_bin.size()-1 ? '\n' : ':'));
-            const Statistics& stats = reply_fastrg_system.stats(i);
+            const Statistics& stats = reply.stats(i);
             std::cout << "      Rx packets: " << stats.rx_packets() << std::endl;
             std::cout << "      Tx packets: " << stats.tx_packets() << std::endl;
             std::cout << "      Rx bytes: " << stats.rx_bytes() << std::endl;
@@ -216,22 +245,30 @@ void fastrg_grpc_get_system_info() {
             std::cout << "          Dropped bytes: " << per_user_stats.dropped_bytes() << std::endl;
         }
     } else {
-        std::cout << "grpc client get info failed: " << std::endl;
+        std::cout << "grpc client get system stats failed: " << std::endl;
         std::cout << "  Error code: " << status.error_code() << std::endl;
         std::cout << "  Error message: " << status.error_message() << std::endl;
     }
+}
 
-    context_node_status.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
-    status = fastrg_client->stub_->GetNodeStatus(&context_node_status, request, &reply_node_status);
+void fastrg_grpc_get_system_xstats() {
+    std::cout << "grpc client getting FastRG system xstats" << std::endl;
+    google::protobuf::Empty request;
+    FastrgSystemXStatsInfo reply;
+    ClientContext context;
+    Status status = fastrg_client->stub_->GetFastrgSystemXStats(&context, request, &reply);
     if (status.ok()) {
-        std::cout << "grpc client get node status ok" << std::endl;
-        std::cout << "  Node OS version: " << reply_node_status.node_os_version() << std::endl;
-        std::cout << "  Node uptime (seconds): " << reply_node_status.node_uptime() << std::endl;
-        std::cout << "  Node IP address: " << reply_node_status.node_ip_info() << std::endl;
-        std::cout << "  Health status: " << (reply_node_status.healthy() ? "Healthy" : "Unhealthy") << std::endl;
-
+        std::cout << "grpc client get FastRG system xstats ok" << std::endl;
+        for(int i=0; i<reply.nic_xstats_size(); i++) {
+            const NicXStats& nic_xstats = reply.nic_xstats(i);
+            std::cout << "  Port " << nic_xstats.port_id() << " xstats:" << std::endl;
+            for(int j=0; j<nic_xstats.xstats_size(); j++) {
+                const XStat& xstat = nic_xstats.xstats(j);
+                printf("    %-48s: %" PRIu64 "\n", xstat.name().c_str(), xstat.value());
+            }
+        }
     } else {
-        std::cout << "grpc client get node status failed: " << std::endl;
+        std::cout << "grpc client get system xstats failed: " << std::endl;
         std::cout << "  Error code: " << status.error_code() << std::endl;
         std::cout << "  Error message: " << status.error_message() << std::endl;
     }

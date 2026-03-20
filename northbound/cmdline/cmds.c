@@ -63,8 +63,6 @@ static void cmd_info_parsed(void *parsed_result,
         fastrg_grpc_get_hsi_info();
     else if (strncmp(res->subsystem, "dhcp", 4) == 0)
         fastrg_grpc_get_dhcp_info();
-    else if (strncmp(res->subsystem, "system", 6) == 0)
-        fastrg_grpc_get_system_info();
 
     return;
 }
@@ -72,15 +70,58 @@ static void cmd_info_parsed(void *parsed_result,
 cmdline_parse_token_string_t cmd_info_info_token =
     TOKEN_STRING_INITIALIZER(struct cmd_info_result, info_token, "show");
 cmdline_parse_token_string_t cmd_show_subsystem =
-    TOKEN_STRING_INITIALIZER(struct cmd_info_result, subsystem, "hsi#dhcp#system");
+    TOKEN_STRING_INITIALIZER(struct cmd_info_result, subsystem, "hsi#dhcp");
 
 cmdline_parse_inst_t cmd_info = {
     .f = cmd_info_parsed,  /* function to call */
     .data = NULL,      /* 2nd arg of func */
-    .help_str = "show user info, show <hsi|dhcp|system>",
+    .help_str = "show subscriber info, show <hsi|dhcp>",
     .tokens = {        /* token list, NULL terminated */
             (void *)&cmd_info_info_token,
             (void *)&cmd_show_subsystem,
+            NULL,
+    },
+};
+
+/**********************************************************/
+
+struct cmd_system_result {
+    cmdline_fixed_string_t show_token;
+    cmdline_fixed_string_t system_token;
+    cmdline_fixed_string_t subcmd;
+};
+
+static void cmd_system_parsed(void *parsed_result,
+        struct cmdline *cl,
+        __attribute__((unused)) void *data)
+{
+    struct cmd_system_result *res = parsed_result;
+
+    if (strncmp(res->subcmd, "info", 4) == 0)
+        fastrg_grpc_get_system_info();
+    else if (strncmp(res->subcmd, "stats", 5) == 0)
+        fastrg_grpc_get_system_stats();
+    else if (strncmp(res->subcmd, "xstats", 6) == 0)
+        fastrg_grpc_get_system_xstats();
+
+    return;
+}
+
+cmdline_parse_token_string_t cmd_system_show_token =
+    TOKEN_STRING_INITIALIZER(struct cmd_system_result, show_token, "show");
+cmdline_parse_token_string_t cmd_system_system_token =
+    TOKEN_STRING_INITIALIZER(struct cmd_system_result, system_token, "system");
+cmdline_parse_token_string_t cmd_system_subcmd =
+    TOKEN_STRING_INITIALIZER(struct cmd_system_result, subcmd, "info#stats#xstats");
+
+cmdline_parse_inst_t cmd_system = {
+    .f = cmd_system_parsed,  /* function to call */
+    .data = NULL,      /* 2nd arg of func */
+    .help_str = "show system <info|stats|xstats>",
+    .tokens = {        /* token list, NULL terminated */
+            (void *)&cmd_system_show_token,
+            (void *)&cmd_system_system_token,
+            (void *)&cmd_system_subcmd,
             NULL,
     },
 };
@@ -155,11 +196,13 @@ static void cmd_help_parsed(__attribute__((unused)) void *parsed_result,
                 __attribute__((unused)) void *data)
 {
     cmdline_printf(cl,"usage: \n"
-                      "show <hsi|dhcp|system> to show information\n"
+                      "show <hsi|dhcp> to show information\n"
+                      "show system <info|stats|xstats> to show system info/stats/xstats\n"
+                      "config <add|del> user <id> vlan <id> pppoe account <account> password <password> dhcp pool <start~end> subnet <mask> gateway <ip> to add/update user configuration\n"
+                      "exec hsi <start|stop> <user id | all> to start/stop HSI (PPPoE + DHCP)\n"
+                      "exec pppoe <start|stop> <user id | all> to start/stop PPPoE only\n"
+                      "exec dhcp-server <start|stop> <user id | all> to start/stop DHCP server only\n"
                       "help to show usage commands\n"
-                      "disconnect <user id | all> [force] to disconnect session(s)\n"
-                      "connect <user id | all> to connect session(s)\n"
-                      "dhcp-server <start | stop> <user id | all> to start/stop dhcp server function\n"
                       "quit/exit to quit FastRG CLI\n");
 }
 
@@ -305,7 +348,7 @@ cmdline_parse_token_ipaddr_t cmd_config_gateway_ip =
 cmdline_parse_inst_t cmd_config_add = {
     .f = cmd_config_parsed,  /* function to call */
     .data = NULL,      /* 2nd arg of func */
-    .help_str = "configure user settings: config <add|del> user <id> vlan <id> pppoe account <account> password <password> dhcp pool <start~end> subnet <mask> gateway <ip>",
+    .help_str = "configure subscriber settings: config add user <id> vlan <id> pppoe account <account> password <password> dhcp pool <start~end> subnet <mask> gateway <ip>",
     .tokens = {        /* token list, NULL terminated */
         (void *)&cmd_config_config,
         (void *)&cmd_config_add_str,
@@ -332,7 +375,7 @@ cmdline_parse_inst_t cmd_config_add = {
 cmdline_parse_inst_t cmd_config_del = {
     .f = cmd_config_parsed,  /* function to call */
     .data = NULL,      /* 2nd arg of func */
-    .help_str = "configure user settings: config <add|del> user <id> vlan <id> pppoe account <account> password <password> dhcp pool <start~end> subnet <mask> gateway <ip>",
+    .help_str = "configure subscriber settings: config del user <id>",
     .tokens = {        /* token list, NULL terminated */
         (void *)&cmd_config_config,
         (void *)&cmd_config_del_str,
@@ -386,81 +429,18 @@ cmdline_parse_inst_t cmd_config_set_subscriber = {
 
 /**********************************************************/
 
-struct cmd_connect_result {
-    cmdline_fixed_string_t connect;
-    cmdline_multi_string_t user_id_opt;
-};
-
-static void cmd_connect_parsed(void *parsed_result,
-                __attribute__((unused)) struct cmdline *cl,
-                __attribute__((unused)) void *data)
-{
-    struct cmd_connect_result *res = parsed_result;
-    char *user_id_opt = res->user_id_opt;
-    U16 user_id;
-
-    char *user_id_str = strtok_r(user_id_opt, PARSE_DELIMITER, &user_id_opt);
-    if (user_id_str == NULL) {
-        cmdline_printf(cl, "user id input error\n");
-        return;
-    }
-
-    if (strcmp(user_id_str, "all") == 0) {
-        user_id = 0;
-    } else {
-        user_id = strtoul(user_id_str, NULL, 10);
-        if (user_id <= 0) {
-            cmdline_printf(cl, "Wrong user id\n");
-            return;
-        }
-    }
-
-    if (strcmp(res->connect, "connect") == 0) {
-        fastrg_grpc_hsi_connect(user_id);
-    } else {
-        char *is_force = strtok_r(user_id_opt, PARSE_DELIMITER, &user_id_opt);
-        if (is_force == NULL) {
-            fastrg_grpc_hsi_disconnect(user_id, false);
-            return;
-        }
-        if (strcmp(is_force, "force") != 0) {
-            cmdline_printf(cl, "Wrong disconnect option\n");
-            return;
-        }
-        fastrg_grpc_hsi_disconnect(user_id, true);
-    }
-}
-
-cmdline_parse_token_string_t cmd_connect_connect =
-    TOKEN_STRING_INITIALIZER(struct cmd_connect_result, connect, "connect#disconnect");
-cmdline_parse_token_string_t cmd_connect_user_id_opt =
-    TOKEN_STRING_INITIALIZER(struct cmd_connect_result, user_id_opt, TOKEN_STRING_MULTI);
-
-cmdline_parse_inst_t cmd_connect = {
-    .f = cmd_connect_parsed,  /* function to call */
-    .data = NULL,      /* 2nd arg of func */
-    .help_str = "start/stop pppoe connection, "
-            "connect|disconnect <user id | all> [force]",
-    .tokens = {        /* token list, NULL terminated */
-        (void *)&cmd_connect_connect,
-        (void *)&cmd_connect_user_id_opt,
-        NULL,
-    },
-};
-
-/**********************************************************/
-
-struct cmd_dhcp_result {
-    cmdline_fixed_string_t dhcp;
-    cmdline_fixed_string_t cmd;
+struct cmd_exec_result {
+    cmdline_fixed_string_t exec_token;
+    cmdline_fixed_string_t subsystem;
+    cmdline_fixed_string_t action;
     cmdline_fixed_string_t user_id;
 };
 
-static void cmd_dhcp_parsed(void *parsed_result,
-                __attribute__((unused)) struct cmdline *cl,
+static void cmd_exec_parsed(void *parsed_result,
+                struct cmdline *cl,
                 __attribute__((unused)) void *data)
 {
-    struct cmd_dhcp_result *res = parsed_result;
+    struct cmd_exec_result *res = parsed_result;
     U16 user_id;
 
     if (strcmp(res->user_id, "all") == 0) {
@@ -473,31 +453,45 @@ static void cmd_dhcp_parsed(void *parsed_result,
         }
     }
 
-    if (strcmp(res->cmd, "start") == 0) {
-        fastrg_grpc_dhcp_server_start(user_id);
-    } else if (strcmp(res->cmd, "stop") == 0) {
-        fastrg_grpc_dhcp_server_stop(user_id);
-    } else {
-        cmdline_printf(cl, "Wrong dhcp cmd\n");
-        return;
+    if (strncmp(res->subsystem, "hsi", 3) == 0) {
+        if (strcmp(res->action, "start") == 0) {
+            fastrg_grpc_hsi_connect(user_id);
+            fastrg_grpc_dhcp_server_start(user_id);
+        } else {
+            fastrg_grpc_hsi_disconnect(user_id, false);
+            fastrg_grpc_dhcp_server_stop(user_id);
+        }
+    } else if (strncmp(res->subsystem, "pppoe", 5) == 0) {
+        if (strcmp(res->action, "start") == 0)
+            fastrg_grpc_hsi_connect(user_id);
+        else
+            fastrg_grpc_hsi_disconnect(user_id, false);
+    } else if (strncmp(res->subsystem, "dhcp-server", 11) == 0) {
+        if (strcmp(res->action, "start") == 0)
+            fastrg_grpc_dhcp_server_start(user_id);
+        else
+            fastrg_grpc_dhcp_server_stop(user_id);
     }
 }
 
-cmdline_parse_token_string_t cmd_dhcp_dhcp =
-    TOKEN_STRING_INITIALIZER(struct cmd_dhcp_result, dhcp, "dhcp-server");
-cmdline_parse_token_string_t cmd_dhcp_cmd =
-    TOKEN_STRING_INITIALIZER(struct cmd_dhcp_result, cmd, "start#stop");
-cmdline_parse_token_string_t cmd_dhcp_user_id =
-    TOKEN_STRING_INITIALIZER(struct cmd_dhcp_result, user_id, NULL);
+cmdline_parse_token_string_t cmd_exec_exec_token =
+    TOKEN_STRING_INITIALIZER(struct cmd_exec_result, exec_token, "exec");
+cmdline_parse_token_string_t cmd_exec_subsystem =
+    TOKEN_STRING_INITIALIZER(struct cmd_exec_result, subsystem, "hsi#pppoe#dhcp-server");
+cmdline_parse_token_string_t cmd_exec_action =
+    TOKEN_STRING_INITIALIZER(struct cmd_exec_result, action, "start#stop");
+cmdline_parse_token_string_t cmd_exec_user_id =
+    TOKEN_STRING_INITIALIZER(struct cmd_exec_result, user_id, NULL);
 
-cmdline_parse_inst_t cmd_dhcp = {
-    .f = cmd_dhcp_parsed,  /* function to call */
+cmdline_parse_inst_t cmd_exec = {
+    .f = cmd_exec_parsed,  /* function to call */
     .data = NULL,      /* 2nd arg of func */
-    .help_str = "start/stop dhcp server",
+    .help_str = "exec <hsi|pppoe|dhcp-server> <start|stop> <user id | all>",
     .tokens = {        /* token list, NULL terminated */
-        (void *)&cmd_dhcp_dhcp,
-        (void *)&cmd_dhcp_cmd,
-        (void *)&cmd_dhcp_user_id,
+        (void *)&cmd_exec_exec_token,
+        (void *)&cmd_exec_subsystem,
+        (void *)&cmd_exec_action,
+        (void *)&cmd_exec_user_id,
         NULL,
     },
 };
@@ -505,13 +499,13 @@ cmdline_parse_inst_t cmd_dhcp = {
 /****** CONTEXT (list of instruction) */
 cmdline_parse_ctx_t ctx[] = {
         (cmdline_parse_inst_t *)&cmd_info,
+        (cmdline_parse_inst_t *)&cmd_system,
         (cmdline_parse_inst_t *)&cmd_quit,
         (cmdline_parse_inst_t *)&cmd_help,
         (cmdline_parse_inst_t *)&cmd_config_add,
         (cmdline_parse_inst_t *)&cmd_config_del,
         (cmdline_parse_inst_t *)&cmd_config_set_subscriber,
-        (cmdline_parse_inst_t *)&cmd_connect,
-        (cmdline_parse_inst_t *)&cmd_dhcp,
+        (cmdline_parse_inst_t *)&cmd_exec,
         (cmdline_parse_inst_t *)&cmd_log,
     NULL,
 };
