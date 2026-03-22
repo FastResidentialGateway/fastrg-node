@@ -73,7 +73,8 @@ grpc::Status FastRGNodeServiceImpl::ApplyConfig(::grpc::ServerContext* context, 
     // Write the config to etcd to trigger etcd watcher (only if etcd is initialized)
     if (etcd_client_is_initialized() && fastrg_ccb && fastrg_ccb->node_uuid) {
         std::string user_id_str = std::to_string(user_id);
-        etcd_status_t s = etcd_client_put_hsi_config(fastrg_ccb->node_uuid, user_id_str.c_str(), &hsi_config, "fastrg-node-grpc");
+        etcd_status_t s = etcd_client_put_hsi_config(fastrg_ccb->node_uuid, 
+            user_id_str.c_str(), &hsi_config, ENABLE_STATUS_DISABLED, "fastrg-node-grpc");
         if (s != ETCD_SUCCESS) {
             std::string err = "Failed to write configuration to etcd for user " + user_id_str;
             cout << err << endl;
@@ -215,7 +216,7 @@ grpc::Status FastRGNodeServiceImpl::ConnectHsi(::grpc::ServerContext* context, c
             cout << "User " << ccb_id + 1 << " has no configuration, skip connecting" << endl;
             std::string err = "Error! User " + std::to_string(user_id) + " has no configuration";
             cout << err << endl;
-            return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, err);
+            return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, err);
         }
         if (rte_atomic16_read(&ppp_ccb->ppp_bool) == 1) {
             cout << "User " << ccb_id + 1 << " is already connectiing/connected, skip connecting" << endl;
@@ -258,7 +259,7 @@ grpc::Status FastRGNodeServiceImpl::DisconnectHsi(::grpc::ServerContext* context
             }
             ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, i);
             if (rte_atomic16_read(&ppp_ccb->vlan_id) == 0) {
-                cout << "User " << i + 1 << " has no configuration, skip connecting" << endl;
+                cout << "User " << i + 1 << " has no configuration, skip disconnecting" << endl;
                 continue;
             }
             if (rte_atomic16_read(&ppp_ccb->ppp_bool) == 0) {
@@ -283,10 +284,10 @@ grpc::Status FastRGNodeServiceImpl::DisconnectHsi(::grpc::ServerContext* context
         }
         ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
         if (rte_atomic16_read(&ppp_ccb->vlan_id) == 0) {
-            cout << "User " << ccb_id + 1 << " has no configuration, skip connecting" << endl;
+            cout << "User " << ccb_id + 1 << " has no configuration, skip disconnecting" << endl;
             std::string err = "Error! User " + std::to_string(user_id) + " has no configuration";
             cout << err << endl;
-            return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, err);
+            return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, err);
         }
         if (rte_atomic16_read(&ppp_ccb->ppp_bool) == 0) {
             cout << "User " << ccb_id + 1 << " is already disconnectiing/disconnected, skip disconnecting" << endl;
@@ -325,6 +326,11 @@ grpc::Status FastRGNodeServiceImpl::DhcpServerStart(::grpc::ServerContext* conte
                 err += "User " + std::to_string(i + 1) + " DHCP server is already enabled\n";
                 continue;
             }
+            if (dhcp_ccb->dhcp_server_ip == 0) {
+                cout << "User " << i + 1 << " DHCP server has not been configured, skip enabling" << endl;
+                err += "User " + std::to_string(i + 1) + " DHCP server has not been configured\n";
+                continue;
+            }
             if (fastrg_gen_northbound_event(EV_NORTHBOUND_DHCP, DHCP_CMD_ENABLE, i) == ERROR) {
                 cout << "Failed to generate DHCP enable event for user " << i + 1 << endl;
                 err += "Failed to generate DHCP enable event for user " + std::to_string(i + 1) + "\n";
@@ -332,13 +338,18 @@ grpc::Status FastRGNodeServiceImpl::DhcpServerStart(::grpc::ServerContext* conte
             }
         }
         if (!err.empty())
-            return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, err);
+            return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, err);
     } else {
         dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
         if (rte_atomic16_read(&dhcp_ccb->dhcp_bool) == 1) {
             cout << "User " << ccb_id + 1 << " DHCP server is already enabled, skip enabling" << endl;
             std::string err = "User " + std::to_string(ccb_id + 1) + " DHCP server is already enabled\n";
             return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, err);
+        }
+        if (dhcp_ccb->dhcp_server_ip == 0) {
+            cout << "User " << ccb_id + 1 << " DHCP server has not been configured, skip enabling" << endl;
+            std::string err = "User " + std::to_string(ccb_id + 1) + " DHCP server has not been configured\n";
+            return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, err);
         }
         if (fastrg_gen_northbound_event(EV_NORTHBOUND_DHCP, DHCP_CMD_ENABLE, ccb_id) == ERROR) {
             cout << "Failed to generate DHCP enable event for user " << ccb_id + 1 << endl;

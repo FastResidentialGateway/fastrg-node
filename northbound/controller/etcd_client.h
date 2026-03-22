@@ -64,6 +64,22 @@ typedef struct {
     int user_count;         // New user count to scale to
 } user_count_config_t;
 
+typedef enum {
+    ENABLE_STATUS_ENABLED = 1,
+    ENABLE_STATUS_ENABLING = 2,
+    ENABLE_STATUS_DISABLING = 3,
+    ENABLE_STATUS_DISABLED = 4
+} hsi_enable_status_t;
+
+// Full HSI config structure including metadata
+typedef struct {
+    hsi_config_t config;
+    hsi_enable_status_t enable_status;
+    char updated_by[64];
+    char updated_at[32];
+    char resource_version[64];
+} hsi_config_full_t;
+
 // Callback function types
 typedef STATUS (*hsi_config_callback_t)(const char *node_id, const char *user_id, 
     const hsi_config_t *config, etcd_action_type_t action, 
@@ -105,7 +121,7 @@ int etcd_client_is_initialized(void);
  * value: JSON matching HSIConfigWithMetadata
  */
 etcd_status_t etcd_client_put_hsi_config(const char *node_id, const char *user_id, 
-    const hsi_config_t *config, const char *updated_by);
+    const hsi_config_t *config, hsi_enable_status_t enable_status, const char *updated_by);
 /**
  * @fn etcd_client_delete_hsi_config
  * 
@@ -121,22 +137,6 @@ etcd_status_t etcd_client_put_hsi_config(const char *node_id, const char *user_i
  */
 etcd_status_t etcd_client_delete_hsi_config(const char *node_id, 
     const char *user_id, int64_t *revision);
-
-typedef enum {
-    ENABLE_STATUS_ENABLED = 1,
-    ENABLE_STATUS_ENABLING = 2,
-    ENABLE_STATUS_DISABLING = 3,
-    ENABLE_STATUS_DISABLED = 4
-} hsi_enable_status_t;
-
-// Full HSI config structure including metadata
-typedef struct {
-    hsi_config_t config;
-    hsi_enable_status_t enable_status;
-    char updated_by[64];
-    char updated_at[32];
-    char resource_version[64];
-} hsi_config_full_t;
 
 /**
  * @fn etcd_client_modify_hsi_config_status

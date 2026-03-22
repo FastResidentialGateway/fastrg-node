@@ -660,7 +660,8 @@ public:
     }
 
     // Put HSI config into etcd under configs/{nodeId}/hsi/{userId}
-    etcd_status_t put_hsi_config(const char* node_id, const char* user_id, const hsi_config_t* config, const char* updated_by) {
+    etcd_status_t put_hsi_config(const char* node_id, const char* user_id, 
+        const hsi_config_t* config, hsi_enable_status_t enable_status, const char* updated_by) {
         if (!client_ || !node_id || !user_id || !config) return ETCD_ERROR;
 
         try {
@@ -683,7 +684,25 @@ public:
             meta["node"] = std::string(node_id);
             meta["resourceVersion"] = "";
             meta["updatedBy"] = updated_by ? std::string(updated_by) : std::string("");
-            meta["enableStatus"] = "disabled";
+            std::string status_str;
+            switch (enable_status) {
+                case ENABLE_STATUS_ENABLED:
+                    status_str = "enabled";
+                    break;
+                case ENABLE_STATUS_ENABLING:
+                    status_str = "enabling";
+                    break;
+                case ENABLE_STATUS_DISABLING:
+                    status_str = "disabling";
+                    break;
+                case ENABLE_STATUS_DISABLED:
+                    status_str = "disabled";
+                    break;
+                default:
+                    status_str = "unknown";
+                    break;
+            }
+            meta["enableStatus"] = status_str;
 
             // ISO8601-ish timestamp
             std::time_t now = std::time(nullptr);
@@ -1118,7 +1137,7 @@ public:
                     if (parse_user_count_config(value, &config)) {
                         int64_t revision = user_count_response.index();
                         // Invoke user count changed callback
-                        user_count_callback(node_id.c_str(), &config, HSI_ACTION_CREATE, 
+                        user_count_callback(node_id.c_str(), &config, HSI_ACTION_UPDATE, 
                             revision, user_data);
                         std::cout << "Loaded existing user count: " << 
                             config.user_count << std::endl;
@@ -1169,9 +1188,9 @@ public:
                     // Get the revision from response
                     int64_t revision = response.index();
 
-                    // Invoke callback with CREATE action for existing configs
+                    // Invoke callback with UPDATE action for existing configs
                     STATUS ret = hsi_callback(node_id.c_str(), user_id.c_str(), &config, 
-                        HSI_ACTION_CREATE, revision, user_data);
+                        HSI_ACTION_UPDATE, revision, user_data);
                     if (ret == SUCCESS) {
                         count++;
                         std::cout << "Loaded existing HSI config for user: " << user_id << std::endl;
@@ -1635,9 +1654,9 @@ int etcd_client_is_initialized(void) {
 }
 
 etcd_status_t etcd_client_put_hsi_config(const char* node_id, const char* user_id, 
-    const hsi_config_t* config, const char* updated_by) {
+    const hsi_config_t* config, hsi_enable_status_t enable_status, const char* updated_by) {
     if (!g_etcd_client) return ETCD_ERROR;
-    return g_etcd_client->put_hsi_config(node_id, user_id, config, updated_by);
+    return g_etcd_client->put_hsi_config(node_id, user_id, config, enable_status, updated_by);
 }
 
 etcd_status_t etcd_client_delete_hsi_config(const char* node_id, const char* user_id, 

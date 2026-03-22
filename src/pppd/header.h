@@ -38,6 +38,8 @@
 #define PADM				0xd3
 #define SESSION_DATA 		0x0
 
+#define PPPoE_TAG_DEFAULT_MAX_LEN 64
+
 #define LCP_PROTOCOL 		0xc021
 #define PPP_IP_PROTOCOL 	0x0021
 #define IPCP_PROTOCOL		0x8021

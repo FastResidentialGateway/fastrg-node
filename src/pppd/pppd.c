@@ -81,17 +81,31 @@ void PPP_bye(ppp_ccb_t *s_ppp_ccb)
     }
 }
 
-void ppp_update_config_by_user(ppp_ccb_t *ppp_ccb, U16 vlan_id, const char *user_name, const char *password)
+STATUS ppp_update_config_by_user(ppp_ccb_t *ppp_ccb, U16 vlan_id, const char *user_name, const char *password)
 {
     rte_atomic16_set(&ppp_ccb->vlan_id, vlan_id);
 
     /* We don't need to lock here because in dp, we don't need this field */
     if (ppp_ccb->ppp_user_acc != NULL)
-        ppp_ccb->ppp_user_acc = fastrg_malloc(U8, strlen(user_name) + 1, 0);
+        fastrg_mfree(ppp_ccb->ppp_user_acc);
+    ppp_ccb->ppp_user_acc = fastrg_calloc(U8, 1, strlen(user_name) + 1, 0);
+    if (ppp_ccb->ppp_user_acc == NULL) {
+        FastRG_LOG(ERR, ppp_ccb->fastrg_ccb->fp, NULL, PPPLOGMSG, 
+            "account buffer update failed: %s", rte_strerror(errno));
+        return ERROR;
+    }
     strcpy((char *)ppp_ccb->ppp_user_acc, user_name);
     if (ppp_ccb->ppp_passwd != NULL)
-        ppp_ccb->ppp_passwd = fastrg_malloc(U8, strlen(password) + 1, 0);
+        fastrg_mfree(ppp_ccb->ppp_passwd);
+    ppp_ccb->ppp_passwd = fastrg_calloc(U8, 1, strlen(password) + 1, 0);
+    if (ppp_ccb->ppp_passwd == NULL) {
+        FastRG_LOG(ERR, ppp_ccb->fastrg_ccb->fp, NULL, PPPLOGMSG, 
+            "password buffer update failed: %s", rte_strerror(errno));
+        return ERROR;
+    }
     strcpy((char *)ppp_ccb->ppp_passwd, password);
+
+    return SUCCESS;
 }
 
 STATUS ppp_init_config_by_user(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb, U16 ccb_id, U16 vlan_id, 
@@ -132,30 +146,55 @@ STATUS ppp_init_config_by_user(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb, U16 ccb
     rte_atomic64_init(&ppp_ccb->pppoes_rx_packets);
     rte_atomic64_init(&ppp_ccb->pppoes_tx_packets);
 
-    if (ppp_ccb->ppp_user_acc == NULL)
-        ppp_ccb->ppp_user_acc = fastrg_malloc(U8, strlen(user_name) + 1, 0);
+    if (ppp_ccb->ppp_user_acc != NULL)
+        fastrg_mfree(ppp_ccb->ppp_user_acc);
+    ppp_ccb->ppp_user_acc = fastrg_calloc(U8, 1, strlen(user_name) + 1, 0);
     if (ppp_ccb->ppp_user_acc == NULL) {
-        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG, "fastrg_malloc failed: %s", rte_strerror(errno));
-        return ERROR;
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG, 
+            "account buffer allocation failed: %s", rte_strerror(errno));
+        goto err;
     }
     strcpy((char *)ppp_ccb->ppp_user_acc, user_name);
 
-    if (ppp_ccb->ppp_passwd == NULL)
-        ppp_ccb->ppp_passwd = fastrg_malloc(U8, strlen(password) + 1, 0);
+    if (ppp_ccb->ppp_passwd != NULL)
+        fastrg_mfree(ppp_ccb->ppp_passwd);
+    ppp_ccb->ppp_passwd = fastrg_calloc(U8, 1, strlen(password) + 1, 0);
     if (ppp_ccb->ppp_passwd == NULL) {
-        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG, "fastrg_malloc failed: %s", rte_strerror(errno));
-        return ERROR;
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG, 
+            "password buffer allocation failed: %s", 
+            rte_strerror(errno));
+        goto err;
     }
     strcpy((char *)ppp_ccb->ppp_passwd, password);
 
     if (ppp_ccb->pppoe_phase.pppoe_header_tag == NULL)
-        ppp_ccb->pppoe_phase.pppoe_header_tag = fastrg_malloc(pppoe_header_tag_t, RTE_CACHE_LINE_SIZE, RTE_CACHE_LINE_SIZE);
+        ppp_ccb->pppoe_phase.pppoe_header_tag = fastrg_malloc(pppoe_header_tag_t, 
+            PPPoE_TAG_DEFAULT_MAX_LEN, RTE_CACHE_LINE_SIZE);
     if (ppp_ccb->pppoe_phase.pppoe_header_tag == NULL) {
-        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG, "fastrg_malloc failed: %s", rte_strerror(errno));
-        return ERROR;
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG, 
+            "pppoe header tag allocation failed: %s", 
+            rte_strerror(errno));
+        goto err;
     }
 
     return SUCCESS;
+
+err:
+    ppp_ccb->phase = NOT_CONFIGURED;
+    rte_atomic16_set(&ppp_ccb->vlan_id, 0);
+    if (ppp_ccb->ppp_user_acc != NULL) {
+        fastrg_mfree(ppp_ccb->ppp_user_acc);
+        ppp_ccb->ppp_user_acc = NULL;
+    }
+    if (ppp_ccb->ppp_passwd != NULL) {
+        fastrg_mfree(ppp_ccb->ppp_passwd);
+        ppp_ccb->ppp_passwd = NULL;
+    }
+    if (ppp_ccb->pppoe_phase.pppoe_header_tag != NULL) {
+        fastrg_mfree(ppp_ccb->pppoe_phase.pppoe_header_tag);
+        ppp_ccb->pppoe_phase.pppoe_header_tag = NULL;
+    }
+    return ERROR;
 }
 
 STATUS pppd_allocate_ccbs(FastRG_t *fastrg_ccb, U16 start_id, U16 count, ppp_ccb_t **array)

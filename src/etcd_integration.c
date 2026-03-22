@@ -685,19 +685,58 @@ void sync_request_callback(const char *node_id, void *user_data)
         /* vlan id 0 means this subscriber is inactive */
         if (rte_atomic16_read(&ppp_ccb->vlan_id) == 0) {
             FastRG_LOG(DBG, fastrg_ccb->fp, NULL, NULL, 
-                "Skipping subscriber %u during etcd reconnection sync", ccb_id + 1);
+                "Skipping inactive subscriber %u during etcd reconnection sync", ccb_id + 1);
             continue;
         }
         strncpy(config.account_name, (const char *)ppp_ccb->ppp_user_acc, sizeof(config.account_name) - 1);
         strncpy(config.password, (const char *)ppp_ccb->ppp_passwd, sizeof(config.password) - 1);
-        snprintf(config.dhcp_addr_pool, sizeof(config.dhcp_addr_pool), "%u~%u", 
-            dhcp_ccb->per_lan_user_pool[0]->ip_pool.ip_addr, 
-            dhcp_ccb->per_lan_user_pool[dhcp_ccb->per_lan_user_pool_len - 1]->ip_pool.ip_addr);
-        snprintf(config.dhcp_subnet, sizeof(config.dhcp_subnet), "%u", dhcp_ccb->subnet_mask);
-        snprintf(config.dhcp_gateway, sizeof(config.dhcp_gateway), "%u", dhcp_ccb->dhcp_server_ip);
+        struct in_addr s_ip_addr = {
+            .s_addr = dhcp_ccb->per_lan_user_pool[0]->ip_pool.ip_addr,
+        };
+        struct in_addr e_ip_addr = {
+            .s_addr = dhcp_ccb->per_lan_user_pool[dhcp_ccb->per_lan_user_pool_len - 1]->ip_pool.ip_addr,
+        };
+        char s_ip_addr_str[INET_ADDRSTRLEN];
+        char e_ip_addr_str[INET_ADDRSTRLEN];
+        if (inet_ntop(AF_INET, &s_ip_addr, s_ip_addr_str, sizeof(s_ip_addr_str)) == NULL || 
+                inet_ntop(AF_INET, &e_ip_addr, e_ip_addr_str, sizeof(e_ip_addr_str)) == NULL) {
+            FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL, 
+                "Failed to convert DHCP address pool to string for subscriber %u during etcd reconnection sync", ccb_id + 1);
+            continue;
+        }
+        snprintf(config.dhcp_addr_pool, sizeof(config.dhcp_addr_pool), "%s~%s", 
+            s_ip_addr_str, e_ip_addr_str);
+        struct in_addr subnet_mask_addr = {
+            .s_addr = dhcp_ccb->subnet_mask,
+        };
+        char subnet_mask_str[INET_ADDRSTRLEN];
+        if (inet_ntop(AF_INET, &subnet_mask_addr, subnet_mask_str, sizeof(subnet_mask_str)) == NULL) {
+            FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL, 
+                "Failed to convert subnet mask to string for subscriber %u during etcd reconnection sync", ccb_id + 1);
+            continue;
+        }
+        snprintf(config.dhcp_subnet, sizeof(config.dhcp_subnet), "%s", subnet_mask_str);
+        struct in_addr gateway_addr = {
+            .s_addr = dhcp_ccb->dhcp_server_ip,
+        };
+        char gateway_addr_str[INET_ADDRSTRLEN];
+        if (inet_ntop(AF_INET, &gateway_addr, gateway_addr_str, sizeof(gateway_addr_str)) == NULL) {
+            FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL, 
+                "Failed to convert gateway IP to string for subscriber %u during etcd reconnection sync", ccb_id + 1);
+            continue;
+        }
+        snprintf(config.dhcp_gateway, sizeof(config.dhcp_gateway), "%s", gateway_addr_str);
 
+        hsi_enable_status_t enable_status = ENABLE_STATUS_DISABLED;
+        if (ppp_ccb->phase == DATA_PHASE) {
+            enable_status = ENABLE_STATUS_ENABLED;
+        } else if (ppp_ccb->phase <= END_PHASE) {
+            enable_status = ENABLE_STATUS_DISABLED;
+        } else {
+            enable_status = ENABLE_STATUS_ENABLING; // Treat other phases as in-progress
+        }
         etcd_status_t hsi_status = etcd_client_put_hsi_config(
-            fastrg_ccb->node_uuid, config.user_id, &config, "etcd_reconnect_sync");
+            fastrg_ccb->node_uuid, config.user_id, &config, enable_status, "etcd_reconnect_sync");
 
         if (hsi_status == ETCD_SUCCESS) {
             written_count++;
