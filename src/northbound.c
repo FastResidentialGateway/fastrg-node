@@ -56,66 +56,41 @@ STATUS apply_hsi_config(FastRG_t *fastrg_ccb, int ccb_id, const hsi_config_t *co
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Invalid VLAN ID: %s", config->vlan_id);
         return ERROR;
     }
-    U16 ori_ppp_status = rte_atomic16_read(&ppp_ccb->ppp_bool);
-    U16 ori_dp_status = rte_atomic16_read(&ppp_ccb->dp_start_bool);
-    U16 ori_dhcp_status = rte_atomic16_read(&dhcp_ccb->dhcp_bool);
 
-    rte_atomic16_set(&ppp_ccb->ppp_bool, 0);
-    rte_atomic16_set(&ppp_ccb->dp_start_bool, 0);
-    rte_atomic16_set(&dhcp_ccb->dhcp_bool, 0);
-
-    // Enable HSI for this user
-    if (is_update == FALSE) {
-        if (set_vlan_map_ccb_id(fastrg_ccb, vlan_id, ccb_id) == ERROR) {
-            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "config new VLAN ID %u to user %u failed", vlan_id, ccb_id + 1);
-            ret = ERROR;
-            goto out;
-        }
-        if (rte_atomic16_read(&ppp_ccb->ppp_bool) == 1) {
-            FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "PPPoE is already enabled for user %d", ccb_id + 1);
-            ret = ERROR;
-            goto out;
-        }
-        ppp_init_config_by_user(fastrg_ccb, ppp_ccb, ccb_id, vlan_id, config->account_name, config->password);
-    } else {
-        if (rte_atomic16_read(&ppp_ccb->vlan_id) != vlan_id) {
-            if (set_vlan_map_ccb_id(fastrg_ccb, vlan_id, ccb_id) == ERROR) {
-                FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "config new VLAN ID %u to user %u failed", vlan_id, ccb_id + 1);
-                ret = ERROR;
-                goto out;
-            }
-            /* Remove original vlan map */
-            reset_vlan_map_ccb_id(fastrg_ccb, rte_atomic16_read(&ppp_ccb->vlan_id));
-        }
-        if (ppp_ccb->phase == NOT_CONFIGURED) // means the config exists in etcd but not in local
-            ppp_init_config_by_user(fastrg_ccb, ppp_ccb, ccb_id, vlan_id, config->account_name, config->password);
-        else
-            ppp_update_config_by_user(ppp_ccb, vlan_id, config->account_name, config->password);
-    }
-
-    // Apply DHCP configuration
-    if (is_update == FALSE) {
-        if (rte_atomic16_read(&dhcp_ccb->dhcp_bool) == 1) {
-            FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "DHCP is already enabled for user %d", ccb_id + 1);
-            ret = ERROR;
-            goto out;
-        }
-    }
-
+    /* check dhcp configuration is valid */
     if (parse_ip_range(config->dhcp_addr_pool, &dhcp_ip_start, &dhcp_ip_end) == ERROR) {
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Invalid DHCP address pool: %s", config->dhcp_addr_pool);
-        ret = ERROR;
-        goto out;
+        return ERROR;
     }
     if (parse_ip(config->dhcp_subnet, &dhcp_subnet_mask) == ERROR) {
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Invalid DHCP subnet mask: %s", config->dhcp_subnet);
-        ret = ERROR;
-        goto out;
+        return ERROR;
     }
     if (parse_ip(config->dhcp_gateway, &dhcp_gateway) == ERROR) {
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Invalid DHCP gateway: %s", config->dhcp_gateway);
-        ret = ERROR;
-        goto out;
+        return ERROR;
+    }
+
+    U16 ori_ppp_status = rte_atomic16_exchange((volatile uint16_t *)&ppp_ccb->ppp_bool.cnt, 0);
+    U16 ori_dp_status = rte_atomic16_exchange((volatile uint16_t *)&ppp_ccb->dp_start_bool.cnt, 0);
+    U16 ori_dhcp_status = rte_atomic16_exchange((volatile uint16_t *)&dhcp_ccb->dhcp_bool.cnt, 0);
+
+    /* we don't apply config if this is a new configuration while hsi is still active */
+    if (is_update == FALSE) {
+        if (ori_dhcp_status == 1) {
+            FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, 
+                "DHCP is already enabled for user %d while applying new HSI config", 
+                ccb_id + 1);
+            ret = ERROR;
+            goto out;
+        }
+        if (ori_ppp_status == 1) {
+            FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, 
+                "PPPoE is already enabled for user %d while applying new HSI config", 
+                ccb_id + 1);
+            ret = ERROR;
+            goto out;
+        }
     }
 
     /* On x86, rte_atomic32_inc() ensures the processing order of active_count 
@@ -142,8 +117,49 @@ STATUS apply_hsi_config(FastRG_t *fastrg_ccb, int ccb_id, const hsi_config_t *co
             }
         }
     }
-
     /* No more active DHCP packets, we can update now */
+
+    /* Enable HSI for this user, if ppp_ccb is in NOT_CONFIGURED phase, 
+    even it is a UPDATE event, we will treat it as a CREATE event */
+    if (is_update == FALSE || ppp_ccb->phase == NOT_CONFIGURED) { // means this is a new config or the config exists in etcd but not in local
+        if (set_vlan_map_ccb_id(fastrg_ccb, vlan_id, ccb_id) == ERROR) {
+            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "config new VLAN ID %u to user %u failed", vlan_id, ccb_id + 1);
+            ret = ERROR;
+            goto out;
+        }
+        U16 original_vlan_id = rte_atomic16_read(&ppp_ccb->vlan_id);
+        if (ppp_init_config_by_user(fastrg_ccb, ppp_ccb, ccb_id, vlan_id, config->account_name, config->password) == ERROR) {
+            reset_vlan_map_ccb_id(fastrg_ccb, vlan_id);
+            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "config PPPoE for user %u failed", ccb_id + 1);
+            ret = ERROR;
+            goto out;
+        }
+        if (original_vlan_id != vlan_id)
+            reset_vlan_map_ccb_id(fastrg_ccb, original_vlan_id);
+    } else {
+        /* Only execute if VLAN ID has changed */
+        U16 original_vlan_id = rte_atomic16_read(&ppp_ccb->vlan_id);
+        if (original_vlan_id != vlan_id) {
+            if (set_vlan_map_ccb_id(fastrg_ccb, vlan_id, ccb_id) == ERROR) {
+                FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "config new VLAN ID %u to user %u failed", vlan_id, ccb_id + 1);
+                ret = ERROR;
+                goto out;
+            }
+            /* Remove original vlan map */
+            reset_vlan_map_ccb_id(fastrg_ccb, original_vlan_id);
+        }
+        if (ppp_update_config_by_user(ppp_ccb, vlan_id, config->account_name, config->password) == ERROR) {
+            if (original_vlan_id != vlan_id) {
+                reset_vlan_map_ccb_id(fastrg_ccb, vlan_id);
+                set_vlan_map_ccb_id(fastrg_ccb, original_vlan_id, ccb_id);
+            }
+            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "update PPPoE config for user %u failed", ccb_id + 1);
+            ret = ERROR;
+            goto out;
+        }
+    }
+
+    // Apply DHCP configuration
     dhcp_pool_init_by_user(dhcp_ccb, dhcp_gateway, 
         dhcp_ip_start, dhcp_ip_end, dhcp_subnet_mask);
 
@@ -152,6 +168,7 @@ STATUS apply_hsi_config(FastRG_t *fastrg_ccb, int ccb_id, const hsi_config_t *co
         ccb_id + 1, config->dhcp_addr_pool);
 
     ret = SUCCESS;
+    goto out;
 
 out:
     rte_atomic16_set(&ppp_ccb->ppp_bool, ori_ppp_status);
@@ -210,21 +227,29 @@ STATUS execute_pppoe_dial(FastRG_t *fastrg_ccb, int ccb_id, const pppoe_command_
 
     ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
     dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
+    BOOL is_pppoe_enabled = FALSE, is_dhcp_enabled = FALSE;
 
-    if (rte_atomic16_read(&ppp_ccb->ppp_bool) == 1)
+    if (rte_atomic16_read(&ppp_ccb->ppp_bool) == 1) {
+        is_pppoe_enabled = TRUE;
         FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "HSI is already enabled for user %d", ccb_id + 1);
+    }
 
-    if (rte_atomic16_read(&dhcp_ccb->dhcp_bool) == 1)
+    if (rte_atomic16_read(&dhcp_ccb->dhcp_bool) == 1) {
+        is_dhcp_enabled = TRUE;
         FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "DHCP is already enabled for user %d", ccb_id + 1);
+    }
 
-    if (fastrg_gen_northbound_event(EV_NORTHBOUND_PPPoE, PPPoE_CMD_ENABLE, ccb_id) == ERROR) {
+    if (is_pppoe_enabled == FALSE && 
+            fastrg_gen_northbound_event(EV_NORTHBOUND_PPPoE, PPPoE_CMD_ENABLE, ccb_id) == ERROR) {
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Failed to generate PPPoE enable event for user %d", ccb_id + 1);
         return ERROR;
     }
 
-    if (fastrg_gen_northbound_event(EV_NORTHBOUND_DHCP, DHCP_CMD_ENABLE, ccb_id) == ERROR) {
+    if (is_dhcp_enabled == FALSE && 
+            fastrg_gen_northbound_event(EV_NORTHBOUND_DHCP, DHCP_CMD_ENABLE, ccb_id) == ERROR) {
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Failed to generate DHCP enable event for user %d", ccb_id + 1);
-        if (fastrg_gen_northbound_event(EV_NORTHBOUND_PPPoE, PPPoE_CMD_DISABLE, ccb_id) == ERROR) {
+        if (is_pppoe_enabled == FALSE && 
+                fastrg_gen_northbound_event(EV_NORTHBOUND_PPPoE, PPPoE_CMD_DISABLE, ccb_id) == ERROR) {
             FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Failed to generate PPPoE disable event for user %d", ccb_id + 1);
             return ERROR;
         }

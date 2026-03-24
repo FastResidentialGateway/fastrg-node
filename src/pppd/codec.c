@@ -981,7 +981,9 @@ STATUS decode_pppoe(pppoe_header_tag_t *pppoe_header_tag, ppp_ccb_t *s_ppp_ccb)
         if (s_ppp_ccb->pppoe_phase.active == TRUE)
             return ERROR;
         s_ppp_ccb->pppoe_phase.active = TRUE;
-        rte_memcpy(s_ppp_ccb->pppoe_phase.pppoe_header_tag, pppoe_header_tag, pppoe_header_tag_size);
+        rte_memcpy(s_ppp_ccb->pppoe_phase.pppoe_header_tag, pppoe_header_tag, 
+            pppoe_header_tag_size > PPPoE_TAG_DEFAULT_MAX_LEN ? 
+            PPPoE_TAG_DEFAULT_MAX_LEN : pppoe_header_tag_size);
         s_ppp_ccb->pppoe_phase.max_retransmit = MAX_RETRAN;
         s_ppp_ccb->pppoe_phase.timer_counter = 0;
         rte_timer_stop(&(s_ppp_ccb->pppoe));
@@ -1001,7 +1003,9 @@ STATUS decode_pppoe(pppoe_header_tag_t *pppoe_header_tag, ppp_ccb_t *s_ppp_ccb)
         PPP_FSM(&(s_ppp_ccb->ppp), s_ppp_ccb, E_OPEN);
         return SUCCESS;
     case PADT:
-        rte_memcpy(s_ppp_ccb->pppoe_phase.pppoe_header_tag, pppoe_header_tag, pppoe_header_tag_size);
+        rte_memcpy(s_ppp_ccb->pppoe_phase.pppoe_header_tag, pppoe_header_tag, 
+            pppoe_header_tag_size > PPPoE_TAG_DEFAULT_MAX_LEN ? 
+            PPPoE_TAG_DEFAULT_MAX_LEN : pppoe_header_tag_size);
         s_ppp_ccb->pppoe_phase.max_retransmit = MAX_RETRAN;
 
         FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "Session 0x%x connection disconnected.", rte_be_to_cpu_16(s_ppp_ccb->session_id));

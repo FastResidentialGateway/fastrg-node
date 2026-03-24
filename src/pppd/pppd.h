@@ -106,7 +106,7 @@ STATUS ppp_process(FastRG_t *fastrg_ccb, void *mail);
 
 STATUS ppp_connect(ppp_ccb_t *ppp_ccb);
 STATUS ppp_disconnect(ppp_ccb_t *ppp_ccb);
-void   ppp_update_config_by_user(ppp_ccb_t *ppp_ccb, U16 vlan_id, const char *user_name, 
+STATUS ppp_update_config_by_user(ppp_ccb_t *ppp_ccb, U16 vlan_id, const char *user_name, 
     const char *password);
 STATUS ppp_init_config_by_user(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb, U16 ccb_id, 
     U16 vlan_id, const char *user_name, const char *password);
