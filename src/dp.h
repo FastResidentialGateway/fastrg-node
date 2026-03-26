@@ -25,6 +25,8 @@ int wan_ctrl_rx(void *arg);
 int wan_data_rx(void *arg);
 int lan_ctrl_rx(void *arg);
 int lan_data_rx(void *arg);
+int wan_combined_rx(void *arg);
+int lan_combined_rx(void *arg);
 STATUS PORT_INIT(FastRG_t *fastrg_ccb, U16 port);
 
 typedef struct mbuf_priv {

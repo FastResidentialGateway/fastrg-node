@@ -593,13 +593,16 @@ int fastrg_start(int argc, char **argv)
     rte_pdump_init();
     #endif
 
-    /* Install PPPoE-aware RSS flow rules on both ports.
+    /* Install PPPoE-aware RSS flow rules on both ports (ICE PMD only).
      * Queue layout per port:
      *   queue 0          : PPPoE control (Discovery + Session w/o 5-tuple)
      *   queues 1 .. N-1  : RSS worker queues (5-tuple, PPPoE inner-header aware)
      * Queue count: 1 + max(1, 1 + (lcore_count - 5) / 2)
+     *
+     * Non-ICE PMDs use a single queue; rte_flow rules are not installed.
      */
-    {
+    BOOL is_ice_pmd = (fastrg_ccb.nic_info.vendor_id == NIC_VENDOR_ICE);
+    if (is_ice_pmd) {
         struct rte_flow_error flow_error;
         U16 total_q = fastrg_calc_queue_count(rte_lcore_count());
         FastRG_LOG(INFO, fastrg_ccb.fp, NULL, NULL,
@@ -614,33 +617,49 @@ int fastrg_start(int argc, char **argv)
                 goto err;
             }
         }
+    } else {
+        FastRG_LOG(INFO, fastrg_ccb.fp, NULL, NULL,
+            "Non-ICE PMD (%s) detected, using single queue per port, "
+            "rte_flow rules skipped",
+            fastrg_ccb.nic_info.vendor_name ? fastrg_ccb.nic_info.vendor_name : "unknown");
     }
+
     /* --- Launch fixed threads --- */
     rte_eal_remote_launch((lcore_function_t *)control_plane, (void *)&fastrg_ccb, fastrg_ccb.lcore.ctrl_thread);
-    rte_eal_remote_launch((lcore_function_t *)wan_ctrl_rx, (void *)&fastrg_ccb, fastrg_ccb.lcore.wan_ctrl_thread);
-    rte_eal_remote_launch((lcore_function_t *)lan_ctrl_rx, (void *)&fastrg_ccb, fastrg_ccb.lcore.lan_ctrl_thread);
     rte_eal_remote_launch((lcore_function_t *)timer_loop, (void *)&fastrg_ccb, fastrg_ccb.lcore.timer_thread);
 
-    /* --- Launch dynamic data threads (one wan_data_rx + one lan_rx per RSS queue) --- */
-    static dp_rx_arg_t wan_data_args[MAX_DATA_QUEUES];
-    static dp_rx_arg_t lan_data_args[MAX_DATA_QUEUES];
-    U16 num_dq = fastrg_ccb.lcore.num_data_queues;
-    FastRG_LOG(INFO, fastrg_ccb.fp, NULL, NULL,
-        "Launching %u wan_data_rx + %u lan_data_rx threads (RSS queues 1..%u)",
-        num_dq, num_dq, num_dq);
-    for(U16 i=0; i<num_dq; i++) {
-        U16 queue_id = i + 1;  /* RSS queues start at 1 */
-        wan_data_args[i].fastrg_ccb = &fastrg_ccb;
-        wan_data_args[i].rx_queue_id = queue_id;
-        wan_data_args[i].tx_queue_id = queue_id;
-        rte_eal_remote_launch((lcore_function_t *)wan_data_rx,
-            (void *)&wan_data_args[i], fastrg_ccb.lcore.wan_data_threads[i]);
+    if (is_ice_pmd) {
+        /* ICE PMD: separate ctrl + data threads with multi-queue RSS */
+        rte_eal_remote_launch((lcore_function_t *)wan_ctrl_rx, (void *)&fastrg_ccb, fastrg_ccb.lcore.wan_ctrl_thread);
+        rte_eal_remote_launch((lcore_function_t *)lan_ctrl_rx, (void *)&fastrg_ccb, fastrg_ccb.lcore.lan_ctrl_thread);
 
-        lan_data_args[i].fastrg_ccb = &fastrg_ccb;
-        lan_data_args[i].rx_queue_id = queue_id;
-        lan_data_args[i].tx_queue_id = queue_id;
-        rte_eal_remote_launch((lcore_function_t *)lan_data_rx,
-            (void *)&lan_data_args[i], fastrg_ccb.lcore.lan_data_threads[i]);
+        /* --- Launch dynamic data threads (one wan_data_rx + one lan_rx per RSS queue) --- */
+        static dp_rx_arg_t wan_data_args[MAX_DATA_QUEUES];
+        static dp_rx_arg_t lan_data_args[MAX_DATA_QUEUES];
+        U16 num_dq = fastrg_ccb.lcore.num_data_queues;
+        FastRG_LOG(INFO, fastrg_ccb.fp, NULL, NULL,
+            "Launching %u wan_data_rx + %u lan_data_rx threads (RSS queues 1..%u)",
+            num_dq, num_dq, num_dq);
+        for(U16 i=0; i<num_dq; i++) {
+            U16 queue_id = i + 1;  /* RSS queues start at 1 */
+            wan_data_args[i].fastrg_ccb = &fastrg_ccb;
+            wan_data_args[i].rx_queue_id = queue_id;
+            wan_data_args[i].tx_queue_id = queue_id;
+            rte_eal_remote_launch((lcore_function_t *)wan_data_rx,
+                (void *)&wan_data_args[i], fastrg_ccb.lcore.wan_data_threads[i]);
+
+            lan_data_args[i].fastrg_ccb = &fastrg_ccb;
+            lan_data_args[i].rx_queue_id = queue_id;
+            lan_data_args[i].tx_queue_id = queue_id;
+            rte_eal_remote_launch((lcore_function_t *)lan_data_rx,
+                (void *)&lan_data_args[i], fastrg_ccb.lcore.lan_data_threads[i]);
+        }
+    } else {
+        /* Non-ICE PMD: combined ctrl+data function per port, single queue */
+        FastRG_LOG(INFO, fastrg_ccb.fp, NULL, NULL,
+            "Launching combined wan_combined_rx + lan_combined_rx threads (single queue 0)");
+        rte_eal_remote_launch((lcore_function_t *)wan_combined_rx, (void *)&fastrg_ccb, fastrg_ccb.lcore.wan_ctrl_thread);
+        rte_eal_remote_launch((lcore_function_t *)lan_combined_rx, (void *)&fastrg_ccb, fastrg_ccb.lcore.lan_ctrl_thread);
     }
 
     if (northbound(&fastrg_ccb) == ERROR) {
