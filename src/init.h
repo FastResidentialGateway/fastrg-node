@@ -29,7 +29,6 @@ void sys_cleanup(FastRG_t *fastrg_ccb);
 
 extern struct rte_mempool *direct_pool[PORT_AMOUNT];
 extern struct rte_mempool *indirect_pool[PORT_AMOUNT];
-extern struct rte_ring    *gateway_q, *uplink_q, *downlink_q;
 extern struct rte_ring    *cp_q, *free_mail_ring;
 
 #endif

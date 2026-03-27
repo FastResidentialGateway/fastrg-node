@@ -18,6 +18,8 @@ void fastrg_grpc_hsi_disconnect(U16 user_id, bool force);
 void fastrg_grpc_dhcp_server_start(U16 user_id);
 void fastrg_grpc_dhcp_server_stop(U16 user_id);
 void fastrg_grpc_get_system_info();
+void fastrg_grpc_get_system_stats();
+void fastrg_grpc_get_system_xstats();
 void fastrg_grpc_get_hsi_info();
 void fastrg_grpc_get_dhcp_info();
 

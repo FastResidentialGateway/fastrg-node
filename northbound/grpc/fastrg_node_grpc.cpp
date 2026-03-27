@@ -438,6 +438,7 @@ int getNicStats(Statistics *stats, uint8_t port_id, FastRG_t *fastrg_ccb)
     stats->set_rx_errors(eth_stats.ierrors);
     stats->set_tx_errors(eth_stats.oerrors);
     stats->set_rx_dropped(eth_stats.imissed);
+
     // per user stats - with RCU protection
     unsigned int lcore_id = 0;
     // gRPC usually runs on non-DPDK lcore
@@ -473,10 +474,55 @@ int getNicStats(Statistics *stats, uint8_t port_id, FastRG_t *fastrg_ccb)
     return 0;
 }
 
+int getNicXStats(NicXStats *nic_xstats, uint8_t port_id)
+{
+    nic_xstats->set_port_id(port_id);
+
+    int eth_stats_len = rte_eth_xstats_get(port_id, NULL, 0);
+    if (eth_stats_len < 0) {
+        std::string err = "get xstats length failed";
+        return -1;
+    }
+    struct rte_eth_xstat *xstats = fastrg_calloc(struct rte_eth_xstat, 
+        eth_stats_len, sizeof(struct rte_eth_xstat), 0);
+    if (xstats == NULL) {
+        std::string err = "calloc xstats failed";
+        return -1;
+    }
+    int ret = rte_eth_xstats_get(port_id, xstats, eth_stats_len);
+    if (ret < 0 || ret > eth_stats_len) {
+        std::string err = "get xstats failed";
+        fastrg_mfree(xstats);
+        return -1;
+    }
+    rte_eth_xstat_name *xstats_names = fastrg_calloc(struct rte_eth_xstat_name, 
+        eth_stats_len, sizeof(struct rte_eth_xstat_name), 0);
+    if (xstats_names == NULL) {
+        std::string err = "calloc xstats names failed";
+        fastrg_mfree(xstats);
+        return -1;
+    }
+    ret = rte_eth_xstats_get_names(port_id, xstats_names, eth_stats_len);
+    if (ret < 0 || ret > eth_stats_len) {
+        std::string err = "get xstats names failed";
+        fastrg_mfree(xstats);
+        fastrg_mfree(xstats_names);
+        return -1;
+    }
+
+    for(int i=0; i<eth_stats_len; i++) {
+        XStat *xstat = nic_xstats->add_xstats();
+        xstat->set_name(std::string(xstats_names[i].name));
+        xstat->set_value(xstats[i].value);
+    }
+
+    fastrg_mfree(xstats);
+    fastrg_mfree(xstats_names);
+    return 0;
+}
+
 grpc::Status FastRGNodeServiceImpl::GetFastrgSystemInfo(::grpc::ServerContext* context, const ::google::protobuf::Empty* request, ::fastrgnodeservice::FastrgSystemInfo* response)
 {
-    uint8_t lan_port_id = 0, wan_port_id = 1;
-
     FastrgBaseInfo* base_info = response->mutable_base_info();
     base_info->set_fastrg_version(std::string(fastrg_ccb->version));
     base_info->set_build_date(std::string(fastrg_ccb->build_date));
@@ -484,12 +530,18 @@ grpc::Status FastRGNodeServiceImpl::GetFastrgSystemInfo(::grpc::ServerContext* c
     base_info->set_dpdk_eal_args(std::string(fastrg_ccb->eal_args));
     base_info->set_num_users(fastrg_ccb->user_count);
 
+    return grpc::Status::OK;
+}
+
+grpc::Status FastRGNodeServiceImpl::GetFastrgSystemStats(::grpc::ServerContext* context, const ::google::protobuf::Empty* request, ::fastrgnodeservice::FastrgSystemStatsInfo* response)
+{
+    uint8_t lan_port_id = 0, wan_port_id = 1;
+
     NicDriverInfo *lan_nic_info = response->add_nics();
     if (getNicInfo(lan_nic_info, lan_port_id) != 0) {
         std::string err = "get lan device info failed";
         return grpc::Status(grpc::StatusCode::INTERNAL, err);
     }
-    // mac addr
     lan_nic_info->set_mac_addr(std::string(
         reinterpret_cast<const char*>(fastrg_ccb->nic_info.hsi_lan_mac.addr_bytes), 6));
 
@@ -498,7 +550,6 @@ grpc::Status FastRGNodeServiceImpl::GetFastrgSystemInfo(::grpc::ServerContext* c
         std::string err = "get wan device info failed";
         return grpc::Status(grpc::StatusCode::INTERNAL, err);
     }
-    // mac addr
     wan_nic_info->set_mac_addr(std::string(
         reinterpret_cast<const char*>(fastrg_ccb->nic_info.hsi_wan_src_mac.addr_bytes), 6));
 
@@ -510,6 +561,25 @@ grpc::Status FastRGNodeServiceImpl::GetFastrgSystemInfo(::grpc::ServerContext* c
     Statistics *wan_stats = response->add_stats();
     if (getNicStats(wan_stats, wan_port_id, fastrg_ccb) != 0) {
         std::string err = "get wan device stats failed";
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+
+    return grpc::Status::OK;
+}
+
+grpc::Status FastRGNodeServiceImpl::GetFastrgSystemXStats(::grpc::ServerContext* context, const ::google::protobuf::Empty* request, ::fastrgnodeservice::FastrgSystemXStatsInfo* response)
+{
+    uint8_t lan_port_id = 0, wan_port_id = 1;
+
+    NicXStats *lan_xstats = response->add_nic_xstats();
+    if (getNicXStats(lan_xstats, lan_port_id) != 0) {
+        std::string err = "get lan device xstats failed";
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+
+    NicXStats *wan_xstats = response->add_nic_xstats();
+    if (getNicXStats(wan_xstats, wan_port_id) != 0) {
+        std::string err = "get wan device xstats failed";
         return grpc::Status(grpc::StatusCode::INTERNAL, err);
     }
 

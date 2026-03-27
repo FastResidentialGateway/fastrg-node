@@ -6,6 +6,8 @@
 #include <rte_malloc.h>
 #include <rte_ring.h>
 
+#include <linux/ethtool.h>
+
 #include "protocol.h"
 
 #define RING_BURST_SIZE 64
@@ -132,18 +134,20 @@ static inline int fastrg_ring_dequeue(struct rte_ring *ring, void **mail)
     return burst_size;
 }
 
+#define MAX_DATA_QUEUES 16
+
 struct lcore_map {
     U8 ctrl_thread;
-    U8 wan_thread;
-    U8 down_thread;
-    U8 lan_thread;
-    U8 up_thread;
-    U8 gateway_thread;
+    U8 wan_ctrl_thread;     /* WAN queue 0: PPPoE control + ICMP decap */
+    U8 lan_ctrl_thread;     /* LAN queue 0: ARP, ICMP, PPPoE passthrough */
     U8 timer_thread;
     U8 northbound_thread;
+    U8 wan_data_threads[MAX_DATA_QUEUES];  /* WAN queues 1..N: PPPoE session TCP/UDP */
+    U8 lan_data_threads[MAX_DATA_QUEUES];  /* LAN queues 1..N: TCP/UDP encap */
+    U16 num_data_queues;    /* number of RSS data queues (= rss_queue_count) */
 };
 
-void get_all_lcore_id(struct lcore_map *lcore);
+void get_all_lcore_id(struct lcore_map *lcore, unsigned int cpu_count);
 char *make_eal_args_string(int argc, const char **argv);
 
 /**
@@ -268,5 +272,40 @@ static inline void posix_sleep_ms(unsigned int ms)
     };
     nanosleep(&ts, NULL);
 }
+
+/**
+ * @fn fastrg_calc_queue_count - Compute total RX/TX queue count from CPU count.
+ *
+ * @brief Queue layout:
+ *   Queue 0          : PPPoE control plane (PPPoED 0x8863 / PPPoES without
+ *                       inner 5-tuple 0x8864).  Never used by RSS.
+ *   Queue 1 .. N     : RSS worker queues (5-tuple hash, PPPoE inner-header
+ *                       aware).
+ *
+ * Thread budget: 5 fixed (main + ctrl + wan_ctrl + lan_ctrl + timer)
+ *                + 2 * N data (wan_data + lan_data per RSS queue)
+ * => N = max(1, (cpu_count - 5) / 2)
+ *
+ * @param cpu_count
+ *      Number of available CPU cores (>= 1).
+ * @return
+ *      Total queue count (RSS queues + 1).
+ */
+U16 fastrg_calc_queue_count(unsigned int cpu_count);
+
+/**
+ * @fn get_drvinfo
+ * 
+ * @brief Get port driver information
+ * 
+ * @param port_id
+ *      Port ID
+ * @param drvinfo
+ *      Driver information in ethtool format
+ * 
+ * @return
+ *      errno
+ */
+int get_drvinfo(U16 port_id, struct ethtool_drvinfo *drvinfo);
 
 #endif

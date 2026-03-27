@@ -701,7 +701,7 @@ STATUS A_this_layer_up(__attribute__((unused)) struct rte_timer *ppp_timer, ppp_
             SINGLE, fastrg_ccb->lcore.ctrl_thread, (rte_timer_cb_t)PPP_bye_timer_cb, s_ppp_ccb);
         if (s_ppp_ccb->auth_method == PAP_PROTOCOL)
             build_auth_request_pap(buffer, &mulen, s_ppp_ccb);
-        drv_xmit(fastrg_ccb, s_ppp_ccb->user_num - 1, buffer, mulen);
+        wan_ctrl_tx(fastrg_ccb, s_ppp_ccb->user_num - 1, buffer, mulen);
         FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " LCP connection establish successfully.", s_ppp_ccb->user_num);
         FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " starting Authentication.", s_ppp_ccb->user_num);
     } else if (s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].ppp_payload.ppp_protocol == rte_cpu_to_be_16(IPCP_PROTOCOL)) {
@@ -811,7 +811,7 @@ STATUS A_send_config_request(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb)
         return SUCCESS;
     }
     build_config_request(buffer, &mulen, s_ppp_ccb);
-    drv_xmit(fastrg_ccb, s_ppp_ccb->user_num - 1, buffer, mulen);
+    wan_ctrl_tx(fastrg_ccb, s_ppp_ccb->user_num - 1, buffer, mulen);
     s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].timer_counter--;
 
     return SUCCESS;
@@ -824,7 +824,7 @@ STATUS A_send_config_nak_rej(__attribute__((unused)) struct rte_timer *ppp_timer
     U16 mulen = 0;
 
     build_config_nak_rej(buffer, &mulen, s_ppp_ccb);
-    drv_xmit(fastrg_ccb, s_ppp_ccb->user_num - 1, buffer, mulen);
+    wan_ctrl_tx(fastrg_ccb, s_ppp_ccb->user_num - 1, buffer, mulen);
 
     return SUCCESS;
 }
@@ -836,7 +836,7 @@ STATUS A_send_config_ack(__attribute__((unused)) struct rte_timer *ppp_timer, pp
     U16 mulen = 0;
 
     build_config_ack(buffer, &mulen, s_ppp_ccb);
-    drv_xmit(fastrg_ccb, s_ppp_ccb->user_num - 1, buffer, mulen);
+    wan_ctrl_tx(fastrg_ccb, s_ppp_ccb->user_num - 1, buffer, mulen);
 
     return SUCCESS;
 }
@@ -854,7 +854,7 @@ STATUS A_send_terminate_request(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_cc
         return SUCCESS;
     }
     build_terminate_request(buffer, &mulen, s_ppp_ccb);
-    drv_xmit(fastrg_ccb, s_ppp_ccb->user_num - 1, buffer, mulen);
+    wan_ctrl_tx(fastrg_ccb, s_ppp_ccb->user_num - 1, buffer, mulen);
     s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].timer_counter--;
 
     return SUCCESS;
@@ -867,7 +867,7 @@ STATUS A_send_terminate_ack(__attribute__((unused)) struct rte_timer *ppp_timer,
     U16 mulen = 0;
 
     build_terminate_ack(buffer, &mulen, s_ppp_ccb);
-    drv_xmit(fastrg_ccb, s_ppp_ccb->user_num - 1, buffer, mulen);
+    wan_ctrl_tx(fastrg_ccb, s_ppp_ccb->user_num - 1, buffer, mulen);
 
     return SUCCESS;
 }
@@ -880,7 +880,7 @@ STATUS A_send_code_reject(__attribute__((unused)) struct rte_timer *ppp_timer, p
 
     if (build_code_reject(buffer,s_ppp_ccb,&mulen) < 0)
         return FALSE;
-    drv_xmit(fastrg_ccb, s_ppp_ccb->user_num - 1, buffer, mulen);
+    wan_ctrl_tx(fastrg_ccb, s_ppp_ccb->user_num - 1, buffer, mulen);
 
     return SUCCESS;
 }
@@ -892,7 +892,7 @@ STATUS A_send_echo_reply(__attribute__((unused)) struct rte_timer *ppp_timer, pp
     U16 mulen = 0;
 
     build_echo_reply(buffer, &mulen, s_ppp_ccb);
-    drv_xmit(fastrg_ccb, s_ppp_ccb->user_num - 1, buffer, mulen);
+    wan_ctrl_tx(fastrg_ccb, s_ppp_ccb->user_num - 1, buffer, mulen);
 
     return SUCCESS;
 }

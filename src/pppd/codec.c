@@ -892,7 +892,7 @@ STATUS pppoe_send_pkt(U8 encode_type, ppp_ccb_t *s_ppp_ccb)
             return ERROR;
         }
         s_ppp_ccb->pppoe_phase.timer_counter++;
-        drv_xmit(fastrg_ccb, s_ppp_ccb->user_num - 1, buffer, mulen);
+        wan_ctrl_tx(fastrg_ccb, s_ppp_ccb->user_num - 1, buffer, mulen);
         break;
     case ENCODE_PADR:
         if (s_ppp_ccb->pppoe_phase.timer_counter >= s_ppp_ccb->pppoe_phase.max_retransmit) {
@@ -905,11 +905,11 @@ STATUS pppoe_send_pkt(U8 encode_type, ppp_ccb_t *s_ppp_ccb)
             return ERROR;
         }
         s_ppp_ccb->pppoe_phase.timer_counter++;
-        drv_xmit(fastrg_ccb, s_ppp_ccb->user_num - 1, buffer, mulen);
+        wan_ctrl_tx(fastrg_ccb, s_ppp_ccb->user_num - 1, buffer, mulen);
         break;
     case ENCODE_PADT:
         build_padt(buffer, &mulen, s_ppp_ccb);
-        drv_xmit(fastrg_ccb, s_ppp_ccb->user_num - 1, buffer, mulen);
+        wan_ctrl_tx(fastrg_ccb, s_ppp_ccb->user_num - 1, buffer, mulen);
         s_ppp_ccb->phase = PPPOE_PHASE;
         s_ppp_ccb->pppoe_phase.active = FALSE;
         FastRG_LOG(DBG, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %u PPPoE session closed successfully.", s_ppp_ccb->user_num);
@@ -1109,7 +1109,7 @@ STATUS decode_ppp(ppp_payload_t *ppp_payload, U16 *event, ppp_ccb_t *s_ppp_ccb)
             tmp_s_ppp_ccb->session_id = s_ppp_ccb->session_id;
 
             build_auth_ack_pap(buffer, &mulen, tmp_s_ppp_ccb);
-            drv_xmit(fastrg_ccb, s_ppp_ccb->user_num - 1, buffer, mulen);
+            wan_ctrl_tx(fastrg_ccb, s_ppp_ccb->user_num - 1, buffer, mulen);
             fastrg_mfree(tmp_s_ppp_ccb);
             FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " recv pap request.\n", s_ppp_ccb->user_num);
             return SUCCESS;
@@ -1139,7 +1139,7 @@ STATUS decode_ppp(ppp_payload_t *ppp_payload, U16 *event, ppp_ccb_t *s_ppp_ccb)
             tmp_s_ppp_ccb->session_id = s_ppp_ccb->session_id;
 
             build_auth_response_chap(buffer, &mulen, tmp_s_ppp_ccb, ppp_chap_data);
-            drv_xmit(fastrg_ccb, s_ppp_ccb->user_num - 1, buffer, mulen);
+            wan_ctrl_tx(fastrg_ccb, s_ppp_ccb->user_num - 1, buffer, mulen);
             FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " recv chap challenge.", s_ppp_ccb->user_num);
             fastrg_mfree(tmp_s_ppp_ccb);
             return SUCCESS;

@@ -17,8 +17,9 @@
 ## System required:
 
 - DPDK capable NIC with at least 2 ports
+	- Suggest to use Intel E800 series NICs to acquire best performance.
 - 8GB RAM
-- 8 CPU cores.
+- At least 7 CPU cores.
 
 ## How to use:
 
@@ -58,14 +59,19 @@ Then
 
 e.g.
 
-	# fastrg -l 0-7 -n 4
+	# fastrg -l 0-8 -n 4 -a 0000:04:00.0 -a 0000:08:00.0
 
 For using FastRG system data plane in Docker,
 
 	# docker build --no-cache -t fastrg:latest .
 	# mount -t hugetlbfs -o pagesize=1G none /dev/hugepages1G
 	# docker run -d --net=host --privileged -v /sys/bus/pci/devices:/sys/bus/pci/devices \
-	-v /sys/kernel/mm/hugepages:/sys/kernel/mm/hugepages -v /sys/devices/system/node:/sys/devices/system/node -v /dev:/dev -v /etc/fastrg:/etc/fastrg fastrg:latest
+	-v /sys/kernel/mm/hugepages:/sys/kernel/mm/hugepages -v /sys/devices/system/node:/sys/devices/system/node -v /dev:/dev -v /etc/fastrg:/etc/fastrg fastrg:latest fastrg -l 0-8 -n 4 -a 0000:04:00.0 -a 0000:08:00.0
+
+For Intel E800 series NICs, please use this command to start Docker container
+
+	# docker run -d --net=host --privileged -v /sys/bus/pci/devices:/sys/bus/pci/devices \
+	-v /sys/kernel/mm/hugepages:/sys/kernel/mm/hugepages -v /sys/devices/system/node:/sys/devices/system/node -v /dev:/dev -v /etc/fastrg:/etc/fastrg -v/lib/firmware/updates/intel/ice/ddp/:/lib/firmware/updates/intel/ice/ddp/ -v /lib/firmware/intel/ice/ddp:/lib/firmware/intel/ice/ddp fastrg:latest fastrg -l 0-8 -n 4 -a 0000:04:00.0 -a 0000:08:00.0
 
 ### SDN mode(Control plane + Data plane)
 
@@ -119,15 +125,17 @@ For hugepages, NIC binding and other system configuration, please refer to DPDK 
 
 1. Subscriber devices behind FastRG should use DHCP to get IP address or set the default gateway address to their end device.
 	- The DHCP ip address pool can be configured via control plane or FastRG CLI.
-2. In configuration file ***config.cfg***, Administrator should use the value ***UserCount*** to specify the initial number of FastRG subscribers. By default, there are only 10 subscribers.
-	- This value can be configured by FastRG controller or FastRG CLI tool.
+2. In configuration file ***config.cfg***, administrator should use the value ***UserCount*** to specify the initial number of FastRG subscribers. By default, there are only 10 subscribers.
+	- This value can be configured via FastRG controller or FastRG CLI tool.
 	- The value range can be set from 2 to 4000.
 3. In data plane, all packets received at FastRG system should include a single tag vlan.
 4. All DPDK EAL lcores should be on the same CPU socket.
+5. The FastRG node supports PPPoE RSS while using Intel E800 series NICs. For every two more CPU cores, the FastRG node uses 1 more Rx queue pair for LAN and WAN port. Minimum Rx queue count is 2, the maximum is 16. 
+	- Please replace DDP package to ice_comms.pkg in /lib/firmware/updates/intel/ice/ddp/ and /lib/firmware/intel/ice/ddp/ and rename it to ice.pkg to enable PPPoE RSS feature. Th DDP package can be download from https://www.intel.com/content/www/us/en/download/19660/intel-ethernet-800-series-dynamic-device-personalization-ddp-for-telecommunication-comms-package.html
 
 ## Test environment:
 
-1. Ubuntu 24.04 with Mellanox CX4 Lx, Intel X710 and X520 network card
+1. Ubuntu 24.04 with Intel E810, X710, X520 and Mellanox CX4 network card
 2. Successfully test control plane and data plane with CHT(Chunghwa Telecom Co., Ltd.) BRAS, open source RP-PPPoE and Mikrotik RouterOS PPPoE server.
 3. DPDK 24.11
 
@@ -135,5 +143,5 @@ For hugepages, NIC binding and other system configuration, please refer to DPDK 
 
 1. Increase unit tests converage
 2. Support IPv6
-3. Support DDP and split ccb for each CPU core
-4. Support DNS proxy
+3. Support DNS proxy
+4. Support Port forwarding

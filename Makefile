@@ -13,7 +13,7 @@ GIT_COMMIT := $(shell git describe --always --dirty --tags)
 
 CFLAGS = $(INCLUDE) -Wall -Werror -g $(shell pkg-config --cflags libdpdk) -O3 -DALLOW_EXPERIMENTAL_API -DTEST_MODE #-Wextra -fsanitize=address
 
-LDFLAGS = $(shell pkg-config --static --libs libdpdk) -lutils -lconfig -luuid -Wl,--start-group -lstdc++ $(shell pkg-config --libs grpc++ protobuf jsoncpp) -letcd-cpp-api -laddress_sorting -lpthread -Wl,--end-group
+LDFLAGS = $(shell pkg-config --static --libs libdpdk) -lutils -lconfig -luuid -Wl,--start-group -lstdc++ $(shell pkg-config --libs grpc++ protobuf jsoncpp) -letcd-cpp-api -laddress_sorting -lpthread -larchive -Wl,--end-group
 
 TARGET = fastrg
 VERSION_H = src/version.h
