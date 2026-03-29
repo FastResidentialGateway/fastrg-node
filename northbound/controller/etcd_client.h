@@ -3,6 +3,7 @@
 
 #include <common.h>
 #include <stddef.h>
+#include <stdlib.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -38,6 +39,13 @@ typedef enum {
     ERROR_REASON_UNKNOWN = 99                // Unknown error
 } etcd_error_reason_t;
 
+// SNAT port-mapping entry for etcd config
+typedef struct {
+    U16 eport;           // external port (host byte order)
+    char dip[32];        // destination LAN IP string
+    U16 dport;           // destination/internal port (host byte order)
+} port_mapping_t;
+
 // HSI config structure matching Go's HSIConfig
 typedef struct {
     char user_id[64];
@@ -47,7 +55,18 @@ typedef struct {
     char dhcp_addr_pool[64];
     char dhcp_subnet[32];
     char dhcp_gateway[32];
+    port_mapping_t *port_mappings;  // heap-allocated; use hsi_config_free_port_mappings() to free
+    int port_mapping_count;
 } hsi_config_t;
+
+// Free heap-allocated port_mappings inside an hsi_config_t
+static inline void hsi_config_free_port_mappings(hsi_config_t *cfg) {
+    if (cfg && cfg->port_mappings) {
+        free(cfg->port_mappings);
+        cfg->port_mappings = NULL;
+        cfg->port_mapping_count = 0;
+    }
+}
 
 // PPPoE command structure
 typedef struct {
@@ -139,6 +158,23 @@ etcd_status_t etcd_client_delete_hsi_config(const char *node_id,
     const char *user_id, int64_t *revision);
 
 /**
+ * @fn etcd_client_get_hsi_config
+ * 
+ * @brief Get HSI config from etcd
+ *        This function reads the current HSI config including its metadata
+ * @param node_id
+ *        Node UUID
+ * @param user_id
+ *        User identifier
+ * @param output
+ *        Output structure to receive the config and status
+ * @return
+ *        ETCD_SUCCESS or error code
+ */
+etcd_status_t etcd_client_get_hsi_config(const char *node_id, 
+    const char *user_id, hsi_config_full_t *output);
+
+/**
  * @fn etcd_client_modify_hsi_config_status
  * 
  * @brief Modify HSI config status (enable/disable)
@@ -159,19 +195,19 @@ etcd_status_t etcd_client_modify_hsi_config_status(const char *node_id,
 /**
  * @fn etcd_client_get_hsi_config_status
  * 
- * @brief HSI config status from etcd
- *        This function reads the current HSI config including its metadata
+ * @brief Get HSI config status from etcd
+ *        This function reads the current HSI config status
  * @param node_id
  *        Node UUID
  * @param user_id
  *        User identifier
- * @param output
- *        Output structure to receive the config and status
+ * @param output_status
+ *        Current HSI config status
  * @return
  *        ETCD_SUCCESS or error code
  */
 etcd_status_t etcd_client_get_hsi_config_status(const char *node_id, 
-    const char *user_id, hsi_config_full_t *output);
+    const char *user_id, hsi_enable_status_t *output_status);
 
 /**
  * @fn etcd_client_put_subscriber_count

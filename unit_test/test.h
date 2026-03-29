@@ -13,5 +13,6 @@ void test_etcd_integration(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pa
 void test_dp_codec(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass);
 void test_dbg(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass);
 void test_config(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass);
+void test_northbound(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass);
 
 #endif // TEST_H

@@ -115,4 +115,26 @@ STATUS set_snat_port_fwd(FastRG_t *fastrg_ccb, U16 ccb_id, U16 eport,
  */
 STATUS remove_snat_port_fwd(FastRG_t *fastrg_ccb, U16 ccb_id, U16 eport);
 
+/**
+ * @fn reconcile_port_mapping
+ *
+ * @brief Reconcile the local port forwarding table with the desired
+ *        port-mapping configuration from etcd.  Entries not present in
+ *        the desired set are removed; entries in the desired set that
+ *        do not yet exist are added.
+ *
+ * @param fastrg_ccb
+ *      Pointer to FastRG control block
+ * @param ccb_id
+ *      User ID (0-based)
+ * @param mappings
+ *      Array of desired port-mapping entries
+ * @param mappings_count
+ *      Number of entries in mappings array
+ *
+ * @return SUCCESS if all entries reconciled, ERROR if any entry failed
+ */
+STATUS reconcile_port_mapping(FastRG_t *fastrg_ccb, int ccb_id,
+    const port_mapping_t *mappings, int mapping_count);
+
 #endif /* NORTHBOUND_H */

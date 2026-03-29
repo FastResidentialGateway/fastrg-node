@@ -546,11 +546,11 @@ void check_etcd_pppoe_status(struct rte_timer *tim, ppp_ccb_t *ppp_ccb)
     FastRG_t *fastrg_ccb = ppp_ccb->fastrg_ccb;
     char *node_id = fastrg_ccb->node_uuid;
     char user_id_str[8] = { 0 };
-    hsi_config_full_t hsi_config = { 0 };
+    hsi_enable_status_t hsi_enable_status;
     int64_t revision = 0;
 
     snprintf(user_id_str, sizeof(user_id_str), "%u", ppp_ccb->user_num);
-    etcd_status_t status = etcd_client_get_hsi_config_status(node_id, user_id_str, &hsi_config);
+    etcd_status_t status = etcd_client_get_hsi_config_status(node_id, user_id_str, &hsi_enable_status);
     if (status != ETCD_SUCCESS && status != ETCD_KEY_NOT_FOUND) {
         if (tim->expire >= (ETCD_RETRY_BASE_TIME << 5)) { // try for 5 times
             FastRG_LOG(ERR, fastrg_ccb->fp, ppp_ccb, PPPLOGMSG, 
@@ -563,7 +563,7 @@ void check_etcd_pppoe_status(struct rte_timer *tim, ppp_ccb_t *ppp_ccb)
             (rte_timer_cb_t)check_etcd_pppoe_status, ppp_ccb);
         return;
     }
-    if (rte_atomic16_read(&ppp_ccb->ppp_bool) == 0 && hsi_config.enable_status != ENABLE_STATUS_DISABLED) {
+    if (rte_atomic16_read(&ppp_ccb->ppp_bool) == 0 && hsi_enable_status != ENABLE_STATUS_DISABLED) {
         etcd_mark_pending_event(HSI_ACTION_UPDATE, ppp_ccb->user_num - 1);
         if (etcd_client_modify_hsi_config_status(fastrg_ccb->node_uuid, user_id_str, 
                 ENABLE_STATUS_DISABLED, &revision) == ETCD_SUCCESS) {
@@ -572,7 +572,7 @@ void check_etcd_pppoe_status(struct rte_timer *tim, ppp_ccb_t *ppp_ccb)
             etcd_remove_event(HSI_ACTION_UPDATE, ppp_ccb->user_num - 1);
         }
     } else if (rte_atomic16_read(&ppp_ccb->ppp_bool) == 1 && 
-            hsi_config.enable_status != ENABLE_STATUS_ENABLED) {
+            hsi_enable_status != ENABLE_STATUS_ENABLED) {
         etcd_mark_pending_event(HSI_ACTION_UPDATE, ppp_ccb->user_num - 1);
         if (etcd_client_modify_hsi_config_status(fastrg_ccb->node_uuid, user_id_str, 
                 ENABLE_STATUS_ENABLED, &revision) == ETCD_SUCCESS) {

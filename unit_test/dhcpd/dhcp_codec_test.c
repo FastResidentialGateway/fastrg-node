@@ -411,14 +411,6 @@ void test_dhcp_codec(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_count = 0;
     pass_count = 0;
 
-    ppp_ccb_t ppp_ccb = {
-        .hsi_primary_dns = rte_cpu_to_be_32(0x08080808),
-        .hsi_secondary_dns = rte_cpu_to_be_32(0x01010101),
-    };
-    fastrg_ccb->ppp_ccb = fastrg_malloc(ppp_ccb_t *,  
-        sizeof(ppp_ccb_t *), 0);
-    fastrg_ccb->ppp_ccb[0] = &ppp_ccb;
-
     test_build_dhcp_offer(fastrg_ccb);
     test_build_dhcp_ack(fastrg_ccb);
     test_build_dhcp_nak(fastrg_ccb);
