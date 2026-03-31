@@ -2,18 +2,36 @@
 
 #include <common.h>
 
+#include <rte_rcu_qsbr.h>
+
 #include "../src/fastrg.h"
 #include "../src/pppd/codec.h"
 #include "../src/pppd/fsm.h"
+#include "../src/dhcpd/dhcpd.h"
 #include "../src/dbg.h"
 #include "test.h"
 
-FastRG_t *init_ccb()
+void free_ccb(FastRG_t *ccb)
 {
-    FastRG_t *ccb = malloc(sizeof(FastRG_t));
+    for(int i=0; i<ccb->user_count; i++) {
+        if (ccb->ppp_ccb[i]) fastrg_mfree(ccb->ppp_ccb[i]);
+        if (ccb->dhcp_ccb[i]) fastrg_mfree(ccb->dhcp_ccb[i]);
+    }
+    if (ccb->ppp_ccb) fastrg_mfree(ccb->ppp_ccb);
+    if (ccb->dhcp_ccb) fastrg_mfree(ccb->dhcp_ccb);
+    fastrg_mfree(ccb);
+}
+
+FastRG_t *init_ccb(int user_count)
+{
+    FastRG_t *ccb = fastrg_malloc(FastRG_t, user_count * sizeof(FastRG_t), 0);
+    if (ccb == NULL) {
+        puts("Failed to allocate memory for FastRG CCB");
+        return NULL;
+    }
 
     ccb->fp = NULL,
-    ccb->nic_info = (struct nic_info){
+    ccb->nic_info = (struct nic_info) {
         .hsi_wan_src_mac = {
             .addr_bytes = {0x9c, 0x69, 0xb4, 0x61, 0x16, 0xdd},
         },
@@ -21,11 +39,57 @@ FastRG_t *init_ccb()
             .addr_bytes = {0x9c, 0x69, 0xb4, 0x61, 0x16, 0xdc},
         },
     };
-    ccb->user_count = 1;
+    ccb->user_count = user_count;
+
+    /* ---- ppp_ccb_rcu -------------------------------------------------- */
+    size_t rcu_sz = rte_rcu_qsbr_get_memsize(RTE_MAX_LCORE);
+    struct rte_rcu_qsbr *ppp_rcu = NULL;
+    if (posix_memalign((void **)&ppp_rcu, RTE_CACHE_LINE_SIZE, rcu_sz) != 0)
+        goto err;
+    memset(ppp_rcu, 0, rcu_sz);
+    if (rte_rcu_qsbr_init(ppp_rcu, RTE_MAX_LCORE) != 0)
+        goto err;
+    rte_rcu_qsbr_thread_register(ppp_rcu, 0);
+    ccb->ppp_ccb_rcu = ppp_rcu;
+
+    /* ---- dhcp_ccb_rcu ------------------------------------------------- */
+    struct rte_rcu_qsbr *dhcp_rcu = NULL;
+    if (posix_memalign((void **)&dhcp_rcu, RTE_CACHE_LINE_SIZE, rcu_sz) != 0)
+        goto err;
+    memset(dhcp_rcu, 0, rcu_sz);
+    if (rte_rcu_qsbr_init(dhcp_rcu, RTE_MAX_LCORE) != 0)
+        goto err;
+    rte_rcu_qsbr_thread_register(dhcp_rcu, 0);
+    ccb->dhcp_ccb_rcu = dhcp_rcu;
+
+    /* ---- ppp_ccb pointer array + individual CCBs --------------------- */
+    ccb->ppp_ccb = fastrg_calloc(ppp_ccb_t *, user_count, sizeof(ppp_ccb_t *), 0);
+    if (ccb->ppp_ccb == NULL) goto err;
+    for(int i=0; i<user_count; i++) {
+        ppp_ccb_t *p = fastrg_calloc(ppp_ccb_t, 1, sizeof(ppp_ccb_t), 0);
+        if (p == NULL) goto err;
+        p->hsi_primary_dns = rte_cpu_to_be_32(0x08080808);
+        p->hsi_secondary_dns = rte_cpu_to_be_32(0x01010101);
+        ccb->ppp_ccb[i] = p;
+    }
+
+    /* ---- dhcp_ccb pointer array + individual CCBs -------------------- */
+    ccb->dhcp_ccb = fastrg_calloc(dhcp_ccb_t *, user_count, sizeof(dhcp_ccb_t *), 0);
+    if (ccb->dhcp_ccb == NULL) goto err;
+    for(int i=0; i<user_count; i++) {
+        dhcp_ccb_t *d = fastrg_calloc(dhcp_ccb_t, 1, sizeof(dhcp_ccb_t), 0);
+        if (d == NULL) goto err;
+        ccb->dhcp_ccb[i] = d;
+    }
+
     ccb->loglvl = -1;
     dbg_init((void *)ccb);
 
     return ccb;
+
+err:
+    free_ccb(ccb);
+    return NULL;
 }
 
 int main()
@@ -50,7 +114,7 @@ int main()
     signal(SIGCHLD, SIG_IGN);
 
     puts("====================start unit tests====================\n");
-    FastRG_t *fastrg_ccb = init_ccb();
+    FastRG_t *fastrg_ccb = init_ccb(1);
     if (fastrg_ccb == NULL) {
         puts("Failed to mock FastRG CCB");
         return 1;
@@ -96,6 +160,10 @@ int main()
 
     puts("====================test config.c====================");
     test_config(fastrg_ccb, &total_tests, &total_pass);
+    puts("ok!");
+
+    puts("====================test northbound.c====================");
+    test_northbound(fastrg_ccb, &total_tests, &total_pass);
     puts("ok!");
 
     printf("\n====================Unit Test Summary====================\n\n");

@@ -406,6 +406,266 @@ grpc::Status FastRGNodeServiceImpl::DhcpServerStop(::grpc::ServerContext* contex
     return grpc::Status::OK;
 }
 
+grpc::Status FastRGNodeServiceImpl::SetSnatConfig(::grpc::ServerContext* context, const ::fastrgnodeservice::SnatConfigRequest* request, ::fastrgnodeservice::SnatConfigReply* response)
+{
+    cout << "SetSnatConfig called" << endl;
+
+    U16 user_id = request->user_id();
+    U16 ccb_id = user_id - 1;
+    U16 eport = request->eport();
+    U16 iport = request->iport();
+    std::string dip = request->dip();
+
+    if (etcd_client_is_initialized() && fastrg_ccb && fastrg_ccb->node_uuid) {
+        std::string user_id_str = std::to_string(user_id);
+
+        // Read current HSI config from etcd, update port-mapping entry, then write back
+        hsi_config_full_t full_config = { 0 };
+        etcd_status_t get_s = etcd_client_get_hsi_config(fastrg_ccb->node_uuid,
+            user_id_str.c_str(), &full_config);
+        if (get_s != ETCD_SUCCESS) {
+            std::string err = "Failed to get HSI config from etcd for user " + user_id_str;
+            cout << err << endl;
+            return grpc::Status(grpc::StatusCode::INTERNAL, err);
+        }
+
+        hsi_config_t *cfg = &full_config.config;
+
+        // Update existing entry if same eport found, otherwise append new entry
+        bool found = false;
+        for(int i=0; cfg->port_mappings!=NULL && i<cfg->port_mapping_count; i++) {
+            if (cfg->port_mappings[i].eport == eport) {
+                strncpy(cfg->port_mappings[i].dip, dip.c_str(), sizeof(cfg->port_mappings[i].dip) - 1);
+                cfg->port_mappings[i].dip[sizeof(cfg->port_mappings[i].dip) - 1] = '\0';
+                cfg->port_mappings[i].dport = iport;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            int new_count = cfg->port_mapping_count + 1;
+            port_mapping_t *new_mappings = (port_mapping_t *)realloc(cfg->port_mappings,
+                new_count * sizeof(port_mapping_t));
+            if (new_mappings == NULL) {
+                hsi_config_free_port_mappings(cfg);
+                std::string err = "Out of memory adding port mapping for user " + user_id_str;
+                cout << err << endl;
+                return grpc::Status(grpc::StatusCode::INTERNAL, err);
+            }
+            cfg->port_mappings = new_mappings;
+            port_mapping_t *pm = &cfg->port_mappings[cfg->port_mapping_count];
+            pm->eport = eport;
+            strncpy(pm->dip, dip.c_str(), sizeof(pm->dip) - 1);
+            pm->dip[sizeof(pm->dip) - 1] = '\0';
+            pm->dport = iport;
+            cfg->port_mapping_count = new_count;
+        }
+
+        etcd_status_t put_s = etcd_client_put_hsi_config(fastrg_ccb->node_uuid,
+            user_id_str.c_str(), cfg, full_config.enable_status, "fastrg-node-grpc");
+        hsi_config_free_port_mappings(cfg);
+
+        if (put_s != ETCD_SUCCESS) {
+            std::string err = "Failed to update HSI config in etcd for user " + user_id_str;
+            cout << err << endl;
+            return grpc::Status(grpc::StatusCode::INTERNAL, err);
+        }
+        cout << "SNAT port forward synced to etcd for user " << user_id_str << endl;
+    } else if (!etcd_client_is_initialized()) {
+        cout << "Etcd not initialized, directly setting SNAT port forward for user " << user_id << endl;
+        if (set_snat_port_fwd(fastrg_ccb, ccb_id, eport, dip.c_str(), iport) == ERROR) {
+            std::string err = "Error! Failed to set SNAT port forward for user " + std::to_string(user_id) +
+                " eport=" + std::to_string(eport) + " dip=" + dip + " iport=" + std::to_string(iport);
+            cout << err << endl;
+            return grpc::Status(grpc::StatusCode::INTERNAL, err);
+        }
+    } else {
+        std::string err = "Error! fastrg_ccb or node_uuid is NULL";
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+
+    response->set_status("SNAT port forward set successfully");
+
+    return grpc::Status::OK;
+}
+
+grpc::Status FastRGNodeServiceImpl::RemoveSnatConfig(::grpc::ServerContext* context, const ::fastrgnodeservice::SnatConfigRequest* request, ::fastrgnodeservice::SnatConfigReply* response)
+{
+    cout << "RemoveSnatConfig called" << endl;
+
+    U16 user_id = request->user_id();
+    U16 ccb_id = user_id - 1;
+    U16 eport = request->eport();
+
+    if (etcd_client_is_initialized() && fastrg_ccb && fastrg_ccb->node_uuid) {
+        std::string user_id_str = std::to_string(user_id);
+
+        // Read current HSI config from etcd, remove the matching eport entry, then write back
+        hsi_config_full_t full_config = { 0 };
+        etcd_status_t get_s = etcd_client_get_hsi_config(fastrg_ccb->node_uuid,
+            user_id_str.c_str(), &full_config);
+        if (get_s != ETCD_SUCCESS) {
+            std::string err = "Failed to get HSI config from etcd for user " + user_id_str;
+            cout << err << endl;
+            return grpc::Status(grpc::StatusCode::INTERNAL, err);
+        }
+
+        hsi_config_t *cfg = &full_config.config;
+
+        // Find and remove the entry with matching eport (shift remaining entries left)
+        bool found = false;
+        for(int i=0; cfg->port_mappings != NULL && i<cfg->port_mapping_count; i++) {
+            if (cfg->port_mappings[i].eport == eport) {
+                for(int j=i; j<cfg->port_mapping_count-1; j++)
+                    cfg->port_mappings[j] = cfg->port_mappings[j + 1];
+                cfg->port_mapping_count--;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            hsi_config_free_port_mappings(cfg);
+            std::string err = "SNAT port forward eport=" + std::to_string(eport) +
+                " not found for user " + user_id_str;
+            cout << err << endl;
+            return grpc::Status(grpc::StatusCode::NOT_FOUND, err);
+        }
+
+        etcd_status_t put_s = etcd_client_put_hsi_config(fastrg_ccb->node_uuid,
+            user_id_str.c_str(), cfg, full_config.enable_status, "fastrg-node-grpc");
+        hsi_config_free_port_mappings(cfg);
+
+        if (put_s != ETCD_SUCCESS) {
+            std::string err = "Failed to update HSI config in etcd for user " + user_id_str;
+            cout << err << endl;
+            return grpc::Status(grpc::StatusCode::INTERNAL, err);
+        }
+        cout << "SNAT port forward removed from etcd for user " << user_id_str << endl;
+    } else if (!etcd_client_is_initialized()) {
+        cout << "Etcd not initialized, directly removing SNAT port forward for user " << user_id << endl;
+        if (remove_snat_port_fwd(fastrg_ccb, ccb_id, eport) == ERROR) {
+            std::string err = "Error! Failed to remove SNAT port forward for user " + std::to_string(user_id) +
+                " eport=" + std::to_string(eport);
+            cout << err << endl;
+            return grpc::Status(grpc::StatusCode::INTERNAL, err);
+        }
+    } else {
+        std::string err = "Error! fastrg_ccb or node_uuid is NULL";
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+
+    response->set_status("SNAT port forward removed successfully");
+
+    return grpc::Status::OK;
+}
+
+grpc::Status FastRGNodeServiceImpl::GetPortFwdInfo(::grpc::ServerContext* context, const ::fastrgnodeservice::PortFwdInfoRequest* request, ::fastrgnodeservice::PortFwdInfoReply* response)
+{
+    cout << "GetPortFwdInfo called" << endl;
+
+    U16 user_id = request->user_id();
+    U16 ccb_id = user_id - 1;
+
+    if (user_id == 0 || user_id > fastrg_ccb->user_count) {
+        std::string err = "Error! User " + std::to_string(user_id) + " does not exist";
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, err);
+    }
+
+    ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
+    response->set_user_id(user_id);
+
+    for(int eport=0; eport<PORT_FWD_TABLE_SIZE; eport++) {
+        if (rte_atomic16_read(&ppp_ccb->port_fwd_table[eport].is_active) == 1) {
+            PortFwdEntry *entry = response->add_entries();
+            entry->set_eport(eport);
+
+            U32 dip = ppp_ccb->port_fwd_table[eport].dip;
+            std::string dip_str = std::to_string((dip) & 0xFF) + "." +
+                std::to_string((dip >> 8) & 0xFF) + "." +
+                std::to_string((dip >> 16) & 0xFF) + "." +
+                std::to_string((dip >> 24) & 0xFF);
+            entry->set_dip(dip_str);
+            entry->set_iport(ppp_ccb->port_fwd_table[eport].iport);
+            entry->set_hit_count(rte_atomic64_read(&ppp_ccb->port_fwd_table[eport].hit_count));
+        }
+    }
+
+    return grpc::Status::OK;
+}
+
+grpc::Status FastRGNodeServiceImpl::GetArpTable(::grpc::ServerContext* context, const ::fastrgnodeservice::ArpTableRequest* request, ::fastrgnodeservice::ArpTableReply* response)
+{
+    cout << "GetArpTable called" << endl;
+
+    U16 user_id = request->user_id();
+    U16 ccb_id = user_id - 1;
+    U32 max_count = request->max_count();
+    if (max_count == 0)
+        max_count = 100;
+
+    if (user_id == 0 || user_id > fastrg_ccb->user_count) {
+        std::string err = "Error! User " + std::to_string(user_id) + " does not exist";
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, err);
+    }
+
+    ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
+    response->set_user_id(user_id);
+
+    if (ppp_ccb->mac_table == NULL) {
+        response->set_total_count(0);
+        return grpc::Status::OK;
+    }
+
+    U32 total_count = 0;
+    U32 returned = 0;
+
+    for(U32 idx=0; idx<MAC_TABLE_SIZE; idx++) {
+        if (rte_atomic16_read(&ppp_ccb->mac_table[idx].valid) != 0) {
+            total_count++;
+            if (returned < max_count) {
+                /* Reconstruct IP from index:
+                 * idx = B * 255*255 + C * 255 + D
+                 * First octet is the network prefix (e.g. 10 for 10.0.0.0/8)
+                 */
+                U32 d = idx % MAC_TABLE_DIM;
+                U32 c = (idx / MAC_TABLE_DIM) % MAC_TABLE_DIM;
+                U32 b = idx / (MAC_TABLE_DIM * MAC_TABLE_DIM);
+
+                /* Use the DHCP server IP's first octet as the network prefix */
+                dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
+                U32 net_ip = rte_be_to_cpu_32(dhcp_ccb->dhcp_server_ip);
+                U32 first_octet = (net_ip >> 24) & 0xFF;
+
+                std::string ip_str = std::to_string(first_octet) + "." +
+                    std::to_string(b) + "." +
+                    std::to_string(c) + "." +
+                    std::to_string(d);
+
+                struct rte_ether_addr *mac = &ppp_ccb->mac_table[idx].mac;
+                char mac_buf[18];
+                snprintf(mac_buf, sizeof(mac_buf),
+                    "%02x:%02x:%02x:%02x:%02x:%02x",
+                    mac->addr_bytes[0], mac->addr_bytes[1],
+                    mac->addr_bytes[2], mac->addr_bytes[3],
+                    mac->addr_bytes[4], mac->addr_bytes[5]);
+
+                ArpTableEntry *entry = response->add_entries();
+                entry->set_entry_id(idx);
+                entry->set_ip(ip_str);
+                entry->set_mac(std::string(mac_buf));
+                returned++;
+            }
+        }
+    }
+
+    response->set_total_count(total_count);
+    return grpc::Status::OK;
+}
+
 int getNicInfo(NicDriverInfo *nic_info, uint8_t port_id)
 {
     struct rte_eth_dev_info dev_info = {0};

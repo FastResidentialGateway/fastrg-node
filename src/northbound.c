@@ -4,6 +4,8 @@
 #include "dbg.h"
 #include "dhcpd/dhcpd.h"
 #include "pppd/pppd.h"
+#include "pppd/nat.h"
+#include "utils.h"
 #include "../northbound/controller/etcd_client.h"
 
 BOOL is_valid_ccb_id(const FastRG_t *fastrg_ccb, int ccb_id)
@@ -291,4 +293,125 @@ STATUS execute_pppoe_hangup(FastRG_t *fastrg_ccb, int ccb_id)
     }
 
     return SUCCESS;
+}
+
+STATUS set_snat_port_fwd(FastRG_t *fastrg_ccb, U16 ccb_id, U16 eport,
+    const char *dip, U16 iport)
+{
+    if (!is_valid_ccb_id(fastrg_ccb, ccb_id) || dip == NULL)
+        return ERROR;
+
+    ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
+    if (ppp_ccb->phase != DATA_PHASE) {
+        FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
+            "User %u has not established PPPoE connection, SNAT port forwarding will be set but not applied",
+            ccb_id + 1);
+    }
+
+    U32 dip_be;
+    if (parse_ip(dip, &dip_be) == ERROR) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+            "Invalid destination IP: %s", dip);
+        return ERROR;
+    }
+
+    port_fwd_add(ppp_ccb->port_fwd_table, eport, dip_be, iport);
+
+    FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+        "User %u: SNAT port forward added eport=%u -> %s:%u",
+        ccb_id + 1, eport, dip, iport);
+
+    return SUCCESS;
+}
+
+STATUS remove_snat_port_fwd(FastRG_t *fastrg_ccb, U16 ccb_id, U16 eport)
+{
+    if (!is_valid_ccb_id(fastrg_ccb, ccb_id))
+        return ERROR;
+
+    ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
+
+    if (port_fwd_remove(ppp_ccb->port_fwd_table, eport) == ERROR) {
+        FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
+            "Port forwarding rule not found for user %u, eport=%u",
+            ccb_id + 1, eport);
+        return ERROR;
+    }
+
+    FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+        "User %u: SNAT port forward removed eport=%u",
+        ccb_id + 1, eport);
+
+    return SUCCESS;
+}
+
+STATUS reconcile_port_mapping(FastRG_t *fastrg_ccb, int ccb_id,
+    const port_mapping_t *mappings, int mapping_count)
+{
+    if (!is_valid_ccb_id(fastrg_ccb, ccb_id))
+        return ERROR;
+
+    if (mapping_count < 0)
+        return ERROR;
+
+    ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
+    int added = 0, updated = 0, errors = 0, remove = 0;
+
+    /* Pass 1: scan local table — remove entries not present in etcd config */
+    for(U32 eport=0; eport<PORT_FWD_TABLE_SIZE; eport++) {
+        port_fwd_entry_t *entry = &ppp_ccb->port_fwd_table[eport];
+        if (rte_atomic16_read(&entry->is_active) == 0)
+            continue; /* This entry is not active, skip */
+        BOOL found = FALSE;
+        for(int i=0; i<mapping_count; i++) {
+            if (eport == mappings[i].eport) {
+                found = TRUE;
+                break;
+            }
+        }
+        if (found == FALSE) {
+            /* This entry is active in local but not found in etcd config, need to remove it */
+            port_fwd_remove(ppp_ccb->port_fwd_table, eport);
+            FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                "User %u: port-mapping reconcile: removed stale mapping for eport=%u",
+                ccb_id + 1, eport);
+            remove++;
+        }
+    }
+
+    /* Pass 2: iterate etcd mappings — add missing entries, update stale ones */
+    for(int i=0; i<mapping_count; i++) {
+        U32 dip_be;
+        if (parse_ip(mappings[i].dip, &dip_be) == ERROR) {
+            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+                "User %u: port-mapping reconcile: invalid dip \"%s\" for eport=%u",
+                ccb_id + 1, mappings[i].dip, mappings[i].eport);
+            errors++;
+            continue;
+        }
+        port_fwd_entry_t *entry = &ppp_ccb->port_fwd_table[mappings[i].eport];
+        if (rte_atomic16_read(&entry->is_active) == 0) {
+            /* Entry missing locally — add it */
+            port_fwd_add(ppp_ccb->port_fwd_table, mappings[i].eport, dip_be, mappings[i].dport);
+            FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                "User %u: port-mapping reconcile: added mapping for eport=%u -> %s:%u",
+                ccb_id + 1, mappings[i].eport, mappings[i].dip, mappings[i].dport);
+            added++;
+        } else if (entry->dip != dip_be || entry->iport != mappings[i].dport) {
+            /* Same eport exists but dip/dport has changed — update it */
+            port_fwd_remove(ppp_ccb->port_fwd_table, mappings[i].eport);
+            port_fwd_add(ppp_ccb->port_fwd_table, mappings[i].eport, dip_be, mappings[i].dport);
+            FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                "User %u: port-mapping reconcile: updated mapping for eport=%u -> %s:%u",
+                ccb_id + 1, mappings[i].eport, mappings[i].dip, mappings[i].dport);
+            updated++;
+        }
+        /* else: exact match, no-op */
+    }
+
+    FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+        "User %u: port-mapping reconcile done: added=%d updated=%d errors=%d removed=%d",
+        ccb_id + 1, added, updated, errors, remove);
+
+    return (errors > 0) ? ERROR : SUCCESS;
 }

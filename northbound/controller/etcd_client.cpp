@@ -679,6 +679,20 @@ public:
             cfg["dhcp_subnet"] = std::string(config->dhcp_subnet);
             cfg["dhcp_gateway"] = std::string(config->dhcp_gateway);
 
+            // Serialize port-mapping array
+            if (config->port_mapping_count > 0 && config->port_mappings != NULL) {
+                Json::Value pm_array(Json::arrayValue);
+                for (int i = 0; i < config->port_mapping_count; i++) {
+                    Json::Value entry;
+                    entry["index"] = std::to_string(i);
+                    entry["eport"] = std::to_string(config->port_mappings[i].eport);
+                    entry["dip"] = std::string(config->port_mappings[i].dip);
+                    entry["dport"] = std::to_string(config->port_mappings[i].dport);
+                    pm_array.append(entry);
+                }
+                cfg["port-mapping"] = pm_array;
+            }
+
             root["config"] = cfg;
             Json::Value meta;
             meta["node"] = std::string(node_id);
@@ -758,6 +772,165 @@ public:
             }
         } catch (const std::exception& e) {
             FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Exception deleting HSI config: %s", e.what());
+            return ETCD_ERROR;
+        }
+    }
+
+    etcd_status_t get_hsi_config(const std::string& node_id, 
+        const std::string& user_id, hsi_config_full_t* output)
+    {
+        if (!client_ || !output) {
+            return ETCD_ERROR;
+        }
+
+        try {
+            std::string key = "configs/" + node_id + "/hsi/" + user_id;
+
+            // Get current config from etcd
+            auto get_response = client_->get(key).get();
+
+            if (get_response.error_code() != 0) {
+                if (get_response.error_code() == 100) {
+                    // Key not found
+                    std::cerr << "HSI config not found for key: " << key << std::endl;
+                    return ETCD_KEY_NOT_FOUND;
+                }
+                std::cerr << "Failed to get HSI config with key: " << key 
+                    << " - " << get_response.error_message() << std::endl;
+                return ETCD_ERROR;
+            }
+
+            std::string value = get_response.value().as_string();
+
+            // Parse JSON
+            Json::Value root;
+            Json::Reader reader;
+
+            if (!reader.parse(value, root)) {
+                std::cerr << "Failed to parse HSI config JSON for get_hsi_config" << std::endl;
+                return ETCD_CONFIG_PARSE_FAILED;
+            }
+
+            // Parse config section
+            Json::Value config_obj;
+            if (root.isMember("config")) {
+                config_obj = root["config"];
+            } else {
+                config_obj = root; // Old format fallback
+            }
+
+            // Fill hsi_config_t part
+            std::strncpy(output->config.user_id, 
+                config_obj.get("user_id", "").asString().c_str(), 
+                sizeof(output->config.user_id) - 1);
+            std::strncpy(output->config.vlan_id, 
+                config_obj.get("vlan_id", "").asString().c_str(), 
+                sizeof(output->config.vlan_id) - 1);
+            std::strncpy(output->config.account_name, 
+                config_obj.get("account_name", "").asString().c_str(), 
+                sizeof(output->config.account_name) - 1);
+            std::strncpy(output->config.password, 
+                config_obj.get("password", "").asString().c_str(), 
+                sizeof(output->config.password) - 1);
+            std::strncpy(output->config.dhcp_addr_pool, 
+                config_obj.get("dhcp_addr_pool", "").asString().c_str(), 
+                sizeof(output->config.dhcp_addr_pool) - 1);
+            std::strncpy(output->config.dhcp_subnet, 
+                config_obj.get("dhcp_subnet", "").asString().c_str(), 
+                sizeof(output->config.dhcp_subnet) - 1);
+            std::strncpy(output->config.dhcp_gateway, 
+                config_obj.get("dhcp_gateway", "").asString().c_str(), 
+                sizeof(output->config.dhcp_gateway) - 1);
+
+            // Parse port-mapping array (dynamic allocation — caller must call hsi_config_free_port_mappings)
+            output->config.port_mappings = NULL;
+            output->config.port_mapping_count = 0;
+            if (config_obj.isMember("port-mapping") && config_obj["port-mapping"].isArray()) {
+                const Json::Value& pm_array = config_obj["port-mapping"];
+                int total = (int)pm_array.size();
+                if (total > 0) {
+                    output->config.port_mappings = (port_mapping_t *)malloc(total * sizeof(port_mapping_t));
+                    if (output->config.port_mappings) {
+                        for (int i = 0; i < total; i++) {
+                            const Json::Value& entry = pm_array[i];
+                            if (!entry.isMember("eport") || !entry.isMember("dip") || !entry.isMember("dport"))
+                                continue;
+                            port_mapping_t *pm = &output->config.port_mappings[output->config.port_mapping_count];
+                            pm->eport = (U16)std::stoi(entry["eport"].asString());
+                            std::strncpy(pm->dip, entry["dip"].asString().c_str(), sizeof(pm->dip) - 1);
+                            pm->dip[sizeof(pm->dip) - 1] = '\0';
+                            pm->dport = (U16)std::stoi(entry["dport"].asString());
+                            output->config.port_mapping_count++;
+                        }
+                    }
+                }
+            }
+
+            // Ensure null termination
+            output->config.user_id[sizeof(output->config.user_id) - 1] = '\0';
+            output->config.vlan_id[sizeof(output->config.vlan_id) - 1] = '\0';
+            output->config.account_name[sizeof(output->config.account_name) - 1] = '\0';
+            output->config.password[sizeof(output->config.password) - 1] = '\0';
+            output->config.dhcp_addr_pool[sizeof(output->config.dhcp_addr_pool) - 1] = '\0';
+            output->config.dhcp_subnet[sizeof(output->config.dhcp_subnet) - 1] = '\0';
+            output->config.dhcp_gateway[sizeof(output->config.dhcp_gateway) - 1] = '\0';
+
+            // Parse metadata section
+            if (root.isMember("metadata")) {
+                Json::Value metadata = root["metadata"];
+                
+                // Parse enableStatus
+                if (metadata["enableStatus"].isString()) {
+                    std::string status = metadata["enableStatus"].asString();
+                    if (status == "enabled") {
+                        output->enable_status = ENABLE_STATUS_ENABLED;
+                    } else if (status == "enabling") {
+                        output->enable_status = ENABLE_STATUS_ENABLING;
+                    } else if (status == "disabling") {
+                        output->enable_status = ENABLE_STATUS_DISABLING;
+                    } else if (status == "disabled") {
+                        output->enable_status = ENABLE_STATUS_DISABLED;
+                    } else {
+                        output->enable_status = ENABLE_STATUS_DISABLED; // default
+                    }
+                } else {
+                    output->enable_status = ENABLE_STATUS_DISABLED;
+                }
+
+                // Parse other metadata fields
+                std::strncpy(output->updated_by, 
+                    metadata.get("updatedBy", "").asString().c_str(), 
+                    sizeof(output->updated_by) - 1);
+                output->updated_by[sizeof(output->updated_by) - 1] = '\0';
+
+                std::strncpy(output->updated_at, 
+                    metadata.get("updatedAt", "").asString().c_str(), 
+                    sizeof(output->updated_at) - 1);
+                output->updated_at[sizeof(output->updated_at) - 1] = '\0';
+
+                std::strncpy(output->resource_version, 
+                    metadata.get("resourceVersion", "").asString().c_str(), 
+                    sizeof(output->resource_version) - 1);
+                output->resource_version[sizeof(output->resource_version) - 1] = '\0';
+            } else {
+                // No metadata section, set defaults
+                output->enable_status = ENABLE_STATUS_DISABLED;
+                output->updated_by[0] = '\0';
+                output->updated_at[0] = '\0';
+                output->resource_version[0] = '\0';
+            }
+
+            std::cout << "Successfully retrieved HSI config for user: " 
+                << user_id << " (enableStatus: " 
+                << (output->enable_status == ENABLE_STATUS_ENABLED ? "enabled" :
+                    output->enable_status == ENABLE_STATUS_ENABLING ? "enabling" :
+                    output->enable_status == ENABLE_STATUS_DISABLING ? "disabling" : "disabled")
+                << ")" << std::endl;
+
+            return ETCD_SUCCESS;
+
+        } catch (const std::exception& e) {
+            std::cerr << "Exception getting HSI config: " << e.what() << std::endl;
             return ETCD_ERROR;
         }
     }
@@ -880,9 +1053,9 @@ public:
     }
 
     etcd_status_t get_hsi_config_status(const std::string& node_id, 
-        const std::string& user_id, hsi_config_full_t* output)
+        const std::string& user_id, hsi_enable_status_t* output_status)
     {
-        if (!client_ || !output) {
+        if (!client_ || !output_status) {
             return ETCD_ERROR;
         }
 
@@ -914,46 +1087,6 @@ public:
                 return ETCD_CONFIG_PARSE_FAILED;
             }
 
-            // Parse config section
-            Json::Value config_obj;
-            if (root.isMember("config")) {
-                config_obj = root["config"];
-            } else {
-                config_obj = root; // Old format fallback
-            }
-
-            // Fill hsi_config_t part
-            std::strncpy(output->config.user_id, 
-                config_obj.get("user_id", "").asString().c_str(), 
-                sizeof(output->config.user_id) - 1);
-            std::strncpy(output->config.vlan_id, 
-                config_obj.get("vlan_id", "").asString().c_str(), 
-                sizeof(output->config.vlan_id) - 1);
-            std::strncpy(output->config.account_name, 
-                config_obj.get("account_name", "").asString().c_str(), 
-                sizeof(output->config.account_name) - 1);
-            std::strncpy(output->config.password, 
-                config_obj.get("password", "").asString().c_str(), 
-                sizeof(output->config.password) - 1);
-            std::strncpy(output->config.dhcp_addr_pool, 
-                config_obj.get("dhcp_addr_pool", "").asString().c_str(), 
-                sizeof(output->config.dhcp_addr_pool) - 1);
-            std::strncpy(output->config.dhcp_subnet, 
-                config_obj.get("dhcp_subnet", "").asString().c_str(), 
-                sizeof(output->config.dhcp_subnet) - 1);
-            std::strncpy(output->config.dhcp_gateway, 
-                config_obj.get("dhcp_gateway", "").asString().c_str(), 
-                sizeof(output->config.dhcp_gateway) - 1);
-
-            // Ensure null termination
-            output->config.user_id[sizeof(output->config.user_id) - 1] = '\0';
-            output->config.vlan_id[sizeof(output->config.vlan_id) - 1] = '\0';
-            output->config.account_name[sizeof(output->config.account_name) - 1] = '\0';
-            output->config.password[sizeof(output->config.password) - 1] = '\0';
-            output->config.dhcp_addr_pool[sizeof(output->config.dhcp_addr_pool) - 1] = '\0';
-            output->config.dhcp_subnet[sizeof(output->config.dhcp_subnet) - 1] = '\0';
-            output->config.dhcp_gateway[sizeof(output->config.dhcp_gateway) - 1] = '\0';
-
             // Parse metadata section
             if (root.isMember("metadata")) {
                 Json::Value metadata = root["metadata"];
@@ -962,48 +1095,29 @@ public:
                 if (metadata["enableStatus"].isString()) {
                     std::string status = metadata["enableStatus"].asString();
                     if (status == "enabled") {
-                        output->enable_status = ENABLE_STATUS_ENABLED;
+                        *output_status = ENABLE_STATUS_ENABLED;
                     } else if (status == "enabling") {
-                        output->enable_status = ENABLE_STATUS_ENABLING;
+                        *output_status = ENABLE_STATUS_ENABLING;
                     } else if (status == "disabling") {
-                        output->enable_status = ENABLE_STATUS_DISABLING;
+                        *output_status = ENABLE_STATUS_DISABLING;
                     } else if (status == "disabled") {
-                        output->enable_status = ENABLE_STATUS_DISABLED;
+                        *output_status = ENABLE_STATUS_DISABLED;
                     } else {
-                        output->enable_status = ENABLE_STATUS_DISABLED; // default
+                        *output_status = ENABLE_STATUS_DISABLED; // default
                     }
                 } else {
-                    output->enable_status = ENABLE_STATUS_DISABLED;
+                    *output_status = ENABLE_STATUS_DISABLED;
                 }
-
-                // Parse other metadata fields
-                std::strncpy(output->updated_by, 
-                    metadata.get("updatedBy", "").asString().c_str(), 
-                    sizeof(output->updated_by) - 1);
-                output->updated_by[sizeof(output->updated_by) - 1] = '\0';
-
-                std::strncpy(output->updated_at, 
-                    metadata.get("updatedAt", "").asString().c_str(), 
-                    sizeof(output->updated_at) - 1);
-                output->updated_at[sizeof(output->updated_at) - 1] = '\0';
-
-                std::strncpy(output->resource_version, 
-                    metadata.get("resourceVersion", "").asString().c_str(), 
-                    sizeof(output->resource_version) - 1);
-                output->resource_version[sizeof(output->resource_version) - 1] = '\0';
             } else {
                 // No metadata section, set defaults
-                output->enable_status = ENABLE_STATUS_DISABLED;
-                output->updated_by[0] = '\0';
-                output->updated_at[0] = '\0';
-                output->resource_version[0] = '\0';
+                *output_status = ENABLE_STATUS_DISABLED;
             }
 
             std::cout << "Successfully retrieved HSI config status for user: " 
                 << user_id << " (enableStatus: " 
-                << (output->enable_status == ENABLE_STATUS_ENABLED ? "enabled" :
-                    output->enable_status == ENABLE_STATUS_ENABLING ? "enabling" :
-                    output->enable_status == ENABLE_STATUS_DISABLING ? "disabling" : "disabled")
+                << (*output_status == ENABLE_STATUS_ENABLED ? "enabled" :
+                    *output_status == ENABLE_STATUS_ENABLING ? "enabling" :
+                    *output_status == ENABLE_STATUS_DISABLING ? "disabling" : "disabled")
                 << ")" << std::endl;
 
             return ETCD_SUCCESS;
@@ -1213,6 +1327,7 @@ public:
                 } else {
                     std::cerr << "Failed to parse existing HSI config for user: " << user_id << std::endl;
                 }
+                hsi_config_free_port_mappings(&config);
             }
 
             std::cout << "Loaded " << count << " existing HSI config(s) for node: " << node_uuid << std::endl;
@@ -1313,6 +1428,7 @@ private:
                     ERROR_REASON_CALLBACK_FAILED, "HSI callback returned error", value);
             }
 
+            hsi_config_free_port_mappings(&config);
             return ret;
         } else {
             std::cerr << "Failed to parse HSI config: " << value << std::endl;
@@ -1552,6 +1668,32 @@ private:
             config->dhcp_subnet[sizeof(config->dhcp_subnet) - 1] = '\0';
             config->dhcp_gateway[sizeof(config->dhcp_gateway) - 1] = '\0';
 
+            // Parse port-mapping array (dynamic allocation — caller must call hsi_config_free_port_mappings)
+            config->port_mappings = NULL;
+            config->port_mapping_count = 0;
+            if (config_obj.isMember("port-mapping") && config_obj["port-mapping"].isArray()) {
+                const Json::Value& pm_array = config_obj["port-mapping"];
+                int total = (int)pm_array.size();
+                if (total > 0) {
+                    config->port_mappings = (port_mapping_t *)malloc(total * sizeof(port_mapping_t));
+                    if (config->port_mappings) {
+                        for (int i = 0; i < total; i++) {
+                            const Json::Value& entry = pm_array[i];
+                            if (!entry.isMember("eport") || !entry.isMember("dip") || !entry.isMember("dport")) {
+                                std::cerr << "Skipping port-mapping entry " << i << ": missing required fields" << std::endl;
+                                continue;
+                            }
+                            port_mapping_t *pm = &config->port_mappings[config->port_mapping_count];
+                            pm->eport = (U16)std::stoi(entry["eport"].asString());
+                            strncpy(pm->dip, entry["dip"].asString().c_str(), sizeof(pm->dip) - 1);
+                            pm->dip[sizeof(pm->dip) - 1] = '\0';
+                            pm->dport = (U16)std::stoi(entry["dport"].asString());
+                            config->port_mapping_count++;
+                        }
+                    }
+                }
+            }
+
             if (root.isMember("metadata") && is_enabled) {
                 Json::Value metadata = root["metadata"];
                 if (metadata["enableStatus"].isString()) {
@@ -1659,6 +1801,13 @@ etcd_status_t etcd_client_put_hsi_config(const char* node_id, const char* user_i
     return g_etcd_client->put_hsi_config(node_id, user_id, config, enable_status, updated_by);
 }
 
+etcd_status_t etcd_client_get_hsi_config(const char* node_id, 
+    const char* user_id, hsi_config_full_t* output) {
+    if (!g_etcd_client) return ETCD_ERROR;
+    return g_etcd_client->get_hsi_config(std::string(node_id), 
+        std::string(user_id), output);
+}
+
 etcd_status_t etcd_client_delete_hsi_config(const char* node_id, const char* user_id, 
     int64_t* revision) {
     if (!g_etcd_client) return ETCD_ERROR;
@@ -1673,10 +1822,10 @@ etcd_status_t etcd_client_modify_hsi_config_status(const char* node_id,
 }
 
 etcd_status_t etcd_client_get_hsi_config_status(const char* node_id, 
-    const char* user_id, hsi_config_full_t* output) {
+    const char* user_id, hsi_enable_status_t* output_status) {
     if (!g_etcd_client) return ETCD_ERROR;
     return g_etcd_client->get_hsi_config_status(std::string(node_id), 
-        std::string(user_id), output);
+        std::string(user_id), output_status);
 }
 
 etcd_status_t etcd_client_get_subscriber_count(const char* node_id, 

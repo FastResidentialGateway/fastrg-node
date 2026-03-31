@@ -160,17 +160,26 @@ static inline int nat_entry_same_flow(addr_table_t *entry, U16 nat_port,
  *        Destination port in network byte order
  * @param addr_table
  *        NAT address table
+ * @param port_fwd_table
+ *        Port forwarding table (direct-indexed by port number).
+ *        If a candidate nat_port is reserved by a port-forward rule,
+ *        it will be skipped to avoid conflict.
  * 
  * @return Allocated nat_port in network byte order, or 0 if all ports exhausted
  */
 static inline U16 nat_learning_port_reuse(struct rte_ether_hdr *eth_hdr,
     U32 src_ip, U32 dst_ip, U16 src_port, U16 dst_port,
-    addr_table_t addr_table[])
+    addr_table_t addr_table[], port_fwd_entry_t port_fwd_table[])
 {
     U16 nat_port = compute_initial_nat_port(src_ip, src_port);
     U16 start_nat_port = nat_port;
 
     do {
+        /* Skip ports reserved by static port forwarding rules */
+        U16 nat_port_host = rte_be_to_cpu_16(nat_port);
+        if (rte_atomic16_read(&port_fwd_table[nat_port_host].is_active) == 1)
+            goto next_nat_port;
+
         /* Compute table index for this (nat_port, dst_ip, dst_port) combination */
         U32 table_idx = compute_nat_table_index(nat_port, 
             dst_ip, dst_port);
@@ -231,7 +240,8 @@ static inline U16 nat_learning_port_reuse(struct rte_ether_hdr *eth_hdr,
         } while (table_idx != start_idx);
 
         /* If we found a conflict or table is full for this nat_port, try next nat_port */
-        U16 nat_port_host = rte_be_to_cpu_16(nat_port);
+next_nat_port:
+        nat_port_host = rte_be_to_cpu_16(nat_port);
         nat_port_host++;
         if (nat_port_host >= TOTAL_SOCK_PORT)
             nat_port_host = SYS_MAX_PORT;
@@ -306,17 +316,19 @@ static inline addr_table_t *nat_reverse_lookup(U16 nat_port, U32 remote_ip, U16 
  *        Pointer to ICMP header
  * @param addr_table
  *        NAT address table
+ * @param port_fwd_table
+ *        Port forwarding table for reserved-port check
  * 
  * @return NAT port in network byte order, or 0 if all ports exhausted
  */
 static inline U16 nat_icmp_learning(struct rte_ether_hdr *eth_hdr, 
     struct rte_ipv4_hdr *ip_hdr, struct rte_icmp_hdr *icmphdr, 
-    addr_table_t addr_table[])
+    addr_table_t addr_table[], port_fwd_entry_t port_fwd_table[])
 {
     return nat_learning_port_reuse(eth_hdr,
         ip_hdr->src_addr, ip_hdr->dst_addr,
         icmphdr->icmp_ident, icmphdr->icmp_type,
-        addr_table);
+        addr_table, port_fwd_table);
 }
 
 /**
@@ -332,17 +344,19 @@ static inline U16 nat_icmp_learning(struct rte_ether_hdr *eth_hdr,
  *        Pointer to UDP header
  * @param addr_table
  *        NAT address table
+ * @param port_fwd_table
+ *        Port forwarding table for reserved-port check
  * 
  * @return NAT port in network byte order, or 0 if all ports exhausted
  */
 static inline U16 nat_udp_learning(struct rte_ether_hdr *eth_hdr, 
     struct rte_ipv4_hdr *ip_hdr, struct rte_udp_hdr *udphdr, 
-    addr_table_t addr_table[])
+    addr_table_t addr_table[], port_fwd_entry_t port_fwd_table[])
 {
     return nat_learning_port_reuse(eth_hdr,
         ip_hdr->src_addr, ip_hdr->dst_addr,
         udphdr->src_port, udphdr->dst_port,
-        addr_table);
+        addr_table, port_fwd_table);
 }
 
 /**
@@ -358,17 +372,132 @@ static inline U16 nat_udp_learning(struct rte_ether_hdr *eth_hdr,
  *        Pointer to TCP header
  * @param addr_table
  *        NAT address table
+ * @param port_fwd_table
+ *        Port forwarding table for reserved-port check
  * 
  * @return NAT port in network byte order, or 0 if all ports exhausted
  */
 static inline U16 nat_tcp_learning(struct rte_ether_hdr *eth_hdr, 
     struct rte_ipv4_hdr *ip_hdr, struct rte_tcp_hdr *tcphdr, 
-    addr_table_t addr_table[])
+    addr_table_t addr_table[], port_fwd_entry_t port_fwd_table[])
 {
     return nat_learning_port_reuse(eth_hdr,
         ip_hdr->src_addr, ip_hdr->dst_addr,
         tcphdr->src_port, tcphdr->dst_port,
-        addr_table);
+        addr_table, port_fwd_table);
+}
+
+/*======================================================================
+ * SNAT Port Forwarding Helpers  –  O(1) direct-index implementation
+ *
+ * Key idea: eport is U16 (0..65535), so we use it directly as the
+ * array index.  No hash, no collision, no loop.
+ *======================================================================*/
+
+/**
+ * @fn port_fwd_lookup_by_eport
+ *
+ * @brief O(1) lookup: index directly by eport value.
+ *
+ * @param table
+ *      port_fwd_table[PORT_FWD_TABLE_SIZE] inside ppp_ccb
+ * @param eport
+ *      External port in HOST byte order
+ *
+ * @return
+ *      Pointer to entry if active, NULL otherwise
+ */
+static inline port_fwd_entry_t *port_fwd_lookup_by_eport(
+    port_fwd_entry_t table[], U16 eport)
+{
+    port_fwd_entry_t *entry = &table[eport];
+    if (rte_atomic16_read(&entry->is_active) == 1)
+        return entry;
+    return NULL;
+}
+
+/**
+ * @fn port_fwd_add
+ *
+ * @brief Add / update a static port forwarding entry.
+ *        O(1): write directly to table[eport].
+ *
+ * @param table
+ *      Port forwarding table
+ * @param eport
+ *      External port (host byte order)
+ * @param dip
+ *      Destination LAN IP (network byte order)
+ * @param iport
+ *      Internal port (host byte order)
+ */
+static inline void port_fwd_add(port_fwd_entry_t table[],
+    U16 eport, U32 dip, U16 iport)
+{
+    port_fwd_entry_t *entry = &table[eport];
+    if (rte_atomic16_read(&entry->is_active) == 1)
+        return; /* Already active, do not overwrite to avoid disrupting existing flow */
+    entry->dip = dip;
+    entry->iport = iport;
+    rte_atomic64_set(&entry->hit_count, 0);
+    rte_atomic_thread_fence(rte_memory_order_release);
+    rte_atomic16_set(&entry->is_active, 1);
+}
+
+/**
+ * @fn port_fwd_remove
+ *
+ * @brief Remove a port forwarding entry.
+ *        O(1): clear table[eport] directly.
+ *
+ * @param table
+ *      Port forwarding table
+ * @param eport
+ *      External port (host byte order)
+ *
+ * @return
+ *      SUCCESS on success, ERROR if entry was not active
+ */
+static inline STATUS port_fwd_remove(port_fwd_entry_t table[], U16 eport)
+{
+    port_fwd_entry_t *entry = &table[eport];
+    if (rte_atomic16_read(&entry->is_active) == 0)
+        return ERROR;
+    rte_atomic16_set(&entry->is_active, 0);
+    rte_atomic_thread_fence(rte_memory_order_release);
+    entry->dip = 0;
+    entry->iport = 0;
+    rte_atomic64_set(&entry->hit_count, 0);
+    return SUCCESS;
+}
+
+/**
+ * @fn nat_port_fwd_reverse_lookup
+ *
+ * @brief O(1) inbound port-forward lookup for the data-path hot path.
+ *
+ * @param table
+ *      port_fwd_table inside ppp_ccb
+ * @param dst_port
+ *      WAN packet destination port, NETWORK byte order
+ * @param out_dip
+ *      [out] LAN destination IP (network byte order)
+ * @param out_iport
+ *      [out] LAN internal port (network byte order)
+ *
+ * @return
+ *      SUCCESS if matched, ERROR if not
+ */
+static inline STATUS nat_port_fwd_reverse_lookup(port_fwd_entry_t table[],
+    U16 dst_port, U32 *out_dip, U16 *out_iport)
+{
+    U16 eport_host = rte_be_to_cpu_16(dst_port);
+    port_fwd_entry_t *entry = port_fwd_lookup_by_eport(table, eport_host);
+    if (entry == NULL)
+        return ERROR;
+    *out_dip = entry->dip;
+    *out_iport = rte_cpu_to_be_16(entry->iport);
+    return SUCCESS;
 }
 
 #endif

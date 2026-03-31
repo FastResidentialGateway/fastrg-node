@@ -17,6 +17,7 @@
 #include "dp.h"
 #include "init.h"
 #include "fastrg.h"
+#include "mac_table.h"
 #include "dbg.h"
 #include "version.h"
 #include "../northbound/controller/controller_client.h"
@@ -281,6 +282,14 @@ STATUS sys_init(FastRG_t *fastrg_ccb)
 
     rte_atomic16_init(&fastrg_ccb->per_subscriber_stats_updating);
 
+    /* Initialize ARP pending mempool for MAC table resolution */
+    ret = arp_pending_init_pool(&fastrg_ccb->arp_pending_mp);
+    if (ret != SUCCESS) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+            "Cannot create ARP pending mempool");
+        goto err;
+    }
+
     /* Initialize per_subscriber_stats using RCU-safe function */
     ret = fastrg_add_subscriber_stats(fastrg_ccb, fastrg_ccb->user_count);
     if (ret != SUCCESS) {
@@ -293,6 +302,21 @@ STATUS sys_init(FastRG_t *fastrg_ccb)
 err:
     cleanup_ring();
     cleanup_mem();
+    arp_pending_cleanup_pool(&fastrg_ccb->arp_pending_mp);
+    if (fastrg_ccb->per_subscriber_stats_rcu) {
+        fastrg_mfree(fastrg_ccb->per_subscriber_stats_rcu);
+        fastrg_ccb->per_subscriber_stats_rcu = NULL;
+    }
+    if (fastrg_ccb->node_uuid != NULL) {
+        fastrg_mfree(fastrg_ccb->node_uuid);
+        fastrg_ccb->node_uuid = NULL;
+    }
+    for(int i=0; i<PORT_AMOUNT; i++) {
+        if (fastrg_ccb->per_subscriber_stats[i] != NULL) {
+            fastrg_mfree(fastrg_ccb->per_subscriber_stats[i]);
+            fastrg_ccb->per_subscriber_stats[i] = NULL;
+        }
+    }
     return ERROR;
 }
 
@@ -304,6 +328,8 @@ void sys_cleanup(FastRG_t *fastrg_ccb)
             fastrg_ccb->per_subscriber_stats[i] = NULL;
         }
     }
+
+    arp_pending_cleanup_pool(&fastrg_ccb->arp_pending_mp);
 
     if (fastrg_ccb->node_uuid != NULL) {
         fastrg_mfree(fastrg_ccb->node_uuid);

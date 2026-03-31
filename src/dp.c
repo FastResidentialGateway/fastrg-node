@@ -28,6 +28,7 @@
 #include "dp_codec.h"
 #include "dp_flow.h"
 #include "dhcpd/dhcpd.h"
+#include "mac_table.h"
 #include "dbg.h"
 #include "dp.h"
 #include "trace.h"
@@ -471,10 +472,10 @@ int wan_data_rx(void *arg)
             single_pkt->l3_len = sizeof(struct rte_ipv4_hdr);
             if (ip_hdr->next_proto_id == PROTO_TYPE_UDP) {
                 pkt_num = decaps_udp(fastrg_ccb, single_pkt, eth_hdr, 
-                    vlan_header, ip_hdr, ccb_id);
+                    vlan_header, ip_hdr, ccb_id, tx_q);
             } else if (ip_hdr->next_proto_id == PROTO_TYPE_TCP) {
                 pkt_num = decaps_tcp(fastrg_ccb, single_pkt, eth_hdr, 
-                    vlan_header, ip_hdr, ccb_id);
+                    vlan_header, ip_hdr, ccb_id, tx_q);
             } else {
                 drop_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
                 continue;
@@ -498,76 +499,6 @@ int wan_data_rx(void *arg)
     }
     return 0;
 }
-
-#if 0
-int ds_mc(void)
-{
-    struct rte_mbuf 	*pkt[BURST_SIZE], *single_pkt;
-    uint64_t 			total_tx;
-    U16			burst_size;
-    struct rte_ipv4_hdr *ip_hdr;
-    vlan_header_t		*vlan_header;
-    int 				i;
-
-    for(i=0; i<BURST_SIZE; i++)
-        pkt[i] = rte_pktmbuf_alloc(mbuf_pool);
-
-    for(;;) {
-        burst_size = rte_ring_dequeue_burst(ds_mc_queue,(void **)pkt,BURST_SIZE,NULL);
-        if (unlikely(burst_size == 0))
-            continue;
-        total_tx = 0;
-        for(i=0; i<burst_size; i++) {
-            single_pkt = pkt[i];
-            rte_prefetch0(rte_pktmbuf_mtod(single_pkt, void *));
-            /* Need to check whether the packet is multicast or VOD */
-            vlan_header = (vlan_header_t *)(rte_pktmbuf_mtod(single_pkt, unsigned char *) + sizeof(struct rte_ether_hdr));
-            U16 vlan_id = rte_be_to_cpu_16(vlan_header->tci_union.tci_value) & 0xFFF;
-            ip_hdr = (struct rte_ipv4_hdr *)(rte_pktmbuf_mtod(single_pkt, unsigned char *) + sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t));
-            if (likely(vlan_id == MULTICAST_TAG || ((ip_hdr->dst_addr) & 0xFFFFFF00) == 10)) // VOD pkt dst ip is always 10.x.x.x
-                pkt[total_tx++] = single_pkt;
-            //else
-                //rte_pktmbuf_free(single_pkt);
-        }
-        if (likely(total_tx > 0)) {
-            U16 nb_tx = rte_eth_tx_burst(LAN_PORT, mc_port_q, pkt, total_tx);
-            if (unlikely(nb_tx < total_tx)) {
-                for(U16 buf=nb_tx; buf<total_tx; buf++)
-                    rte_pktmbuf_free(pkt[buf]);
-            }
-        }
-    }
-    return 0;
-}
-#endif
-
-#if 0
-int us_mc(void)
-{
-    struct rte_mbuf 	*pkt[BURST_SIZE], *single_pkt;
-    uint64_t 			total_tx;
-    U16			burst_size;
-    int 				i;
-
-    for(i=0; i<BURST_SIZE; i++)
-        pkt[i] = rte_pktmbuf_alloc(mbuf_pool);
-
-    for(;;) {
-        burst_size = rte_ring_dequeue_burst(us_mc_queue,(void **)pkt,BURST_SIZE,NULL);
-        if (unlikely(burst_size == 0))
-            continue;
-        total_tx = 0;
-        for(i=0; i<burst_size; i++) {
-            single_pkt = pkt[i];
-            /* Need to check whether the packet is multicast */
-            pkt[total_tx++] = single_pkt;
-        }
-        if (likely(total_tx > 0))
-            rte_eth_tx_burst(WAN_PORT, mc_port_q, pkt, total_tx);
-    }
-    return 0;
-}
-#endif
 
 /**
  * lan_ctrl_rx - LAN port queue 0 handler.
@@ -625,6 +556,14 @@ int lan_ctrl_rx(void *arg)
             if (unlikely(vlan_header->next_proto == rte_cpu_to_be_16(FRAME_TYPE_ARP))) {
                 struct rte_arp_hdr *arphdr = (struct rte_arp_hdr *)(rte_pktmbuf_mtod(single_pkt,
                     unsigned char *) + sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t));
+
+                /* Learn MAC from any ARP source (sender HW/IP always valid) */
+                ppp_ccb_t *ppp_ccb_arp = PPPD_GET_CCB(fastrg_ccb, ccb_id);
+                if (is_ip_in_range(arphdr->arp_data.arp_sip, dhcp_server_ip, subnet_mask)) {
+                    mac_table_learn(ppp_ccb_arp->mac_table,
+                        arphdr->arp_data.arp_sip, &arphdr->arp_data.arp_sha);
+                }
+
                 /* ARP request to gateway IP → reply directly */
                 if (arphdr->arp_opcode == rte_cpu_to_be_16(RTE_ARP_OP_REQUEST) &&
                         arphdr->arp_data.arp_tip == dhcp_server_ip) {
@@ -638,6 +577,25 @@ int lan_ctrl_rx(void *arg)
                     count_tx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                     count_rx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                     rte_eth_tx_burst(LAN_PORT, tx_q, &single_pkt, 1);
+                } else if (arphdr->arp_opcode == rte_cpu_to_be_16(RTE_ARP_OP_REPLY) &&
+                        arphdr->arp_data.arp_tip == dhcp_server_ip) {
+                    /* ARP reply to us → drain pending queue */
+                    count_rx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
+                    struct rte_mbuf *drain_pkts[ARP_PENDING_QUEUE_SIZE];
+                    U16 drain_count = 0;
+                    arp_pending_drain(fastrg_ccb->arp_pending_mp,
+                        &ppp_ccb_arp->arp_pq, arphdr->arp_data.arp_sip,
+                        &arphdr->arp_data.arp_sha,
+                        drain_pkts, &drain_count, ARP_PENDING_QUEUE_SIZE);
+                    if (drain_count > 0) {
+                        U16 nb_tx = rte_eth_tx_burst(LAN_PORT, tx_q,
+                            drain_pkts, drain_count);
+                        for(U16 d=0; d<nb_tx; d++)
+                            count_tx_packet(fastrg_ccb, drain_pkts[d], LAN_PORT, ccb_id);
+                        for(U16 d=nb_tx; d<drain_count; d++)
+                            drop_packet(fastrg_ccb, drain_pkts[d], LAN_PORT, ccb_id);
+                    }
+                    rte_pktmbuf_free(single_pkt);
                 } else {
                     /* ARP to other → forward to WAN */
                     count_rx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
@@ -665,6 +623,12 @@ int lan_ctrl_rx(void *arg)
             if (likely(vlan_header->next_proto == rte_cpu_to_be_16(FRAME_TYPE_IP))) {
                 ip_hdr = (struct rte_ipv4_hdr *)(rte_pktmbuf_mtod(single_pkt, unsigned char *) + 
                     sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t));
+                ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
+                /* Learn MAC from IP packet (before headers are modified) */
+                if (is_ip_in_range(ip_hdr->src_addr, dhcp_server_ip, subnet_mask)) {
+                    mac_table_learn(ppp_ccb->mac_table,
+                        ip_hdr->src_addr, &eth_hdr->src_addr);
+                }
 
                 /* Gateway subnet: only ICMP expected on queue 0 */
                 if (unlikely(is_ip_in_range(ip_hdr->dst_addr, dhcp_server_ip, subnet_mask))) {
@@ -697,7 +661,6 @@ int lan_ctrl_rx(void *arg)
                 single_pkt->l2_len = sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) + sizeof(pppoe_header_t) + sizeof(ppp_payload_t);
                 single_pkt->l3_len = sizeof(struct rte_ipv4_hdr);
 
-                ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
                 if (ip_hdr->next_proto_id == PROTO_TYPE_ICMP) {
                     if (unlikely(!rte_is_same_ether_addr(&eth_hdr->dst_addr, &fastrg_ccb->nic_info.hsi_lan_mac))) {
                         count_rx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
@@ -716,7 +679,7 @@ int lan_ctrl_rx(void *arg)
                     U16 ori_ident = icmphdr->icmp_ident;
 
                     new_port_id = nat_icmp_learning(eth_hdr, ip_hdr, icmphdr, 
-                        ppp_ccb->addr_table);
+                        ppp_ccb->addr_table, ppp_ccb->port_fwd_table);
                     if (unlikely(new_port_id == 0)) {
                         drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                         continue;
@@ -879,6 +842,13 @@ int lan_data_rx(void *arg)
             single_pkt->l3_len = sizeof(struct rte_ipv4_hdr);
 
             ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
+
+            /* Learn MAC from all WAN-bound LAN traffic */
+            if (is_ip_in_range(ip_hdr->src_addr, dhcp_server_ip, subnet_mask)) {
+                mac_table_learn(ppp_ccb->mac_table,
+                    ip_hdr->src_addr, &eth_hdr->src_addr);
+            }
+
             if (ip_hdr->next_proto_id == PROTO_TYPE_TCP) {
                 if (unlikely(!rte_is_same_ether_addr(&eth_hdr->dst_addr, &fastrg_ccb->nic_info.hsi_lan_mac))) {
                     count_rx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
@@ -1100,7 +1070,7 @@ int wan_combined_rx(void *arg)
                 /* UDP → NAT reverse decap + TX to LAN */
                 ip_hdr->hdr_checksum = 0;
                 pkt_num = decaps_udp(fastrg_ccb, single_pkt, eth_hdr,
-                    vlan_header, ip_hdr, ccb_id);
+                    vlan_header, ip_hdr, ccb_id, tx_q);
                 for(int j=0; j<pkt_num; j++) {
                     pkt[total_tx++] = single_pkt;
                     single_pkt = single_pkt->next;
@@ -1109,7 +1079,7 @@ int wan_combined_rx(void *arg)
                 /* TCP → NAT reverse decap + TX to LAN */
                 ip_hdr->hdr_checksum = 0;
                 pkt_num = decaps_tcp(fastrg_ccb, single_pkt, eth_hdr,
-                    vlan_header, ip_hdr, ccb_id);
+                    vlan_header, ip_hdr, ccb_id, tx_q);
                 for(int j=0; j<pkt_num; j++) {
                     pkt[total_tx++] = single_pkt;
                     single_pkt = single_pkt->next;
@@ -1185,6 +1155,14 @@ int lan_combined_rx(void *arg)
             if (unlikely(vlan_header->next_proto == rte_cpu_to_be_16(FRAME_TYPE_ARP))) {
                 struct rte_arp_hdr *arphdr = (struct rte_arp_hdr *)(rte_pktmbuf_mtod(single_pkt,
                     unsigned char *) + sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t));
+
+                /* Learn MAC from any ARP source */
+                ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
+                if (is_ip_in_range(arphdr->arp_data.arp_sip, dhcp_server_ip, subnet_mask)) {
+                    mac_table_learn(ppp_ccb->mac_table,
+                        arphdr->arp_data.arp_sip, &arphdr->arp_data.arp_sha);
+                }
+
                 if (arphdr->arp_opcode == rte_cpu_to_be_16(RTE_ARP_OP_REQUEST) &&
                         arphdr->arp_data.arp_tip == dhcp_server_ip) {
                     rte_ether_addr_copy(&eth_hdr->src_addr, &eth_hdr->dst_addr);
@@ -1197,6 +1175,25 @@ int lan_combined_rx(void *arg)
                     count_tx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                     count_rx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                     rte_eth_tx_burst(LAN_PORT, tx_q, &single_pkt, 1);
+                } else if (arphdr->arp_opcode == rte_cpu_to_be_16(RTE_ARP_OP_REPLY) &&
+                        arphdr->arp_data.arp_tip == dhcp_server_ip) {
+                    /* ARP reply to us → drain pending queue */
+                    count_rx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
+                    struct rte_mbuf *drain_pkts[ARP_PENDING_QUEUE_SIZE];
+                    U16 drain_count = 0;
+                    arp_pending_drain(fastrg_ccb->arp_pending_mp,
+                        &ppp_ccb->arp_pq, arphdr->arp_data.arp_sip,
+                        &arphdr->arp_data.arp_sha,
+                        drain_pkts, &drain_count, ARP_PENDING_QUEUE_SIZE);
+                    if (drain_count > 0) {
+                        U16 nb_tx = rte_eth_tx_burst(LAN_PORT, tx_q,
+                            drain_pkts, drain_count);
+                        for(U16 d=0; d<nb_tx; d++)
+                            count_tx_packet(fastrg_ccb, drain_pkts[d], LAN_PORT, ccb_id);
+                        for(U16 d=nb_tx; d<drain_count; d++)
+                            drop_packet(fastrg_ccb, drain_pkts[d], LAN_PORT, ccb_id);
+                    }
+                    rte_pktmbuf_free(single_pkt);
                 } else {
                     count_rx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                     count_tx_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
@@ -1223,9 +1220,14 @@ int lan_combined_rx(void *arg)
             if (likely(vlan_header->next_proto == rte_cpu_to_be_16(FRAME_TYPE_IP))) {
                 ip_hdr = (struct rte_ipv4_hdr *)(rte_pktmbuf_mtod(single_pkt, unsigned char *) +
                     sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t));
-
+                ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
+                /* Learn MAC from IP packet (before headers are modified) */
+                if (is_ip_in_range(ip_hdr->src_addr, dhcp_server_ip, subnet_mask)) {
+                    mac_table_learn(ppp_ccb->mac_table,
+                        ip_hdr->src_addr, &eth_hdr->src_addr);
+                }
                 /* Gateway subnet handling */
-                if (unlikely(is_ip_in_range(ip_hdr->dst_addr, dhcp_server_ip, subnet_mask))) {
+                if (is_ip_in_range(ip_hdr->dst_addr, dhcp_server_ip, subnet_mask)) {
                     if (ip_hdr->next_proto_id == PROTO_TYPE_ICMP) {
                         icmphdr = (struct rte_icmp_hdr *)(rte_pktmbuf_mtod(single_pkt,
                             unsigned char *) + sizeof(struct rte_ether_hdr) +
@@ -1281,8 +1283,6 @@ int lan_combined_rx(void *arg)
                     sizeof(pppoe_header_t) + sizeof(ppp_payload_t);
                 single_pkt->l3_len = sizeof(struct rte_ipv4_hdr);
 
-                ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
-
                 if (ip_hdr->next_proto_id == PROTO_TYPE_ICMP) {
                     /* ICMP to WAN → NAT + PPPoE encap */
                     if (unlikely(!rte_is_same_ether_addr(&eth_hdr->dst_addr, &fastrg_ccb->nic_info.hsi_lan_mac))) {
@@ -1303,7 +1303,7 @@ int lan_combined_rx(void *arg)
                     U16 ori_ident = icmphdr->icmp_ident;
 
                     new_port_id = nat_icmp_learning(eth_hdr, ip_hdr, icmphdr,
-                        ppp_ccb->addr_table);
+                        ppp_ccb->addr_table, ppp_ccb->port_fwd_table);
                     if (unlikely(new_port_id == 0)) {
                         drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                         continue;

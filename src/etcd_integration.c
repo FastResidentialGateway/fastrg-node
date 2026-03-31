@@ -519,6 +519,17 @@ STATUS hsi_config_changed_callback(const char *node_id, const char *user_id,
                         "Failed to delete HSI config from etcd for user %s", user_id);
                     etcd_remove_event(HSI_ACTION_DELETE, ccb_id);
                 }
+            } else {
+                // HSI config applied successfully, now reconcile port-mapping rules
+                if (config->port_mapping_count > 0 || action == HSI_ACTION_UPDATE) {
+                    STATUS pm_ret = reconcile_port_mapping(fastrg_ccb, ccb_id,
+                        config->port_mappings, config->port_mapping_count);
+                    if (pm_ret == ERROR) {
+                        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+                            "Port-mapping reconciliation failed for user %s", user_id);
+                        ret = ERROR; // Signal failure so caller writes fallback error
+                    }
+                }
             }
             break;
 
@@ -727,6 +738,31 @@ void sync_request_callback(const char *node_id, void *user_data)
         }
         snprintf(config.dhcp_gateway, sizeof(config.dhcp_gateway), "%s", gateway_addr_str);
 
+        /* Populate port-mapping from local port_fwd_table */
+        /* First pass: count active entries to size the heap allocation */
+        int active_port_mapping_count = 0;
+        for(U32 eport=0; eport<PORT_FWD_TABLE_SIZE; eport++) {
+            if (rte_atomic16_read(&ppp_ccb->port_fwd_table[eport].is_active) != 0)
+                active_port_mapping_count++;
+        }
+        config.port_mappings = NULL;
+        config.port_mapping_count = 0;
+        if (active_port_mapping_count > 0)
+            config.port_mappings = malloc(active_port_mapping_count * sizeof(port_mapping_t));
+        if (config.port_mappings != NULL) {
+            for(U32 eport=0; eport<PORT_FWD_TABLE_SIZE; eport++) {
+                if (rte_atomic16_read(&ppp_ccb->port_fwd_table[eport].is_active) == 0)
+                    continue;
+                port_mapping_t *pm = &config.port_mappings[config.port_mapping_count];
+                pm->eport = (U16)eport;
+                struct in_addr pm_addr = { .s_addr = ppp_ccb->port_fwd_table[eport].dip };
+                if (inet_ntop(AF_INET, &pm_addr, pm->dip, sizeof(pm->dip)) == NULL)
+                    continue;
+                pm->dport = ppp_ccb->port_fwd_table[eport].iport;
+                config.port_mapping_count++;
+            }
+        }
+
         hsi_enable_status_t enable_status = ENABLE_STATUS_DISABLED;
         if (ppp_ccb->phase == DATA_PHASE) {
             enable_status = ENABLE_STATUS_ENABLED;
@@ -737,6 +773,7 @@ void sync_request_callback(const char *node_id, void *user_data)
         }
         etcd_status_t hsi_status = etcd_client_put_hsi_config(
             fastrg_ccb->node_uuid, config.user_id, &config, enable_status, "etcd_reconnect_sync");
+        hsi_config_free_port_mappings(&config);
 
         if (hsi_status == ETCD_SUCCESS) {
             written_count++;

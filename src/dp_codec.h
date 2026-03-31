@@ -21,6 +21,7 @@
 #include "init.h"
 #include "pppd/nat.h"
 #include "dhcpd/dhcpd.h"
+#include "mac_table.h"
 #include "dp.h"
 
 /* Queue 0 is for control/fallback, queues 1..N are RSS data queues.
@@ -140,7 +141,7 @@ static int encaps_udp(FastRG_t *fastrg_ccb, struct rte_mbuf **single_pkt,
 
         /* for nat */
         udphdr = (struct rte_udp_hdr *)(ip_hdr + 1);
-        new_port_id = nat_udp_learning(eth_hdr, ip_hdr, udphdr, ppp_ccb->addr_table);
+        new_port_id = nat_udp_learning(eth_hdr, ip_hdr, udphdr, ppp_ccb->addr_table, ppp_ccb->port_fwd_table);
         if (unlikely(new_port_id == 0)) {
             drop_packet(fastrg_ccb, *single_pkt, LAN_PORT, ccb_id);
             return 0;
@@ -246,7 +247,7 @@ static int encaps_tcp(FastRG_t *fastrg_ccb, struct rte_mbuf **single_pkt,
 
         /* for nat */
         tcphdr = (struct rte_tcp_hdr *)(ip_hdr + 1);
-        new_port_id = nat_tcp_learning(eth_hdr, ip_hdr, tcphdr, ppp_ccb->addr_table);
+        new_port_id = nat_tcp_learning(eth_hdr, ip_hdr, tcphdr, ppp_ccb->addr_table, ppp_ccb->port_fwd_table);
         if (unlikely(new_port_id == 0)) {
             drop_packet(fastrg_ccb, *single_pkt, LAN_PORT, ccb_id);
             return 0;
@@ -270,7 +271,7 @@ static int encaps_tcp(FastRG_t *fastrg_ccb, struct rte_mbuf **single_pkt,
 
 static int decaps_udp(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt, 
     struct rte_ether_hdr *eth_hdr, vlan_header_t *vlan_header, 
-    struct rte_ipv4_hdr *ip_hdr, U16 ccb_id)
+    struct rte_ipv4_hdr *ip_hdr, U16 ccb_id, U16 tx_q)
 {
     struct rte_udp_hdr *udphdr;
     ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
@@ -279,6 +280,40 @@ static int decaps_udp(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt,
     addr_table_t *entry = nat_reverse_lookup(udphdr->dst_port, ip_hdr->src_addr, 
         udphdr->src_port, ppp_ccb->addr_table);
     if (unlikely(entry == NULL)) {
+        /* Fallback: check port forwarding table */
+        U32 fwd_dip;
+        U16 fwd_iport;
+        if (nat_port_fwd_reverse_lookup(ppp_ccb->port_fwd_table,
+                udphdr->dst_port, &fwd_dip, &fwd_iport) == SUCCESS) {
+            U16 eport_host = rte_be_to_cpu_16(udphdr->dst_port);
+            rte_atomic64_inc(&ppp_ccb->port_fwd_table[eport_host].hit_count);
+            rte_ether_addr_copy(&fastrg_ccb->nic_info.hsi_lan_mac, &eth_hdr->src_addr);
+            ip_hdr->dst_addr = fwd_dip;
+            udphdr->dst_port = fwd_iport;
+            ip_hdr->hdr_checksum = rte_ipv4_cksum(ip_hdr);
+            udphdr->dgram_cksum = 0;
+            udphdr->dgram_cksum = rte_ipv4_udptcp_cksum(ip_hdr, udphdr);
+            count_rx_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
+            increase_pppoes_rx_count(ppp_ccb, single_pkt->pkt_len);
+
+            /* Look up MAC table for destination host */
+            mac_table_entry_t *mac_entry = mac_table_lookup(
+                ppp_ccb->mac_table, fwd_dip);
+            if (likely(mac_entry != NULL)) {
+                rte_ether_addr_copy(&mac_entry->mac, &eth_hdr->dst_addr);
+                count_tx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
+                return 1;
+            }
+            /* MAC unknown: queue packet and send ARP request */
+            dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
+            arp_pending_enqueue(fastrg_ccb->arp_pending_mp,
+                &ppp_ccb->arp_pq, single_pkt, fwd_dip);
+            if (send_arp_request(&fastrg_ccb->nic_info.hsi_lan_mac,
+                    dhcp_ccb->dhcp_server_ip, fwd_dip,
+                    rte_atomic16_read(&ppp_ccb->vlan_id), tx_q) == SUCCESS)
+                count_tx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
+            return 0;  /* packet held in pending queue */
+        }
         drop_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
         return 0;
     }
@@ -298,7 +333,7 @@ static int decaps_udp(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt,
 
 static int decaps_tcp(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt, 
     struct rte_ether_hdr *eth_hdr, vlan_header_t *vlan_header, 
-    struct rte_ipv4_hdr *ip_hdr, U16 ccb_id)
+    struct rte_ipv4_hdr *ip_hdr, U16 ccb_id, U16 tx_q)
 {
     struct rte_tcp_hdr *tcphdr;
     ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
@@ -307,6 +342,40 @@ static int decaps_tcp(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt,
     addr_table_t *entry = nat_reverse_lookup(tcphdr->dst_port, ip_hdr->src_addr, 
         tcphdr->src_port, ppp_ccb->addr_table);
     if (unlikely(entry == NULL)) {
+        /* Fallback: check port forwarding table */
+        U32 fwd_dip;
+        U16 fwd_iport;
+        if (nat_port_fwd_reverse_lookup(ppp_ccb->port_fwd_table,
+                tcphdr->dst_port, &fwd_dip, &fwd_iport) == SUCCESS) {
+            U16 eport_host = rte_be_to_cpu_16(tcphdr->dst_port);
+            rte_atomic64_inc(&ppp_ccb->port_fwd_table[eport_host].hit_count);
+            rte_ether_addr_copy(&fastrg_ccb->nic_info.hsi_lan_mac, &eth_hdr->src_addr);
+            ip_hdr->dst_addr = fwd_dip;
+            tcphdr->dst_port = fwd_iport;
+            ip_hdr->hdr_checksum = rte_ipv4_cksum(ip_hdr);
+            tcphdr->cksum = 0;
+            tcphdr->cksum = rte_ipv4_udptcp_cksum(ip_hdr, tcphdr);
+            count_rx_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
+            increase_pppoes_rx_count(ppp_ccb, single_pkt->pkt_len);
+
+            /* Look up MAC table for destination host */
+            mac_table_entry_t *mac_entry = mac_table_lookup(
+                ppp_ccb->mac_table, fwd_dip);
+            if (likely(mac_entry != NULL)) {
+                rte_ether_addr_copy(&mac_entry->mac, &eth_hdr->dst_addr);
+                count_tx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
+                return 1;
+            }
+            /* MAC unknown: queue packet and send ARP request */
+            dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
+            arp_pending_enqueue(fastrg_ccb->arp_pending_mp,
+                &ppp_ccb->arp_pq, single_pkt, fwd_dip);
+            if (send_arp_request(&fastrg_ccb->nic_info.hsi_lan_mac,
+                    dhcp_ccb->dhcp_server_ip, fwd_dip,
+                    rte_atomic16_read(&ppp_ccb->vlan_id), tx_q) == SUCCESS)
+                count_tx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
+            return 0;  /* packet held in pending queue */
+        }
         drop_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
         return 0;
     }

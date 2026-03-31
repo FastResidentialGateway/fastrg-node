@@ -28,11 +28,15 @@ service FastrgService {
   rpc DisconnectHsi(HsiRequest) returns(HsiReply) {}
   rpc DhcpServerStart(DhcpServerRequest) returns(DhcpServerReply) {}
   rpc DhcpServerStop(DhcpServerRequest) returns(DhcpServerReply) {}
+  rpc SetSnatConfig(SnatConfigRequest) returns(SnatConfigReply) {}
+  rpc RemoveSnatConfig(SnatConfigRequest) returns(SnatConfigReply) {}
   rpc GetFastrgSystemInfo(google.protobuf.Empty) returns(FastrgSystemInfo) {}
   rpc GetFastrgSystemStats(google.protobuf.Empty) returns(FastrgSystemStatsInfo) {}
   rpc GetFastrgSystemXStats(google.protobuf.Empty) returns(FastrgSystemXStatsInfo) {}
   rpc GetFastrgHsiInfo(google.protobuf.Empty) returns(FastrgHsiInfo) {}
   rpc GetFastrgDhcpInfo(google.protobuf.Empty) returns(FastrgDhcpInfo) {}
+  rpc GetPortFwdInfo(PortFwdInfoRequest) returns(PortFwdInfoReply) {}
+  rpc GetArpTable(ArpTableRequest) returns(ArpTableReply) {}
   rpc GetNodeStatus(google.protobuf.Empty) returns(NodeStatus) {}
 }
 
@@ -48,6 +52,17 @@ message ConfigRequest {
 }
 
 message ConfigReply { 
+  string status = 1;
+}
+
+message SnatConfigRequest {
+  uint32 user_id = 1;
+  uint32 eport = 2;
+  string dip = 3;
+  uint32 iport = 4;
+}
+
+message SnatConfigReply { 
   string status = 1;
 }
 
@@ -174,4 +189,37 @@ message DhcpInfo {
 
 message FastrgDhcpInfo {
   repeated DhcpInfo dhcp_infos = 1;
+}
+
+message PortFwdInfoRequest {
+  uint32 user_id = 1;
+}
+
+message PortFwdEntry {
+  uint32 eport = 1;
+  string dip = 2;
+  uint32 iport = 3;
+  uint64 hit_count = 4;
+}
+
+message PortFwdInfoReply {
+  uint32 user_id = 1;
+  repeated PortFwdEntry entries = 2;
+}
+
+message ArpTableRequest {
+  uint32 user_id = 1;
+  uint32 max_count = 2; // max entries to return (0 = use server default)
+}
+
+message ArpTableEntry {
+  uint32 entry_id = 1; // index in table
+  string ip = 2;
+  string mac = 3;
+}
+
+message ArpTableReply {
+  uint32 user_id = 1;
+  uint32 total_count = 2; // total valid entries in the table
+  repeated ArpTableEntry entries = 3;
 }

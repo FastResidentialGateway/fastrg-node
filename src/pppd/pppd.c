@@ -146,6 +146,30 @@ STATUS ppp_init_config_by_user(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb, U16 ccb
     rte_atomic64_init(&ppp_ccb->pppoes_rx_packets);
     rte_atomic64_init(&ppp_ccb->pppoes_tx_packets);
 
+    /* MAC table: allocate once, reset on re-init */
+    if (ppp_ccb->mac_table == NULL) {
+        ppp_ccb->mac_table = mac_table_alloc();
+        if (ppp_ccb->mac_table == NULL) {
+            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG,
+                "mac_table allocation failed");
+            goto err;
+        }
+    } else {
+        memset(ppp_ccb->mac_table, 0,
+            (size_t)MAC_TABLE_SIZE * sizeof(mac_table_entry_t));
+    }
+
+    /* ARP pending ring: create once, flush on re-init */
+    if (ppp_ccb->arp_pq.ring == NULL) {
+        if (arp_pending_init_queue(&ppp_ccb->arp_pq, ccb_id) != SUCCESS) {
+            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG,
+                "arp_pending ring creation failed for ccb %u", ccb_id);
+            goto err;
+        }
+    } else {
+        arp_pending_flush(fastrg_ccb->arp_pending_mp, &ppp_ccb->arp_pq);
+    }
+
     if (ppp_ccb->ppp_user_acc != NULL)
         fastrg_mfree(ppp_ccb->ppp_user_acc);
     ppp_ccb->ppp_user_acc = fastrg_calloc(U8, 1, strlen(user_name) + 1, 0);
@@ -182,6 +206,9 @@ STATUS ppp_init_config_by_user(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb, U16 ccb
 err:
     ppp_ccb->phase = NOT_CONFIGURED;
     rte_atomic16_set(&ppp_ccb->vlan_id, 0);
+    mac_table_free(ppp_ccb->mac_table);
+    arp_pending_cleanup_queue(&ppp_ccb->arp_pq, fastrg_ccb->arp_pending_mp);
+    ppp_ccb->mac_table = NULL;
     if (ppp_ccb->ppp_user_acc != NULL) {
         fastrg_mfree(ppp_ccb->ppp_user_acc);
         ppp_ccb->ppp_user_acc = NULL;
@@ -384,6 +411,11 @@ STATUS pppd_remove_ccb(FastRG_t *fastrg_ccb, U16 remove_ccb_count, U16 old_ccb_c
             fastrg_mfree(ppp_ccb->ppp_passwd);
         if (ppp_ccb->pppoe_phase.pppoe_header_tag != NULL)
             fastrg_mfree(ppp_ccb->pppoe_phase.pppoe_header_tag);
+        arp_pending_cleanup_queue(&ppp_ccb->arp_pq, fastrg_ccb->arp_pending_mp);
+        if (ppp_ccb->mac_table != NULL) {
+            mac_table_free(ppp_ccb->mac_table);
+            ppp_ccb->mac_table = NULL;
+        }
         rte_mempool_put(fastrg_ccb->ppp_ccb_mp, old_array[ccb_id]);
         old_array[ccb_id] = NULL;
     }
@@ -546,11 +578,11 @@ void check_etcd_pppoe_status(struct rte_timer *tim, ppp_ccb_t *ppp_ccb)
     FastRG_t *fastrg_ccb = ppp_ccb->fastrg_ccb;
     char *node_id = fastrg_ccb->node_uuid;
     char user_id_str[8] = { 0 };
-    hsi_config_full_t hsi_config = { 0 };
+    hsi_enable_status_t hsi_enable_status;
     int64_t revision = 0;
 
     snprintf(user_id_str, sizeof(user_id_str), "%u", ppp_ccb->user_num);
-    etcd_status_t status = etcd_client_get_hsi_config_status(node_id, user_id_str, &hsi_config);
+    etcd_status_t status = etcd_client_get_hsi_config_status(node_id, user_id_str, &hsi_enable_status);
     if (status != ETCD_SUCCESS && status != ETCD_KEY_NOT_FOUND) {
         if (tim->expire >= (ETCD_RETRY_BASE_TIME << 5)) { // try for 5 times
             FastRG_LOG(ERR, fastrg_ccb->fp, ppp_ccb, PPPLOGMSG, 
@@ -563,7 +595,7 @@ void check_etcd_pppoe_status(struct rte_timer *tim, ppp_ccb_t *ppp_ccb)
             (rte_timer_cb_t)check_etcd_pppoe_status, ppp_ccb);
         return;
     }
-    if (rte_atomic16_read(&ppp_ccb->ppp_bool) == 0 && hsi_config.enable_status != ENABLE_STATUS_DISABLED) {
+    if (rte_atomic16_read(&ppp_ccb->ppp_bool) == 0 && hsi_enable_status != ENABLE_STATUS_DISABLED) {
         etcd_mark_pending_event(HSI_ACTION_UPDATE, ppp_ccb->user_num - 1);
         if (etcd_client_modify_hsi_config_status(fastrg_ccb->node_uuid, user_id_str, 
                 ENABLE_STATUS_DISABLED, &revision) == ETCD_SUCCESS) {
@@ -572,7 +604,7 @@ void check_etcd_pppoe_status(struct rte_timer *tim, ppp_ccb_t *ppp_ccb)
             etcd_remove_event(HSI_ACTION_UPDATE, ppp_ccb->user_num - 1);
         }
     } else if (rte_atomic16_read(&ppp_ccb->ppp_bool) == 1 && 
-            hsi_config.enable_status != ENABLE_STATUS_ENABLED) {
+            hsi_enable_status != ENABLE_STATUS_ENABLED) {
         etcd_mark_pending_event(HSI_ACTION_UPDATE, ppp_ccb->user_num - 1);
         if (etcd_client_modify_hsi_config_status(fastrg_ccb->node_uuid, user_id_str, 
                 ENABLE_STATUS_ENABLED, &revision) == ETCD_SUCCESS) {

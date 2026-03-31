@@ -92,6 +92,7 @@ typedef struct FastRG {
     struct rte_mempool      *dhcp_ccb_mp;
     struct rte_rcu_qsbr     *dhcp_ccb_rcu;  /* RCU for protecting dhcp_ccb array pointer */
     rte_atomic16_t          dhcp_ccb_updating; /* flag indicating array is being updated */
+    struct rte_mempool      *arp_pending_mp; /* mempool for ARP pending queue entries */
     rte_atomic16_t          *vlan_userid_map; /* vlan to user id map */
     struct per_ccb_stats    *per_subscriber_stats[PORT_AMOUNT]; /* per subscriber stats */
     U16                     per_subscriber_stats_len;
