@@ -89,23 +89,16 @@ To configure PPPoE subscriber account, DHCP server pool and VLAN ID mapping, ple
 	FastRG> config add user 1 vlan 3 pppoe account admin password passwd dhcp pool 192.168.3.2~192.168.3.201 subnet 255.255.255.0 gateway 192.168.3.1
 	FastRG> config del user 1
 
-Use command ***connect*** or ***disconnect*** to determine which user start/stop a PPPoE connection, e.g.:
+### Example CLI commands:
+Use command ***exec*** to determine which user start/stop a PPPoE connection, e.g.:
 
-To start specific subscriber 1 PPPoE connection.
+To start specific subscriber 1 PPPoE connection and DHCP server.
 
-	FastRG> connect 1
+	FastRG> exec hsi start 1
 
-To disconnect specific subscriber 1 PPPoE connection.
+To disconnect specific subscriber 1 PPPoE connection and DHCP server.
 
-	FastRG> disconnect 1
-
-To start specific subscriber 1 DHCP server.
-
-	FastRG> dhcp-server start 1
-
-To stop all subscribers DHCP server.
-
-	FastRG> dhcp-server stop all
+	FastRG> exec hsi stop 1
 
 To show current PPPoE connection status.
 
@@ -115,9 +108,13 @@ To show current DHCP server status.
 
 	FastRG> show dhcp
 
-To show current system status.
+To show current system statistics.
 
-	FastRG> show system
+	FastRG> show system info
+
+To configure SNAT port forwarding for specific subscriber 1.
+
+	FastRG> config add user 1 snat eport 55688 dip 192.168.3.2 iport 8080
 
 For hugepages, NIC binding and other system configuration, please refer to DPDK documentation: [DPDK doc](http://doc.dpdk.org/guides/linux_gsg/)
 
@@ -144,4 +141,3 @@ For hugepages, NIC binding and other system configuration, please refer to DPDK 
 1. Increase unit tests converage
 2. Support IPv6
 3. Support DNS proxy
-4. Support Port forwarding
