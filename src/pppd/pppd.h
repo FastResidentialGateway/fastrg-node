@@ -20,6 +20,7 @@
 
 #include "header.h"
 #include "../fastrg.h"
+#include "../mac_table.h"
 
 #define PPP_MSG_BUF_LEN	        128
 
@@ -90,6 +91,8 @@ typedef struct {
     BOOL                  ppp_processing;    /* boolean flag for checking ppp is disconnecting */
     addr_table_t          addr_table[MAX_NAT_ENTRIES]; /* hsi nat addr table */
     port_fwd_entry_t      port_fwd_table[PORT_FWD_TABLE_SIZE]; /* SNAT port forwarding, direct-indexed by eport */
+    mac_table_entry_t     *mac_table;        /* per-subscriber LAN host MAC table (255^3 entries) */
+    arp_pending_queue_t   arp_pq;            /* ARP pending queue for unresolved port-fwd destinations */
     struct rte_timer      pppoe;             /* pppoe timer */
     struct rte_timer      ppp;               /* ppp timer */
     struct rte_timer      nat;               /* nat table timer */

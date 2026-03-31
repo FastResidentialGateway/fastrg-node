@@ -201,6 +201,7 @@ static void cmd_help_parsed(__attribute__((unused)) void *parsed_result,
                       "config <add|del> user <id> pppoe-dhcp vlan <id> account <account> password <password> pool <start~end> subnet <mask> gateway <ip> to add/update/del PPPoE/DHCP configuration\n"
                       "configure SNAT port forwarding: config <add|del> user <id> snat eport <port> dip <ip> iport <port>\n"
                       "show user <id> nat port-forwarding to show port forwarding entries\n"
+                      "show user <id> arp-table [count] to show subscriber ARP table (default: 100 entries)\n"
                       "exec hsi <start|stop> <user id | all> to start/stop HSI (PPPoE + DHCP)\n"
                       "exec pppoe <start|stop> <user id | all> to start/stop PPPoE only\n"
                       "exec dhcp-server <start|stop> <user id | all> to start/stop DHCP server only\n"
@@ -628,6 +629,72 @@ cmdline_parse_inst_t cmd_show_port_fwd = {
     },
 };
 
+/****** SHOW USER ARP-TABLE ******/
+
+struct cmd_show_arp_table_result {
+    cmdline_fixed_string_t show_token;
+    cmdline_fixed_string_t user_str;
+    uint16_t               user_id;
+    cmdline_fixed_string_t arp_table_str;
+    uint16_t               count;
+};
+
+static void cmd_show_arp_table_parsed(void *parsed_result,
+                struct cmdline *cl,
+                __attribute__((unused)) void *data)
+{
+    struct cmd_show_arp_table_result *res = parsed_result;
+    fastrg_grpc_get_arp_table(res->user_id, 100);
+}
+
+static void cmd_show_arp_table_count_parsed(void *parsed_result,
+                struct cmdline *cl,
+                __attribute__((unused)) void *data)
+{
+    struct cmd_show_arp_table_result *res = parsed_result;
+    fastrg_grpc_get_arp_table(res->user_id, (U32)res->count);
+}
+
+cmdline_parse_token_string_t cmd_show_arp_table_show =
+    TOKEN_STRING_INITIALIZER(struct cmd_show_arp_table_result, show_token, "show");
+cmdline_parse_token_string_t cmd_show_arp_table_user =
+    TOKEN_STRING_INITIALIZER(struct cmd_show_arp_table_result, user_str, "user");
+cmdline_parse_token_num_t cmd_show_arp_table_user_id =
+    TOKEN_NUM_INITIALIZER(struct cmd_show_arp_table_result, user_id, RTE_UINT16);
+cmdline_parse_token_string_t cmd_show_arp_table_arp =
+    TOKEN_STRING_INITIALIZER(struct cmd_show_arp_table_result, arp_table_str, "arp-table");
+cmdline_parse_token_num_t cmd_show_arp_table_count_val =
+    TOKEN_NUM_INITIALIZER(struct cmd_show_arp_table_result, count, RTE_UINT16);
+
+/* Variant with count */
+cmdline_parse_inst_t cmd_show_arp_table_count = {
+    .f = cmd_show_arp_table_count_parsed,
+    .data = NULL,
+    .help_str = "show user <id> arp-table <count>: display ARP table entries for a subscriber (with count)",
+    .tokens = {
+        (void *)&cmd_show_arp_table_show,
+        (void *)&cmd_show_arp_table_user,
+        (void *)&cmd_show_arp_table_user_id,
+        (void *)&cmd_show_arp_table_arp,
+        (void *)&cmd_show_arp_table_count_val,
+        NULL,
+    },
+};
+
+/* Variant without count (defaults to 100) */
+cmdline_parse_inst_t cmd_show_arp_table = {
+    .f = cmd_show_arp_table_parsed,
+    .data = NULL,
+    .help_str = "show user <id> arp-table: display ARP table entries for a subscriber (default: 100)",
+    .tokens = {
+        (void *)&cmd_show_arp_table_show,
+        (void *)&cmd_show_arp_table_user,
+        (void *)&cmd_show_arp_table_user_id,
+        (void *)&cmd_show_arp_table_arp,
+        NULL,
+    },
+};
+
 /****** CONTEXT (list of instruction) */
 cmdline_parse_ctx_t ctx[] = {
         (cmdline_parse_inst_t *)&cmd_info,
@@ -641,6 +708,8 @@ cmdline_parse_ctx_t ctx[] = {
         (cmdline_parse_inst_t *)&cmd_config_set_subscriber,
         (cmdline_parse_inst_t *)&cmd_exec,
         (cmdline_parse_inst_t *)&cmd_show_port_fwd,
+        (cmdline_parse_inst_t *)&cmd_show_arp_table_count,
+        (cmdline_parse_inst_t *)&cmd_show_arp_table,
         (cmdline_parse_inst_t *)&cmd_log,
     NULL,
 };

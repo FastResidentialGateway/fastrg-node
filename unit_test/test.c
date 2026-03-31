@@ -20,12 +20,15 @@ void free_ccb(FastRG_t *ccb)
     if (ccb->ppp_ccb) fastrg_mfree(ccb->ppp_ccb);
     if (ccb->dhcp_ccb) fastrg_mfree(ccb->dhcp_ccb);
     fastrg_mfree(ccb);
-    return NULL;
 }
 
 FastRG_t *init_ccb(int user_count)
 {
-    FastRG_t *ccb = fastrg_malloc(FastRG_t, sizeof(FastRG_t), 0);
+    FastRG_t *ccb = fastrg_malloc(FastRG_t, user_count * sizeof(FastRG_t), 0);
+    if (ccb == NULL) {
+        puts("Failed to allocate memory for FastRG CCB");
+        return NULL;
+    }
 
     ccb->fp = NULL,
     ccb->nic_info = (struct nic_info) {
@@ -85,13 +88,7 @@ FastRG_t *init_ccb(int user_count)
     return ccb;
 
 err:
-    for(int i=0; i<user_count; i++) {
-        if (ccb->ppp_ccb[i]) fastrg_mfree(ccb->ppp_ccb[i]);
-        if (ccb->dhcp_ccb[i]) fastrg_mfree(ccb->dhcp_ccb[i]);
-    }
-    if (ccb->ppp_ccb) fastrg_mfree(ccb->ppp_ccb);
-    if (ccb->dhcp_ccb) fastrg_mfree(ccb->dhcp_ccb);
-    fastrg_mfree(ccb);
+    free_ccb(ccb);
     return NULL;
 }
 

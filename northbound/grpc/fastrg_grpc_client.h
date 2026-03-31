@@ -20,6 +20,7 @@ void fastrg_grpc_dhcp_server_stop(U16 user_id);
 void fastrg_grpc_hsi_snat_set(U16 user_id, U16 eport, char *dip, U16 iport);
 void fastrg_grpc_hsi_snat_unset(U16 user_id, U16 eport);
 void fastrg_grpc_get_port_fwd_info(U16 user_id);
+void fastrg_grpc_get_arp_table(U16 user_id, U32 max_count);
 void fastrg_grpc_get_system_info();
 void fastrg_grpc_get_system_stats();
 void fastrg_grpc_get_system_xstats();

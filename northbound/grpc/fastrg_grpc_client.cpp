@@ -221,7 +221,7 @@ void fastrg_grpc_get_port_fwd_info(U16 user_id) {
                       << std::setw(12) << "Hit Count"
                       << std::endl;
             std::cout << "  " << std::string(74, '-') << std::endl;
-            for (int i = 0; i < reply.entries_size(); i++) {
+            for(int i=0; i<reply.entries_size(); i++) {
                 const PortFwdEntry& entry = reply.entries(i);
                 std::cout << "  " << std::left
                           << std::setw(20) << entry.eport()
@@ -233,6 +233,42 @@ void fastrg_grpc_get_port_fwd_info(U16 user_id) {
         }
     } else {
         std::cout << "grpc client get port fwd info failed: " << std::endl;
+        std::cout << "  Error code: " << status.error_code() << std::endl;
+        std::cout << "  Error message: " << status.error_message() << std::endl;
+    }
+}
+
+void fastrg_grpc_get_arp_table(U16 user_id, U32 max_count) {
+    ArpTableRequest request;
+    ArpTableReply reply;
+    request.set_user_id(user_id);
+    request.set_max_count(max_count);
+    ClientContext context;
+    Status status = fastrg_client->stub_->GetArpTable(&context, request, &reply);
+    if (status.ok()) {
+        std::cout << "ARP Table for User " << reply.user_id()
+                  << " (showing " << reply.entries_size()
+                  << " of " << reply.total_count() << " entries):" << std::endl;
+        if (reply.entries_size() == 0) {
+            std::cout << "  (no entries)" << std::endl;
+        } else {
+            std::cout << "  " << std::left
+                      << std::setw(15) << "Entry ID"
+                      << std::setw(20) << "IP Address"
+                      << std::setw(20) << "MAC Address"
+                      << std::endl;
+            std::cout << "  " << std::string(55, '-') << std::endl;
+            for(int i=0; i<reply.entries_size(); i++) {
+                const ArpTableEntry& entry = reply.entries(i);
+                std::cout << "  " << std::left
+                          << std::setw(15) << entry.entry_id()
+                          << std::setw(20) << entry.ip()
+                          << std::setw(20) << entry.mac()
+                          << std::endl;
+            }
+        }
+    } else {
+        std::cout << "grpc client get arp table failed: " << std::endl;
         std::cout << "  Error code: " << status.error_code() << std::endl;
         std::cout << "  Error message: " << status.error_message() << std::endl;
     }

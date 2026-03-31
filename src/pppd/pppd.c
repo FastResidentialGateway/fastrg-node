@@ -146,6 +146,30 @@ STATUS ppp_init_config_by_user(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb, U16 ccb
     rte_atomic64_init(&ppp_ccb->pppoes_rx_packets);
     rte_atomic64_init(&ppp_ccb->pppoes_tx_packets);
 
+    /* MAC table: allocate once, reset on re-init */
+    if (ppp_ccb->mac_table == NULL) {
+        ppp_ccb->mac_table = mac_table_alloc();
+        if (ppp_ccb->mac_table == NULL) {
+            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG,
+                "mac_table allocation failed");
+            goto err;
+        }
+    } else {
+        memset(ppp_ccb->mac_table, 0,
+            (size_t)MAC_TABLE_SIZE * sizeof(mac_table_entry_t));
+    }
+
+    /* ARP pending ring: create once, flush on re-init */
+    if (ppp_ccb->arp_pq.ring == NULL) {
+        if (arp_pending_init_queue(&ppp_ccb->arp_pq, ccb_id) != SUCCESS) {
+            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG,
+                "arp_pending ring creation failed for ccb %u", ccb_id);
+            goto err;
+        }
+    } else {
+        arp_pending_flush(fastrg_ccb->arp_pending_mp, &ppp_ccb->arp_pq);
+    }
+
     if (ppp_ccb->ppp_user_acc != NULL)
         fastrg_mfree(ppp_ccb->ppp_user_acc);
     ppp_ccb->ppp_user_acc = fastrg_calloc(U8, 1, strlen(user_name) + 1, 0);
@@ -182,6 +206,9 @@ STATUS ppp_init_config_by_user(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb, U16 ccb
 err:
     ppp_ccb->phase = NOT_CONFIGURED;
     rte_atomic16_set(&ppp_ccb->vlan_id, 0);
+    mac_table_free(ppp_ccb->mac_table);
+    arp_pending_cleanup_queue(&ppp_ccb->arp_pq, fastrg_ccb->arp_pending_mp);
+    ppp_ccb->mac_table = NULL;
     if (ppp_ccb->ppp_user_acc != NULL) {
         fastrg_mfree(ppp_ccb->ppp_user_acc);
         ppp_ccb->ppp_user_acc = NULL;
@@ -384,6 +411,11 @@ STATUS pppd_remove_ccb(FastRG_t *fastrg_ccb, U16 remove_ccb_count, U16 old_ccb_c
             fastrg_mfree(ppp_ccb->ppp_passwd);
         if (ppp_ccb->pppoe_phase.pppoe_header_tag != NULL)
             fastrg_mfree(ppp_ccb->pppoe_phase.pppoe_header_tag);
+        arp_pending_cleanup_queue(&ppp_ccb->arp_pq, fastrg_ccb->arp_pending_mp);
+        if (ppp_ccb->mac_table != NULL) {
+            mac_table_free(ppp_ccb->mac_table);
+            ppp_ccb->mac_table = NULL;
+        }
         rte_mempool_put(fastrg_ccb->ppp_ccb_mp, old_array[ccb_id]);
         old_array[ccb_id] = NULL;
     }
