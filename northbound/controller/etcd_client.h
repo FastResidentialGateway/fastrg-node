@@ -55,6 +55,8 @@ typedef struct {
     char dhcp_addr_pool[64];
     char dhcp_subnet[32];
     char dhcp_gateway[32];
+    char dns_primary[32];       /* primary DNS server IP (e.g. "8.8.8.8") */
+    char dns_secondary[32];     /* secondary DNS server IP (e.g. "1.1.1.1") */
     port_mapping_t *port_mappings;  // heap-allocated; use hsi_config_free_port_mappings() to free
     int port_mapping_count;
 } hsi_config_t;
@@ -116,6 +118,19 @@ typedef STATUS (*user_count_changed_callback_t)(const char *node_id,
 // The callback should write local HSI configs and subscriber count to etcd if they don't exist
 typedef void (*sync_request_callback_t)(const char *node_id, void *user_data);
 
+// DNS static record structure for etcd
+typedef struct {
+    char domain[256];
+    char ip[32];
+    U32 ttl;
+} dns_record_config_t;
+
+// DNS record callback type
+// path: configs/{nodeId}/{subscriberId}/dns/{domain}
+typedef STATUS (*dns_record_callback_t)(const char *node_id, const char *user_id,
+    const dns_record_config_t *record, etcd_action_type_t action,
+    int64_t revision, void *user_data);
+
 /* Initialize etcd client */
 etcd_status_t etcd_client_init(const char *etcd_endpoints, void* user_data);
 
@@ -124,7 +139,8 @@ etcd_status_t etcd_client_start_watch(const char *node_uuid,
     hsi_config_callback_t hsi_callback,
     pppoe_command_callback_t command_callback,
     user_count_changed_callback_t user_count_callback,
-    sync_request_callback_t sync_request_callback);
+    sync_request_callback_t sync_request_callback,
+    dns_record_callback_t dns_record_callback);
 
 /* Stop watching etcd */
 void etcd_client_stop_watch(void);
@@ -246,22 +262,78 @@ etcd_status_t etcd_client_get_subscriber_count(const char* node_id,
  * This function reads all existing configs under configs/{nodeId}/hsi/
  * and invokes the callback for each one
  * @param node_uuid
- *        Node UUID
+ *      Node UUID
  * @param hsi_callback
- *        Callback to invoke for each config
+ *      Callback to invoke for each config
  * @param command_callback
- *        Callback to invoke for each command
+ *      Callback to invoke for each command
  * @param user_count_callback
- *        Callback to invoke for user count config
+ *      Callback to invoke for user count config
  * @param user_data
- *        User data to pass to callback
+ *      User data to pass to callback
  * @return
- *        ETCD_SUCCESS or error code
+ *      ETCD_SUCCESS or error code
  */
 etcd_status_t etcd_client_load_existing_configs(const char *node_uuid,
     hsi_config_callback_t hsi_callback, 
     pppoe_command_callback_t command_callback,
     user_count_changed_callback_t user_count_callback,
+    dns_record_callback_t dns_record_callback,
+    void *user_data);
+
+/**
+ * @fn etcd_client_put_dns_record
+ * 
+ * @brief Put a DNS static record to etcd
+ *        key: configs/{nodeId}/{userId}/dns/{domain}
+ * @param node_id 
+ *      Node UUID
+ * @param user_id
+ *      User identifier
+ * @param record
+ *      DNS record to store
+ * @return
+ *      ETCD_SUCCESS or error code
+ */
+etcd_status_t etcd_client_put_dns_record(const char *node_id, const char *user_id,
+    const dns_record_config_t *record);
+
+/**
+ * @fn etcd_client_delete_dns_record
+ * 
+ * @brief Delete a DNS static record from etcd
+ * @param node_id
+ *      Node UUID
+ * @param user_id
+ *      User identifier
+ * @param domain
+ *      Domain name to delete
+ * @return
+ *      ETCD_SUCCESS or error code
+ */
+etcd_status_t etcd_client_delete_dns_record(const char *node_id, const char *user_id,
+    const char *domain);
+
+/**
+ * @fn etcd_client_load_dns_records
+ *
+ * @brief Load all DNS static records for a specific subscriber from etcd.
+ *        Called when a PPPoE session comes up to restore per-user DNS overrides.
+ *        key pattern: configs/{nodeId}/{userId}/dns/{domain}
+ * @param node_uuid Node UUID
+ *      Node UUID
+ * @param user_id
+ *      Subscriber user ID string
+ * @param dns_record_callback
+ *      Callback invoked for each record found (action = HSI_ACTION_CREATE)
+ * @param user_data
+ *      Opaque pointer forwarded to the callback
+ * @return
+ *      ETCD_SUCCESS on success, ETCD_ERROR otherwise
+ */
+etcd_status_t etcd_client_load_dns_records(const char *node_uuid,
+    const char *user_id,
+    dns_record_callback_t dns_record_callback,
     void *user_data);
 
 /* Cleanup etcd client */

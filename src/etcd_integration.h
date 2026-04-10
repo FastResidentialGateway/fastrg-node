@@ -197,4 +197,28 @@ STATUS user_count_changed_callback(const char *node_id,
  */
 void sync_request_callback(const char *node_id, void *user_data);
 
+/**
+ * @fn dns_record_changed_callback
+ * 
+ * @brief 
+ *      Callback for DNS static record changes from etcd
+ * @param node_id
+ *      Node UUID
+ * @param user_id
+ *      User identifier (subscriber ID)
+ * @param record
+ *      Pointer to DNS record config (domain always set; ip/ttl set for PUT)
+ * @param action
+ *      Etcd action type (CREATE/UPDATE/DELETE)
+ * @param revision
+ *      Etcd revision number of the event
+ * @param user_data
+ *      User data pointer (FastRG context)
+ * @return 
+ *      SUCCESS on success, ERROR on failure
+ */
+STATUS dns_record_changed_callback(const char *node_id, const char *user_id,
+    const dns_record_config_t *record, etcd_action_type_t action,
+    int64_t revision, void *user_data);
+
 #endif /* _ETCD_INTEGRATION_H_ */

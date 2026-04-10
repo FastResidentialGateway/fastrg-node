@@ -37,7 +37,7 @@ void controller_heartbeat_timer_cb(__rte_unused struct rte_timer *tim, void *arg
     }
 
     // Reset the timer for next heartbeat
-    uint64_t timer_ticks = rte_get_timer_hz() * fastrg_ccb->heartbeat_interval;
+    uint64_t timer_ticks = fastrg_get_cycles_in_sec() * fastrg_ccb->heartbeat_interval;
     rte_timer_reset(&fastrg_ccb->heartbeat_timer, timer_ticks, SINGLE, 
         fastrg_ccb->lcore.timer_thread, controller_heartbeat_timer_cb, fastrg_ccb);
 }
@@ -102,7 +102,7 @@ int controller_register_this_node(FastRG_t *fastrg_ccb)
         FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "Node registered successfully with controller");
 
         // Start heartbeat timer
-        uint64_t timer_ticks = rte_get_timer_hz() * fastrg_ccb->heartbeat_interval;
+        uint64_t timer_ticks = fastrg_get_cycles_in_sec() * fastrg_ccb->heartbeat_interval;
         rte_timer_reset(&fastrg_ccb->heartbeat_timer, timer_ticks, SINGLE,
                         fastrg_ccb->lcore.timer_thread, controller_heartbeat_timer_cb, fastrg_ccb);
 

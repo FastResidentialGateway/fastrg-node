@@ -120,6 +120,8 @@ void dhcp_init_by_user(dhcp_ccb_t *dhcp_ccb, U16 ccb_id,
     dhcp_ccb->ccb_id = ccb_id;
     rte_atomic16_init(&dhcp_ccb->dhcp_bool);
     rte_atomic32_init(&dhcp_ccb->active_count);
+    // TODO: make this configurable via northbound interface
+    dhcp_ccb->dns_state.dns_proxy_enabled = TRUE;
 
     // critical section
     dhcp_pool_init_by_user(dhcp_ccb, 0, 0, 0, 0); //initialize with empty pool
@@ -524,7 +526,7 @@ int dhcpd(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt,
     /* If no more packet from the host, clear all information in dhcp_ccb */
     rte_timer_stop_sync(&dhcp_ccb->per_lan_user_pool[cur_tmp_pool_index]->lan_user_info.timer);
     rte_timer_reset(&dhcp_ccb->per_lan_user_pool[cur_tmp_pool_index]->lan_user_info.timer, 
-        LEASE_TIMEOUT * 2 * rte_get_timer_hz(), SINGLE, 
+        LEASE_TIMEOUT * 2 * fastrg_get_cycles_in_sec(), SINGLE, 
         fastrg_ccb->lcore.ctrl_thread, (rte_timer_cb_t)release_lan_user, 
         dhcp_ccb->per_lan_user_pool[cur_tmp_pool_index]);
 
@@ -554,9 +556,6 @@ int dhcpd(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt,
         rte_atomic32_dec(&dhcp_ccb->active_count);
         return -1;
     }
-    single_pkt->data_len = single_pkt->pkt_len = sizeof(struct rte_ether_hdr) + 
-        sizeof(vlan_header_t) + sizeof(struct rte_ipv4_hdr) + 
-        rte_be_to_cpu_16(dhcp_ccb->ip_hdr->total_length);
 
     rte_atomic32_dec(&dhcp_ccb->active_count);
     return 1;

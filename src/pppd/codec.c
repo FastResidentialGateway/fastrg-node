@@ -284,7 +284,7 @@ STATUS decode_lcp(U16 ppp_hdr_len, U16 *event, struct rte_timer *tim, ppp_ccb_t 
             if (s_ppp_ccb->phase < LCP_PHASE)
                 return ERROR;
             rte_timer_stop(&(s_ppp_ccb->ppp_alive));
-            rte_timer_reset(&(s_ppp_ccb->ppp_alive), ppp_interval*rte_get_timer_hz(), 
+            rte_timer_reset(&(s_ppp_ccb->ppp_alive), ppp_interval*fastrg_get_cycles_in_sec(), 
                 SINGLE, fastrg_ccb->lcore.ctrl_thread, 
                 (rte_timer_cb_t)PPP_bye_timer_cb, s_ppp_ccb);
             *event = E_RECV_ECHO_REPLY_REQUEST_DISCARD_REQUEST;
@@ -327,7 +327,22 @@ STATUS decode_ipcp(U16 ppp_hdr_len, U16 *event, struct rte_timer *tim, ppp_ccb_t
                 default:
                     ;
             }
-            rte_memcpy(&(s_ppp_ccb->hsi_ipv4_gw), ppp_options->val,sizeof(s_ppp_ccb->hsi_ipv4_gw));
+            
+            {
+                U16 opt_total = sizeof(ppp_header_t);
+                for(ppp_options_t *cur=ppp_options; opt_total<ppp_hdr_len;
+                        cur = (ppp_options_t *)((char *)cur + cur->length)) {
+                    if (cur->length < sizeof(ppp_options_t))
+                        break;
+                    if (cur->type == IP_ADDRESS)
+                        rte_memcpy(&(s_ppp_ccb->hsi_ipv4_gw), cur->val, sizeof(s_ppp_ccb->hsi_ipv4_gw));
+                    else if (cur->type == PRIMARY_DNS)
+                        rte_memcpy(&(s_ppp_ccb->hsi_primary_dns), cur->val, sizeof(s_ppp_ccb->hsi_primary_dns));
+                    else if (cur->type == SECONDARY_DNS)
+                        rte_memcpy(&(s_ppp_ccb->hsi_secondary_dns), cur->val, sizeof(s_ppp_ccb->hsi_secondary_dns));
+                    opt_total += cur->length;
+                }
+            }
             *event = E_RECV_GOOD_CONFIG_REQUEST;
             ppp_hdr->length = rte_cpu_to_be_16(ppp_hdr_len);
             return SUCCESS;
@@ -336,14 +351,55 @@ STATUS decode_ipcp(U16 ppp_hdr_len, U16 *event, struct rte_timer *tim, ppp_ccb_t
                 return FALSE;
             rte_timer_stop(tim);
             *event = E_RECV_CONFIG_ACK;
-            rte_memcpy(&(s_ppp_ccb->hsi_ipv4),ppp_options->val,sizeof(s_ppp_ccb->hsi_ipv4));
+            {
+                U16 opt_total = sizeof(ppp_header_t);
+                for(ppp_options_t *cur=ppp_options; opt_total<ppp_hdr_len;
+                        cur = (ppp_options_t *)((char *)cur + cur->length)) {
+                    if (cur->length < sizeof(ppp_options_t))
+                        break;
+                    if (cur->type == IP_ADDRESS)
+                        rte_memcpy(&(s_ppp_ccb->hsi_ipv4), cur->val, sizeof(s_ppp_ccb->hsi_ipv4));
+                    else if (cur->type == PRIMARY_DNS)
+                        rte_memcpy(&(s_ppp_ccb->hsi_primary_dns), cur->val, sizeof(s_ppp_ccb->hsi_primary_dns));
+                    else if (cur->type == SECONDARY_DNS)
+                        rte_memcpy(&(s_ppp_ccb->hsi_secondary_dns), cur->val, sizeof(s_ppp_ccb->hsi_secondary_dns));
+                    opt_total += cur->length;
+                }
+            }
             return SUCCESS;
         case CONFIG_NAK : 
             // if we receive nak packet, the option field contains correct ip address we want
-            rte_memcpy(&(s_ppp_ccb->hsi_ipv4),ppp_options->val,4);
+            {
+                U16 opt_total = sizeof(ppp_header_t);
+                for(ppp_options_t *cur=ppp_options; opt_total<ppp_hdr_len;
+                        cur = (ppp_options_t *)((char *)cur + cur->length)) {
+                    if (cur->length < sizeof(ppp_options_t))
+                        break;
+                    if (cur->type == IP_ADDRESS)
+                        rte_memcpy(&(s_ppp_ccb->hsi_ipv4), cur->val, sizeof(s_ppp_ccb->hsi_ipv4));
+                    else if (cur->type == PRIMARY_DNS)
+                        rte_memcpy(&(s_ppp_ccb->hsi_primary_dns), cur->val, sizeof(s_ppp_ccb->hsi_primary_dns));
+                    else if (cur->type == SECONDARY_DNS)
+                        rte_memcpy(&(s_ppp_ccb->hsi_secondary_dns), cur->val, sizeof(s_ppp_ccb->hsi_secondary_dns));
+                    opt_total += cur->length;
+                }
+            }
             *event = E_RECV_CONFIG_NAK_REJ;
             return SUCCESS;
         case CONFIG_REJECT :
+            {
+                U16 opt_total = sizeof(ppp_header_t);
+                for(ppp_options_t *cur=ppp_options; opt_total<ppp_hdr_len;
+                        cur = (ppp_options_t *)((char *)cur + cur->length)) {
+                    if (cur->length < sizeof(ppp_options_t))
+                        break;
+                    else if (cur->type == PRIMARY_DNS)
+                        s_ppp_ccb->hsi_primary_dns = 0x0; /* if primary dns is rejected, we set it to 0 */
+                    else if (cur->type == SECONDARY_DNS)
+                        s_ppp_ccb->hsi_secondary_dns = 0x0; /* if secondary dns is rejected, we set it to 0 */
+                    opt_total += cur->length;
+                }
+            }
             *event = E_RECV_CONFIG_NAK_REJ;
             return SUCCESS;
         case TERMIN_REQUEST :
@@ -523,10 +579,27 @@ void build_config_request(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb)
     if (s_ppp_ccb->cp == 1) {
         ppp_payload->ppp_protocol = rte_cpu_to_be_16(IPCP_PROTOCOL);
         ppp_options->type = IP_ADDRESS;
-        rte_memcpy(ppp_options->val, &(s_ppp_ccb->hsi_ipv4), 4);
+        U8 total_opt_len = 0;
+        rte_memcpy(ppp_options->val, &(s_ppp_ccb->hsi_ipv4), sizeof(s_ppp_ccb->hsi_ipv4));
         ppp_options->length = sizeof(s_ppp_ccb->hsi_ipv4) + sizeof(ppp_options_t);
-        pppoe_header->length += ppp_options->length;
-        ppp_hdr->length += ppp_options->length;
+        total_opt_len += ppp_options->length;
+        if (s_ppp_ccb->hsi_primary_dns == 0xffffffff) {
+            ppp_options = (ppp_options_t *)((char *)ppp_options + ppp_options->length);
+            ppp_options->type = PRIMARY_DNS;
+            memset(ppp_options->val, 0, sizeof(s_ppp_ccb->hsi_primary_dns));
+            ppp_options->length = sizeof(s_ppp_ccb->hsi_primary_dns) + sizeof(ppp_options_t);
+            total_opt_len += ppp_options->length;
+        }
+        if (s_ppp_ccb->hsi_secondary_dns == 0xffffffff) {
+            ppp_options = (ppp_options_t *)((char *)ppp_options + ppp_options->length);
+            ppp_options->type = SECONDARY_DNS;
+            memset(ppp_options->val, 0, sizeof(s_ppp_ccb->hsi_secondary_dns));
+            ppp_options->length = sizeof(s_ppp_ccb->hsi_secondary_dns) + sizeof(ppp_options_t);
+            total_opt_len += ppp_options->length;
+        }
+
+        pppoe_header->length += total_opt_len;
+        ppp_hdr->length += total_opt_len;
     } else if (s_ppp_ccb->cp == 0) {
         ppp_payload->ppp_protocol = rte_cpu_to_be_16(LCP_PROTOCOL);
         ppp_options_t *cur = ppp_options;
@@ -992,7 +1065,7 @@ STATUS decode_pppoe(pppoe_header_tag_t *pppoe_header_tag, ppp_ccb_t *s_ppp_ccb)
             exit_ppp(s_ppp_ccb);
             return ERROR;
         }
-        rte_timer_reset(&(s_ppp_ccb->pppoe), rte_get_timer_hz(), PERIODICAL, 
+        rte_timer_reset(&(s_ppp_ccb->pppoe), fastrg_get_cycles_in_sec(), PERIODICAL, 
             fastrg_ccb->lcore.ctrl_thread, (rte_timer_cb_t)A_padr_timer_func, 
             s_ppp_ccb);
         return SUCCESS;

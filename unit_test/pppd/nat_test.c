@@ -698,7 +698,7 @@ void test_nat_table_almost_full(void)
     printf("  Second entry will hash to index: %u\n", new_table_idx);
 
     U32 filled_count = 0;
-    for (U32 i = 0; i < MAX_NAT_ENTRIES; i++) {
+    for(U32 i=0; i<MAX_NAT_ENTRIES; i++) {
         /* Skip the known entry's slot */
         if (i == known_table_idx)
             continue;

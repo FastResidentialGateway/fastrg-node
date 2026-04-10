@@ -457,6 +457,117 @@ void fastrg_grpc_get_dhcp_info() {
     }
 }
 
+void fastrg_grpc_add_dns_record(U16 user_id, char *domain, char *ip, U32 ttl) {
+    DnsRecordRequest request;
+    DnsRecordReply reply;
+    request.set_user_id(user_id);
+    request.set_domain(domain);
+    request.set_ip(ip);
+    request.set_ttl(ttl);
+    ClientContext context;
+    Status status = fastrg_client->stub_->AddDnsRecord(&context, request, &reply);
+    if (status.ok()) {
+        std::cout << "DNS record added: " << domain << " -> " << ip << " (TTL: " << ttl << ")" << std::endl;
+    } else {
+        std::cout << "Failed to add DNS record: " << status.error_message() << std::endl;
+    }
+}
+
+void fastrg_grpc_remove_dns_record(U16 user_id, char *domain) {
+    DnsRecordRequest request;
+    DnsRecordReply reply;
+    request.set_user_id(user_id);
+    request.set_domain(domain);
+    ClientContext context;
+    Status status = fastrg_client->stub_->RemoveDnsRecord(&context, request, &reply);
+    if (status.ok()) {
+        std::cout << "DNS record removed: " << domain << std::endl;
+    } else {
+        std::cout << "Failed to remove DNS record: " << status.error_message() << std::endl;
+    }
+}
+
+void fastrg_grpc_get_dns_cache(U16 user_id) {
+    DnsCacheRequest request;
+    DnsCacheReply reply;
+    request.set_user_id(user_id);
+    ClientContext context;
+    Status status = fastrg_client->stub_->GetDnsCache(&context, request, &reply);
+    if (status.ok()) {
+        std::cout << "DNS Cache for User " << reply.user_id()
+                  << " (" << reply.total_entries() << " entries):" << std::endl;
+        if (reply.entries_size() == 0) {
+            std::cout << "  (empty)" << std::endl;
+        } else {
+            std::cout << "  " << std::left
+                      << std::setw(40) << "Domain"
+                      << std::setw(8) << "Type"
+                      << std::setw(10) << "TTL"
+                      << std::setw(14) << "Remaining"
+                      << std::setw(10) << "Hits"
+                      << std::endl;
+            std::cout << "  " << std::string(82, '-') << std::endl;
+            for(int i=0; i<reply.entries_size(); i++) {
+                const DnsCacheEntry& entry = reply.entries(i);
+                std::cout << "  " << std::left
+                          << std::setw(40) << entry.domain()
+                          << std::setw(8) << entry.qtype()
+                          << std::setw(10) << entry.ttl()
+                          << std::setw(14) << entry.remaining_ttl()
+                          << std::setw(10) << entry.hit_count()
+                          << std::endl;
+            }
+        }
+    } else {
+        std::cout << "Failed to get DNS cache: " << status.error_message() << std::endl;
+    }
+}
+
+void fastrg_grpc_get_dns_static(U16 user_id) {
+    DnsStaticRequest request;
+    DnsStaticReply reply;
+    request.set_user_id(user_id);
+    ClientContext context;
+    Status status = fastrg_client->stub_->GetDnsStaticRecords(&context, request, &reply);
+    if (status.ok()) {
+        std::cout << "DNS Static Records for User " << reply.user_id()
+                  << " (" << reply.total_entries() << " entries):" << std::endl;
+        if (reply.entries_size() == 0) {
+            std::cout << "  (empty)" << std::endl;
+        } else {
+            std::cout << "  " << std::left
+                      << std::setw(40) << "Domain"
+                      << std::setw(20) << "IP"
+                      << std::setw(10) << "TTL"
+                      << std::endl;
+            std::cout << "  " << std::string(70, '-') << std::endl;
+            for(int i=0; i<reply.entries_size(); i++) {
+                const DnsStaticEntry& entry = reply.entries(i);
+                std::cout << "  " << std::left
+                          << std::setw(40) << entry.domain()
+                          << std::setw(20) << entry.ip()
+                          << std::setw(10) << entry.ttl()
+                          << std::endl;
+            }
+        }
+    } else {
+        std::cout << "Failed to get DNS static records: " << status.error_message() << std::endl;
+    }
+}
+
+void fastrg_grpc_flush_dns_cache(U16 user_id) {
+    DnsCacheFlushRequest request;
+    DnsCacheFlushReply reply;
+    request.set_user_id(user_id);
+    ClientContext context;
+    Status status = fastrg_client->stub_->FlushDnsCache(&context, request, &reply);
+    if (status.ok()) {
+        std::cout << "DNS cache flushed: " << reply.flushed_count() << " entries removed" << std::endl;
+    } else {
+        std::cout << "Failed to flush DNS cache: " << status.error_message() << std::endl;
+    }
+}
+
 #ifdef __cplusplus
 }
 #endif

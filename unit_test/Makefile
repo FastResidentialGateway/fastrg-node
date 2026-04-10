@@ -12,7 +12,7 @@ CFLAGS = $(INCLUDE) -Wall -g $(shell pkg-config --cflags libdpdk) -DALLOW_EXPERI
 LDFLAGS = $(shell pkg-config --static --libs libdpdk) -lutils -lconfig -luuid -Wl,--start-group -lstdc++ $(shell pkg-config --libs grpc++ protobuf jsoncpp) -letcd-cpp-api -lgrpc_unsecure -lgrpc++_unsecure -laddress_sorting -lpthread -Wl,--end-group
 
 TARGET = unit-tester
-SRC = $(wildcard *.c) $(wildcard pppd/*.c) $(wildcard dhcpd/*.c)
+SRC = $(wildcard *.c) $(wildcard pppd/*.c) $(wildcard dhcpd/*.c) $(wildcard dnsd/*.c)
 OBJ = $(SRC:.c=.o)
 
 ifneq ($(shell pkg-config --exists libdpdk && echo 0),0)
@@ -29,7 +29,7 @@ main:
 	# Ensure all dependencies are built
 	@make -C ..
 $(TARGET): $(OBJ)
-	main_obj="$(OBJ) $(wildcard ../src/pppd/*.o) $(wildcard ../src/dhcpd/*.o) \
+	main_obj="$(OBJ) $(wildcard ../src/pppd/*.o) $(wildcard ../src/dhcpd/*.o) $(wildcard ../src/dnsd/*.o) \
         $(filter-out ../src/main.o, $(wildcard ../src/*.o)) \
         $(filter-out ../northbound/grpc/fastrg_grpc_client.o, $(wildcard ../northbound/grpc/*.o)) \
         $(wildcard ../northbound/controller/*.o) $(wildcard ../northbound/controller/proto/*.o)"; \

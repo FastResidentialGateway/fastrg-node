@@ -80,7 +80,7 @@
 #define	IP_COMPRESSION		0x2
 #define	IP_ADDRESS 			0x3
 #define PRIMARY_DNS			0x81
-#define SECOND_DNS			0x83
+#define SECONDARY_DNS		0x83
 
 #define MAX_RECV_UNIT		ETH_MTU - sizeof(pppoe_header_t) - sizeof(ppp_payload_t) - sizeof(vlan_header_t)
 #define MAX_RETRAN			10

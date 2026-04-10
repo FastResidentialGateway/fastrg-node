@@ -695,6 +695,206 @@ cmdline_parse_inst_t cmd_show_arp_table = {
     },
 };
 
+/**********************************************************/
+/* DNS commands                                           */
+/**********************************************************/
+
+struct cmd_dns_config_result {
+    cmdline_fixed_string_t  config;
+    cmdline_fixed_string_t  cmd_str;        /* add/del */
+    cmdline_fixed_string_t  user_str;
+    uint16_t                user_id;
+    cmdline_fixed_string_t  service_type;   /* dns */
+    cmdline_fixed_string_t  domain_str;
+    cmdline_fixed_string_t  domain;
+    cmdline_fixed_string_t  ip_str;
+    cmdline_ipaddr_t        ip;
+    cmdline_fixed_string_t  ttl_str;
+    uint32_t                ttl;
+};
+
+static void cmd_config_dns_parsed(void *parsed_result,
+                struct cmdline *cl,
+                __attribute__((unused)) void *data)
+{
+    struct cmd_dns_config_result *res = parsed_result;
+
+    if (strncmp(res->cmd_str, "del", 3) == 0) {
+        fastrg_grpc_remove_dns_record(res->user_id, res->domain);
+        return;
+    }
+
+    char ip_str[32] = {0};
+    if (res->ip.family == AF_INET) {
+        snprintf(ip_str, sizeof(ip_str), "%u.%u.%u.%u",
+            (res->ip.addr.ipv4.s_addr) & 0xFF,
+            (res->ip.addr.ipv4.s_addr >> 8) & 0xFF,
+            (res->ip.addr.ipv4.s_addr >> 16) & 0xFF,
+            (res->ip.addr.ipv4.s_addr >> 24) & 0xFF);
+    }
+
+    cmdline_printf(cl, "DNS Static Record for User %u:\n", res->user_id);
+    cmdline_printf(cl, "  Domain: %s\n", res->domain);
+    cmdline_printf(cl, "  IP: %s\n", ip_str);
+    cmdline_printf(cl, "  TTL: %u\n", res->ttl);
+
+    fastrg_grpc_add_dns_record(res->user_id, res->domain, ip_str, res->ttl);
+}
+
+/* DNS config tokens */
+cmdline_parse_token_string_t cmd_dns_config =
+    TOKEN_STRING_INITIALIZER(struct cmd_dns_config_result, config, "config");
+cmdline_parse_token_string_t cmd_dns_add_str =
+    TOKEN_STRING_INITIALIZER(struct cmd_dns_config_result, cmd_str, "add");
+cmdline_parse_token_string_t cmd_dns_del_str =
+    TOKEN_STRING_INITIALIZER(struct cmd_dns_config_result, cmd_str, "del");
+cmdline_parse_token_string_t cmd_dns_user_str =
+    TOKEN_STRING_INITIALIZER(struct cmd_dns_config_result, user_str, "user");
+cmdline_parse_token_num_t cmd_dns_user_id =
+    TOKEN_NUM_INITIALIZER(struct cmd_dns_config_result, user_id, RTE_UINT16);
+cmdline_parse_token_string_t cmd_dns_service =
+    TOKEN_STRING_INITIALIZER(struct cmd_dns_config_result, service_type, "dns");
+cmdline_parse_token_string_t cmd_dns_domain_str =
+    TOKEN_STRING_INITIALIZER(struct cmd_dns_config_result, domain_str, "domain");
+cmdline_parse_token_string_t cmd_dns_domain =
+    TOKEN_STRING_INITIALIZER(struct cmd_dns_config_result, domain, NULL);
+cmdline_parse_token_string_t cmd_dns_ip_str =
+    TOKEN_STRING_INITIALIZER(struct cmd_dns_config_result, ip_str, "ip");
+cmdline_parse_token_ipaddr_t cmd_dns_ip =
+    TOKEN_IPV4_INITIALIZER(struct cmd_dns_config_result, ip);
+cmdline_parse_token_string_t cmd_dns_ttl_str =
+    TOKEN_STRING_INITIALIZER(struct cmd_dns_config_result, ttl_str, "ttl");
+cmdline_parse_token_num_t cmd_dns_ttl =
+    TOKEN_NUM_INITIALIZER(struct cmd_dns_config_result, ttl, RTE_UINT32);
+
+cmdline_parse_inst_t cmd_config_add_dns = {
+    .f = cmd_config_dns_parsed,
+    .data = NULL,
+    .help_str = "add DNS static record: config add user <id> dns domain <name> ip <ip> ttl <seconds>",
+    .tokens = {
+        (void *)&cmd_dns_config,
+        (void *)&cmd_dns_add_str,
+        (void *)&cmd_dns_user_str,
+        (void *)&cmd_dns_user_id,
+        (void *)&cmd_dns_service,
+        (void *)&cmd_dns_domain_str,
+        (void *)&cmd_dns_domain,
+        (void *)&cmd_dns_ip_str,
+        (void *)&cmd_dns_ip,
+        (void *)&cmd_dns_ttl_str,
+        (void *)&cmd_dns_ttl,
+        NULL,
+    },
+};
+
+cmdline_parse_inst_t cmd_config_del_dns = {
+    .f = cmd_config_dns_parsed,
+    .data = NULL,
+    .help_str = "delete DNS static record: config del user <id> dns domain <name>",
+    .tokens = {
+        (void *)&cmd_dns_config,
+        (void *)&cmd_dns_del_str,
+        (void *)&cmd_dns_user_str,
+        (void *)&cmd_dns_user_id,
+        (void *)&cmd_dns_service,
+        (void *)&cmd_dns_domain_str,
+        (void *)&cmd_dns_domain,
+        NULL,
+    },
+};
+
+/**********************************************************/
+/* show/flush DNS commands                                */
+/**********************************************************/
+
+struct cmd_show_dns_result {
+    cmdline_fixed_string_t  show_str;
+    cmdline_fixed_string_t  user_str;
+    uint16_t                user_id;
+    cmdline_fixed_string_t  dns_str;
+    cmdline_fixed_string_t  subcommand;   /* cache / static */
+};
+
+static void cmd_show_dns_parsed(void *parsed_result,
+                struct cmdline *cl,
+                __attribute__((unused)) void *data)
+{
+    struct cmd_show_dns_result *res = parsed_result;
+
+    if (strncmp(res->subcommand, "cache", 5) == 0) {
+        fastrg_grpc_get_dns_cache(res->user_id);
+    } else if (strncmp(res->subcommand, "static", 6) == 0) {
+        fastrg_grpc_get_dns_static(res->user_id);
+    }
+}
+
+cmdline_parse_token_string_t cmd_show_dns_show =
+    TOKEN_STRING_INITIALIZER(struct cmd_show_dns_result, show_str, "show");
+cmdline_parse_token_string_t cmd_show_dns_user =
+    TOKEN_STRING_INITIALIZER(struct cmd_show_dns_result, user_str, "user");
+cmdline_parse_token_num_t cmd_show_dns_user_id =
+    TOKEN_NUM_INITIALIZER(struct cmd_show_dns_result, user_id, RTE_UINT16);
+cmdline_parse_token_string_t cmd_show_dns_dns =
+    TOKEN_STRING_INITIALIZER(struct cmd_show_dns_result, dns_str, "dns");
+cmdline_parse_token_string_t cmd_show_dns_subcmd =
+    TOKEN_STRING_INITIALIZER(struct cmd_show_dns_result, subcommand, "cache#static");
+
+cmdline_parse_inst_t cmd_show_dns = {
+    .f = cmd_show_dns_parsed,
+    .data = NULL,
+    .help_str = "show user <id> dns <cache|static>: display DNS cache or static records",
+    .tokens = {
+        (void *)&cmd_show_dns_show,
+        (void *)&cmd_show_dns_user,
+        (void *)&cmd_show_dns_user_id,
+        (void *)&cmd_show_dns_dns,
+        (void *)&cmd_show_dns_subcmd,
+        NULL,
+    },
+};
+
+/* flush dns cache */
+struct cmd_flush_dns_result {
+    cmdline_fixed_string_t  flush_str;
+    cmdline_fixed_string_t  user_str;
+    uint16_t                user_id;
+    cmdline_fixed_string_t  dns_str;
+    cmdline_fixed_string_t  cache_str;
+};
+
+static void cmd_flush_dns_parsed(void *parsed_result,
+                struct cmdline *cl,
+                __attribute__((unused)) void *data)
+{
+    struct cmd_flush_dns_result *res = parsed_result;
+    fastrg_grpc_flush_dns_cache(res->user_id);
+}
+
+cmdline_parse_token_string_t cmd_flush_dns_flush =
+    TOKEN_STRING_INITIALIZER(struct cmd_flush_dns_result, flush_str, "flush");
+cmdline_parse_token_string_t cmd_flush_dns_user =
+    TOKEN_STRING_INITIALIZER(struct cmd_flush_dns_result, user_str, "user");
+cmdline_parse_token_num_t cmd_flush_dns_user_id =
+    TOKEN_NUM_INITIALIZER(struct cmd_flush_dns_result, user_id, RTE_UINT16);
+cmdline_parse_token_string_t cmd_flush_dns_dns =
+    TOKEN_STRING_INITIALIZER(struct cmd_flush_dns_result, dns_str, "dns");
+cmdline_parse_token_string_t cmd_flush_dns_cache =
+    TOKEN_STRING_INITIALIZER(struct cmd_flush_dns_result, cache_str, "cache");
+
+cmdline_parse_inst_t cmd_flush_dns_cache_inst = {
+    .f = cmd_flush_dns_parsed,
+    .data = NULL,
+    .help_str = "flush user <id> dns cache: flush DNS cache for a subscriber",
+    .tokens = {
+        (void *)&cmd_flush_dns_flush,
+        (void *)&cmd_flush_dns_user,
+        (void *)&cmd_flush_dns_user_id,
+        (void *)&cmd_flush_dns_dns,
+        (void *)&cmd_flush_dns_cache,
+        NULL,
+    },
+};
+
 /****** CONTEXT (list of instruction) */
 cmdline_parse_ctx_t ctx[] = {
         (cmdline_parse_inst_t *)&cmd_info,
@@ -706,10 +906,14 @@ cmdline_parse_ctx_t ctx[] = {
         (cmdline_parse_inst_t *)&cmd_config_del_snat,
         (cmdline_parse_inst_t *)&cmd_config_del,
         (cmdline_parse_inst_t *)&cmd_config_set_subscriber,
+        (cmdline_parse_inst_t *)&cmd_config_add_dns,
+        (cmdline_parse_inst_t *)&cmd_config_del_dns,
         (cmdline_parse_inst_t *)&cmd_exec,
         (cmdline_parse_inst_t *)&cmd_show_port_fwd,
         (cmdline_parse_inst_t *)&cmd_show_arp_table_count,
         (cmdline_parse_inst_t *)&cmd_show_arp_table,
+        (cmdline_parse_inst_t *)&cmd_show_dns,
+        (cmdline_parse_inst_t *)&cmd_flush_dns_cache_inst,
         (cmdline_parse_inst_t *)&cmd_log,
     NULL,
 };

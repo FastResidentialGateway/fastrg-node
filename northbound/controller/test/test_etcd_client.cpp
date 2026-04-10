@@ -104,6 +104,22 @@ void sync_request_callback(const char* node_id, void* user_data) {
     std::cout << "==========================" << std::endl;
 }
 
+STATUS dns_record_callback(const char *node_id, const char *user_id,
+    const dns_record_config_t *record, etcd_action_type_t action,
+    int64_t revision, void *user_data) {
+    callback_count++;
+    std::cout << "=== DNS Record Event ===" << std::endl;
+    std::cout << "Node ID: " << node_id << std::endl;
+    std::cout << "User ID: " << user_id << std::endl;
+    if (record) {
+        std::cout << "Domain: " << record->domain << std::endl;
+        std::cout << "Action: " << (action == HSI_ACTION_DELETE ? "DELETE" : "UNKNOWN") << std::endl;
+    }
+    std::cout << "========================" << std::endl;
+
+    return SUCCESS;
+}
+
 int main() {
     std::cout << "Starting etcd client test..." << std::endl;
     std::cout << "\nTest Features:" << std::endl;
@@ -130,7 +146,7 @@ int main() {
     const char* test_node_uuid = "test-node-12345";
     status = etcd_client_start_watch(test_node_uuid, hsi_config_callback, 
         pppoe_command_callback, user_count_changed_callback, 
-        sync_request_callback);
+        sync_request_callback, dns_record_callback);
 
     if (status != ETCD_SUCCESS) {
         std::cerr << "Failed to start etcd watching" << std::endl;

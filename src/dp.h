@@ -21,6 +21,7 @@ typedef struct dp_rx_arg {
 } dp_rx_arg_t;
 
 void wan_ctrl_tx(FastRG_t *fastrg_ccb, U16 ccb_id, U8 *mu, U16 mulen);
+void lan_ctrl_tx(FastRG_t *fastrg_ccb, U16 ccb_id, U8 *mu, U16 mulen);
 int wan_ctrl_rx(void *arg);
 int wan_data_rx(void *arg);
 int lan_ctrl_rx(void *arg);

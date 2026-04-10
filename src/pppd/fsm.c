@@ -22,6 +22,8 @@
 #include "../dp.h"
 #include "nat.h"
 #include "fsm.h"
+#include "../dhcpd/dhcpd.h"
+#include "../dnsd/dnsd.h"
 #include "../etcd_integration.h"
 #include "../../northbound/controller/etcd_client.h"
 
@@ -697,7 +699,7 @@ STATUS A_this_layer_up(__attribute__((unused)) struct rte_timer *ppp_timer, ppp_
 
     if (s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].ppp_payload.ppp_protocol == rte_cpu_to_be_16(LCP_PROTOCOL)) {
         memset(buffer,0,PPP_MSG_BUF_LEN);
-        rte_timer_reset(&(s_ppp_ccb->ppp_alive), ppp_interval*rte_get_timer_hz(), 
+        rte_timer_reset(&(s_ppp_ccb->ppp_alive), ppp_interval*fastrg_get_cycles_in_sec(), 
             SINGLE, fastrg_ccb->lcore.ctrl_thread, (rte_timer_cb_t)PPP_bye_timer_cb, s_ppp_ccb);
         if (s_ppp_ccb->auth_method == PAP_PROTOCOL)
             build_auth_request_pap(buffer, &mulen, s_ppp_ccb);
@@ -707,7 +709,7 @@ STATUS A_this_layer_up(__attribute__((unused)) struct rte_timer *ppp_timer, ppp_
     } else if (s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].ppp_payload.ppp_protocol == rte_cpu_to_be_16(IPCP_PROTOCOL)) {
         rte_atomic16_set(&s_ppp_ccb->dp_start_bool, (BIT16)1);
         s_ppp_ccb->phase = DATA_PHASE;
-        rte_timer_reset(&(s_ppp_ccb->nat), rte_get_timer_hz(), PERIODICAL, 
+        rte_timer_reset(&(s_ppp_ccb->nat), fastrg_get_cycles_in_sec(), PERIODICAL, 
             fastrg_ccb->lcore.ctrl_thread, (rte_timer_cb_t)nat_rule_timer, s_ppp_ccb);
         FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " IPCP connection establish successfully.", s_ppp_ccb->user_num);
         FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "Now user %" PRIu16 " can start to send data via pppoe session id 0x%x and vlan is %" 
@@ -718,8 +720,17 @@ STATUS A_this_layer_up(__attribute__((unused)) struct rte_timer *ppp_timer, ppp_
             *(((U8 *)&(s_ppp_ccb->hsi_ipv4))+2), *(((U8 *)&(s_ppp_ccb->hsi_ipv4))+3), 
             *(((U8 *)&(s_ppp_ccb->hsi_ipv4_gw))), *(((U8 *)&(s_ppp_ccb->hsi_ipv4_gw))+1), 
             *(((U8 *)&(s_ppp_ccb->hsi_ipv4_gw))+2), *(((U8 *)&(s_ppp_ccb->hsi_ipv4_gw))+3));
-        s_ppp_ccb->hsi_primary_dns = rte_cpu_to_be_32(0x08080808); /* 8.8.8.8 */
-        s_ppp_ccb->hsi_secondary_dns = rte_cpu_to_be_32(0x01010101); /* 1.1.1.1 */
+        if (s_ppp_ccb->hsi_primary_dns == 0xffffffff || s_ppp_ccb->hsi_primary_dns == 0x0)
+            s_ppp_ccb->hsi_primary_dns = rte_cpu_to_be_32(0x08080808); /* 8.8.8.8 */
+        if (s_ppp_ccb->hsi_secondary_dns == 0xffffffff || s_ppp_ccb->hsi_secondary_dns == 0x0)
+            s_ppp_ccb->hsi_secondary_dns = rte_cpu_to_be_32(0x01010101); /* 1.1.1.1 */
+        dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, s_ppp_ccb->user_num - 1);
+        if (dns_proxy_init(&dhcp_ccb->dns_state, s_ppp_ccb->hsi_primary_dns, 
+                s_ppp_ccb->hsi_secondary_dns) != SUCCESS) {
+            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+                "User %u: Failed to init DNS proxy", s_ppp_ccb->user_num);
+            return ERROR;
+        }
         FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " HSI module is spawned.\n", s_ppp_ccb->user_num);
         if (fastrg_ccb->is_standalone == FALSE) {
             char user_id_str[6];
@@ -732,6 +743,8 @@ STATUS A_this_layer_up(__attribute__((unused)) struct rte_timer *ppp_timer, ppp_
             } else {
                 etcd_remove_event(HSI_ACTION_UPDATE, s_ppp_ccb->user_num - 1);
             }
+            etcd_client_load_dns_records(fastrg_ccb->node_uuid, user_id_str,
+                dns_record_changed_callback, fastrg_ccb);
         }
     }
 
@@ -779,7 +792,7 @@ STATUS A_init_restart_config(struct rte_timer *ppp_timer, __attribute__((unused)
     FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " init config req timer start.\n", s_ppp_ccb->user_num);
     rte_timer_stop(ppp_timer);
     s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].timer_counter = 9;
-    rte_timer_reset(ppp_timer, 3*rte_get_timer_hz(), PERIODICAL, fastrg_ccb->lcore.ctrl_thread, 
+    rte_timer_reset(ppp_timer, 3*fastrg_get_cycles_in_sec(), PERIODICAL, fastrg_ccb->lcore.ctrl_thread, 
         (rte_timer_cb_t)A_send_config_request, s_ppp_ccb);
 
     return SUCCESS;
@@ -792,7 +805,7 @@ STATUS A_init_restart_termin(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb)
     FastRG_LOG(DBG, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " init termin req timer start.\n", s_ppp_ccb->user_num);
     rte_timer_stop(ppp_timer);
     s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].timer_counter = 9;
-    rte_timer_reset(ppp_timer, 3*rte_get_timer_hz(), PERIODICAL, fastrg_ccb->lcore.ctrl_thread, 
+    rte_timer_reset(ppp_timer, 3*fastrg_get_cycles_in_sec(), PERIODICAL, fastrg_ccb->lcore.ctrl_thread, 
         (rte_timer_cb_t)A_send_terminate_request, s_ppp_ccb);
 
     return SUCCESS;

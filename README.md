@@ -140,4 +140,4 @@ For hugepages, NIC binding and other system configuration, please refer to DPDK 
 
 1. Increase unit tests converage
 2. Support IPv6
-3. Support DNS proxy
+3. Support IGMP/IPTV

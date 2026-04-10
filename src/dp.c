@@ -28,6 +28,7 @@
 #include "dp_codec.h"
 #include "dp_flow.h"
 #include "dhcpd/dhcpd.h"
+#include "dnsd/dnsd.h"
 #include "mac_table.h"
 #include "dbg.h"
 #include "dp.h"
@@ -226,29 +227,36 @@ static inline BOOL is_iptv_pkt_need_drop(FastRG_t *fastrg_ccb, vlan_header_t *vl
     return TRUE;
 }
 
-static inline void send2cp(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt)
+/**
+ * send2cp - Forward DNS/DHCP/PPPoE packet to control plane via cp_q ring.
+ *
+ * Deep-copies the packet data into a pre-allocated tFastRG_MBX slot,
+ * sets the event type (EV_DP_DNS, EV_DP_DHCP, or EV_DP_PPPoE) and ccb_id/port_id,
+ * then enqueues to cp_q for processing in fastrg_loop().
+ */
+static inline void send2cp(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt,
+    fastrg_event_type_t evt_type, U8 port_id)
 {
-    /* Try to get a free mail slot from free_mail_ring */
     tFastRG_MBX *slot = NULL;
     U16 ccb_id = ((mbuf_priv_t *)rte_mbuf_to_priv(single_pkt))->ccb_id;
 
-    /* Get a free mail slot */
     if (rte_ring_dequeue(free_mail_ring, (void **)&slot) == 0) {
-        /* Deep copy packet data to slot's refp buffer to avoid data buffer being overwritten by rx_burst */
         U16 copy_len = RTE_MIN(single_pkt->pkt_len, sizeof(slot->refp));
         rte_memcpy(slot->refp, rte_pktmbuf_mtod(single_pkt, void *), copy_len);
-        slot->type = EV_DP;
+        slot->type = evt_type;
         slot->len = copy_len;
+        slot->ccb_id = ccb_id;
+        slot->port_id = port_id;
         /* cp_q is full: return slot to free_mail_ring */
         if (rte_ring_enqueue(cp_q, slot) != 0) {
             rte_ring_enqueue(free_mail_ring, slot);
-            drop_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
+            drop_packet(fastrg_ccb, single_pkt, port_id, ccb_id);
         } else {
-            count_rx_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
+            count_rx_packet(fastrg_ccb, single_pkt, port_id, ccb_id);
             rte_pktmbuf_free(single_pkt);
         }
     } else {
-        drop_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
+        drop_packet(fastrg_ccb, single_pkt, port_id, ccb_id);
     }
 }
 
@@ -320,7 +328,7 @@ int wan_ctrl_rx(void *arg)
                     drop_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
                     continue;
                 }
-                send2cp(fastrg_ccb, single_pkt);
+                send2cp(fastrg_ccb, single_pkt, EV_DP_PPPoE, WAN_PORT);
                 continue;
             }
 
@@ -471,7 +479,16 @@ int wan_data_rx(void *arg)
             single_pkt->l2_len = sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t);
             single_pkt->l3_len = sizeof(struct rte_ipv4_hdr);
             if (ip_hdr->next_proto_id == PROTO_TYPE_UDP) {
-                pkt_num = decaps_udp(fastrg_ccb, single_pkt, eth_hdr, 
+                struct rte_udp_hdr *udp_hdr = (struct rte_udp_hdr *)(ip_hdr + 1);
+                if (udp_hdr->src_port == rte_cpu_to_be_16(DNS_PORT)) {
+                    /* Forward DNS response to control plane for proxy handling */
+                    dhcp_ccb_t *dns_dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
+                    if (dns_dhcp_ccb != NULL && dns_dhcp_ccb->dns_state.dns_proxy_enabled) {
+                        send2cp(fastrg_ccb, single_pkt, EV_DP_DNS, WAN_PORT);
+                        continue;
+                    }
+                }
+                pkt_num = decaps_udp(fastrg_ccb, single_pkt, eth_hdr,
                     vlan_header, ip_hdr, ccb_id, tx_q);
             } else if (ip_hdr->next_proto_id == PROTO_TYPE_TCP) {
                 pkt_num = decaps_tcp(fastrg_ccb, single_pkt, eth_hdr, 
@@ -635,6 +652,10 @@ int lan_ctrl_rx(void *arg)
                     if (ip_hdr->next_proto_id == PROTO_TYPE_ICMP) {
                         icmphdr = (struct rte_icmp_hdr *)(rte_pktmbuf_mtod(single_pkt, unsigned char *) + sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) + sizeof(struct rte_ipv4_hdr));
                         if (ip_hdr->dst_addr == dhcp_server_ip) {
+                            if (icmphdr->icmp_type != ICMP_ECHO_REQUEST) {
+                                drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
+                                continue;
+                            }
                             rte_ether_addr_copy(&eth_hdr->src_addr, &eth_hdr->dst_addr);
                             rte_ether_addr_copy(&fastrg_ccb->nic_info.hsi_lan_mac, &eth_hdr->src_addr);
                             ip_hdr->dst_addr = ip_hdr->src_addr;
@@ -806,30 +827,37 @@ int lan_data_rx(void *arg)
             ip_hdr = (struct rte_ipv4_hdr *)(rte_pktmbuf_mtod(single_pkt, unsigned char *) + 
                 sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t));
 
-            /* Gateway subnet traffic: only DHCP (UDP port 67) is relevant here */
+            /* Gateway subnet traffic: DHCP (UDP port 67) and DNS (port 53) */
             if (unlikely(is_ip_in_range(ip_hdr->dst_addr, dhcp_server_ip, subnet_mask))) {
                 if (ip_hdr->next_proto_id == PROTO_TYPE_UDP) {
                     struct rte_udp_hdr *udp_hdr = (struct rte_udp_hdr *)(ip_hdr + 1);
                     if (udp_hdr->dst_port == rte_be_to_cpu_16(DHCP_SERVER_PORT)) {
-                        /* DHCP server handling */
+                        /* Forward DHCP to control plane */
                         dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
                         if (rte_atomic16_read(&dhcp_ccb->dhcp_bool) == 0) {
                             drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                             continue;
                         }
-                        int ret = dhcpd(fastrg_ccb, single_pkt, eth_hdr, vlan_header, ip_hdr, udp_hdr, ccb_id);
-                        if (ret == 0) {
-                            count_rx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
-                            count_tx_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
-                            rte_eth_tx_burst(WAN_PORT, tx_q, &single_pkt, 1);
-                        } else if (ret > 0) {
-                            count_rx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
-                            count_tx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
-                            rte_eth_tx_burst(LAN_PORT, tx_q, &single_pkt, 1);
-                        } else {
-                            drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
-                        }
+                        send2cp(fastrg_ccb, single_pkt, EV_DP_DHCP, LAN_PORT);
                         continue;
+                    }
+                    if (udp_hdr->dst_port == rte_cpu_to_be_16(DNS_PORT)) {
+                        /* Forward DNS (UDP) to control plane */
+                        dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
+                        if (dhcp_ccb->dns_state.dns_proxy_enabled) {
+                            send2cp(fastrg_ccb, single_pkt, EV_DP_DNS, LAN_PORT);
+                            continue;
+                        }
+                    }
+                } else if (ip_hdr->next_proto_id == PROTO_TYPE_TCP) {
+                    struct rte_tcp_hdr *tcp_hdr = (struct rte_tcp_hdr *)(ip_hdr + 1);
+                    if (tcp_hdr->dst_port == rte_cpu_to_be_16(DNS_PORT)) {
+                        /* Forward DNS (TCP) to control plane */
+                        dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
+                        if (dhcp_ccb->dns_state.dns_proxy_enabled) {
+                            send2cp(fastrg_ccb, single_pkt, EV_DP_DNS, LAN_PORT);
+                            continue;
+                        }
                     }
                 }
                 /* Other gateway subnet traffic -> drop */
@@ -876,24 +904,13 @@ int lan_data_rx(void *arg)
                 }
                 struct rte_udp_hdr *udp_hdr = (struct rte_udp_hdr *)(ip_hdr + 1);
                 if (unlikely(udp_hdr->dst_port == rte_be_to_cpu_16(DHCP_SERVER_PORT))) {
-                    /* DHCP -> handle locally */
+                    /* Forward DHCP to control plane */
                     dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
                     if (rte_atomic16_read(&dhcp_ccb->dhcp_bool) == 0) {
                         drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                         continue;
                     }
-                    int ret = dhcpd(fastrg_ccb, single_pkt, eth_hdr, vlan_header, ip_hdr, udp_hdr, ccb_id);
-                    if (ret == 0) {
-                        count_rx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
-                        count_tx_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
-                        rte_eth_tx_burst(WAN_PORT, tx_q, &single_pkt, 1);
-                    } else if (ret > 0) {
-                        count_rx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
-                        count_tx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
-                        rte_eth_tx_burst(LAN_PORT, tx_q, &single_pkt, 1);
-                    } else {
-                        drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
-                    }
+                    send2cp(fastrg_ccb, single_pkt, EV_DP_DHCP, LAN_PORT);
                     continue;
                 }
                 if (unlikely(!rte_is_same_ether_addr(&eth_hdr->dst_addr, &fastrg_ccb->nic_info.hsi_lan_mac))) {
@@ -1005,7 +1022,7 @@ int wan_combined_rx(void *arg)
                     drop_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
                     continue;
                 }
-                send2cp(fastrg_ccb, single_pkt);
+                send2cp(fastrg_ccb, single_pkt, EV_DP_PPPoE, WAN_PORT);
                 continue;
             }
 
@@ -1067,7 +1084,16 @@ int wan_combined_rx(void *arg)
                 count_rx_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
                 increase_pppoes_rx_count(ppp_ccb, single_pkt->pkt_len);
             } else if (ip_hdr->next_proto_id == PROTO_TYPE_UDP) {
-                /* UDP → NAT reverse decap + TX to LAN */
+                /* UDP → check DNS proxy first, then NAT reverse decap + TX to LAN */
+                struct rte_udp_hdr *udp_hdr_wan = (struct rte_udp_hdr *)(ip_hdr + 1);
+                if (udp_hdr_wan->src_port == rte_cpu_to_be_16(DNS_PORT)) {
+                    /* Forward DNS response to control plane for proxy handling */
+                    dhcp_ccb_t *dns_dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
+                    if (dns_dhcp_ccb != NULL && dns_dhcp_ccb->dns_state.dns_proxy_enabled) {
+                        send2cp(fastrg_ccb, single_pkt, EV_DP_DNS, WAN_PORT);
+                        continue;
+                    }
+                }
                 ip_hdr->hdr_checksum = 0;
                 pkt_num = decaps_udp(fastrg_ccb, single_pkt, eth_hdr,
                     vlan_header, ip_hdr, ccb_id, tx_q);
@@ -1249,23 +1275,34 @@ int lan_combined_rx(void *arg)
                             rte_eth_tx_burst(LAN_PORT, tx_q, &single_pkt, 1);
                         }
                     } else if (ip_hdr->next_proto_id == PROTO_TYPE_UDP) {
-                        /* DHCP on gateway subnet */
+                        /* DHCP and DNS on gateway subnet */
                         struct rte_udp_hdr *udp_hdr = (struct rte_udp_hdr *)(ip_hdr + 1);
                         if (udp_hdr->dst_port == rte_be_to_cpu_16(DHCP_SERVER_PORT)) {
+                            /* Forward DHCP to control plane */
                             dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
                             if (rte_atomic16_read(&dhcp_ccb->dhcp_bool) == 0) {
                                 drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                                 continue;
                             }
-                            int ret = dhcpd(fastrg_ccb, single_pkt, eth_hdr, vlan_header, ip_hdr, udp_hdr, ccb_id);
-                            if (ret == 0) {
-                                count_rx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
-                                count_tx_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
-                                rte_eth_tx_burst(WAN_PORT, tx_q, &single_pkt, 1);
-                            } else if (ret > 0) {
-                                count_rx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
-                                count_tx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
-                                rte_eth_tx_burst(LAN_PORT, tx_q, &single_pkt, 1);
+                            send2cp(fastrg_ccb, single_pkt, EV_DP_DHCP, LAN_PORT);
+                        } else if (udp_hdr->dst_port == rte_cpu_to_be_16(DNS_PORT)) {
+                            /* Forward DNS (UDP) to control plane */
+                            dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
+                            if (dhcp_ccb->dns_state.dns_proxy_enabled) {
+                                send2cp(fastrg_ccb, single_pkt, EV_DP_DNS, LAN_PORT);
+                            } else {
+                                drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
+                            }
+                        } else {
+                            drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
+                        }
+                    } else if (ip_hdr->next_proto_id == PROTO_TYPE_TCP) {
+                        struct rte_tcp_hdr *tcp_hdr = (struct rte_tcp_hdr *)(ip_hdr + 1);
+                        if (tcp_hdr->dst_port == rte_cpu_to_be_16(DNS_PORT)) {
+                            /* Forward DNS (TCP) to control plane */
+                            dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
+                            if (dhcp_ccb->dns_state.dns_proxy_enabled) {
+                                send2cp(fastrg_ccb, single_pkt, EV_DP_DNS, LAN_PORT);
                             } else {
                                 drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                             }
@@ -1367,23 +1404,13 @@ int lan_combined_rx(void *arg)
                     }
                     struct rte_udp_hdr *udp_hdr = (struct rte_udp_hdr *)(ip_hdr + 1);
                     if (unlikely(udp_hdr->dst_port == rte_be_to_cpu_16(DHCP_SERVER_PORT))) {
+                        /* Forward DHCP to control plane */
                         dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
                         if (rte_atomic16_read(&dhcp_ccb->dhcp_bool) == 0) {
                             drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                             continue;
                         }
-                        int ret = dhcpd(fastrg_ccb, single_pkt, eth_hdr, vlan_header, ip_hdr, udp_hdr, ccb_id);
-                        if (ret == 0) {
-                            count_rx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
-                            count_tx_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
-                            rte_eth_tx_burst(WAN_PORT, tx_q, &single_pkt, 1);
-                        } else if (ret > 0) {
-                            count_rx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
-                            count_tx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
-                            rte_eth_tx_burst(LAN_PORT, tx_q, &single_pkt, 1);
-                        } else {
-                            drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
-                        }
+                        send2cp(fastrg_ccb, single_pkt, EV_DP_DHCP, LAN_PORT);
                         continue;
                     }
                     if (unlikely(!rte_is_same_ether_addr(&eth_hdr->dst_addr, &fastrg_ccb->nic_info.hsi_lan_mac))) {
@@ -1463,6 +1490,29 @@ void wan_ctrl_tx(FastRG_t *fastrg_ccb, U16 ccb_id, U8 *mu, U16 mulen)
     count_tx_packet(fastrg_ccb, pkt, WAN_PORT, ccb_id);
     if (rte_eth_tx_burst(WAN_PORT, 0, &pkt, 1) == 0)
         drop_packet(fastrg_ccb, pkt, WAN_PORT, ccb_id);
+}
+
+void lan_ctrl_tx(FastRG_t *fastrg_ccb, U16 ccb_id, U8 *mu, U16 mulen)
+{
+    struct rte_mbuf *pkt;
+    unsigned char *buf;
+
+    pkt = rte_pktmbuf_alloc(direct_pool[0]);
+    if (pkt == NULL) {
+        {
+            struct per_ccb_stats *__stats = OPENRG_GET_PER_SUBSCRIBER_STATS(fastrg_ccb, LAN_PORT, ccb_id);
+            if (likely(__stats)) increase_ccb_drop_count(__stats, mulen);
+        };
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "lan_ctrl_tx failed: rte_pktmbuf_alloc failed: %s\n", rte_strerror(rte_errno));
+        return;
+    }
+    buf = rte_pktmbuf_mtod(pkt, unsigned char *);
+    rte_memcpy(buf, mu, mulen);
+    pkt->data_len = mulen;
+    pkt->pkt_len = mulen;
+    count_tx_packet(fastrg_ccb, pkt, LAN_PORT, ccb_id);
+    if (rte_eth_tx_burst(LAN_PORT, 0, &pkt, 1) == 0)
+        drop_packet(fastrg_ccb, pkt, LAN_PORT, ccb_id);
 }
 
 static int lsi_event_callback(U16 port_id, enum rte_eth_event_type type, void *param)

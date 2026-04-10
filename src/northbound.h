@@ -6,6 +6,8 @@
 #include "fastrg.h"
 #include "../northbound/controller/etcd_client.h"
 
+BOOL is_valid_ccb_id(const FastRG_t *fastrg_ccb, int ccb_id);
+
 /**
  * @fn apply_hsi_config
  * 
@@ -136,5 +138,39 @@ STATUS remove_snat_port_fwd(FastRG_t *fastrg_ccb, U16 ccb_id, U16 eport);
  */
 STATUS reconcile_port_mapping(FastRG_t *fastrg_ccb, int ccb_id,
     const port_mapping_t *mappings, int mapping_count);
+
+/**
+ * @fn apply_dns_record
+ *
+ * @brief Apply a static DNS record for a subscriber.
+ *        Adds or updates a static DNS entry in the subscriber's DNS proxy state.
+ *
+ * @param fastrg_ccb
+ *      Pointer to FastRG control block
+ * @param ccb_id
+ *      User ID (0-based)
+ * @param record
+ *      DNS record configuration
+ *
+ * @return SUCCESS on success, ERROR on failure
+ */
+STATUS apply_dns_record(FastRG_t *fastrg_ccb, int ccb_id,
+    const dns_record_config_t *record);
+
+/**
+ * @fn remove_dns_record
+ *
+ * @brief Remove a static DNS record for a subscriber.
+ *
+ * @param fastrg_ccb
+ *      Pointer to FastRG control block
+ * @param ccb_id
+ *      User ID (0-based)
+ * @param domain
+ *      Domain name to remove
+ *
+ * @return SUCCESS on success, ERROR on failure
+ */
+STATUS remove_dns_record(FastRG_t *fastrg_ccb, int ccb_id, const char *domain);
 
 #endif /* NORTHBOUND_H */

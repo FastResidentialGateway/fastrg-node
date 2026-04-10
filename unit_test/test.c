@@ -166,6 +166,18 @@ int main()
     test_northbound(fastrg_ccb, &total_tests, &total_pass);
     puts("ok!");
 
+    puts("====================test dnsd/dns_codec.c====================");
+    test_dns_codec(fastrg_ccb, &total_tests, &total_pass);
+    puts("ok!");
+
+    puts("====================test dnsd/dns_cache.c====================");
+    test_dns_cache(fastrg_ccb, &total_tests, &total_pass);
+    puts("ok!");
+
+    puts("====================test dnsd/dnsd.c====================");
+    test_dnsd(fastrg_ccb, &total_tests, &total_pass);
+    puts("ok!");
+
     printf("\n====================Unit Test Summary====================\n\n");
     printf("╔════════════════════════════════════════════════════════════╗\n");
     printf("║  All Test Summary                                          ║\n");

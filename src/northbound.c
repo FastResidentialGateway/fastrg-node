@@ -6,6 +6,8 @@
 #include "pppd/pppd.h"
 #include "pppd/nat.h"
 #include "utils.h"
+#include "dnsd/dnsd.h"
+#include "dnsd/dns_static.h"
 #include "../northbound/controller/etcd_client.h"
 
 BOOL is_valid_ccb_id(const FastRG_t *fastrg_ccb, int ccb_id)
@@ -102,7 +104,7 @@ STATUS apply_hsi_config(FastRG_t *fastrg_ccb, int ccb_id, const hsi_config_t *co
     /* check if there are active DHCP packets being processed */
     U32 spin_count = 0;
     U32 yield_threshold = 1000; // check fast for 1000 times
-    uint64_t start_tsc = rte_rdtsc();
+    uint64_t start_tsc = fastrg_get_cur_cycles();
     uint64_t timeout_us = 1000000; // 1 second timeout
     while (rte_atomic32_read(&dhcp_ccb->active_count) > 0) {
         if (spin_count < yield_threshold) {
@@ -110,7 +112,7 @@ STATUS apply_hsi_config(FastRG_t *fastrg_ccb, int ccb_id, const hsi_config_t *co
             spin_count++;
         } else {
             rte_delay_ms(1);
-            uint64_t elapsed_us = (rte_rdtsc() - start_tsc) * 1000000 / rte_get_tsc_hz();
+            uint64_t elapsed_us = (fastrg_get_cur_cycles() - start_tsc) * 1000000 / rte_get_tsc_hz();
             if (elapsed_us > timeout_us) {
                 FastRG_LOG(ERR, fastrg_ccb->fp, NULL, DHCPLOGMSG, 
                     "DHCP: Timeout waiting for active dhcp packets\n");
@@ -414,4 +416,61 @@ STATUS reconcile_port_mapping(FastRG_t *fastrg_ccb, int ccb_id,
         ccb_id + 1, added, updated, errors, remove);
 
     return (errors > 0) ? ERROR : SUCCESS;
+}
+
+STATUS apply_dns_record(FastRG_t *fastrg_ccb, int ccb_id,
+    const dns_record_config_t *record)
+{
+    if (!is_valid_ccb_id(fastrg_ccb, ccb_id) || !record)
+        return ERROR;
+
+    dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
+    if (!dhcp_ccb)
+        return ERROR;
+
+    U32 ip_addr;
+    if (inet_pton(AF_INET, record->ip, &ip_addr) != 1) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+            "User %u: Invalid DNS record IP: %s", ccb_id + 1, record->ip);
+        return ERROR;
+    }
+
+    U32 ttl = record->ttl > 0 ? record->ttl : 3600;
+
+    if (dns_static_add(&dhcp_ccb->dns_state.static_table,
+            record->domain, ip_addr, ttl) != 0) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+            "User %u: Failed to add DNS static record: %s -> %s",
+            ccb_id + 1, record->domain, record->ip);
+        return ERROR;
+    }
+
+    FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+        "User %u: DNS static record added: %s -> %s (TTL=%u)",
+        ccb_id + 1, record->domain, record->ip, ttl);
+    return SUCCESS;
+}
+
+STATUS remove_dns_record(FastRG_t *fastrg_ccb, int ccb_id, const char *domain)
+{
+    if (!is_valid_ccb_id(fastrg_ccb, ccb_id) || !domain)
+        return ERROR;
+
+    dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
+    if (!dhcp_ccb) {
+        FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
+            "User %u: DNS proxy not initialized, cannot remove record: %s",
+            ccb_id + 1, domain);
+        return ERROR;
+    }
+
+    if (dns_static_remove(&dhcp_ccb->dns_state.static_table, domain) != 0) {
+        FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
+            "User %u: DNS static record not found: %s", ccb_id + 1, domain);
+        return ERROR;
+    }
+
+    FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+        "User %u: DNS static record removed: %s", ccb_id + 1, domain);
+    return SUCCESS;
 }

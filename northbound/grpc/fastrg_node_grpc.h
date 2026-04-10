@@ -27,6 +27,11 @@ class FastRGNodeServiceImpl final : public fastrgnodeservice::FastrgService::Ser
     ::grpc::Status GetPortFwdInfo(::grpc::ServerContext* context, const ::fastrgnodeservice::PortFwdInfoRequest* request, ::fastrgnodeservice::PortFwdInfoReply* response) override;
     ::grpc::Status GetArpTable(::grpc::ServerContext* context, const ::fastrgnodeservice::ArpTableRequest* request, ::fastrgnodeservice::ArpTableReply* response) override;
     ::grpc::Status GetNodeStatus(::grpc::ServerContext* context, const ::google::protobuf::Empty* request, ::fastrgnodeservice::NodeStatus* response) override;
+    ::grpc::Status AddDnsRecord(::grpc::ServerContext* context, const ::fastrgnodeservice::DnsRecordRequest* request, ::fastrgnodeservice::DnsRecordReply* response) override;
+    ::grpc::Status RemoveDnsRecord(::grpc::ServerContext* context, const ::fastrgnodeservice::DnsRecordRequest* request, ::fastrgnodeservice::DnsRecordReply* response) override;
+    ::grpc::Status GetDnsCache(::grpc::ServerContext* context, const ::fastrgnodeservice::DnsCacheRequest* request, ::fastrgnodeservice::DnsCacheReply* response) override;
+    ::grpc::Status GetDnsStaticRecords(::grpc::ServerContext* context, const ::fastrgnodeservice::DnsStaticRequest* request, ::fastrgnodeservice::DnsStaticReply* response) override;
+    ::grpc::Status FlushDnsCache(::grpc::ServerContext* context, const ::fastrgnodeservice::DnsCacheFlushRequest* request, ::fastrgnodeservice::DnsCacheFlushReply* response) override;
 
     private:
     FastRG_t* fastrg_ccb;

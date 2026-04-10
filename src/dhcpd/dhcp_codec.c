@@ -265,7 +265,10 @@ STATUS build_dhcp_offer(dhcp_ccb_per_lan_user_t *per_lan_user, struct rte_ether_
     U16 ccb_id = dhcp_ccb->ccb_id;
     ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(dhcp_ccb->fastrg_ccb, ccb_id);
     U32 dns_1, dns_2;
-    if (rte_atomic16_read(&ppp_ccb->dp_start_bool) == 0) {
+    if (dhcp_ccb->dns_state.dns_proxy_enabled) {
+        dns_1 = dhcp_ccb->dhcp_server_ip;
+        dns_2 = dhcp_ccb->dhcp_server_ip;
+    } else if (rte_atomic16_read(&ppp_ccb->dp_start_bool) == 0) {
         dns_1 = rte_cpu_to_be_32(0x08080808);
         dns_2 = rte_cpu_to_be_32(0x01010101);
     } else {
@@ -370,7 +373,10 @@ STATUS build_dhcp_ack(dhcp_ccb_per_lan_user_t *per_lan_user, struct rte_ether_ad
     U16 ccb_id = dhcp_ccb->ccb_id;
     ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(dhcp_ccb->fastrg_ccb, ccb_id);
     U32 dns_1, dns_2;
-    if (rte_atomic16_read(&ppp_ccb->dp_start_bool) == 0) {
+    if (dhcp_ccb->dns_state.dns_proxy_enabled) {
+        dns_1 = dhcp_ccb->dhcp_server_ip;
+        dns_2 = dhcp_ccb->dhcp_server_ip;
+    } else if (rte_atomic16_read(&ppp_ccb->dp_start_bool) == 0) {
         dns_1 = rte_cpu_to_be_32(0x08080808);
         dns_2 = rte_cpu_to_be_32(0x01010101);
     } else {
@@ -543,8 +549,14 @@ STATUS build_dhcp_ack_inform(dhcp_ccb_per_lan_user_t *per_lan_user,
 #ifndef UNIT_TEST
     U16 ccb_id = dhcp_ccb->ccb_id;
     ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(dhcp_ccb->fastrg_ccb, ccb_id);
-    U32 dns_1 = ppp_ccb->hsi_primary_dns;
-    U32 dns_2 = ppp_ccb->hsi_secondary_dns;
+    U32 dns_1, dns_2;
+    if (dhcp_ccb->dns_state.dns_proxy_enabled) {
+        dns_1 = dhcp_ccb->dhcp_server_ip;
+        dns_2 = dhcp_ccb->dhcp_server_ip;
+    } else {
+        dns_1 = ppp_ccb->hsi_primary_dns;
+        dns_2 = ppp_ccb->hsi_secondary_dns;
+    }
 #else
     U32 dns_1 = rte_cpu_to_be_32(0x08080808);
     U32 dns_2 = rte_cpu_to_be_32(0x01010101);
