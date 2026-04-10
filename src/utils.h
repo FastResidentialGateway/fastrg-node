@@ -5,6 +5,7 @@
 
 #include <rte_malloc.h>
 #include <rte_ring.h>
+#include <rte_mbuf.h>
 
 #include <linux/ethtool.h>
 
@@ -37,6 +38,7 @@ typedef struct {
     int                 len;
     U16                 ccb_id;     /* subscriber CCB ID (used by EV_DP_DNS / EV_DP_DHCP) */
     U8                  port_id;    /* source port: LAN_PORT(0) or WAN_PORT(1) */
+    struct rte_mbuf     *mbuf;      /* mbuf pointer for EV_DP_* zero-copy path */
 } tFastRG_MBX;
 
 /* only execution when condition is true */

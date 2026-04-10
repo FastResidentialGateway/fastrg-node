@@ -655,13 +655,12 @@ void exit_ppp(ppp_ccb_t *ppp_ccb)
     }
 }
 
-STATUS ppp_process(FastRG_t *fastrg_ccb, void *mail)
+STATUS ppp_process(FastRG_t *fastrg_ccb, U8 *pkt_data, U16 len)
 {
-    tFastRG_MBX	*pppoe_mail = (tFastRG_MBX *)mail;
     int         ret;
     U16	        event, ccb_id = 0;
 
-    ret = get_ccb_id(fastrg_ccb, pppoe_mail->refp, &ccb_id);
+    ret = get_ccb_id(fastrg_ccb, pkt_data, &ccb_id);
     if (ret == ERROR)
         return ERROR;
 
@@ -672,7 +671,7 @@ STATUS ppp_process(FastRG_t *fastrg_ccb, void *mail)
         return ERROR;
     }
 
-    ret = PPP_decode_frame(pppoe_mail->refp, pppoe_mail->len, &event, ppp_ccb);
+    ret = PPP_decode_frame(pkt_data, len, &event, ppp_ccb);
     if (ret == ERROR)					
         return ERROR;
 
