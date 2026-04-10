@@ -19,6 +19,9 @@ extern "C"
 #include "../../src/northbound.h"
 #include "../../src/pppd/pppd.h"
 #include "../../src/etcd_integration.h"
+#include "../../src/dnsd/dnsd.h"
+#include "../../src/dnsd/dns_cache.h"
+#include "../../src/dnsd/dns_static.h"
 
 #ifdef __cplusplus
 }
@@ -1077,5 +1080,174 @@ grpc::Status FastRGNodeServiceImpl::GetNodeStatus(::grpc::ServerContext* context
 
     response->set_healthy(true);
 
+    return grpc::Status::OK;
+}
+
+grpc::Status FastRGNodeServiceImpl::AddDnsRecord(::grpc::ServerContext* context,
+    const ::fastrgnodeservice::DnsRecordRequest* request,
+    ::fastrgnodeservice::DnsRecordReply* response)
+{
+    cout << "AddDnsRecord called" << endl;
+
+    U16 user_id = request->user_id();
+    std::string domain = request->domain();
+    std::string ip = request->ip();
+    U32 ttl = request->ttl();
+    if (ttl == 0) ttl = 3600;
+
+    if (etcd_client_is_initialized() && fastrg_ccb && fastrg_ccb->node_uuid) {
+        std::string user_id_str = std::to_string(user_id);
+        dns_record_config_t record;
+        memset(&record, 0, sizeof(record));
+        strncpy(record.domain, domain.c_str(), sizeof(record.domain) - 1);
+        strncpy(record.ip, ip.c_str(), sizeof(record.ip) - 1);
+        record.ttl = ttl;
+
+        etcd_status_t s = etcd_client_put_dns_record(fastrg_ccb->node_uuid,
+            user_id_str.c_str(), &record);
+        if (s != ETCD_SUCCESS) {
+            std::string err = "Failed to write DNS record to etcd for user " + user_id_str;
+            return grpc::Status(grpc::StatusCode::INTERNAL, err);
+        }
+    } else {
+        /* Etcd not available, apply directly */
+        U16 ccb_id = user_id - 1;
+        dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
+        if (!dhcp_ccb) {
+            std::string err = "DNS proxy not initialized for user " + std::to_string(user_id);
+            return grpc::Status(grpc::StatusCode::INTERNAL, err);
+        }
+        U32 ip_addr;
+        if (inet_pton(AF_INET, ip.c_str(), &ip_addr) != 1) {
+            return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "Invalid IP address");
+        }
+        dns_static_add(&dhcp_ccb->dns_state.static_table, domain.c_str(), ip_addr, ttl);
+    }
+
+    response->set_status("DNS record added successfully");
+    return grpc::Status::OK;
+}
+
+grpc::Status FastRGNodeServiceImpl::RemoveDnsRecord(::grpc::ServerContext* context,
+    const ::fastrgnodeservice::DnsRecordRequest* request,
+    ::fastrgnodeservice::DnsRecordReply* response)
+{
+    cout << "RemoveDnsRecord called" << endl;
+
+    U16 user_id = request->user_id();
+    std::string domain = request->domain();
+
+    if (etcd_client_is_initialized() && fastrg_ccb && fastrg_ccb->node_uuid) {
+        std::string user_id_str = std::to_string(user_id);
+        etcd_status_t s = etcd_client_delete_dns_record(fastrg_ccb->node_uuid,
+            user_id_str.c_str(), domain.c_str());
+        if (s != ETCD_SUCCESS) {
+            std::string err = "Failed to delete DNS record from etcd for user " + user_id_str;
+            return grpc::Status(grpc::StatusCode::INTERNAL, err);
+        }
+    } else {
+        U16 ccb_id = user_id - 1;
+        dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
+        if (!dhcp_ccb) {
+            std::string err = "DNS proxy not initialized for user " + std::to_string(user_id);
+            return grpc::Status(grpc::StatusCode::INTERNAL, err);
+        }
+        dns_static_remove(&dhcp_ccb->dns_state.static_table, domain.c_str());
+    }
+
+    response->set_status("DNS record removed successfully");
+    return grpc::Status::OK;
+}
+
+grpc::Status FastRGNodeServiceImpl::GetDnsCache(::grpc::ServerContext* context,
+    const ::fastrgnodeservice::DnsCacheRequest* request,
+    ::fastrgnodeservice::DnsCacheReply* response)
+{
+    cout << "GetDnsCache called" << endl;
+
+    U16 user_id = request->user_id();
+    U16 ccb_id = user_id - 1;
+    dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
+    if (!dhcp_ccb) {
+        std::string err = "DNS proxy not initialized for user " + std::to_string(user_id);
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+
+    response->set_user_id(user_id);
+    dns_cache_t *cache = &dhcp_ccb->dns_state.cache;
+    U32 total = 0;
+    U64 now = rte_rdtsc();
+    U64 cycles_in_sec = fastrg_get_cycles_in_sec();
+
+    for(U32 i=0; i<DNS_CACHE_BUCKET_COUNT; i++) {
+        dns_cache_entry_t *entry = cache->buckets[i];
+        while (entry) {
+            total++;
+            DnsCacheEntry* e = response->add_entries();
+            e->set_domain(entry->domain);
+            e->set_qtype(entry->qtype);
+            e->set_ttl(entry->ttl);
+            U32 elapsed = (U32)((now - entry->insert_time) / cycles_in_sec);
+            U32 remaining = (elapsed < entry->ttl) ? (entry->ttl - elapsed) : 0;
+            e->set_remaining_ttl(remaining);
+            e->set_hit_count(entry->hit_count);
+            entry = entry->next;
+        }
+    }
+    response->set_total_entries(total);
+    return grpc::Status::OK;
+}
+
+grpc::Status FastRGNodeServiceImpl::GetDnsStaticRecords(::grpc::ServerContext* context,
+    const ::fastrgnodeservice::DnsStaticRequest* request,
+    ::fastrgnodeservice::DnsStaticReply* response)
+{
+    cout << "GetDnsStaticRecords called" << endl;
+
+    U16 user_id = request->user_id();
+    U16 ccb_id = user_id - 1;
+    dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
+    if (!dhcp_ccb) {
+        std::string err = "DNS proxy not initialized for user " + std::to_string(user_id);
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+
+    response->set_user_id(user_id);
+    dns_static_table_t *tbl = &dhcp_ccb->dns_state.static_table;
+    U32 total = 0;
+    char ip_str[32];
+
+    for(U32 i=0; i<DNS_STATIC_MAX_RECORDS; i++) {
+        if (!tbl->records[i].active) continue;
+        total++;
+        DnsStaticEntry* e = response->add_entries();
+        e->set_domain(tbl->records[i].domain);
+        struct in_addr addr;
+        addr.s_addr = tbl->records[i].ip_addr;
+        inet_ntop(AF_INET, &addr, ip_str, sizeof(ip_str));
+        e->set_ip(ip_str);
+        e->set_ttl(tbl->records[i].ttl);
+    }
+    response->set_total_entries(total);
+    return grpc::Status::OK;
+}
+
+grpc::Status FastRGNodeServiceImpl::FlushDnsCache(::grpc::ServerContext* context,
+    const ::fastrgnodeservice::DnsCacheFlushRequest* request,
+    ::fastrgnodeservice::DnsCacheFlushReply* response)
+{
+    cout << "FlushDnsCache called" << endl;
+
+    U16 user_id = request->user_id();
+    U16 ccb_id = user_id - 1;
+    dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
+    if (!dhcp_ccb) {
+        std::string err = "DNS proxy not initialized for user " + std::to_string(user_id);
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+
+    U32 flushed = dns_cache_flush(&dhcp_ccb->dns_state.cache);
+    response->set_status("ok");
+    response->set_flushed_count(flushed);
     return grpc::Status::OK;
 }

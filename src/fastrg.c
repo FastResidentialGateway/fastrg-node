@@ -23,6 +23,8 @@
 #include "init.h"
 #include "dp_flow.h"
 #include "dhcpd/dhcpd.h"
+#include "dnsd/dnsd.h"
+#include <ip_codec.h>
 #include "config.h"
 #include "timer.h"
 #include "controller.h"
@@ -330,15 +332,15 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
     tFastRG_MBX         *mail[RING_BURST_SIZE];
     U16                 burst_size;
     fastrg_event_type_t recv_type;
-    uint64_t prev_tsc = rte_rdtsc(), cur_tsc = 0, diff_tsc = 0;
-    uint64_t timer_resolution_cycles = rte_get_timer_hz() / 10; /* check every 100ms */
+    uint64_t prev_tsc = fastrg_get_cur_cycles(), cur_tsc = 0, diff_tsc = 0;
+    uint64_t timer_resolution_cycles = fastrg_get_cycles_in_sec() / 10; /* check every 100ms */
 
     while(rte_atomic16_read(&stop_flag) == 0) {
         burst_size = rte_ring_dequeue_burst(cp_q, (void **)mail, RING_BURST_SIZE, NULL);
         for(int i=0; i<burst_size; i++) {
             recv_type = mail[i]->type;
             switch(recv_type) {
-            case EV_NORTHBOUND_PPPoE:
+            case EV_NORTHBOUND_PPPoE: {
                 /* process cli command */
                 fastrg_event_northbound_msg_t *pppoe_msg = (fastrg_event_northbound_msg_t *)mail[i]->refp;
                 ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, pppoe_msg->ccb_id);
@@ -356,7 +358,8 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
                 }
                 rte_ring_enqueue(free_mail_ring, mail[i]);
                 break;
-            case EV_NORTHBOUND_DHCP:
+            }
+            case EV_NORTHBOUND_DHCP: {
                 fastrg_event_northbound_msg_t *dhcp_msg = (fastrg_event_northbound_msg_t *)mail[i]->refp;
                 dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, dhcp_msg->ccb_id);
                 if (dhcp_msg->cmd == DHCP_CMD_DISABLE) {
@@ -370,21 +373,13 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
                 }
                 rte_ring_enqueue(free_mail_ring, mail[i]);
                 break;
-            case EV_DP:
-                /* recv pppoe packet from hsi_recvd() */
-                /* Data is already in mail[i]->refp, no mbuf to free */
-                if (ppp_process(fastrg_ccb, mail[i]) == ERROR) {
-                    rte_ring_enqueue(free_mail_ring, mail[i]);
-                    continue;
-                }
-                rte_ring_enqueue(free_mail_ring, mail[i]);
-                break;
-            case EV_LINK:
+            }
+            case EV_LINK: {
                 FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "Recv Link Up/Down event");
                 if ((U16)(mail[i]->refp[1]) == 1) {
                     if (mail[i]->refp[0] == LINK_DOWN) {
                         rte_timer_reset(&fastrg_ccb->link, 
-                            LINK_DOWN_TIMEOUT * rte_get_timer_hz(), // 10 seconds
+                            LINK_DOWN_TIMEOUT * fastrg_get_cycles_in_sec(), // 10 seconds
                             SINGLE, fastrg_ccb->lcore.timer_thread, 
                             (rte_timer_cb_t)link_disconnect, fastrg_ccb);           
                     } else if (mail[i]->refp[0] == LINK_UP) {
@@ -394,6 +389,56 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
                 /* Link event type still uses fastrg_mfree (dynamically allocated) */
                 fastrg_mfree(mail[i]);
                 break;
+            }
+            case EV_DP_PPPoE: {
+                /* recv pppoe packet from hsi_recvd() */
+                /* Data is already in mail[i]->refp, no mbuf to free */
+                if (ppp_process(fastrg_ccb, mail[i]) == ERROR) {
+                    rte_ring_enqueue(free_mail_ring, mail[i]);
+                    continue;
+                }
+                rte_ring_enqueue(free_mail_ring, mail[i]);
+                break;
+            }
+            case EV_DP_DHCP: {
+                U16 ccb_id = mail[i]->ccb_id;
+                U8 *pkt_data = mail[i]->refp;
+                struct rte_ether_hdr *eth_hdr = (struct rte_ether_hdr *)pkt_data;
+                vlan_header_t *vlan_header = (vlan_header_t *)(eth_hdr + 1);
+                struct rte_ipv4_hdr *ip_hdr = (struct rte_ipv4_hdr *)(vlan_header + 1);
+                struct rte_udp_hdr *udp_hdr = (struct rte_udp_hdr *)(ip_hdr + 1);
+                int ret = dhcpd(fastrg_ccb, NULL, eth_hdr, vlan_header, ip_hdr, udp_hdr, ccb_id);
+                if (ret > 0) {
+                    U16 out_len = sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) +
+                        sizeof(struct rte_ipv4_hdr) + rte_be_to_cpu_16(ip_hdr->total_length);
+                    lan_ctrl_tx(fastrg_ccb, ccb_id, pkt_data, out_len);
+                } else if (ret == 0) {
+                    wan_ctrl_tx(fastrg_ccb, ccb_id, pkt_data, mail[i]->len);
+                }
+                rte_ring_enqueue(free_mail_ring, mail[i]);
+                break;
+            }
+            case EV_DP_DNS: {
+                U16 ccb_id = mail[i]->ccb_id;
+                U8 port_id = mail[i]->port_id;
+                if (port_id == WAN_PORT) {
+                    dnsd_cp_process_wan_udp_response(fastrg_ccb, mail[i]->refp,
+                        mail[i]->len, ccb_id);
+                } else {
+                    struct rte_ether_hdr *dns_eth = (struct rte_ether_hdr *)mail[i]->refp;
+                    vlan_header_t *dns_vlan = (vlan_header_t *)(dns_eth + 1);
+                    struct rte_ipv4_hdr *dns_ip = (struct rte_ipv4_hdr *)(dns_vlan + 1);
+                    if (dns_ip->next_proto_id == PROTO_TYPE_UDP) {
+                        dnsd_cp_process_lan_udp_query(fastrg_ccb, mail[i]->refp,
+                            mail[i]->len, ccb_id);
+                    } else if (dns_ip->next_proto_id == PROTO_TYPE_TCP) {
+                        dnsd_cp_process_lan_tcp_query(fastrg_ccb, mail[i]->refp,
+                            mail[i]->len, ccb_id);
+                    }
+                }
+                rte_ring_enqueue(free_mail_ring, mail[i]);
+                break;
+            }
             default:
                 /* Return unknown type slot to free_mail_ring */
                 rte_ring_enqueue(free_mail_ring, mail[i]);
@@ -401,7 +446,7 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
             mail[i] = NULL;
         }
 
-        cur_tsc = rte_rdtsc();
+        cur_tsc = fastrg_get_cur_cycles();
         diff_tsc = cur_tsc - prev_tsc;
         if (diff_tsc >= timer_resolution_cycles) {
             rte_timer_manage();

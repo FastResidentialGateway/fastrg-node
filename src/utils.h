@@ -17,7 +17,9 @@ extern rte_atomic16_t stop_flag;
 typedef enum {
     EV_NORTHBOUND_PPPoE,
     EV_NORTHBOUND_DHCP,
-    EV_DP,
+    EV_DP_PPPoE,
+    EV_DP_DNS,
+    EV_DP_DHCP,
     EV_LINK,
 } fastrg_event_type_t;
 
@@ -33,6 +35,8 @@ typedef struct {
     fastrg_event_type_t type;
     U8                  refp[ETH_JUMBO];
     int                 len;
+    U16                 ccb_id;     /* subscriber CCB ID (used by EV_DP_DNS / EV_DP_DHCP) */
+    U8                  port_id;    /* source port: LAN_PORT(0) or WAN_PORT(1) */
 } tFastRG_MBX;
 
 /* only execution when condition is true */
@@ -41,6 +45,18 @@ typedef struct {
         (ret) = (op); \
     } \
 } while(0)
+
+/* Memory operation wrappers */
+#ifdef UNIT_TEST
+#define fastrg_malloc(type, size, aligned) (type *)malloc(size)
+#define fastrg_calloc(type, num, size, aligned) (type *)calloc(num, size)
+#define fastrg_realloc(type, ptr, size, aligned) (type *)realloc(ptr, size)
+#define fastrg_mfree(ptr) free(ptr)
+#else
+#define fastrg_malloc(type, size, aligned) (type *)_fastrg_malloc(size, aligned)
+#define fastrg_calloc(type, num, size, aligned) (type *)_fastrg_calloc((num)*(size), aligned)
+#define fastrg_realloc(type, ptr, size, aligned) (type *)_fastrg_realloc(ptr, size, aligned)
+#define fastrg_mfree(ptr) _fastrg_mfree(ptr)
 
 static inline void *_fastrg_malloc(size_t size, unsigned int aligned) {
     if (unlikely(size == 0)) {
@@ -70,17 +86,19 @@ static inline void _fastrg_mfree(void *ptr) {
     }
     rte_free(ptr);
 }
+#endif
 
+/* rte_timer wrappers */
 #ifdef UNIT_TEST
-#define fastrg_malloc(type, size, aligned) (type *)malloc(size)
-#define fastrg_calloc(type, num, size, aligned) (type *)calloc(num, size)
-#define fastrg_realloc(type, ptr, size, aligned) (type *)realloc(ptr, size)
-#define fastrg_mfree(ptr) free(ptr)
+#define fastrg_get_cycles_in_sec simulate_get_timer_hz
+static inline uint64_t simulate_get_timer_hz(void)
+{
+    return 2000000000ULL; // 2 GHz for unit tests
+}
+#define fastrg_get_cur_cycles __rdtsc
 #else
-#define fastrg_malloc(type, size, aligned) (type *)_fastrg_malloc(size, aligned)
-#define fastrg_calloc(type, num, size, aligned) (type *)_fastrg_calloc((num)*(size), aligned)
-#define fastrg_realloc(type, ptr, size, aligned) (type *)_fastrg_realloc(ptr, size, aligned)
-#define fastrg_mfree(ptr) _fastrg_mfree(ptr)
+#define fastrg_get_cycles_in_sec rte_get_timer_hz
+#define fastrg_get_cur_cycles rte_rdtsc
 #endif
 
 /**

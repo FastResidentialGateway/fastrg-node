@@ -44,11 +44,6 @@ enum {
 extern rte_atomic16_t stop_flag;
 extern rte_atomic16_t start_flag;
 
-typedef struct {
-    U8 is_hsi_enable; /* hsi switch from northbound */
-    U8 is_dhcp_server_enable; /* dhcp server switch from northbound */
-} fastrg_feature_switch_t;
-
 struct nic_info {
     char *vendor_name;
     nic_vendor_t vendor_id;

@@ -38,6 +38,11 @@ service FastrgService {
   rpc GetPortFwdInfo(PortFwdInfoRequest) returns(PortFwdInfoReply) {}
   rpc GetArpTable(ArpTableRequest) returns(ArpTableReply) {}
   rpc GetNodeStatus(google.protobuf.Empty) returns(NodeStatus) {}
+  rpc AddDnsRecord(DnsRecordRequest) returns(DnsRecordReply) {}
+  rpc RemoveDnsRecord(DnsRecordRequest) returns(DnsRecordReply) {}
+  rpc GetDnsCache(DnsCacheRequest) returns(DnsCacheReply) {}
+  rpc GetDnsStaticRecords(DnsStaticRequest) returns(DnsStaticReply) {}
+  rpc FlushDnsCache(DnsCacheFlushRequest) returns(DnsCacheFlushReply) {}
 }
 
 message ConfigRequest {
@@ -49,6 +54,8 @@ message ConfigRequest {
   string dhcp_pool_end = 6;
   string dhcp_subnet_mask = 7;
   string dhcp_gateway = 8;
+  string dns_primary = 9;
+  string dns_secondary = 10;
 }
 
 message ConfigReply { 
@@ -222,4 +229,59 @@ message ArpTableReply {
   uint32 user_id = 1;
   uint32 total_count = 2; // total valid entries in the table
   repeated ArpTableEntry entries = 3;
+}
+
+// DNS proxy messages
+message DnsRecordRequest {
+  uint32 user_id = 1;
+  string domain = 2;
+  string ip = 3;
+  uint32 ttl = 4;
+}
+
+message DnsRecordReply {
+  string status = 1;
+}
+
+message DnsCacheRequest {
+  uint32 user_id = 1;
+}
+
+message DnsCacheEntry {
+  string domain = 1;
+  uint32 qtype = 2;
+  uint32 ttl = 3;
+  uint32 remaining_ttl = 4;
+  uint32 hit_count = 5;
+}
+
+message DnsCacheReply {
+  uint32 user_id = 1;
+  uint32 total_entries = 2;
+  repeated DnsCacheEntry entries = 3;
+}
+
+message DnsStaticRequest {
+  uint32 user_id = 1;
+}
+
+message DnsStaticEntry {
+  string domain = 1;
+  string ip = 2;
+  uint32 ttl = 3;
+}
+
+message DnsStaticReply {
+  uint32 user_id = 1;
+  uint32 total_entries = 2;
+  repeated DnsStaticEntry entries = 3;
+}
+
+message DnsCacheFlushRequest {
+  uint32 user_id = 1;
+}
+
+message DnsCacheFlushReply {
+  string status = 1;
+  uint32 flushed_count = 2;
 }

@@ -14,6 +14,7 @@
 
 #include "../protocol.h"
 #include "../fastrg.h"
+#include "../dnsd/dnsd.h"
 
 #define DHCP_CMD_DISABLE 0
 #define DHCP_CMD_ENABLE  1
@@ -60,6 +61,7 @@ typedef struct dhcp_ccb {
     struct rte_mempool      *dhcp_per_lan_user_mempool;
     FILE                    *log_fp;
     FastRG_t                *fastrg_ccb;
+    dns_proxy_state_t       dns_state; /* per-subscriber DNS proxy state */
 }dhcp_ccb_t;
 
 int dhcpd(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt, 

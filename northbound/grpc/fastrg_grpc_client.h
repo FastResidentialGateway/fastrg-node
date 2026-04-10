@@ -26,6 +26,11 @@ void fastrg_grpc_get_system_stats();
 void fastrg_grpc_get_system_xstats();
 void fastrg_grpc_get_hsi_info();
 void fastrg_grpc_get_dhcp_info();
+void fastrg_grpc_add_dns_record(U16 user_id, char *domain, char *ip, U32 ttl);
+void fastrg_grpc_remove_dns_record(U16 user_id, char *domain);
+void fastrg_grpc_get_dns_cache(U16 user_id);
+void fastrg_grpc_get_dns_static(U16 user_id);
+void fastrg_grpc_flush_dns_cache(U16 user_id);
 
 #ifdef __cplusplus
 }

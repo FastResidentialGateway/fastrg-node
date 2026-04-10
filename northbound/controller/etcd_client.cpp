@@ -26,6 +26,7 @@ private:
     std::unique_ptr<etcd::Watcher> hsi_watcher_;
     std::unique_ptr<etcd::Watcher> command_watcher_;
     std::unique_ptr<etcd::Watcher> user_count_watcher_;
+    std::unique_ptr<etcd::Watcher> dns_record_watcher_;
     std::atomic<bool> watch_running_;
     std::string node_uuid_;
     std::string etcd_endpoints_;
@@ -34,6 +35,7 @@ private:
     pppoe_command_callback_t command_callback_;
     user_count_changed_callback_t user_count_callback_;
     sync_request_callback_t sync_request_callback_;
+    dns_record_callback_t dns_record_callback_;
     FastRG_t* fastrg_ccb;
     
     // Track self-initiated status modifications to avoid processing our own updates
@@ -66,7 +68,8 @@ private:
 public:
     EtcdClientImpl() : watch_running_(false), hsi_callback_(nullptr), 
                        command_callback_(nullptr), user_count_callback_(nullptr),
-                       sync_request_callback_(nullptr), fastrg_ccb(nullptr), 
+                       sync_request_callback_(nullptr), dns_record_callback_(nullptr),
+                       fastrg_ccb(nullptr), 
                        reconnect_running_(false), watchdog_running_(false) {
         last_watch_activity_.store(std::chrono::steady_clock::now());
     }
@@ -225,7 +228,8 @@ public:
         hsi_config_callback_t hsi_callback,
         pppoe_command_callback_t command_callback,
         user_count_changed_callback_t user_count_callback,
-        sync_request_callback_t sync_request_callback) {
+        sync_request_callback_t sync_request_callback,
+        dns_record_callback_t dns_record_callback) {
 
         if (!client_) {
             return ETCD_ERROR;
@@ -236,6 +240,7 @@ public:
         command_callback_ = command_callback;
         user_count_callback_ = user_count_callback;
         sync_request_callback_ = sync_request_callback;
+        dns_record_callback_ = dns_record_callback;
         watch_running_ = true;
 
         return create_watchers();
@@ -257,6 +262,11 @@ public:
             if (user_count_watcher_) {
                 user_count_watcher_->Cancel();
                 user_count_watcher_.reset();
+            }
+
+            if (dns_record_watcher_) {
+                dns_record_watcher_->Cancel();
+                dns_record_watcher_.reset();
             }
 
             // Watch HSI configs: configs/{nodeId}/hsi/
@@ -362,6 +372,37 @@ public:
                 },
                 true  // recursive
             );
+
+            // Watch DNS static records: configs/{nodeId}/{subscriberId}/dns/
+            if (dns_record_callback_) {
+                std::string dns_prefix = "configs/" + node_uuid_ + "/";
+                dns_record_watcher_ = std::make_unique<etcd::Watcher>(
+                    *client_,
+                    dns_prefix,
+                    [this](etcd::Response response) {
+                        if (!watch_running_) return;
+                        update_watch_activity();
+                        if (response.error_code() == 0) {
+                            for (const auto& event : response.events()) {
+                                process_dns_record_event(event);
+                            }
+                        } else {
+                            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+                                "DNS record watch error: %s", response.error_message().c_str());
+                            trigger_reconnect();
+                        }
+                    },
+                    [this](bool connected) {
+                        update_watch_activity();
+                        if (!connected && watch_running_) {
+                            FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
+                                "DNS record watcher disconnected, triggering reconnect...");
+                            trigger_reconnect();
+                        }
+                    },
+                    true  // recursive
+                );
+            }
 
             FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "Etcd watchers started successfully");
             
@@ -532,6 +573,7 @@ public:
                 hsi_callback_,
                 command_callback_,
                 user_count_callback_,
+                dns_record_callback_,
                 fastrg_ccb
             );
             
@@ -1223,6 +1265,7 @@ public:
         hsi_config_callback_t hsi_callback,
         pppoe_command_callback_t command_callback,
         user_count_changed_callback_t user_count_callback,
+        dns_record_callback_t dns_record_callback,
         void* user_data) {
         if (!client_ || !node_uuid || !hsi_callback) {
             return ETCD_ERROR;
@@ -1331,6 +1374,61 @@ public:
             }
 
             std::cout << "Loaded " << count << " existing HSI config(s) for node: " << node_uuid << std::endl;
+
+            // Load existing DNS static records:
+            // configs/{nodeId}/{userId}/dns/{domain}
+            if (dns_record_callback) {
+                std::string dns_base_prefix = "configs/" + std::string(node_uuid) + "/";
+                std::regex dns_regex("configs/([^/]+)/([^/]+)/dns/(.+)");
+                auto dns_response = client_->ls(dns_base_prefix).get();
+                if (dns_response.error_code() == 0) {
+                    int dns_count = 0;
+                    for (size_t i = 0; i < dns_response.keys().size(); ++i) {
+                        std::string key = dns_response.key(i);
+                        std::smatch dns_matches;
+                        if (!std::regex_match(key, dns_matches, dns_regex) || dns_matches.size() != 4)
+                            continue;
+
+                        std::string dns_node_id = dns_matches[1].str();
+                        std::string dns_user_id = dns_matches[2].str();
+                        std::string dns_domain  = dns_matches[3].str();
+                        std::string dns_value   = dns_response.value(i).as_string();
+
+                        dns_record_config_t dns_rec;
+                        memset(&dns_rec, 0, sizeof(dns_rec));
+                        strncpy(dns_rec.domain, dns_domain.c_str(), sizeof(dns_rec.domain) - 1);
+
+                        try {
+                            Json::Value root;
+                            Json::Reader reader;
+                            if (!reader.parse(dns_value, root)) {
+                                std::cerr << "Failed to parse DNS record JSON during load: " << key << std::endl;
+                                continue;
+                            }
+                            if (root.isMember("ip"))
+                                strncpy(dns_rec.ip, root["ip"].asString().c_str(), sizeof(dns_rec.ip) - 1);
+                            dns_rec.ttl = root.isMember("ttl") ? root["ttl"].asUInt() : 3600;
+                        } catch (const std::exception& e) {
+                            std::cerr << "Exception parsing DNS record during load: " << e.what() << std::endl;
+                            continue;
+                        }
+
+                        int64_t dns_revision = dns_response.index();
+                        STATUS dns_ret = dns_record_callback(dns_node_id.c_str(), dns_user_id.c_str(),
+                            &dns_rec, HSI_ACTION_CREATE, dns_revision, user_data);
+                        if (dns_ret == SUCCESS) {
+                            dns_count++;
+                            std::cout << "Loaded DNS record: " << dns_domain
+                                      << " for user " << dns_user_id << std::endl;
+                        }
+                    }
+                    std::cout << "Loaded " << dns_count << " DNS static record(s) for node: "
+                              << node_uuid << std::endl;
+                } else if (dns_response.error_code() != 100) {
+                    std::cerr << "Error querying DNS records during load: "
+                              << dns_response.error_message() << std::endl;
+                }
+            }
 
             return ETCD_SUCCESS;
 
@@ -1748,6 +1846,219 @@ private:
             return false;
         }
     }
+
+    // DNS record event processing
+    STATUS process_dns_record_event(const etcd::Event& event) {
+        if (!dns_record_callback_) return ERROR;
+
+        std::string key = event.kv().key();
+
+        // Only process keys matching configs/{nodeId}/{subscriberId}/dns/{domain}
+        std::regex dns_regex("configs/([^/]+)/([^/]+)/dns/(.+)");
+        std::smatch matches;
+        if (!std::regex_match(key, matches, dns_regex) || matches.size() != 4) {
+            return ERROR; // Not a DNS record key, skip silently
+        }
+
+        std::string node_id = matches[1].str();
+        std::string user_id = matches[2].str();
+        std::string domain = matches[3].str();
+
+        if (node_id != node_uuid_) return ERROR; // Not for us
+
+        int64_t revision = event.kv().modified_index();
+
+        etcd_action_type_t action;
+        switch (event.event_type()) {
+            case etcd::Event::EventType::PUT:
+                try {
+                    if (event.prev_kv().key().empty() || event.prev_kv().key().length() == 0)
+                        action = HSI_ACTION_CREATE;
+                    else
+                        action = HSI_ACTION_UPDATE;
+                } catch (...) {
+                    action = HSI_ACTION_CREATE;
+                }
+                break;
+            case etcd::Event::EventType::DELETE_:
+                action = HSI_ACTION_DELETE;
+                break;
+            default:
+                return ERROR;
+        }
+
+        dns_record_config_t record;
+        memset(&record, 0, sizeof(record));
+        strncpy(record.domain, domain.c_str(), sizeof(record.domain) - 1);
+
+        if (action == HSI_ACTION_DELETE) {
+            return dns_record_callback_(node_id.c_str(), user_id.c_str(),
+                &record, action, revision, fastrg_ccb);
+        }
+
+        // Parse JSON value
+        std::string value = event.kv().as_string();
+        try {
+            Json::Value root;
+            Json::Reader reader;
+            if (!reader.parse(value, root)) {
+                std::cerr << "Failed to parse DNS record JSON: " << value << std::endl;
+                return ERROR;
+            }
+            if (root.isMember("ip"))
+                strncpy(record.ip, root["ip"].asString().c_str(), sizeof(record.ip) - 1);
+            if (root.isMember("ttl"))
+                record.ttl = root["ttl"].asUInt();
+            else
+                record.ttl = 3600; // default TTL
+        } catch (const std::exception& e) {
+            std::cerr << "Exception parsing DNS record: " << e.what() << std::endl;
+            return ERROR;
+        }
+
+        return dns_record_callback_(node_id.c_str(), user_id.c_str(),
+            &record, action, revision, fastrg_ccb);
+    }
+
+    // Put DNS record to etcd
+public:
+    etcd_status_t put_dns_record(const char* node_id, const char* user_id,
+        const dns_record_config_t* record) {
+        if (!client_ || !node_id || !user_id || !record) return ETCD_ERROR;
+
+        try {
+            std::stringstream ss;
+            ss << "configs/" << node_id << "/" << user_id << "/dns/" << record->domain;
+            std::string key = ss.str();
+
+            Json::Value root;
+            root["domain"] = std::string(record->domain);
+            root["ip"] = std::string(record->ip);
+            root["ttl"] = record->ttl;
+
+            Json::StreamWriterBuilder writer;
+            writer["indentation"] = "";
+            std::string payload = Json::writeString(writer, root);
+
+            auto response = client_->set(key, payload).get();
+            if (response.error_code() == 0) {
+                FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                    "Wrote DNS record to: %s", key.c_str());
+                return ETCD_SUCCESS;
+            } else {
+                FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+                    "Failed to put DNS record: %s", response.error_message().c_str());
+                return ETCD_ERROR;
+            }
+        } catch (const std::exception& e) {
+            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+                "Exception putting DNS record: %s", e.what());
+            return ETCD_ERROR;
+        }
+    }
+
+    // Load all DNS static records for a specific subscriber from etcd
+    etcd_status_t load_dns_records(const char *node_uuid, const char *user_id,
+        dns_record_callback_t dns_record_callback, void *user_data) {
+
+        if (!client_ || !node_uuid || !user_id || !dns_record_callback)
+            return ETCD_ERROR;
+
+        try {
+            std::string prefix = "configs/" + std::string(node_uuid) + "/"
+                + std::string(user_id) + "/dns/";
+            std::regex dns_regex("configs/([^/]+)/([^/]+)/dns/(.+)");
+
+            auto response = client_->ls(prefix).get();
+            if (response.error_code() != 0) {
+                /* error_code 100 = key not found; treat as empty, not a hard error */
+                if (response.error_code() == 100)
+                    return ETCD_SUCCESS;
+                FastRG_LOG(ERR, fastrg_ccb ? fastrg_ccb->fp : nullptr, NULL, NULL,
+                    "load_user_dns_records: ls failed for prefix %s: %s",
+                    prefix.c_str(), response.error_message().c_str());
+                return ETCD_ERROR;
+            }
+
+            int loaded = 0;
+            for (size_t i = 0; i < response.keys().size(); ++i) {
+                std::string key   = response.key(i);
+                std::string value = response.value(i).as_string();
+                std::smatch m;
+
+                if (!std::regex_match(key, m, dns_regex) || m.size() != 4)
+                    continue;
+
+                /* m[3] is the domain name part after .../dns/ */
+                std::string domain = m[3].str();
+
+                dns_record_config_t rec;
+                memset(&rec, 0, sizeof(rec));
+                strncpy(rec.domain, domain.c_str(), sizeof(rec.domain) - 1);
+
+                try {
+                    Json::Value root;
+                    Json::Reader reader;
+                    if (!reader.parse(value, root)) {
+                        FastRG_LOG(WARN, fastrg_ccb ? fastrg_ccb->fp : nullptr, NULL, NULL,
+                            "load_user_dns_records: failed to parse JSON for key %s",
+                            key.c_str());
+                        continue;
+                    }
+                    if (root.isMember("ip"))
+                        strncpy(rec.ip, root["ip"].asString().c_str(), sizeof(rec.ip) - 1);
+                    rec.ttl = root.isMember("ttl") ? root["ttl"].asUInt() : 3600;
+                } catch (const std::exception &e) {
+                    FastRG_LOG(WARN, fastrg_ccb ? fastrg_ccb->fp : nullptr, NULL, NULL,
+                        "load_user_dns_records: exception parsing %s: %s",
+                        key.c_str(), e.what());
+                    continue;
+                }
+
+                int64_t revision = response.index();
+                if (dns_record_callback(node_uuid, user_id, &rec,
+                        HSI_ACTION_CREATE, revision, user_data) == SUCCESS)
+                    loaded++;
+            }
+
+            FastRG_LOG(INFO, fastrg_ccb ? fastrg_ccb->fp : nullptr, NULL, NULL,
+                "load_user_dns_records: loaded %d DNS record(s) for user %s",
+                loaded, user_id);
+            return ETCD_SUCCESS;
+
+        } catch (const std::exception &e) {
+            FastRG_LOG(ERR, fastrg_ccb ? fastrg_ccb->fp : nullptr, NULL, NULL,
+                "load_user_dns_records: exception: %s", e.what());
+            return ETCD_ERROR;
+        }
+    }
+
+    // Delete DNS record from etcd
+    etcd_status_t delete_dns_record(const char* node_id, const char* user_id,
+        const char* domain) {
+        if (!client_ || !node_id || !user_id || !domain) return ETCD_ERROR;
+
+        try {
+            std::stringstream ss;
+            ss << "configs/" << node_id << "/" << user_id << "/dns/" << domain;
+            std::string key = ss.str();
+
+            auto response = client_->rm(key).get();
+            if (response.error_code() == 0) {
+                FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                    "Deleted DNS record: %s", key.c_str());
+                return ETCD_SUCCESS;
+            } else {
+                FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+                    "Failed to delete DNS record: %s", response.error_message().c_str());
+                return ETCD_ERROR;
+            }
+        } catch (const std::exception& e) {
+            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+                "Exception deleting DNS record: %s", e.what());
+            return ETCD_ERROR;
+        }
+    }
 };
 
 // Global instance
@@ -1769,13 +2080,15 @@ etcd_status_t etcd_client_start_watch(const char* node_uuid,
     hsi_config_callback_t hsi_callback,
     pppoe_command_callback_t command_callback,
     user_count_changed_callback_t user_count_callback,
-    sync_request_callback_t sync_request_callback) {
+    sync_request_callback_t sync_request_callback,
+    dns_record_callback_t dns_record_callback) {
 
     if (!g_etcd_client) {
         return ETCD_ERROR;
     }
     return g_etcd_client->start_watch(node_uuid, hsi_callback, 
-        command_callback, user_count_callback, sync_request_callback);
+        command_callback, user_count_callback, sync_request_callback,
+        dns_record_callback);
 }
 
 void etcd_client_stop_watch(void) {
@@ -1844,16 +2157,38 @@ etcd_status_t etcd_client_load_existing_configs(const char* node_uuid,
     hsi_config_callback_t hsi_callback, 
     pppoe_command_callback_t command_callback,
     user_count_changed_callback_t user_count_callback,
+    dns_record_callback_t dns_record_callback,
     void* user_data) {
     if (!g_etcd_client) return ETCD_ERROR;
     return g_etcd_client->load_existing_configs(node_uuid, hsi_callback, 
-        command_callback, user_count_callback, user_data);
+        command_callback, user_count_callback, dns_record_callback, user_data);
 }
 
 void etcd_client_cleanup(void) {
     if (g_etcd_client) {
         g_etcd_client.reset();
     }
+}
+
+etcd_status_t etcd_client_put_dns_record(const char* node_id, const char* user_id,
+    const dns_record_config_t* record) {
+    if (!g_etcd_client) return ETCD_ERROR;
+    return g_etcd_client->put_dns_record(node_id, user_id, record);
+}
+
+etcd_status_t etcd_client_delete_dns_record(const char* node_id, const char* user_id,
+    const char* domain) {
+    if (!g_etcd_client) return ETCD_ERROR;
+    return g_etcd_client->delete_dns_record(node_id, user_id, domain);
+}
+
+etcd_status_t etcd_client_load_dns_records(const char *node_uuid,
+    const char *user_id,
+    dns_record_callback_t dns_record_callback,
+    void *user_data) {
+    if (!g_etcd_client) return ETCD_ERROR;
+    return g_etcd_client->load_dns_records(node_uuid, user_id,
+        dns_record_callback, user_data);
 }
 
 } // extern "C"

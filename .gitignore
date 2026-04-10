@@ -12,3 +12,4 @@ unit_test/unit-tester
 **/*.pb.*
 src/version.h
 northbound/controller/proto
+.github/*.md

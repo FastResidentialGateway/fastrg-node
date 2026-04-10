@@ -121,8 +121,8 @@ STATUS ppp_init_config_by_user(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb, U16 ccb
 
     ppp_ccb->hsi_ipv4 = 0x0;
     ppp_ccb->hsi_ipv4_gw = 0x0;
-    ppp_ccb->hsi_primary_dns = 0x0;
-    ppp_ccb->hsi_secondary_dns = 0x0;
+    ppp_ccb->hsi_primary_dns = 0xffffffff; /* 0xffffffff means no dns assigned by server */
+    ppp_ccb->hsi_secondary_dns = 0xffffffff; /* 0xffffffff means no dns assigned by server */
     // vlan_id of each subscriptor is 0 to indicate unconfigured
     ppp_ccb->phase = vlan_id != 0 ? END_PHASE : NOT_CONFIGURED;
     ppp_ccb->is_pap_auth = FALSE;
@@ -550,7 +550,7 @@ STATUS ppp_connect(ppp_ccb_t *ppp_ccb)
         PPP_bye(ppp_ccb);
     /* set ppp starting boolean flag to TRUE */
     rte_atomic16_set(&ppp_ccb->ppp_bool, 1);
-    rte_timer_reset(&ppp_ccb->pppoe, rte_get_timer_hz(), PERIODICAL, 
+    rte_timer_reset(&ppp_ccb->pppoe, fastrg_get_cycles_in_sec(), PERIODICAL, 
         fastrg_ccb->lcore.ctrl_thread, (rte_timer_cb_t)A_padi_timer_func, ppp_ccb);
 
     return SUCCESS;
@@ -618,6 +618,8 @@ void check_etcd_pppoe_status(struct rte_timer *tim, ppp_ccb_t *ppp_ccb)
 void exit_ppp(ppp_ccb_t *ppp_ccb)
 {
     FastRG_t *fastrg_ccb = ppp_ccb->fastrg_ccb;
+    U16 ccb_id = ppp_ccb->user_num - 1;
+    dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
 
     rte_atomic16_cmpset((U16 *)&(ppp_ccb->ppp_bool.cnt), 1, 0);
     rte_timer_stop(&(ppp_ccb->ppp));
@@ -629,6 +631,11 @@ void exit_ppp(ppp_ccb_t *ppp_ccb)
     ppp_ccb->ppp_phase[0].state = S_INIT;
     ppp_ccb->ppp_phase[1].state = S_INIT;
     ppp_ccb->pppoe_phase.active = FALSE;
+    ppp_ccb->hsi_ipv4 = 0x0;
+    ppp_ccb->hsi_ipv4_gw = 0x0;
+    ppp_ccb->hsi_primary_dns = 0xffffffff; /* 0xffffffff means no dns assigned by server */
+    ppp_ccb->hsi_secondary_dns = 0xffffffff; /* 0xffffffff means no dns assigned by server */
+    dns_proxy_cleanup(&dhcp_ccb->dns_state);
     FastRG_LOG(INFO, fastrg_ccb->fp, ppp_ccb, PPPLOGMSG, "User %" PRIu16 
         " HSI module is terminated.\n", ppp_ccb->user_num);
 

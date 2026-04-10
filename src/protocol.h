@@ -3,6 +3,8 @@
 
 #include <common.h>
 
+#include <rte_common.h>
+
 #define ETH_MTU	        1500
 #define ETH_JUMBO       9000
 
@@ -36,6 +38,6 @@ typedef struct vlan_header {
         }tci_struct;
     }tci_union;
     U16 next_proto;
-}__rte_aligned(2) vlan_header_t;
+}__rte_aligned(4) vlan_header_t;
 
 #endif

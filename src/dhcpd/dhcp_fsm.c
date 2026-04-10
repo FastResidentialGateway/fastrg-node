@@ -153,7 +153,7 @@ STATUS A_wait_request_timer(dhcp_ccb_t *dhcp_ccb, U32 pool_index)
     FastRG_t *fastrg_ccb = dhcp_ccb->fastrg_ccb;
 
     rte_timer_stop(tim);
-    rte_timer_reset(tim, 5 * rte_get_timer_hz(), SINGLE, 
+    rte_timer_reset(tim, 5 * fastrg_get_cycles_in_sec(), SINGLE, 
         fastrg_ccb->lcore.ctrl_thread, (rte_timer_cb_t)request_timer, 
         dhcp_ccb->per_lan_user_pool[pool_index]);
     return SUCCESS;
@@ -191,7 +191,7 @@ STATUS A_wait_lease_timer(dhcp_ccb_t *dhcp_ccb, U32 pool_index)
     rte_timer_stop(tim);
     rte_timer_reset(tim, (lan_user_info->timeout_secs != 0 ? 
         lan_user_info->timeout_secs : LEASE_TIMEOUT) 
-        * rte_get_timer_hz(), SINGLE, fastrg_ccb->lcore.ctrl_thread, 
+        * fastrg_get_cycles_in_sec(), SINGLE, fastrg_ccb->lcore.ctrl_thread, 
         (rte_timer_cb_t)lease_timer, 
         dhcp_ccb->per_lan_user_pool[pool_index]);
 
@@ -218,7 +218,7 @@ STATUS A_mark_ip_conflicted(dhcp_ccb_t *dhcp_ccb, U32 pool_index)
     memset(&ip_pool->mac_addr, 0, sizeof(struct rte_ether_addr));
     rte_timer_stop_sync(&lan_user_info->timer);
     rte_timer_reset(&lan_user_info->timer, 
-        360 * rte_get_timer_hz(), SINGLE, // mark as conflicted for 6 minutes
+        360 * fastrg_get_cycles_in_sec(), SINGLE, // mark as conflicted for 6 minutes
         fastrg_ccb->lcore.ctrl_thread, (rte_timer_cb_t)release_lan_user, 
         per_lan_user);
 

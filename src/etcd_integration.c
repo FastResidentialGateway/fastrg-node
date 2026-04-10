@@ -357,6 +357,7 @@ STATUS etcd_integration_start(FastRG_t *fastrg_ccb)
         hsi_config_changed_callback, 
         pppoe_command_received_callback,
         user_count_changed_callback,
+        NULL, // No need to load DNS records here since they are loaded while PPPoE connections are established
         fastrg_ccb);
 
     if (load_status != ETCD_SUCCESS) {
@@ -391,7 +392,8 @@ STATUS etcd_integration_start(FastRG_t *fastrg_ccb)
         hsi_config_changed_callback, 
         pppoe_command_received_callback,
         user_count_changed_callback,
-        sync_request_callback);
+        sync_request_callback,
+        dns_record_changed_callback);
 
     if (status != ETCD_SUCCESS) {
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Failed to start etcd watching for node: %s", fastrg_ccb->node_uuid);
@@ -785,6 +787,50 @@ void sync_request_callback(const char *node_id, void *user_data)
 
     FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, 
         "Wrote %d HSI config(s) to etcd after reconnection", written_count);
+
+    /* Write static DNS records for all active subscribers back to etcd */
+    int dns_written_count = 0;
+    for(int dns_ccb_id=0; dns_ccb_id<fastrg_ccb->user_count; dns_ccb_id++) {
+        ppp_ccb_t *dns_ppp_ccb = PPPD_GET_CCB(fastrg_ccb, dns_ccb_id);
+        if (rte_atomic16_read(&dns_ppp_ccb->vlan_id) == 0)
+            continue; /* skip inactive subscribers */
+
+        dhcp_ccb_t *dns_dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, dns_ccb_id);
+        if (dns_dhcp_ccb == NULL || !dns_dhcp_ccb->dns_state.dns_proxy_enabled)
+            continue;
+
+        dns_static_table_t *tbl = &dns_dhcp_ccb->dns_state.static_table;
+        char dns_user_id_str[8];
+        snprintf(dns_user_id_str, sizeof(dns_user_id_str), "%d", dns_ccb_id + 1);
+
+        for(U32 j=0; j<DNS_STATIC_MAX_RECORDS; j++) {
+            dns_static_record_t *rec = &tbl->records[j];
+            if (!rec->active)
+                continue;
+
+            struct in_addr dns_ip_addr = { .s_addr = rec->ip_addr };
+            char dns_ip_str[INET_ADDRSTRLEN];
+            if (inet_ntop(AF_INET, &dns_ip_addr, dns_ip_str, sizeof(dns_ip_str)) == NULL)
+                continue;
+
+            dns_record_config_t etcd_rec;
+            memset(&etcd_rec, 0, sizeof(etcd_rec));
+            strncpy(etcd_rec.domain, rec->domain, sizeof(etcd_rec.domain) - 1);
+            strncpy(etcd_rec.ip, dns_ip_str, sizeof(etcd_rec.ip) - 1);
+            etcd_rec.ttl = rec->ttl;
+
+            if (etcd_client_put_dns_record(fastrg_ccb->node_uuid, dns_user_id_str,
+                    &etcd_rec) == ETCD_SUCCESS) {
+                dns_written_count++;
+            } else {
+                FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
+                    "Failed to write DNS record %s for user %s to etcd after reconnection",
+                    rec->domain, dns_user_id_str);
+            }
+        }
+    }
+    FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+        "Wrote %d DNS static record(s) to etcd after reconnection", dns_written_count);
 }
 
 #define PPPOE_ACTION_DIAL   "dial"
@@ -839,4 +885,37 @@ STATUS pppoe_command_received_callback(const char *node_id, const pppoe_command_
     }
 
     return ret;
+}
+
+STATUS dns_record_changed_callback(const char *node_id, const char *user_id,
+    const dns_record_config_t *record, etcd_action_type_t action,
+    int64_t revision, void *user_data)
+{
+    FastRG_t *fastrg_ccb = (FastRG_t *)user_data;
+    if (!fastrg_ccb || !user_id || !record) {
+        return ERROR;
+    }
+
+    int ccb_id = atoi(user_id) - 1;
+    if (!is_valid_ccb_id(fastrg_ccb, ccb_id)) {
+        FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
+            "DNS record callback: invalid ccb_id %d for user %s", ccb_id, user_id);
+        return ERROR;
+    }
+
+    FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+        "DNS record event: user=%s domain=%s action=%d rev=%ld",
+        user_id, record->domain, action, (long)revision);
+
+    switch (action) {
+        case HSI_ACTION_CREATE:
+        case HSI_ACTION_UPDATE:
+            return apply_dns_record(fastrg_ccb, ccb_id, record);
+        case HSI_ACTION_DELETE:
+            return remove_dns_record(fastrg_ccb, ccb_id, record->domain);
+        default:
+            FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
+                "DNS record callback: unknown action %d", action);
+            return ERROR;
+    }
 }
