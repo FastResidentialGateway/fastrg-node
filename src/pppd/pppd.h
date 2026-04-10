@@ -115,12 +115,14 @@ void   exit_ppp(ppp_ccb_t *ppp_ccb);
  * 
  * @param fastrg_ccb
  *      FastRG control block pointer
- * @param mail
- *      Mail pointer from mailbox between control plane and data plane
+ * @param pkt_data
+ *      Pointer to the PPPoE / PPP packet data
+ * @param len
+ *      Length of the packet data
  * 
  * @return SUCCESS if process successfully, ERROR if process failed
  */
-STATUS ppp_process(FastRG_t *fastrg_ccb, void *mail);
+STATUS ppp_process(FastRG_t *fastrg_ccb, U8 *pkt_data, U16 len);
 
 STATUS ppp_connect(ppp_ccb_t *ppp_ccb);
 STATUS ppp_disconnect(ppp_ccb_t *ppp_ccb);

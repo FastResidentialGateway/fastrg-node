@@ -7,6 +7,7 @@
 
 #include <rte_eal.h>
 #include <rte_ethdev.h>
+#include <rte_mbuf.h>
 #include <rte_cycles.h>
 #include <rte_lcore.h>
 #include <rte_timer.h>
@@ -391,18 +392,20 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
                 break;
             }
             case EV_DP_PPPoE: {
-                /* recv pppoe packet from hsi_recvd() */
-                /* Data is already in mail[i]->refp, no mbuf to free */
-                if (ppp_process(fastrg_ccb, mail[i]) == ERROR) {
+                /* recv pppoe packet from data plane — mbuf pointer in mail */
+                U8 *pkt_data = rte_pktmbuf_mtod(mail[i]->mbuf, U8 *);
+                if (ppp_process(fastrg_ccb, pkt_data, mail[i]->len) == ERROR) {
+                    rte_pktmbuf_free(mail[i]->mbuf);
                     rte_ring_enqueue(free_mail_ring, mail[i]);
                     continue;
                 }
+                rte_pktmbuf_free(mail[i]->mbuf);
                 rte_ring_enqueue(free_mail_ring, mail[i]);
                 break;
             }
             case EV_DP_DHCP: {
                 U16 ccb_id = mail[i]->ccb_id;
-                U8 *pkt_data = mail[i]->refp;
+                U8 *pkt_data = rte_pktmbuf_mtod(mail[i]->mbuf, U8 *);
                 struct rte_ether_hdr *eth_hdr = (struct rte_ether_hdr *)pkt_data;
                 vlan_header_t *vlan_header = (vlan_header_t *)(eth_hdr + 1);
                 struct rte_ipv4_hdr *ip_hdr = (struct rte_ipv4_hdr *)(vlan_header + 1);
@@ -415,27 +418,30 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
                 } else if (ret == 0) {
                     wan_ctrl_tx(fastrg_ccb, ccb_id, pkt_data, mail[i]->len);
                 }
+                rte_pktmbuf_free(mail[i]->mbuf);
                 rte_ring_enqueue(free_mail_ring, mail[i]);
                 break;
             }
             case EV_DP_DNS: {
                 U16 ccb_id = mail[i]->ccb_id;
                 U8 port_id = mail[i]->port_id;
+                U8 *dns_pkt_data = rte_pktmbuf_mtod(mail[i]->mbuf, U8 *);
                 if (port_id == WAN_PORT) {
-                    dnsd_cp_process_wan_udp_response(fastrg_ccb, mail[i]->refp,
+                    dnsd_cp_process_wan_udp_response(fastrg_ccb, dns_pkt_data,
                         mail[i]->len, ccb_id);
                 } else {
-                    struct rte_ether_hdr *dns_eth = (struct rte_ether_hdr *)mail[i]->refp;
+                    struct rte_ether_hdr *dns_eth = (struct rte_ether_hdr *)dns_pkt_data;
                     vlan_header_t *dns_vlan = (vlan_header_t *)(dns_eth + 1);
                     struct rte_ipv4_hdr *dns_ip = (struct rte_ipv4_hdr *)(dns_vlan + 1);
                     if (dns_ip->next_proto_id == PROTO_TYPE_UDP) {
-                        dnsd_cp_process_lan_udp_query(fastrg_ccb, mail[i]->refp,
+                        dnsd_cp_process_lan_udp_query(fastrg_ccb, dns_pkt_data,
                             mail[i]->len, ccb_id);
                     } else if (dns_ip->next_proto_id == PROTO_TYPE_TCP) {
-                        dnsd_cp_process_lan_tcp_query(fastrg_ccb, mail[i]->refp,
+                        dnsd_cp_process_lan_tcp_query(fastrg_ccb, dns_pkt_data,
                             mail[i]->len, ccb_id);
                     }
                 }
+                rte_pktmbuf_free(mail[i]->mbuf);
                 rte_ring_enqueue(free_mail_ring, mail[i]);
                 break;
             }

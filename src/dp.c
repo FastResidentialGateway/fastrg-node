@@ -230,9 +230,9 @@ static inline BOOL is_iptv_pkt_need_drop(FastRG_t *fastrg_ccb, vlan_header_t *vl
 /**
  * send2cp - Forward DNS/DHCP/PPPoE packet to control plane via cp_q ring.
  *
- * Deep-copies the packet data into a pre-allocated tFastRG_MBX slot,
- * sets the event type (EV_DP_DNS, EV_DP_DHCP, or EV_DP_PPPoE) and ccb_id/port_id,
- * then enqueues to cp_q for processing in fastrg_loop().
+ * Stores the mbuf pointer directly in the pre-allocated tFastRG_MBX slot
+ * (zero-copy). The control plane is responsible for freeing the mbuf after
+ * processing.
  */
 static inline void send2cp(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt,
     fastrg_event_type_t evt_type, U8 port_id)
@@ -241,10 +241,9 @@ static inline void send2cp(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt,
     U16 ccb_id = ((mbuf_priv_t *)rte_mbuf_to_priv(single_pkt))->ccb_id;
 
     if (rte_ring_dequeue(free_mail_ring, (void **)&slot) == 0) {
-        U16 copy_len = RTE_MIN(single_pkt->pkt_len, sizeof(slot->refp));
-        rte_memcpy(slot->refp, rte_pktmbuf_mtod(single_pkt, void *), copy_len);
+        slot->mbuf = single_pkt;
         slot->type = evt_type;
-        slot->len = copy_len;
+        slot->len = single_pkt->pkt_len;
         slot->ccb_id = ccb_id;
         slot->port_id = port_id;
         /* cp_q is full: return slot to free_mail_ring */
@@ -253,7 +252,7 @@ static inline void send2cp(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt,
             drop_packet(fastrg_ccb, single_pkt, port_id, ccb_id);
         } else {
             count_rx_packet(fastrg_ccb, single_pkt, port_id, ccb_id);
-            rte_pktmbuf_free(single_pkt);
+            /* mbuf ownership transferred to control plane — do NOT free here */
         }
     } else {
         drop_packet(fastrg_ccb, single_pkt, port_id, ccb_id);
