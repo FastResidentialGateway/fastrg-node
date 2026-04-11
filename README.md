@@ -1,7 +1,7 @@
 # FastRG(Fast Residential Gateway) system (Data plane node)
 
 [![BSD license](https://img.shields.io/badge/License-BSD-blue.svg)](https://opensource.org/licenses/BSD-3-Clause)
-[![FastRG Node CI](https://github.com/w180112/fastrg-node/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/w180112/fastrg-node/actions/workflows/ci.yml)
+[![FastRG Node CI](https://github.com/FastResidentialGateway/fastrg-node/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/FastResidentialGateway/fastrg-node/actions/workflows/ci.yml)
 
 ## Introduction:
 
@@ -11,7 +11,7 @@
 - The FastRG system support DHCP server and NAT function for subscribers behind the FastRG system.
 - For service provider, the FastRG system can help to reduce the CAPEX and OPEX of deploying residential gateway for subscribers by just deploying an ONT with L2 bridge in subscriber's home.
 - Because of the centralized management of Residential Gateway system, service provider can easily maintain and update the FastRG system without going to subscriber's home. This can greatly reduce the network security risks of service provider.
-- The FastRG system also provides both a command line interface and a [central controller](https://github.com/w180112/fastrg-controller) for administrator to manage. Administrator can easily deploy the FastRG system in a cloud native environment with Kubernetes and Docker image.
+- The FastRG system also provides both a command line interface and a [central controller](https://github.com/FastResidentialGateway/fastrg-controller) for administrator to manage. Administrator can easily deploy the FastRG system in a cloud native environment with Kubernetes and Docker image.
 - The FastRG system data plane is implemented based on DPDK library to achieve high performance packet processing.
 
 ## System required:
@@ -23,7 +23,7 @@
 
 ## How to use:
 
-- The FastRG system is consisted of control plane and data plane, the [FastRG controller](https://github.com/w180112/fastrg-controller) and this repository.
+- The FastRG system is consisted of control plane and data plane, the [FastRG controller](https://github.com/FastResidentialGateway/fastrg-controller) and this repository.
 	- The control plane is used to manage the data plane node and network functions. 
 	- The data plane is used to forward packets between LAN and WAN port.
 - User can deploy both control plane and data plane or just data plane only.
