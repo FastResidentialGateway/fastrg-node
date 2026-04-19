@@ -23,6 +23,7 @@
 #include <rte_hash_crc.h>
 
 #include "pppd.h"
+#include "tcp_conntrack.h"
 
 #define NAT_ENTRY_TIMEOUT_TICKS 10
 
@@ -199,6 +200,8 @@ static inline U16 nat_learning_port_reuse(struct rte_ether_hdr *eth_hdr,
                     entry->src_port = src_port;
                     entry->dst_port = dst_port;
                     entry->nat_port = nat_port;
+                    entry->tcp_state = TCP_CONNTRACK_NONE;
+                    entry->tcp_fin_flags = 0;
                     rte_atomic16_set(&entry->is_alive, NAT_ENTRY_TIMEOUT_TICKS);
 
                     rte_atomic_thread_fence(rte_memory_order_release);
@@ -362,7 +365,7 @@ static inline U16 nat_udp_learning(struct rte_ether_hdr *eth_hdr,
 /**
  * @fn nat_tcp_learning
  * 
- * @brief NAT learning for TCP packets
+ * @brief NAT learning for TCP packets with connection tracking
  * 
  * @param eth_hdr
  *        Pointer to Ethernet header
@@ -381,10 +384,30 @@ static inline U16 nat_tcp_learning(struct rte_ether_hdr *eth_hdr,
     struct rte_ipv4_hdr *ip_hdr, struct rte_tcp_hdr *tcphdr, 
     addr_table_t addr_table[], port_fwd_entry_t port_fwd_table[])
 {
-    return nat_learning_port_reuse(eth_hdr,
+    U16 nat_port = nat_learning_port_reuse(eth_hdr,
         ip_hdr->src_addr, ip_hdr->dst_addr,
         tcphdr->src_port, tcphdr->dst_port,
         addr_table, port_fwd_table);
+
+    if (nat_port != 0) {
+        /* Find the entry and run the TCP conntrack FSM (originator direction) */
+        U32 table_idx = compute_nat_table_index(nat_port,
+            ip_hdr->dst_addr, tcphdr->dst_port);
+        U32 start_idx = table_idx;
+        do {
+            addr_table_t *entry = &addr_table[table_idx];
+            if (rte_atomic16_read(&entry->is_fill) == NAT_ENTRY_READY &&
+                    nat_entry_matches_key(entry, nat_port,
+                        ip_hdr->dst_addr, tcphdr->dst_port)) {
+                tcp_conntrack_fsm(entry, tcphdr->tcp_flags, FALSE);
+                break;
+            }
+            table_idx++;
+            if (table_idx >= MAX_NAT_ENTRIES)
+                table_idx = 0;
+        } while (table_idx != start_idx);
+    }
+    return nat_port;
 }
 
 /*======================================================================

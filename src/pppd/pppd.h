@@ -56,6 +56,8 @@ typedef struct addr_table {
     U16                   src_port; // original src port from LAN user
     U16                   dst_port; // dst port where LAN user wants to visit
     U16                   nat_port;
+    U8                    tcp_state; // TCP conntrack state (tcp_conntrack_state_t), 0 = NONE
+    U8                    tcp_fin_flags; // bitmask: bit0 = originator FIN, bit1 = responder FIN
     rte_atomic16_t        is_fill; // is this entry filled or not
     rte_atomic16_t        is_alive; // counter for checking entry alive or not every second
 }__rte_cache_aligned addr_table_t;
