@@ -178,6 +178,10 @@ int main()
     test_dnsd(fastrg_ccb, &total_tests, &total_pass);
     puts("ok!");
 
+    puts("====================test pppd/tcp_conntrack.c====================");
+    test_tcp_conntrack(fastrg_ccb, &total_tests, &total_pass);
+    puts("ok!");
+
     printf("\n====================Unit Test Summary====================\n\n");
     printf("╔════════════════════════════════════════════════════════════╗\n");
     printf("║  All Test Summary                                          ║\n");

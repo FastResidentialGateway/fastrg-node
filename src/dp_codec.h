@@ -381,6 +381,7 @@ static int decaps_tcp(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt,
     }
     rte_ether_addr_copy(&fastrg_ccb->nic_info.hsi_lan_mac, &eth_hdr->src_addr);
     rte_ether_addr_copy(&entry->mac_addr, &eth_hdr->dst_addr);
+    tcp_conntrack_fsm(entry, tcphdr->tcp_flags, TRUE);
     ip_hdr->dst_addr = entry->src_ip;
     tcphdr->dst_port = entry->src_port;
     ip_hdr->hdr_checksum = rte_ipv4_cksum(ip_hdr);
