@@ -22,55 +22,64 @@
 
 static STATUS tcp_act_timeout_none(struct addr_table *entry)
 {
-    rte_atomic16_set(&((addr_table_t *)entry)->is_alive, TCP_TIMEOUT_NONE);
+    rte_atomic64_set(&((addr_table_t *)entry)->expire_at,
+        fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_NONE * fastrg_get_cycles_in_sec());
     return SUCCESS;
 }
 
 static STATUS tcp_act_timeout_syn_sent(struct addr_table *entry)
 {
-    rte_atomic16_set(&((addr_table_t *)entry)->is_alive, TCP_TIMEOUT_SYN_SENT);
+    rte_atomic64_set(&((addr_table_t *)entry)->expire_at,
+        fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_SYN_SENT * fastrg_get_cycles_in_sec());
     return SUCCESS;
 }
 
 static STATUS tcp_act_timeout_syn_recv(struct addr_table *entry)
 {
-    rte_atomic16_set(&((addr_table_t *)entry)->is_alive, TCP_TIMEOUT_SYN_RECV);
+    rte_atomic64_set(&((addr_table_t *)entry)->expire_at,
+        fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_SYN_RECV * fastrg_get_cycles_in_sec());
     return SUCCESS;
 }
 
 static STATUS tcp_act_timeout_established(struct addr_table *entry)
 {
-    rte_atomic16_set(&((addr_table_t *)entry)->is_alive, TCP_TIMEOUT_ESTABLISHED);
+    rte_atomic64_set(&((addr_table_t *)entry)->expire_at,
+        fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_ESTABLISHED * fastrg_get_cycles_in_sec());
     return SUCCESS;
 }
 
 static STATUS tcp_act_timeout_fin_wait(struct addr_table *entry)
 {
-    rte_atomic16_set(&((addr_table_t *)entry)->is_alive, TCP_TIMEOUT_FIN_WAIT);
+    rte_atomic64_set(&((addr_table_t *)entry)->expire_at,
+        fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_FIN_WAIT * fastrg_get_cycles_in_sec());
     return SUCCESS;
 }
 
 static STATUS tcp_act_timeout_close_wait(struct addr_table *entry)
 {
-    rte_atomic16_set(&((addr_table_t *)entry)->is_alive, TCP_TIMEOUT_CLOSE_WAIT);
+    rte_atomic64_set(&((addr_table_t *)entry)->expire_at,
+        fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_CLOSE_WAIT * fastrg_get_cycles_in_sec());
     return SUCCESS;
 }
 
 static STATUS tcp_act_timeout_last_ack(struct addr_table *entry)
 {
-    rte_atomic16_set(&((addr_table_t *)entry)->is_alive, TCP_TIMEOUT_LAST_ACK);
+    rte_atomic64_set(&((addr_table_t *)entry)->expire_at,
+        fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_LAST_ACK * fastrg_get_cycles_in_sec());
     return SUCCESS;
 }
 
 static STATUS tcp_act_timeout_time_wait(struct addr_table *entry)
 {
-    rte_atomic16_set(&((addr_table_t *)entry)->is_alive, TCP_TIMEOUT_TIME_WAIT);
+    rte_atomic64_set(&((addr_table_t *)entry)->expire_at,
+        fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_TIME_WAIT * fastrg_get_cycles_in_sec());
     return SUCCESS;
 }
 
 static STATUS tcp_act_timeout_close(struct addr_table *entry)
 {
-    rte_atomic16_set(&((addr_table_t *)entry)->is_alive, TCP_TIMEOUT_CLOSE);
+    rte_atomic64_set(&((addr_table_t *)entry)->expire_at,
+        fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_CLOSE * fastrg_get_cycles_in_sec());
     return SUCCESS;
 }
 
@@ -83,6 +92,12 @@ static STATUS tcp_act_set_fin_orig(struct addr_table *entry)
 static STATUS tcp_act_set_fin_resp(struct addr_table *entry)
 {
     ((addr_table_t *)entry)->tcp_fin_flags |= TCP_FIN_FLAG_RESPONDER;
+    return SUCCESS;
+}
+
+static STATUS tcp_act_reset_fin_flags(struct addr_table *entry)
+{
+    ((addr_table_t *)entry)->tcp_fin_flags = 0;
     return SUCCESS;
 }
 
@@ -134,9 +149,12 @@ static tcp_conntrack_state_tbl_t tcp_conntrack_tbl[] = {
     /* TIME_WAIT: both FINs acked, waiting 2*MSL */
     { TCP_CONNTRACK_TIME_WAIT,   TCP_EV_ACK,       TCP_CONNTRACK_TIME_WAIT,     { tcp_act_timeout_time_wait, NULL } },  /* late ACK retransmit */
     { TCP_CONNTRACK_TIME_WAIT,   TCP_EV_RST,       TCP_CONNTRACK_CLOSE,         { tcp_act_timeout_close, NULL } },
+    { TCP_CONNTRACK_TIME_WAIT,   TCP_EV_SYN,       TCP_CONNTRACK_SYN_SENT,      { tcp_act_reset_fin_flags, tcp_act_timeout_syn_sent, NULL } },  /* new connection reuse during 2MSL */
 
     /* CLOSE: RST or fully closed */
     { TCP_CONNTRACK_CLOSE,       TCP_EV_RST,       TCP_CONNTRACK_CLOSE,         { tcp_act_timeout_close, NULL } },
+    { TCP_CONNTRACK_CLOSE,       TCP_EV_SYN,       TCP_CONNTRACK_SYN_SENT,      { tcp_act_reset_fin_flags, tcp_act_timeout_syn_sent, NULL } },    /* new connection from originator */
+    { TCP_CONNTRACK_CLOSE,       TCP_EV_SYN_ACK,   TCP_CONNTRACK_SYN_RECV,      { tcp_act_reset_fin_flags, tcp_act_timeout_syn_recv, NULL } },    /* new passive connection */
 
     /* Sentinel */
     { TCP_CONNTRACK_INVLD, 0, 0, { NULL } },
