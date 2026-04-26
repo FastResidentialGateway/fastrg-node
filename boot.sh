@@ -28,8 +28,8 @@ download_controller_grpc() {
 
     # Try to use tag, use master if not found
     PROTO_URLS=(
-        "https://raw.githubusercontent.com/w180112/fastrg-controller/$CURRENT_TAG/proto/controller.proto"
-        "https://raw.githubusercontent.com/w180112/fastrg-controller/master/proto/controller.proto"
+        "https://raw.githubusercontent.com/FastResidentialGateway/fastrg-controller/$CURRENT_TAG/proto/controller.proto"
+        "https://raw.githubusercontent.com/FastResidentialGateway/fastrg-controller/master/proto/controller.proto"
     )
 
     DOWNLOAD_SUCCESS=0

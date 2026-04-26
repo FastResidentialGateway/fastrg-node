@@ -709,8 +709,6 @@ STATUS A_this_layer_up(__attribute__((unused)) struct rte_timer *ppp_timer, ppp_
     } else if (s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].ppp_payload.ppp_protocol == rte_cpu_to_be_16(IPCP_PROTOCOL)) {
         rte_atomic16_set(&s_ppp_ccb->dp_start_bool, (BIT16)1);
         s_ppp_ccb->phase = DATA_PHASE;
-        rte_timer_reset(&(s_ppp_ccb->nat), fastrg_get_cycles_in_sec(), PERIODICAL, 
-            fastrg_ccb->lcore.ctrl_thread, (rte_timer_cb_t)nat_rule_timer, s_ppp_ccb);
         FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " IPCP connection establish successfully.", s_ppp_ccb->user_num);
         FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "Now user %" PRIu16 " can start to send data via pppoe session id 0x%x and vlan is %" 
             PRIu16 ".\n", s_ppp_ccb->user_num, rte_be_to_cpu_16(s_ppp_ccb->session_id), rte_atomic16_read(&s_ppp_ccb->vlan_id));

@@ -39,7 +39,7 @@ typedef enum {
     TCP_EV_INVLD,     /* Sentinel */
 } tcp_conntrack_event_t;
 
-/*--------- TIMEOUT VALUES (in timer ticks, 1 tick = 1 second) ----------*/
+/*--------- TIMEOUT VALUES (in seconds, used to compute absolute expiry timestamp) ----------*/
 #define TCP_TIMEOUT_NONE         10
 #define TCP_TIMEOUT_SYN_SENT     30
 #define TCP_TIMEOUT_SYN_RECV     30

@@ -58,8 +58,8 @@ typedef struct addr_table {
     U16                   nat_port;
     U8                    tcp_state; // TCP conntrack state (tcp_conntrack_state_t), 0 = NONE
     U8                    tcp_fin_flags; // bitmask: bit0 = originator FIN, bit1 = responder FIN
-    rte_atomic16_t        is_fill; // is this entry filled or not
-    rte_atomic16_t        is_alive; // counter for checking entry alive or not every second
+    rte_atomic16_t        is_fill;   // is this entry filled or not
+    rte_atomic64_t        expire_at; // absolute TSC timestamp when entry expires
 }__rte_cache_aligned addr_table_t;
 
 /**
@@ -97,7 +97,6 @@ typedef struct {
     arp_pending_queue_t   arp_pq;            /* ARP pending queue for unresolved port-fwd destinations */
     struct rte_timer      pppoe;             /* pppoe timer */
     struct rte_timer      ppp;               /* ppp timer */
-    struct rte_timer      nat;               /* nat table timer */
     struct rte_timer      ppp_alive;         /* PPP connection checking timer */
     struct rte_timer      etcd_pppoe_status_timer; /* etcd pppoe status checking timer */
     rte_atomic64_t        pppoes_rx_bytes;

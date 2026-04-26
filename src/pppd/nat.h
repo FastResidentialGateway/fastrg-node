@@ -25,7 +25,7 @@
 #include "pppd.h"
 #include "tcp_conntrack.h"
 
-#define NAT_ENTRY_TIMEOUT_TICKS 10
+#define NAT_ENTRY_TIMEOUT_SEC 10
 
 #define MAX_L4_PORT_NUM 0xffff
 #define SYS_MAX_PORT 1000
@@ -35,7 +35,33 @@
 #define NAT_ENTRY_FILLING    1
 #define NAT_ENTRY_READY      2
 
-void nat_rule_timer(__attribute__((unused)) struct rte_timer *tim, ppp_ccb_t *s_ppp_ccb);
+/**
+ * @fn nat_expiry_cycles
+ *
+ * @brief Compute the absolute TSC timestamp at which a new/refreshed NAT entry
+ *        should expire (now + NAT_ENTRY_TIMEOUT_SEC seconds).
+ *
+ * @return Expiry timestamp in CPU cycles
+ */
+static inline U64 nat_expiry_cycles(void)
+{
+    return fastrg_get_cur_cycles() + (U64)NAT_ENTRY_TIMEOUT_SEC * fastrg_get_cycles_in_sec();
+}
+
+/**
+ * @fn nat_entry_is_expired
+ *
+ * @brief Check whether a READY NAT entry has passed its expiry timestamp.
+ *        Must only be called on entries whose is_fill == NAT_ENTRY_READY.
+ *
+ * @param entry  Pointer to NAT address table entry
+ *
+ * @return Non-zero if the entry has expired, 0 otherwise
+ */
+static inline int nat_entry_is_expired(addr_table_t *entry)
+{
+    return fastrg_get_cur_cycles() > (U64)rte_atomic64_read(&entry->expire_at);
+}
 
 /**
  * @fn compute_nat_table_index
@@ -202,7 +228,7 @@ static inline U16 nat_learning_port_reuse(struct rte_ether_hdr *eth_hdr,
                     entry->nat_port = nat_port;
                     entry->tcp_state = TCP_CONNTRACK_NONE;
                     entry->tcp_fin_flags = 0;
-                    rte_atomic16_set(&entry->is_alive, NAT_ENTRY_TIMEOUT_TICKS);
+                    rte_atomic64_set(&entry->expire_at, nat_expiry_cycles());
 
                     rte_atomic_thread_fence(rte_memory_order_release);
                     rte_atomic16_set(&entry->is_fill, NAT_ENTRY_READY);
@@ -223,20 +249,47 @@ static inline U16 nat_learning_port_reuse(struct rte_ether_hdr *eth_hdr,
 
             /* Case 2: Entry is READY - safe to read */
             if (entry_state == NAT_ENTRY_READY) {
-                /* Same flow already exists - return existing nat_port */
+                /* Same flow already exists - refresh expiry and return */
                 if (nat_entry_same_flow(entry, nat_port, src_ip, src_port, dst_ip, dst_port)) {
-                    rte_atomic16_set(&entry->is_alive, NAT_ENTRY_TIMEOUT_TICKS);
+                    rte_atomic64_set(&entry->expire_at, nat_expiry_cycles());
                     return entry->nat_port;
                 }
 
-                /* Same (nat_port, dst_ip, dst_port) but different source = CONFLICT
-                * This means another source already uses this nat_port for this destination
-                * Must try a different nat_port */
+                /* Entry is expired - try to evict and reuse this slot */
+                if (nat_entry_is_expired(entry)) {
+                    if (rte_atomic16_cmpset((volatile uint16_t *)&entry->is_fill,
+                            NAT_ENTRY_READY, NAT_ENTRY_FILLING)) {
+                        if (nat_entry_is_expired(entry)) {
+                            /* Still expired after CAS: evict and reuse */
+                            rte_ether_addr_copy(&eth_hdr->src_addr, &entry->mac_addr);
+                            entry->src_ip = src_ip;
+                            entry->dst_ip = dst_ip;
+                            entry->src_port = src_port;
+                            entry->dst_port = dst_port;
+                            entry->nat_port = nat_port;
+                            entry->tcp_state = TCP_CONNTRACK_NONE;
+                            entry->tcp_fin_flags = 0;
+                            rte_atomic64_set(&entry->expire_at, nat_expiry_cycles());
+                            rte_atomic_thread_fence(rte_memory_order_release);
+                            rte_atomic16_set(&entry->is_fill, NAT_ENTRY_READY);
+                            return entry->nat_port;
+                        }
+                        /* Entry was refreshed between our check and CAS: restore it */
+                        rte_atomic16_set(&entry->is_fill, NAT_ENTRY_READY);
+                    }
+                    /* CAS failed or entry restored: advance to next slot */
+                    table_idx++;
+                    if (table_idx >= MAX_NAT_ENTRIES)
+                        table_idx = 0;
+                    continue;
+                }
+
+                /* Active conflict: same (nat_port, dst_ip, dst_port), different source */
                 if (nat_entry_matches_key(entry, nat_port, dst_ip, dst_port))
                     break;
             }
 
-            /* Case 4: Hash collision (different key, same bucket) - try next slot */
+            /* Case 3: Hash collision (active entry, different key) - try next slot */
             table_idx++;
             if (table_idx >= MAX_NAT_ENTRIES)
                 table_idx = 0;
@@ -293,8 +346,18 @@ static inline addr_table_t *nat_reverse_lookup(U16 nat_port, U32 remote_ip, U16 
         /* Entry is ready - safe to read */
         rte_atomic_thread_fence(rte_memory_order_acquire);
 
+        /* Evict expired entries encountered during the walk */
+        if (nat_entry_is_expired(entry)) {
+                rte_atomic16_cmpset((volatile uint16_t *)&entry->is_fill,
+                    NAT_ENTRY_READY, NAT_ENTRY_FREE);
+            table_idx++;
+            if (table_idx >= MAX_NAT_ENTRIES)
+                table_idx = 0;
+            continue;
+        }
+
         if (nat_entry_matches_key(entry, nat_port, remote_ip, remote_port)) {
-            rte_atomic16_set(&entry->is_alive, NAT_ENTRY_TIMEOUT_TICKS);
+            rte_atomic64_set(&entry->expire_at, nat_expiry_cycles());
             return entry;
         }
 

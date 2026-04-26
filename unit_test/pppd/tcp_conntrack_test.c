@@ -21,7 +21,8 @@ static void init_entry(addr_table_t *entry, U8 initial_state)
     entry->tcp_state = initial_state;
     entry->tcp_fin_flags = 0;
     rte_atomic16_set(&entry->is_fill, NAT_ENTRY_READY);
-    rte_atomic16_set(&entry->is_alive, TCP_TIMEOUT_NONE);
+    rte_atomic64_set(&entry->expire_at,
+        fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_NONE * fastrg_get_cycles_in_sec());
 }
 
 /**
@@ -55,6 +56,19 @@ static void test_three_way_handshake(void)
         "expected ESTABLISHED(%d), got %d", TCP_CONNTRACK_ESTABLISHED, entry.tcp_state);
 }
 
+/*
+ * Helper: verify expire_at was set to approximately (now + expected_secs * hz).
+ * Returns 1 if in range, 0 otherwise.
+ */
+static int expire_at_approx(U64 before_cycles, U64 expire_at, U64 expected_secs)
+{
+    U64 hz = fastrg_get_cycles_in_sec();
+    U64 tolerance = hz / 1000; /* 1 ms tolerance */
+    U64 expected = (U64)expected_secs * hz;
+    return expire_at >= before_cycles + expected &&
+           expire_at <= before_cycles + expected + tolerance;
+}
+
 /**
  * Test 2: Timeout values per state
  */
@@ -64,41 +78,47 @@ static void test_timeout_values(void)
     printf("=================================\n\n");
 
     addr_table_t entry;
+    U64 before;
 
     /* SYN_SENT timeout */
     init_entry(&entry, TCP_CONNTRACK_NONE);
+    before = fastrg_get_cur_cycles();
     tcp_conntrack_fsm(&entry, RTE_TCP_SYN_FLAG, FALSE);
-    TEST_ASSERT(rte_atomic16_read(&entry.is_alive) == TCP_TIMEOUT_SYN_SENT,
+    TEST_ASSERT(expire_at_approx(before, rte_atomic64_read(&entry.expire_at), TCP_TIMEOUT_SYN_SENT),
         "SYN_SENT timeout",
-        "expected %d, got %d", TCP_TIMEOUT_SYN_SENT, rte_atomic16_read(&entry.is_alive));
+        "expire_at not set to ~%d seconds", TCP_TIMEOUT_SYN_SENT);
 
     /* ESTABLISHED timeout */
     init_entry(&entry, TCP_CONNTRACK_SYN_RECV);
+    before = fastrg_get_cur_cycles();
     tcp_conntrack_fsm(&entry, RTE_TCP_ACK_FLAG, FALSE);
-    TEST_ASSERT(rte_atomic16_read(&entry.is_alive) == TCP_TIMEOUT_ESTABLISHED,
+    TEST_ASSERT(expire_at_approx(before, rte_atomic64_read(&entry.expire_at), TCP_TIMEOUT_ESTABLISHED),
         "ESTABLISHED timeout",
-        "expected %d, got %d", TCP_TIMEOUT_ESTABLISHED, rte_atomic16_read(&entry.is_alive));
+        "expire_at not set to ~%d seconds", TCP_TIMEOUT_ESTABLISHED);
 
     /* CLOSE timeout (via RST) */
     init_entry(&entry, TCP_CONNTRACK_ESTABLISHED);
+    before = fastrg_get_cur_cycles();
     tcp_conntrack_fsm(&entry, RTE_TCP_RST_FLAG, FALSE);
-    TEST_ASSERT(rte_atomic16_read(&entry.is_alive) == TCP_TIMEOUT_CLOSE,
+    TEST_ASSERT(expire_at_approx(before, rte_atomic64_read(&entry.expire_at), TCP_TIMEOUT_CLOSE),
         "CLOSE timeout after RST",
-        "expected %d, got %d", TCP_TIMEOUT_CLOSE, rte_atomic16_read(&entry.is_alive));
+        "expire_at not set to ~%d seconds", TCP_TIMEOUT_CLOSE);
 
     /* FIN_WAIT timeout */
     init_entry(&entry, TCP_CONNTRACK_ESTABLISHED);
+    before = fastrg_get_cur_cycles();
     tcp_conntrack_fsm(&entry, RTE_TCP_FIN_FLAG, FALSE);
-    TEST_ASSERT(rte_atomic16_read(&entry.is_alive) == TCP_TIMEOUT_FIN_WAIT,
+    TEST_ASSERT(expire_at_approx(before, rte_atomic64_read(&entry.expire_at), TCP_TIMEOUT_FIN_WAIT),
         "FIN_WAIT timeout",
-        "expected %d, got %d", TCP_TIMEOUT_FIN_WAIT, rte_atomic16_read(&entry.is_alive));
+        "expire_at not set to ~%d seconds", TCP_TIMEOUT_FIN_WAIT);
 
     /* CLOSE_WAIT timeout */
     init_entry(&entry, TCP_CONNTRACK_ESTABLISHED);
+    before = fastrg_get_cur_cycles();
     tcp_conntrack_fsm(&entry, RTE_TCP_FIN_FLAG, TRUE);
-    TEST_ASSERT(rte_atomic16_read(&entry.is_alive) == TCP_TIMEOUT_CLOSE_WAIT,
+    TEST_ASSERT(expire_at_approx(before, rte_atomic64_read(&entry.expire_at), TCP_TIMEOUT_CLOSE_WAIT),
         "CLOSE_WAIT timeout",
-        "expected %d, got %d", TCP_TIMEOUT_CLOSE_WAIT, rte_atomic16_read(&entry.is_alive));
+        "expire_at not set to ~%d seconds", TCP_TIMEOUT_CLOSE_WAIT);
 }
 
 /**
@@ -275,15 +295,18 @@ static void test_syn_retransmit(void)
 
     addr_table_t entry;
     init_entry(&entry, TCP_CONNTRACK_SYN_SENT);
-    rte_atomic16_set(&entry.is_alive, 5); /* simulate partial timeout */
+    /* simulate a partially elapsed timeout (5 seconds remaining) */
+    rte_atomic64_set(&entry.expire_at,
+        fastrg_get_cur_cycles() + 5ULL * fastrg_get_cycles_in_sec());
 
+    U64 before = fastrg_get_cur_cycles();
     tcp_conntrack_fsm(&entry, RTE_TCP_SYN_FLAG, FALSE);
     TEST_ASSERT(entry.tcp_state == TCP_CONNTRACK_SYN_SENT,
         "SYN retransmit stays SYN_SENT",
         "expected SYN_SENT(%d), got %d", TCP_CONNTRACK_SYN_SENT, entry.tcp_state);
-    TEST_ASSERT(rte_atomic16_read(&entry.is_alive) == TCP_TIMEOUT_SYN_SENT,
+    TEST_ASSERT(expire_at_approx(before, rte_atomic64_read(&entry.expire_at), TCP_TIMEOUT_SYN_SENT),
         "SYN retransmit refreshes timeout",
-        "expected %d, got %d", TCP_TIMEOUT_SYN_SENT, rte_atomic16_read(&entry.is_alive));
+        "expire_at not reset to ~%d seconds", TCP_TIMEOUT_SYN_SENT);
 }
 
 /**
@@ -317,6 +340,72 @@ static void test_direction_aware_fin(void)
         "expected TIME_WAIT(%d), got %d", TCP_CONNTRACK_TIME_WAIT, entry.tcp_state);
 }
 
+/**
+ * Test 11: New connection reuse from CLOSE state
+ * CLOSE + SYN → SYN_SENT (fin_flags cleared)
+ * CLOSE + SYN_ACK → SYN_RECV (passive open, fin_flags cleared)
+ */
+static void test_close_new_connection(void)
+{
+    printf("\nTesting new connection from CLOSE state:\n");
+    printf("=========================================\n\n");
+
+    addr_table_t entry;
+
+    /* CLOSE + SYN → SYN_SENT, fin_flags cleared */
+    init_entry(&entry, TCP_CONNTRACK_CLOSE);
+    entry.tcp_fin_flags = TCP_FIN_FLAG_ORIGINATOR | TCP_FIN_FLAG_RESPONDER;
+    U64 before = fastrg_get_cur_cycles();
+    tcp_conntrack_fsm(&entry, RTE_TCP_SYN_FLAG, FALSE);
+    TEST_ASSERT(entry.tcp_state == TCP_CONNTRACK_SYN_SENT,
+        "CLOSE + SYN → SYN_SENT",
+        "expected SYN_SENT(%d), got %d", TCP_CONNTRACK_SYN_SENT, entry.tcp_state);
+    TEST_ASSERT(entry.tcp_fin_flags == 0,
+        "CLOSE + SYN clears fin_flags",
+        "expected 0, got %d", entry.tcp_fin_flags);
+    TEST_ASSERT(expire_at_approx(before, rte_atomic64_read(&entry.expire_at), TCP_TIMEOUT_SYN_SENT),
+        "CLOSE + SYN sets SYN_SENT timeout",
+        "expire_at not set to ~%d seconds", TCP_TIMEOUT_SYN_SENT);
+
+    /* CLOSE + SYN_ACK → SYN_RECV (passive open), fin_flags cleared */
+    init_entry(&entry, TCP_CONNTRACK_CLOSE);
+    entry.tcp_fin_flags = TCP_FIN_FLAG_ORIGINATOR | TCP_FIN_FLAG_RESPONDER;
+    before = fastrg_get_cur_cycles();
+    tcp_conntrack_fsm(&entry, RTE_TCP_SYN_FLAG | RTE_TCP_ACK_FLAG, TRUE);
+    TEST_ASSERT(entry.tcp_state == TCP_CONNTRACK_SYN_RECV,
+        "CLOSE + SYN_ACK → SYN_RECV",
+        "expected SYN_RECV(%d), got %d", TCP_CONNTRACK_SYN_RECV, entry.tcp_state);
+    TEST_ASSERT(entry.tcp_fin_flags == 0,
+        "CLOSE + SYN_ACK clears fin_flags",
+        "expected 0, got %d", entry.tcp_fin_flags);
+}
+
+/**
+ * Test 12: New connection reuse from TIME_WAIT state
+ * TIME_WAIT + SYN → SYN_SENT (fin_flags cleared)
+ */
+static void test_time_wait_new_connection(void)
+{
+    printf("\nTesting new connection from TIME_WAIT state:\n");
+    printf("=============================================\n\n");
+
+    addr_table_t entry;
+    init_entry(&entry, TCP_CONNTRACK_TIME_WAIT);
+    entry.tcp_fin_flags = TCP_FIN_FLAG_ORIGINATOR | TCP_FIN_FLAG_RESPONDER;
+
+    U64 before = fastrg_get_cur_cycles();
+    tcp_conntrack_fsm(&entry, RTE_TCP_SYN_FLAG, FALSE);
+    TEST_ASSERT(entry.tcp_state == TCP_CONNTRACK_SYN_SENT,
+        "TIME_WAIT + SYN → SYN_SENT",
+        "expected SYN_SENT(%d), got %d", TCP_CONNTRACK_SYN_SENT, entry.tcp_state);
+    TEST_ASSERT(entry.tcp_fin_flags == 0,
+        "TIME_WAIT + SYN clears fin_flags",
+        "expected 0, got %d", entry.tcp_fin_flags);
+    TEST_ASSERT(expire_at_approx(before, rte_atomic64_read(&entry.expire_at), TCP_TIMEOUT_SYN_SENT),
+        "TIME_WAIT + SYN sets SYN_SENT timeout",
+        "expire_at not set to ~%d seconds", TCP_TIMEOUT_SYN_SENT);
+}
+
 void test_tcp_conntrack(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 {
     (void)fastrg_ccb;
@@ -334,6 +423,8 @@ void test_tcp_conntrack(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_simultaneous_close();
     test_syn_retransmit();
     test_direction_aware_fin();
+    test_close_new_connection();
+    test_time_wait_new_connection();
 
     *total_tests += test_count;
     *total_pass += pass_count;

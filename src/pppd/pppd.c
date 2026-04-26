@@ -45,7 +45,6 @@ void PPP_bye(ppp_ccb_t *s_ppp_ccb)
     rte_timer_stop(&(s_ppp_ccb->ppp));
     rte_timer_stop(&(s_ppp_ccb->pppoe));
     rte_timer_stop(&(s_ppp_ccb->ppp_alive));
-    rte_timer_stop(&s_ppp_ccb->nat);
     rte_atomic16_cmpset((volatile uint16_t *)&s_ppp_ccb->dp_start_bool.cnt, (BIT16)1, (BIT16)0);
     switch(s_ppp_ccb->phase) {
         case END_PHASE:
@@ -130,13 +129,12 @@ STATUS ppp_init_config_by_user(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb, U16 ccb
     ppp_ccb->magic_num = rte_cpu_to_be_32((rand() % 0xFFFFFFFE) + 1);
     ppp_ccb->identifier = 0x0;
     for(int j=0; j<TOTAL_SOCK_PORT; j++) {
-        rte_atomic16_init(&ppp_ccb->addr_table[j].is_alive);
         rte_atomic16_init(&ppp_ccb->addr_table[j].is_fill);
+        rte_atomic64_init(&ppp_ccb->addr_table[j].expire_at);
     }
     memset(ppp_ccb->PPP_dst_mac.addr_bytes, 0, ETH_ALEN);
     rte_timer_init(&(ppp_ccb->pppoe));
     rte_timer_init(&(ppp_ccb->ppp));
-    rte_timer_init(&(ppp_ccb->nat));
     rte_timer_init(&(ppp_ccb->ppp_alive));
     rte_timer_init(&(ppp_ccb->etcd_pppoe_status_timer));
     rte_atomic16_init(&ppp_ccb->dp_start_bool);
@@ -625,7 +623,6 @@ void exit_ppp(ppp_ccb_t *ppp_ccb)
     rte_timer_stop(&(ppp_ccb->ppp));
     rte_timer_stop(&(ppp_ccb->pppoe));
     rte_timer_stop(&(ppp_ccb->ppp_alive));
-    rte_timer_stop(&ppp_ccb->nat);
     fastrg_ccb->cur_user--;
     ppp_ccb->phase = END_PHASE;
     ppp_ccb->ppp_phase[0].state = S_INIT;
