@@ -381,6 +381,13 @@ static int decaps_tcp(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt,
     }
     rte_ether_addr_copy(&fastrg_ccb->nic_info.hsi_lan_mac, &eth_hdr->src_addr);
     rte_ether_addr_copy(&entry->mac_addr, &eth_hdr->dst_addr);
+
+    /* SPI: drop packets that are inconsistent with the tracked TCP state */
+    if (unlikely(!tcp_conntrack_inbound_valid(entry->tcp_state, tcphdr->tcp_flags))) {
+        drop_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
+        return 0;
+    }
+
     tcp_conntrack_fsm(entry, tcphdr->tcp_flags, TRUE);
     ip_hdr->dst_addr = entry->src_ip;
     tcphdr->dst_port = entry->src_port;
