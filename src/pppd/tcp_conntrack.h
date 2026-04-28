@@ -96,6 +96,55 @@ static inline tcp_conntrack_event_t tcp_flags_to_event(U8 tcp_flags, BOOL is_rep
 }
 
 /**
+ * @fn tcp_conntrack_inbound_valid
+ *
+ * @brief SPI (Stateful Packet Inspection) guard for inbound (WAN→LAN) TCP packets.
+ *        Returns TRUE only if the TCP flags are consistent with the current conntrack
+ *        state from the WAN→LAN direction.  Call this before tcp_conntrack_fsm() on
+ *        the inbound path; drop the packet if it returns FALSE.
+ *
+ *        Per-state allowlist:
+ *          SYN_SENT              → SYN-ACK, RST
+ *          SYN_RECV              → SYN-ACK (retransmit), ACK, FIN (resp), RST
+ *          ESTABLISHED, FIN_WAIT → ACK, FIN (resp), RST
+ *          CLOSE_WAIT, LAST_ACK, TIME_WAIT → ACK, RST
+ *          NONE, CLOSE, INVLD    → nothing (drop all)
+ *
+ * @param state     Current tcp_state of the NAT entry
+ * @param tcp_flags TCP flags byte from rte_tcp_hdr
+ *
+ * @return TRUE if the packet is consistent with the tracked state; FALSE to drop
+ */
+static inline BOOL tcp_conntrack_inbound_valid(U8 state, U8 tcp_flags)
+{
+    tcp_conntrack_event_t event = tcp_flags_to_event(tcp_flags, TRUE);
+
+    switch ((tcp_conntrack_state_t)state) {
+    case TCP_CONNTRACK_SYN_SENT:
+        return (event == TCP_EV_SYN_ACK || event == TCP_EV_RST);
+
+    case TCP_CONNTRACK_SYN_RECV:
+        /* Include SYN-ACK so retransmits from WAN are forwarded to LAN */
+        return (event == TCP_EV_SYN_ACK || event == TCP_EV_ACK ||
+                event == TCP_EV_FIN_RESP || event == TCP_EV_RST);
+
+    case TCP_CONNTRACK_ESTABLISHED:
+    case TCP_CONNTRACK_FIN_WAIT:
+        return (event == TCP_EV_ACK || event == TCP_EV_FIN_RESP || event == TCP_EV_RST);
+
+    case TCP_CONNTRACK_CLOSE_WAIT:
+    case TCP_CONNTRACK_LAST_ACK:
+    case TCP_CONNTRACK_TIME_WAIT:
+        return (event == TCP_EV_ACK || event == TCP_EV_RST);
+
+    default:
+        /* NONE, CLOSE, INVLD: connection not established or fully closed; WAN cannot
+         * initiate through SNAT, so all inbound is dropped */
+        return FALSE;
+    }
+}
+
+/**
  * @fn tcp_conntrack_fsm
  *
  * @brief TCP connection tracking finite state machine.

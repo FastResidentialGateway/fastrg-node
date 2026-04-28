@@ -406,6 +406,90 @@ static void test_time_wait_new_connection(void)
         "expire_at not set to ~%d seconds", TCP_TIMEOUT_SYN_SENT);
 }
 
+/**
+ * Test 13: Inbound SPI filtering (tcp_conntrack_inbound_valid)
+ */
+static void test_inbound_spi(void)
+{
+    printf("\nTesting inbound SPI filtering:\n");
+    printf("================================\n\n");
+
+    /* SYN_SENT: only SYN-ACK (expected reply) and RST (abort) are valid from WAN */
+    TEST_ASSERT(tcp_conntrack_inbound_valid(TCP_CONNTRACK_SYN_SENT,
+            RTE_TCP_SYN_FLAG | RTE_TCP_ACK_FLAG) == TRUE,
+        "SYN_SENT + SYN-ACK → valid", NULL);
+    TEST_ASSERT(tcp_conntrack_inbound_valid(TCP_CONNTRACK_SYN_SENT,
+            RTE_TCP_RST_FLAG) == TRUE,
+        "SYN_SENT + RST → valid", NULL);
+    TEST_ASSERT(tcp_conntrack_inbound_valid(TCP_CONNTRACK_SYN_SENT,
+            RTE_TCP_SYN_FLAG) == FALSE,
+        "SYN_SENT + SYN → invalid (WAN cannot initiate through SNAT)", NULL);
+    TEST_ASSERT(tcp_conntrack_inbound_valid(TCP_CONNTRACK_SYN_SENT,
+            RTE_TCP_ACK_FLAG) == FALSE,
+        "SYN_SENT + ACK → invalid (no SYN-ACK seen yet)", NULL);
+    TEST_ASSERT(tcp_conntrack_inbound_valid(TCP_CONNTRACK_SYN_SENT,
+            RTE_TCP_FIN_FLAG) == FALSE,
+        "SYN_SENT + FIN → invalid", NULL);
+
+    /* SYN_RECV: SYN-ACK retransmit, ACK, FIN, RST valid */
+    TEST_ASSERT(tcp_conntrack_inbound_valid(TCP_CONNTRACK_SYN_RECV,
+            RTE_TCP_SYN_FLAG | RTE_TCP_ACK_FLAG) == TRUE,
+        "SYN_RECV + SYN-ACK → valid (retransmit)", NULL);
+    TEST_ASSERT(tcp_conntrack_inbound_valid(TCP_CONNTRACK_SYN_RECV,
+            RTE_TCP_ACK_FLAG) == TRUE,
+        "SYN_RECV + ACK → valid", NULL);
+    TEST_ASSERT(tcp_conntrack_inbound_valid(TCP_CONNTRACK_SYN_RECV,
+            RTE_TCP_RST_FLAG) == TRUE,
+        "SYN_RECV + RST → valid", NULL);
+    TEST_ASSERT(tcp_conntrack_inbound_valid(TCP_CONNTRACK_SYN_RECV,
+            RTE_TCP_SYN_FLAG) == FALSE,
+        "SYN_RECV + SYN → invalid", NULL);
+
+    /* ESTABLISHED: ACK, FIN (reply direction), RST valid; SYN from WAN is invalid */
+    TEST_ASSERT(tcp_conntrack_inbound_valid(TCP_CONNTRACK_ESTABLISHED,
+            RTE_TCP_ACK_FLAG) == TRUE,
+        "ESTABLISHED + ACK → valid", NULL);
+    TEST_ASSERT(tcp_conntrack_inbound_valid(TCP_CONNTRACK_ESTABLISHED,
+            RTE_TCP_FIN_FLAG | RTE_TCP_ACK_FLAG) == TRUE,
+        "ESTABLISHED + FIN+ACK (reply) → valid", NULL);
+    TEST_ASSERT(tcp_conntrack_inbound_valid(TCP_CONNTRACK_ESTABLISHED,
+            RTE_TCP_RST_FLAG) == TRUE,
+        "ESTABLISHED + RST → valid", NULL);
+    TEST_ASSERT(tcp_conntrack_inbound_valid(TCP_CONNTRACK_ESTABLISHED,
+            RTE_TCP_SYN_FLAG) == FALSE,
+        "ESTABLISHED + SYN → invalid (session hijack attempt)", NULL);
+
+    /* TIME_WAIT: only ACK (late retransmit) and RST */
+    TEST_ASSERT(tcp_conntrack_inbound_valid(TCP_CONNTRACK_TIME_WAIT,
+            RTE_TCP_ACK_FLAG) == TRUE,
+        "TIME_WAIT + ACK → valid (late retransmit)", NULL);
+    TEST_ASSERT(tcp_conntrack_inbound_valid(TCP_CONNTRACK_TIME_WAIT,
+            RTE_TCP_RST_FLAG) == TRUE,
+        "TIME_WAIT + RST → valid", NULL);
+    TEST_ASSERT(tcp_conntrack_inbound_valid(TCP_CONNTRACK_TIME_WAIT,
+            RTE_TCP_SYN_FLAG) == FALSE,
+        "TIME_WAIT + SYN → invalid (WAN cannot initiate through SNAT)", NULL);
+
+    /* NONE: connection not yet established — drop all inbound */
+    TEST_ASSERT(tcp_conntrack_inbound_valid(TCP_CONNTRACK_NONE,
+            RTE_TCP_ACK_FLAG) == FALSE,
+        "NONE + ACK → invalid", NULL);
+    TEST_ASSERT(tcp_conntrack_inbound_valid(TCP_CONNTRACK_NONE,
+            RTE_TCP_SYN_FLAG) == FALSE,
+        "NONE + SYN → invalid", NULL);
+
+    /* CLOSE: connection fully closed — drop all inbound */
+    TEST_ASSERT(tcp_conntrack_inbound_valid(TCP_CONNTRACK_CLOSE,
+            RTE_TCP_RST_FLAG) == FALSE,
+        "CLOSE + RST → invalid (connection dead)", NULL);
+    TEST_ASSERT(tcp_conntrack_inbound_valid(TCP_CONNTRACK_CLOSE,
+            RTE_TCP_SYN_FLAG) == FALSE,
+        "CLOSE + SYN → invalid (WAN cannot initiate through SNAT)", NULL);
+    TEST_ASSERT(tcp_conntrack_inbound_valid(TCP_CONNTRACK_CLOSE,
+            RTE_TCP_ACK_FLAG) == FALSE,
+        "CLOSE + ACK → invalid", NULL);
+}
+
 void test_tcp_conntrack(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 {
     (void)fastrg_ccb;
@@ -425,6 +509,7 @@ void test_tcp_conntrack(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_direction_aware_fin();
     test_close_new_connection();
     test_time_wait_new_connection();
+    test_inbound_spi();
 
     *total_tests += test_count;
     *total_pass += pass_count;
