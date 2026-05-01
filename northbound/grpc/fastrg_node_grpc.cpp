@@ -856,6 +856,8 @@ grpc::Status FastRGNodeServiceImpl::GetFastrgHsiInfo(::grpc::ServerContext* cont
         ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, i);
         hsi_info->set_user_id(i + 1);
         hsi_info->set_vlan_id(rte_atomic16_read(&ppp_ccb->vlan_id));
+        hsi_info->set_account(std::string(reinterpret_cast<const char*>(ppp_ccb->ppp_user_acc)));
+        hsi_info->set_password(std::string(reinterpret_cast<const char*>(ppp_ccb->ppp_passwd)));
         switch (ppp_ccb->phase) {
             case END_PHASE:
                 hsi_info->set_status("End phase");
@@ -874,8 +876,6 @@ grpc::Status FastRGNodeServiceImpl::GetFastrgHsiInfo(::grpc::ServerContext* cont
                 break;
             case DATA_PHASE:
                 hsi_info->set_status("Data phase");
-                hsi_info->set_account(std::string(reinterpret_cast<const char*>(ppp_ccb->ppp_user_acc)));
-                hsi_info->set_password(std::string(reinterpret_cast<const char*>(ppp_ccb->ppp_passwd)));
                 hsi_info->set_session_id(rte_be_to_cpu_16(ppp_ccb->session_id));
                 hsi_info->set_ip_addr(std::to_string(*(((U8 *)&(ppp_ccb->hsi_ipv4)))) + "." +
                                      std::to_string(*(((U8 *)&(ppp_ccb->hsi_ipv4))+1)) + "." +
