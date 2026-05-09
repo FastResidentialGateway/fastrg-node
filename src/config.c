@@ -41,7 +41,7 @@ STATUS parse_config(const char *config_path, FastRG_t *fastrg_ccb, struct fastrg
 {
     config_t cfg;
     int user_count, heartbeat_interval;
-    const char *loglvl, *unix_sock_path, *log_path, *node_grpc_port, *controller_address, *etcd_endpoints;
+    const char *loglvl, *unix_sock_path, *log_path, *node_grpc_port, *controller_address, *etcd_endpoints, *ddp_pkg_path;
 
     config_init(&cfg);
     if (!config_read_file(&cfg, config_path)) {
@@ -113,6 +113,11 @@ STATUS parse_config(const char *config_path, FastRG_t *fastrg_ccb, struct fastrg
         etcd_endpoints = "127.0.0.1:2379";
     strncpy(fastrg_cfg->etcd_endpoints, etcd_endpoints, sizeof(fastrg_cfg->etcd_endpoints) - 1);
     fastrg_cfg->etcd_endpoints[sizeof(fastrg_cfg->etcd_endpoints) - 1] = '\0';
+
+    if (config_lookup_string(&cfg, "I40eDdpPkgPath", &ddp_pkg_path) == CONFIG_FALSE)
+        ddp_pkg_path = "";
+    strncpy(fastrg_cfg->ddp_pkg_path, ddp_pkg_path, sizeof(fastrg_cfg->ddp_pkg_path) - 1);
+    fastrg_cfg->ddp_pkg_path[sizeof(fastrg_cfg->ddp_pkg_path) - 1] = '\0';
 
     config_destroy(&cfg);
 

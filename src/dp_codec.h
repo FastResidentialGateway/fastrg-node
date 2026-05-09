@@ -269,6 +269,46 @@ static int encaps_tcp(FastRG_t *fastrg_ccb, struct rte_mbuf **single_pkt,
     return new_pkt_num;
 }
 
+static int encaps_icmp(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt, 
+    struct rte_ether_hdr *eth_hdr, vlan_header_t *vlan_header, 
+    struct rte_ipv4_hdr *ip_hdr, struct rte_icmp_hdr *icmphdr, U16 ccb_id)
+{
+    U16                 new_port_id;
+    int32_t             new_pkt_num = 0;
+    U16                 vlan_hdr_tci = vlan_header->tci_union.tci_value;
+    ppp_ccb_t           *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
+
+    /* NAT + PPPoE encapsulate ICMP */
+    U32 icmp_new_cksum;
+    U16 ori_ident = icmphdr->icmp_ident;
+
+    new_port_id = nat_icmp_learning(eth_hdr, ip_hdr, icmphdr, 
+        ppp_ccb->addr_table, ppp_ccb->port_fwd_table);
+    if (unlikely(new_port_id == 0)) {
+        drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
+        return new_pkt_num;
+    }
+    ip_hdr->src_addr = ppp_ccb->hsi_ipv4;
+    icmphdr->icmp_ident = new_port_id;
+    ip_hdr->hdr_checksum = 0;
+    ip_hdr->hdr_checksum = rte_ipv4_cksum(ip_hdr);
+
+    if (((icmp_new_cksum = icmphdr->icmp_cksum + ori_ident - new_port_id) >> 16) != 0)
+        icmp_new_cksum = (icmp_new_cksum & 0xFFFF) + (icmp_new_cksum >> 16);
+    icmphdr->icmp_cksum = (U16)icmp_new_cksum;
+
+    if (unlikely(insert_pppoes_hdr(fastrg_ccb, &single_pkt, ccb_id, vlan_hdr_tci) == ERROR)) {
+        drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
+        return new_pkt_num;
+    }
+    count_rx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
+    count_tx_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
+    increase_pppoes_tx_count(ppp_ccb, single_pkt->pkt_len);
+    new_pkt_num = 1;
+
+    return new_pkt_num;
+}
+
 static int decaps_udp(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt, 
     struct rte_ether_hdr *eth_hdr, vlan_header_t *vlan_header, 
     struct rte_ipv4_hdr *ip_hdr, U16 ccb_id, U16 tx_q)
@@ -394,6 +434,44 @@ static int decaps_tcp(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt,
     ip_hdr->hdr_checksum = rte_ipv4_cksum(ip_hdr);
     tcphdr->cksum = 0;
     tcphdr->cksum = rte_ipv4_udptcp_cksum(ip_hdr, tcphdr);
+    count_tx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
+    count_rx_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
+    increase_pppoes_rx_count(ppp_ccb, single_pkt->pkt_len);
+
+    return 1;
+}
+
+static int decaps_icmp(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt,
+    struct rte_ether_hdr *eth_hdr, struct rte_ipv4_hdr *ip_hdr, U16 ccb_id)
+{
+    ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
+    struct rte_icmp_hdr *icmphdr = (struct rte_icmp_hdr *)(rte_pktmbuf_mtod(single_pkt,
+        unsigned char *) + sizeof(struct rte_ether_hdr) +
+        sizeof(vlan_header_t) + sizeof(struct rte_ipv4_hdr));
+
+    if (icmphdr->icmp_type != ICMP_ECHO_REPLY) {
+        drop_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
+        return 0;
+    }
+    addr_table_t *entry = nat_reverse_lookup(icmphdr->icmp_ident,
+        ip_hdr->src_addr, ICMP_ECHO_REQUEST, ppp_ccb->addr_table);
+    if (entry == NULL) {
+        drop_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
+        return 0;
+    }
+    int32_t icmp_cksum_diff = (int32_t)icmphdr->icmp_ident - (int32_t)entry->src_port;
+    U32 icmp_new_cksum;
+
+    rte_ether_addr_copy(&fastrg_ccb->nic_info.hsi_lan_mac, &eth_hdr->src_addr);
+    rte_ether_addr_copy(&entry->mac_addr, &eth_hdr->dst_addr);
+    ip_hdr->dst_addr = entry->src_ip;
+    icmphdr->icmp_ident = entry->src_port;
+
+    if (((icmp_new_cksum = (U32)icmp_cksum_diff + (U32)icmphdr->icmp_cksum) >> 16) != 0)
+        icmp_new_cksum = (icmp_new_cksum & 0xFFFF) + (icmp_new_cksum >> 16);
+    icmphdr->icmp_cksum = (U16)icmp_new_cksum;
+    ip_hdr->hdr_checksum = 0;
+    ip_hdr->hdr_checksum = rte_ipv4_cksum(ip_hdr);
     count_tx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
     count_rx_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
     increase_pppoes_rx_count(ppp_ccb, single_pkt->pkt_len);

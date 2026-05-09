@@ -95,6 +95,7 @@ typedef struct FastRG {
     rte_atomic16_t          per_subscriber_stats_updating; /* flag indicating stats array is being updated */
     struct rte_timer        link;           /* for physical link checking timer */
     struct rte_timer        heartbeat_timer;/* for controller heartbeat timer */
+    BOOL                    i40e_ddp_enabled; /* TRUE if i40e DDP package loaded */
 } __rte_cache_aligned FastRG_t;
 
 STATUS fastrg_disable_subscriber_stats(FastRG_t *fastrg_ccb, U16 disable_count, 
