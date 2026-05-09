@@ -18,8 +18,10 @@
 #include "init.h"
 #include "fastrg.h"
 #include "mac_table.h"
+#include "dp_flow.h"
 #include "dbg.h"
 #include "version.h"
+#include "config.h"
 #include "../northbound/controller/controller_client.h"
 
 #define NUM_MBUFS 		8191
@@ -171,7 +173,7 @@ err:
     return ERROR;
 }
 
-STATUS init_port(FastRG_t *fastrg_ccb)
+STATUS init_port(FastRG_t *fastrg_ccb, struct fastrg_config *fastrg_cfg)
 {
     struct ethtool_drvinfo 	dev_info;
     U8 						portid;
@@ -210,6 +212,19 @@ STATUS init_port(FastRG_t *fastrg_ccb)
         FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "firmware-version: %s", dev_info.fw_version);
         FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "bus-info: %s", dev_info.bus_info);
 
+        fastrg_ccb->i40e_ddp_enabled = FALSE;
+        if (fastrg_ccb->nic_info.vendor_id == NIC_VENDOR_I40E &&
+                fastrg_cfg->ddp_pkg_path[0] != '\0') {
+            if (i40e_load_ddp_package(fastrg_ccb, fastrg_cfg->ddp_pkg_path) == SUCCESS) {
+                fastrg_ccb->i40e_ddp_enabled = TRUE;
+                FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                    "i40e DDP package loaded, multi-queue RSS will be enabled");
+            } else {
+                FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
+                    "i40e DDP load failed, falling back to single queue mode");
+            }
+        }
+
         if (PORT_INIT(fastrg_ccb, portid) == ERROR) {
             FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Cannot init port %"PRIu8 "", portid);
             return ERROR;
@@ -232,7 +247,7 @@ STATUS init_port(FastRG_t *fastrg_ccb)
     return SUCCESS;
 }
 
-STATUS sys_init(FastRG_t *fastrg_ccb)
+STATUS sys_init(FastRG_t *fastrg_ccb, struct fastrg_config *fastrg_cfg)
 {
     STATUS ret;
 
@@ -246,7 +261,7 @@ STATUS sys_init(FastRG_t *fastrg_ccb)
     /* init RTE timer library */
     rte_timer_subsystem_init();
 
-    ret = init_port(fastrg_ccb);
+    ret = init_port(fastrg_ccb, fastrg_cfg);
     if (ret != 0)
         goto err;
 

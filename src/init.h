@@ -10,6 +10,8 @@
 
 #include <common.h>
 
+#include "config.h"
+
 typedef struct FastRG FastRG_t;
 
 #define PORT_AMOUNT 2
@@ -24,7 +26,7 @@ typedef enum {
 } nic_vendor_t;
 
 int setup_signalfd(void);
-STATUS sys_init(FastRG_t *fastrg_ccb);
+STATUS sys_init(FastRG_t *fastrg_ccb, struct fastrg_config *fastrg_cfg);
 void sys_cleanup(FastRG_t *fastrg_ccb);
 
 extern struct rte_mempool *direct_pool[PORT_AMOUNT];

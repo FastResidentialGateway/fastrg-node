@@ -15,17 +15,28 @@
  *  Port 1 (WAN-side, PPPoE):
  *    Priority 0:
  *      eth(ether_type=0x8863)              -> queue 0   (PPPoE Discovery)
+ *    ICE/E810 (rte_flow pattern path):
  *      eth / pppoes / ipv4 / tcp           -> RSS 1..N  (matches VLAN-tagged too)
  *      eth / pppoes / ipv4 / udp           -> RSS 1..N
  *      eth / pppoes / ipv6 / tcp           -> RSS 1..N
  *      eth / pppoes / ipv6 / udp           -> RSS 1..N
- *    Priority 1:
- *      eth(ether_type=0x8864)              -> queue 0   (PPPoE Session fallback)
+ *    i40e X710 + ppp-oe DDP (PCTYPE mapping path):
+ *      PCTYPE 15 (PPPoE/IPv4) -> SW flow type 28 -> RSS enabled
+ *      PCTYPE 16 (PPPoE/IPv6) -> SW flow type 29 -> RSS enabled
+ *      (i40e_hash.c does not support PPPOES in its rte_flow RSS pattern table)
  *
- * DDP note: ICE E810 with COMMS DDP package.
+ * DDP note (ICE E810 / COMMS DDP package):
  *   eth / pppoes / L3 / L4 transparently matches VLAN-tagged PPPoE frames;
  *   verified with testpmd that eth/vlan/pppoes/ipv4/tcp and
  *   eth/vlan/pppoes/ipv4/udp are both handled by this pattern.
+ *
+ * DDP note (i40e X710 / ppp-oe-ol2tpv2 DDP package):
+ *   The i40e PMD's RSS handler only allows IPV4, IPV6, or VLAN after ETH in
+ *   its pattern table (i40e_hash.c: I40E_HASH_ETH_NEXT_ALLOW), so the
+ *   eth/pppoes/... rte_flow pattern is rejected even with DDP loaded.
+ *   Instead, DDP adds PCTYPEs 15/16 for PPPoE IPv4/IPv6; these are mapped to
+ *   software flow types via rte_pmd_i40e_flow_type_mapping_update, then RSS is
+ *   enabled for those flow types via rte_eth_dev_rss_hash_update.
  *
  * Queue count formula (total = RSS + 1 for queue 0)
  *   cpu_count = 5  ->  1 RSS queue  (total 2 queues)
@@ -37,10 +48,12 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 
 #include <rte_flow.h>
 #include <rte_ethdev.h>
 #include <rte_lcore.h>
+#include <rte_pmd_i40e.h>
 
 #include "fastrg.h"
 #include "dbg.h"
@@ -366,8 +379,85 @@ static struct rte_flow *create_pppoe_session_rss_flow(FastRG_t *fastrg_ccb,
 }
 
 /**
+ * @fn i40e_setup_pppoe_rss
+ *
+ * @brief Enable PPPoE session RSS on i40e (X710) NICs loaded with the
+ *        ppp-oe-ol2tpv2 DDP package.
+ *
+ * The i40e PMD's rte_flow RSS handler (i40e_hash.c) only allows IPV4, IPV6,
+ * or VLAN after ETH in its supported-pattern table.  Passing PPPOES as the
+ * second pattern item therefore always returns "Pattern not supported".
+ *
+ * The correct mechanism for i40e + DDP is:
+ *   1. Map the DDP-defined PCTYPEs to software flow-type IDs via
+ *      rte_pmd_i40e_flow_type_mapping_update().
+ *   2. Enable RSS for those flow-type IDs via rte_eth_dev_rss_hash_update().
+ *
+ * PCTYPE assignments in the ppp-oe-ol2tpv2 DDP package:
+ *   15 = PPPoE Session / inner IPv4
+ *   16 = PPPoE Session / inner IPv6
+ *
+ * @param fastrg_ccb  FastRG control block (logging).
+ * @param port_id     DPDK port identifier.
+ * @return SUCCESS on success, ERROR on failure.
+ */
+static STATUS i40e_setup_pppoe_rss(FastRG_t *fastrg_ccb, uint16_t port_id)
+{
+#define I40E_DDP_PCTYPE_PPPOE_IPV4   15u
+#define I40E_DDP_PCTYPE_PPPOE_IPV6   16u
+#define I40E_DDP_FLOWTYPE_PPPOE_IPV4 28u
+#define I40E_DDP_FLOWTYPE_PPPOE_IPV6 29u
+
+    struct rte_pmd_i40e_flow_type_mapping mappings[] = {
+        { .flow_type = I40E_DDP_FLOWTYPE_PPPOE_IPV4,
+          .pctype    = (1ULL << I40E_DDP_PCTYPE_PPPOE_IPV4) },
+        { .flow_type = I40E_DDP_FLOWTYPE_PPPOE_IPV6,
+          .pctype    = (1ULL << I40E_DDP_PCTYPE_PPPOE_IPV6) },
+    };
+
+    int ret = rte_pmd_i40e_flow_type_mapping_update(port_id, mappings,
+        RTE_DIM(mappings), 0);
+    if (ret != 0) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+            "Port %u: i40e PCTYPE->flow type mapping failed (err=%d): %s\n",
+            port_id, ret, strerror(-ret));
+        return ERROR;
+    }
+
+    /* OR the new PPPoE flow types into the current RSS hash config so we
+     * do not accidentally clear any previously enabled standard flow types. */
+    struct rte_eth_rss_conf rss_conf;
+    memset(&rss_conf, 0, sizeof(rss_conf));
+    ret = rte_eth_dev_rss_hash_conf_get(port_id, &rss_conf);
+    if (ret != 0) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+            "Port %u: rte_eth_dev_rss_hash_conf_get failed (err=%d): %s\n",
+            port_id, ret, strerror(-ret));
+        return ERROR;
+    }
+
+    rss_conf.rss_hf |= (1ULL << I40E_DDP_FLOWTYPE_PPPOE_IPV4) |
+                       (1ULL << I40E_DDP_FLOWTYPE_PPPOE_IPV6);
+    ret = rte_eth_dev_rss_hash_update(port_id, &rss_conf);
+    if (ret != 0) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+            "Port %u: RSS hash update for PPPoE flow types failed (err=%d): %s\n",
+            port_id, ret, strerror(-ret));
+        return ERROR;
+    }
+
+    FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+        "Port %u: i40e DDP PPPoE RSS: PCTYPE %u/IPv4 -> flow type %u, "
+        "PCTYPE %u/IPv6 -> flow type %u, RSS enabled\n",
+        port_id,
+        I40E_DDP_PCTYPE_PPPOE_IPV4, I40E_DDP_FLOWTYPE_PPPOE_IPV4,
+        I40E_DDP_PCTYPE_PPPOE_IPV6, I40E_DDP_FLOWTYPE_PPPOE_IPV6);
+    return SUCCESS;
+}
+
+/**
  * @fn create_vlan_ip_rss_flow
- * 
+ *
  * @brief Create a flow for VLAN-tagged IP packets that steers to RSS queues.
  * eth / vlan / L3 / L4 --> RSS queues 1..N via RETA, priority 0
  *
@@ -458,7 +548,7 @@ int setup_port_flows(FastRG_t *fastrg_ccb, uint16_t port_id, uint16_t total_queu
     } else {
         /* ---- Port 1+: WAN-side PPPoE --------------------------------- */
 
-        /* Priority 0: PPPoE Discovery -> queue 0 */
+        /* Priority 0: PPPoE Discovery -> queue 0 (works on all PMDs) */
         flow = create_pppoe_discovery_flow(fastrg_ccb, port_id, error);
         if (!flow)
             return -1;
@@ -466,57 +556,75 @@ int setup_port_flows(FastRG_t *fastrg_ccb, uint16_t port_id, uint16_t total_queu
             "Port %u: PPPoE Discovery (ether_type=0x8863) -> queue 0 [OK]\n",
             port_id);
 
-        /* Priority 0: PPPoE Session + inner IPv4/TCP -> RSS */
-        flow = create_pppoe_session_rss_flow(fastrg_ccb, port_id,
-            RTE_FLOW_ITEM_TYPE_IPV4, RTE_FLOW_ITEM_TYPE_TCP,
-            RTE_ETH_RSS_NONFRAG_IPV4_TCP, error);
-        if (!flow)
-            return -1;
-        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
-            "Port %u: PPPoE Session IPv4/TCP -> RSS 1..%u [OK]\n",
-            port_id, total_queues - 1);
+        if (fastrg_ccb->nic_info.vendor_id == NIC_VENDOR_I40E &&
+                fastrg_ccb->i40e_ddp_enabled) {
+            /*
+             * i40e X710 + ppp-oe DDP: the rte_flow PPPOES pattern is rejected
+             * by i40e_hash.c (I40E_HASH_ETH_NEXT_ALLOW lacks PPPOES).  Use the
+             * PCTYPE mapping path instead: map DDP-added PCTYPEs 15/16 to SW
+             * flow types 28/29 and enable RSS for those flow types.
+             */
+            if (i40e_setup_pppoe_rss(fastrg_ccb, port_id) != SUCCESS)
+                return -1;
+            FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                "Port %u: PPPoE Session -> RSS 1..%u via i40e DDP PCTYPE mapping [OK]\n",
+                port_id, total_queues - 1);
+        } else {
+            /*
+             * ICE/E810 (COMMS DDP): use rte_flow priority 0
+             * eth/pppoes/L3/L4 patterns which transparently match
+             * VLAN-tagged PPPoE Session frames too.
+             */
+            /* Priority 0: PPPoE Session + inner IPv4/TCP -> RSS */
+            flow = create_pppoe_session_rss_flow(fastrg_ccb, port_id,
+                RTE_FLOW_ITEM_TYPE_IPV4, RTE_FLOW_ITEM_TYPE_TCP,
+                RTE_ETH_RSS_NONFRAG_IPV4_TCP, error);
+            if (!flow)
+                return -1;
+            FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                "Port %u: PPPoE Session IPv4/TCP -> RSS 1..%u [OK]\n",
+                port_id, total_queues - 1);
 
-        /* Priority 0: PPPoE Session + inner IPv4/UDP -> RSS */
-        flow = create_pppoe_session_rss_flow(fastrg_ccb, port_id,
-            RTE_FLOW_ITEM_TYPE_IPV4, RTE_FLOW_ITEM_TYPE_UDP,
-            RTE_ETH_RSS_NONFRAG_IPV4_UDP, error);
-        if (!flow)
-            return -1;
-        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
-            "Port %u: PPPoE Session IPv4/UDP -> RSS 1..%u [OK]\n",
-            port_id, total_queues - 1);
+            flow = create_pppoe_session_rss_flow(fastrg_ccb, port_id,
+                RTE_FLOW_ITEM_TYPE_IPV4, RTE_FLOW_ITEM_TYPE_UDP,
+                RTE_ETH_RSS_NONFRAG_IPV4_UDP, error);
+            if (!flow)
+                return -1;
+            FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                "Port %u: PPPoE Session IPv4/UDP -> RSS 1..%u [OK]\n",
+                port_id, total_queues - 1);
 
-        /* Priority 0: PPPoE Session + inner IPv6/TCP -> RSS */
-        flow = create_pppoe_session_rss_flow(fastrg_ccb, port_id,
-            RTE_FLOW_ITEM_TYPE_IPV6, RTE_FLOW_ITEM_TYPE_TCP,
-            RTE_ETH_RSS_NONFRAG_IPV6_TCP, error);
-        if (!flow)
-            return -1;
-        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
-            "Port %u: PPPoE Session IPv6/TCP -> RSS 1..%u [OK]\n",
-            port_id, total_queues - 1);
+            flow = create_pppoe_session_rss_flow(fastrg_ccb, port_id,
+                RTE_FLOW_ITEM_TYPE_IPV6, RTE_FLOW_ITEM_TYPE_TCP,
+                RTE_ETH_RSS_NONFRAG_IPV6_TCP, error);
+            if (!flow)
+                return -1;
+            FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                "Port %u: PPPoE Session IPv6/TCP -> RSS 1..%u [OK]\n",
+                port_id, total_queues - 1);
 
-        /* Priority 0: PPPoE Session + inner IPv6/UDP -> RSS */
-        flow = create_pppoe_session_rss_flow(fastrg_ccb, port_id,
-            RTE_FLOW_ITEM_TYPE_IPV6, RTE_FLOW_ITEM_TYPE_UDP,
-            RTE_ETH_RSS_NONFRAG_IPV6_UDP, error);
-        if (!flow)
-            return -1;
-        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
-            "Port %u: PPPoE Session IPv6/UDP -> RSS 1..%u [OK]\n",
-            port_id, total_queues - 1);
+            flow = create_pppoe_session_rss_flow(fastrg_ccb, port_id,
+                RTE_FLOW_ITEM_TYPE_IPV6, RTE_FLOW_ITEM_TYPE_UDP,
+                RTE_ETH_RSS_NONFRAG_IPV6_UDP, error);
+            if (!flow)
+                return -1;
+            FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                "Port %u: PPPoE Session IPv6/UDP -> RSS 1..%u [OK]\n",
+                port_id, total_queues - 1);
 
-        /* ======Note: This flow is invalid for ICE PMD, I keep it here for here because it is 
-         * a good reference for PPPoE Session fallback flow without inner IP match.====== */
-        #if 0
-         /* Priority 1: PPPoE Session fallback -> queue 0 */
-        flow = create_pppoe_session_fallback_flow(fastrg_ccb, port_id, error);
-        if (!flow)
-            return -1;
-        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
-            "Port %u: PPPoE Session fallback (ether_type=0x8864) -> queue 0 [OK]\n",
-            port_id);
-        #endif
+            /* Note: create_pppoe_session_fallback_flow (ether_type=0x8864 ->
+             * queue 0) is invalid for ICE PMD; kept in #if 0 as PPPoE Session 
+             * fallback flow without inner IP match reference. */
+            #if 0
+            /* Priority 1: PPPoE Session fallback -> queue 0 */
+            flow = create_pppoe_session_fallback_flow(fastrg_ccb, port_id, error);
+            if (!flow)
+                return -1;
+            FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                "Port %u: PPPoE Session fallback (ether_type=0x8864) -> queue 0 [OK]\n",
+                port_id);
+            #endif
+        }
     }
 
     /* ---- Program RETA to distribute RSS traffic to queues 1..N ------- */
@@ -532,4 +640,89 @@ int setup_port_flows(FastRG_t *fastrg_ccb, uint16_t port_id, uint16_t total_queu
         port_id, total_queues, total_queues - 1);
 
     return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* i40e DDP package loader                                            */
+/* ------------------------------------------------------------------ */
+STATUS i40e_load_ddp_package(FastRG_t *fastrg_ccb, const char *pkg_path)
+{
+    FILE *f = fopen(pkg_path, "rb");
+    if (f == NULL) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+            "i40e DDP: cannot open package file %s: %s\n",
+            pkg_path, strerror(errno));
+        return ERROR;
+    }
+
+    if (fseek(f, 0, SEEK_END) != 0) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+            "i40e DDP: fseek failed on %s: %s\n", pkg_path, strerror(errno));
+        fclose(f);
+        return ERROR;
+    }
+    U64 fsize = ftell(f);
+    if (fsize <= 0 || fsize > 4 * 1024 * 1024) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+            "i40e DDP: invalid package file size %ld for %s\n", fsize, pkg_path);
+        fclose(f);
+        return ERROR;
+    }
+    rewind(f);
+
+    U8 *buf = fastrg_malloc(U8, (size_t)fsize, 0);
+    if (buf == NULL) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+            "i40e DDP: cannot allocate %ld bytes for package buffer\n", fsize);
+        fclose(f);
+        return ERROR;
+    }
+
+    if (fread(buf, 1, (size_t)fsize, f) != (size_t)fsize) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+            "i40e DDP: read error on %s: %s\n", pkg_path, strerror(errno));
+        fastrg_mfree(buf);
+        fclose(f);
+        return ERROR;
+    }
+    fclose(f);
+
+    U16 loaded = 0;
+    STATUS result = SUCCESS;
+    U16 port_count = rte_eth_dev_count_avail();
+
+    for(U16 port_id=0; port_id<port_count; port_id++) {
+        struct rte_eth_dev_info dev_info;
+        if (rte_eth_dev_info_get(port_id, &dev_info) != 0)
+            continue;
+        if (strncmp(dev_info.driver_name, "net_i40e", 8) != 0)
+            continue;
+
+        int ret = rte_pmd_i40e_process_ddp_package(port_id, buf,
+            (uint32_t)fsize, RTE_PMD_I40E_PKG_OP_WR_ADD);
+        if (ret == -EEXIST) {
+            FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                "Port %u: i40e DDP package already loaded\n", port_id);
+            loaded++;
+        } else if (ret != 0) {
+            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+                "Port %u: i40e DDP load failed (err=%d): %s\n",
+                port_id, ret, strerror(-ret));
+            result = ERROR;
+        } else {
+            FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                "Port %u: i40e DDP package loaded from %s\n", port_id, pkg_path);
+            loaded++;
+        }
+    }
+
+    fastrg_mfree(buf);
+
+    if (loaded == 0) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+            "i40e DDP: no i40e ports found or all loads failed\n");
+        return ERROR;
+    }
+
+    return result;
 }

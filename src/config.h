@@ -20,6 +20,7 @@ struct fastrg_config {
     char controller_address[256];
     char etcd_endpoints[512];
     U16 heartbeat_interval;
+    char ddp_pkg_path[256]; /* path to i40e DDP package; empty string = disabled */
 };
 
 /**

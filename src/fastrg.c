@@ -621,7 +621,7 @@ int fastrg_start(int argc, char **argv)
     for(int i=0; i<MAX_VLAN_ID; i++)
         rte_atomic16_set(&fastrg_ccb.vlan_userid_map[i], INVALID_CCB_ID);
 
-    ret = sys_init(&fastrg_ccb);
+    ret = sys_init(&fastrg_ccb, &fastrg_cfg);
     if (ret) {
         FastRG_LOG(ERR, fastrg_ccb.fp, NULL, NULL, "System initiation failed: %s", rte_strerror(ret));
         goto err;
@@ -644,16 +644,25 @@ int fastrg_start(int argc, char **argv)
     rte_pdump_init();
     #endif
 
-    /* Install PPPoE-aware RSS flow rules on both ports (ICE PMD only).
+    /* Install PPPoE-aware RSS flow rules on both ports (ICE PMD, or i40e with
+     * DDP loaded).
      * Queue layout per port:
      *   queue 0          : PPPoE control (Discovery + Session w/o 5-tuple)
      *   queues 1 .. N-1  : RSS worker queues (5-tuple, PPPoE inner-header aware)
      * Queue count: 1 + max(1, 1 + (lcore_count - 5) / 2)
      *
-     * Non-ICE PMDs use a single queue; rte_flow rules are not installed.
+     * Other PMDs use a single queue; rte_flow rules are not installed.
      */
     BOOL is_ice_pmd = (fastrg_ccb.nic_info.vendor_id == NIC_VENDOR_ICE);
-    if (is_ice_pmd) {
+    BOOL is_i40e_ddp = (fastrg_ccb.nic_info.vendor_id == NIC_VENDOR_I40E &&
+                        fastrg_ccb.i40e_ddp_enabled == TRUE);
+    printf("NIC Vendor ID: 0x%04x, ICE PMD: %s, i40e DDP: %s, DDP enabled: %s\n",
+        fastrg_ccb.nic_info.vendor_id,
+        is_ice_pmd ? "yes" : "no",
+        is_i40e_ddp ? "yes" : "no",
+        fastrg_ccb.i40e_ddp_enabled ? "yes" : "no");
+    BOOL use_multiqueue = (is_ice_pmd || is_i40e_ddp);
+    if (use_multiqueue) {
         struct rte_flow_error flow_error;
         U16 total_q = fastrg_calc_queue_count(rte_lcore_count());
         FastRG_LOG(INFO, fastrg_ccb.fp, NULL, NULL,
@@ -670,7 +679,7 @@ int fastrg_start(int argc, char **argv)
         }
     } else {
         FastRG_LOG(INFO, fastrg_ccb.fp, NULL, NULL,
-            "Non-ICE PMD (%s) detected, using single queue per port, "
+            "Non-ICE/i40e PMD (%s) detected, using single queue per port, "
             "rte_flow rules skipped",
             fastrg_ccb.nic_info.vendor_name ? fastrg_ccb.nic_info.vendor_name : "unknown");
     }
@@ -679,8 +688,8 @@ int fastrg_start(int argc, char **argv)
     rte_eal_remote_launch((lcore_function_t *)control_plane, (void *)&fastrg_ccb, fastrg_ccb.lcore.ctrl_thread);
     rte_eal_remote_launch((lcore_function_t *)timer_loop, (void *)&fastrg_ccb, fastrg_ccb.lcore.timer_thread);
 
-    if (is_ice_pmd) {
-        /* ICE PMD: separate ctrl + data threads with multi-queue RSS */
+    if (use_multiqueue) {
+        /* ICE PMD or i40e+DDP: separate ctrl + data threads with multi-queue RSS */
         rte_eal_remote_launch((lcore_function_t *)wan_ctrl_rx, (void *)&fastrg_ccb, fastrg_ccb.lcore.wan_ctrl_thread);
         rte_eal_remote_launch((lcore_function_t *)lan_ctrl_rx, (void *)&fastrg_ccb, fastrg_ccb.lcore.lan_ctrl_thread);
 
@@ -706,7 +715,7 @@ int fastrg_start(int argc, char **argv)
                 (void *)&lan_data_args[i], fastrg_ccb.lcore.lan_data_threads[i]);
         }
     } else {
-        /* Non-ICE PMD: combined ctrl+data function per port, single queue */
+        /* Single-queue PMD: combined ctrl+data function per port */
         FastRG_LOG(INFO, fastrg_ccb.fp, NULL, NULL,
             "Launching combined wan_combined_rx + lan_combined_rx threads (single queue 0)");
         rte_eal_remote_launch((lcore_function_t *)wan_combined_rx, (void *)&fastrg_ccb, fastrg_ccb.lcore.wan_ctrl_thread);
