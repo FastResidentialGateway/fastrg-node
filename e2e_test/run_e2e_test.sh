@@ -187,6 +187,11 @@ FASTRG_NODE="192.168.10.201"
 LAN_HOST="192.168.10.210"
 WAN_HOST="192.168.10.106"
 WAN_IP="192.168.201.10"
+SRV_PORT=55688                        # only port the WAN-side firewall lets through in the test bench
+CLIENT_CPORT=47792                    # arbitrary unprivileged port for iperf3 client source port
+WAN_NIC=ens6f3np3                     # WAN-side NIC on the WAN host
+FASTRG_NODE_MAC='74:4d:28:8d:00:2c'  # FastRG node WAN port MAC
+WAN_HOST_MAC='9c:69:b4:68:65:db'     # WAN host NIC MAC
 # Auto-detect SSH key: prefer id_ed25519, fall back to id_rsa
 if [[ -f "${HOME}/.ssh/id_ed25519" ]]; then
     SSH_KEY="${HOME}/.ssh/id_ed25519"
@@ -497,6 +502,7 @@ source "${_E2E_PHASES_DIR}/phase2_etcd_config_sync.sh"
 source "${_E2E_PHASES_DIR}/phase3_dhcp_and_count.sh"
 source "${_E2E_PHASES_DIR}/phase3_5_enable_status.sh"
 source "${_E2E_PHASES_DIR}/phase4_lan_to_wan.sh"
+source "${_E2E_PHASES_DIR}/phase4_5_tcp_spi.sh"
 source "${_E2E_PHASES_DIR}/phase5_dnat_test.sh"
 source "${_E2E_PHASES_DIR}/phase6_dns_ping.sh"
 source "${_E2E_PHASES_DIR}/phase7_user1_config_tests.sh"
@@ -543,6 +549,7 @@ main() {
     phase3_dhcp_and_count
     phase3_5_enable_status
     phase4_lan_to_wan
+    phase4_5_tcp_spi
     phase5_dnat_test
     phase6_dns_ping
     phase7_user1_config_tests

@@ -23,12 +23,12 @@ phase4_lan_to_wan() {
     # ------------------------------------------------------------------
     # Step 11 — iperf3
     # ------------------------------------------------------------------
-    info "Step 11: iperf3 test (LAN→WAN, port 55688, cport 47792)..."
+    info "Step 11: iperf3 test (LAN→WAN, port ${SRV_PORT}, cport 47792)..."
     # Start iperf3 server on WAN host (daemon mode)
-    ssh_wan "iperf3 -s -B ${WAN_IP} -p 55688 -D --forceflush >/dev/null 2>&1 || true" || true
+    ssh_wan "iperf3 -s -B ${WAN_IP} -p ${SRV_PORT} -D --forceflush >/dev/null 2>&1 || true" || true
     sleep 2
 
-    IPERF_OUT=$(ssh_lan "iperf3 -c ${WAN_IP} -p 55688 --cport 47792 -t 5 -J 2>&1" || true)
+    IPERF_OUT=$(ssh_lan "iperf3 -c ${WAN_IP} -p ${SRV_PORT} --cport 47792 -t 5 -J 2>&1" || true)
     # Cleanup iperf3 server
     ssh_wan "pkill -f 'iperf3 -s' 2>/dev/null || true" || true
 
