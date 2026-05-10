@@ -9,6 +9,7 @@ Commands:
     get_hsi_info                                            - GetFastrgHsiInfo  → JSON
     get_dhcp_info                                           - GetFastrgDhcpInfo → JSON
     get_system_info                                         - GetFastrgSystemInfo → JSON
+    get_user_drop_count <user_id> [port_idx]               - GetFastrgSystemStats, WAN dropped_packets for user
     get_port_fwd_info <user_id>                             - GetPortFwdInfo    → JSON
     get_dns_static <user_id>                                - GetDnsStaticRecords → JSON
     apply_config <uid> <vlan> <acct> <pw> <start> <end> <subnet> <gw>
@@ -212,6 +213,18 @@ def set_subscriber_count(node_addr, subscriber_count):
     return {"status": resp.get("status", "")}
 
 
+def get_user_drop_count(node_addr, user_id, port_idx=1):
+    """Return dropped_packets for user_id on port_idx (1=WAN_PORT, 0=LAN_PORT)."""
+    resp = _grpcurl(node_addr, 'GetFastrgSystemStats')
+    stats_list = resp.get('stats', [])
+    if port_idx >= len(stats_list):
+        return {"dropped_packets": 0}
+    for u in stats_list[port_idx].get('per_user_stats', []):
+        if int(u.get('user_id', -1)) == int(user_id):
+            return {"dropped_packets": int(u.get('dropped_packets', 0))}
+    return {"dropped_packets": 0}
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -292,6 +305,13 @@ def main():
                 print(json.dumps({"error": "set_subscriber_count requires <count>"}), file=sys.stderr)
                 sys.exit(1)
             result = set_subscriber_count(opts.node, opts.args[0])
+        elif opts.command == "get_user_drop_count":
+            if not opts.args:
+                print(json.dumps({"error": "get_user_drop_count requires <user_id> [port_idx]"}),
+                      file=sys.stderr)
+                sys.exit(1)
+            port_idx = int(opts.args[1]) if len(opts.args) > 1 else 1
+            result = get_user_drop_count(opts.node, int(opts.args[0]), port_idx)
         else:
             print(json.dumps({"error": f"Unknown command: {opts.command}"}), file=sys.stderr)
             sys.exit(1)

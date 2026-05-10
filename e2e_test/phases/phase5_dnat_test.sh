@@ -5,10 +5,10 @@
 # ---------------------------------------------------------------------------
 phase5_dnat_test() {
     bold "═══════════════════════════════════════════════════════"
-    bold " Phase 5 — WAN→LAN DNAT (Step 13)"
+    bold " Phase 5 — WAN→LAN DNAT (Step 15)"
     bold "═══════════════════════════════════════════════════════"
 
-    info "Step 13: WAN→LAN DNAT — scapy from WAN, nc listen on LAN..."
+    info "Step 15: WAN→LAN DNAT — scapy from WAN, nc listen on LAN..."
 
     # Get port-mapping eport/dport from etcd (already fetched in phase1 as HSI_JSON)
     # Re-fetch in case phase1 was skipped or HSI_JSON is out of scope
@@ -16,7 +16,7 @@ phase5_dnat_test() {
     PM_COUNT=$(printf '%s' "$_HSI_ETCD" | jq -r '(.config["port-mapping"] // []) | length' 2>/dev/null || echo "0")
 
     if [[ "$PM_COUNT" -eq 0 ]]; then
-        skip "Step 13: WAN→LAN DNAT" "No port-mapping in etcd — cannot perform DNAT test"
+        skip "Step 15: WAN→LAN DNAT" "No port-mapping in etcd — cannot perform DNAT test"
         return
     fi
 
@@ -31,7 +31,7 @@ phase5_dnat_test() {
     DNAT_PPP_IP=$(printf '%s' "$_HSI_GRPC" | \
         jq -r ".hsi_infos[] | select(.user_id == ${USER_ID}) | .ip_addr" 2>/dev/null || true)
     if [[ -z "$DNAT_PPP_IP" ]]; then
-        fail "Step 13: WAN→LAN DNAT" "Cannot determine PPPoE client WAN IP for USER_ID=${USER_ID} from gRPC"
+        fail "Step 15: WAN→LAN DNAT" "Cannot determine PPPoE client WAN IP for USER_ID=${USER_ID} from gRPC"
         return
     fi
     info "  PPPoE WAN IP (gRPC ip_addr): ${DNAT_PPP_IP}"
@@ -45,7 +45,7 @@ phase5_dnat_test() {
     sleep 2
 
     # Send UDP packet from WAN host using scapy to WAN IP:eport
-    SCAPY_CMD="python3 -c \"from scapy.all import Ether,IP,UDP,Raw,sendp; pkt=Ether(dst='74:4d:28:8d:00:2c',src='9c:69:b4:68:65:db')/IP(src='192.168.201.10',dst='${DNAT_PPP_IP}',ttl=64,id=0x4003)/UDP(sport=54321,dport=${DNAT_EPORT})/Raw(load=b'hello'); sendp(pkt, iface='ens6f3np3')\" 2>&1"
+    SCAPY_CMD="python3 -c \"from scapy.all import Ether,IP,UDP,Raw,sendp; pkt=Ether(dst='${FASTRG_NODE_MAC}',src='${WAN_HOST_MAC}')/IP(src='${WAN_IP}',dst='${DNAT_PPP_IP}',ttl=64,id=0x4003)/UDP(sport=54321,dport=${DNAT_EPORT})/Raw(load=b'hello'); sendp(pkt, iface='${WAN_NIC}')\" 2>&1"
     SCAPY_OUT=$(ssh_wan "$SCAPY_CMD" 2>&1 || true)
     info "  scapy output: ${SCAPY_OUT}"
 
@@ -60,8 +60,8 @@ phase5_dnat_test() {
     # Also check exit: nc -l exits after receiving one packet (timeout 10 will exit even without data)
     # We consider PASS if nc received data (payload "hello") or exited cleanly within timeout
     if printf '%s' "$NC_OUT" | grep -q "hello"; then
-        pass "Step 13: WAN→LAN DNAT" "UDP payload 'hello' received on LAN ${DNAT_DIP}:${DNAT_DPORT}"
+        pass "Step 15: WAN→LAN DNAT" "UDP payload 'hello' received on LAN ${DNAT_DIP}:${DNAT_DPORT}"
     else
-        fail "Step 13: WAN→LAN DNAT" "scapy failed to send or nc did not receive on LAN ${DNAT_DIP}:${DNAT_DPORT}"
+        fail "Step 15: WAN→LAN DNAT" "scapy failed to send or nc did not receive on LAN ${DNAT_DIP}:${DNAT_DPORT}"
     fi
 }

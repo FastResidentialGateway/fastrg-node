@@ -13,3 +13,4 @@ unit_test/unit-tester
 src/version.h
 northbound/controller/proto
 .github/*.md
+CLAUDE.md
