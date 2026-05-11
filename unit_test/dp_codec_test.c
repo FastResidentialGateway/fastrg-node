@@ -24,13 +24,11 @@ void test_build_icmp_unreach(FastRG_t *fastrg_ccb)
     printf("\nTesting build_icmp_unreach function:\n");
     printf("=========================================\n\n");
 
-    dhcp_ccb_t dhcp_ccb = {
-        .dhcp_server_ip = 0x0101A8C0,  // 192.168.1.1 in network byte order (little-endian)
-        .fastrg_ccb = fastrg_ccb
-    };
-    fastrg_ccb->dhcp_ccb = fastrg_malloc(dhcp_ccb_t *,  
-        sizeof(dhcp_ccb_t *), 0);
-    fastrg_ccb->dhcp_ccb[0] = &dhcp_ccb;
+    /* Use the existing dhcp_ccb[0] allocation from init_ccb instead of a local
+     * stack variable — avoids a dangling pointer after this function returns. */
+    dhcp_ccb_t *dhcp_ccb = (dhcp_ccb_t *)fastrg_ccb->dhcp_ccb[0];
+    dhcp_ccb->dhcp_server_ip = 0x0101A8C0;  // 192.168.1.1
+    dhcp_ccb->fastrg_ccb = fastrg_ccb;
 
     // Setup original Ethernet header
     struct rte_ether_hdr eth_hdr = {
@@ -101,9 +99,9 @@ void test_build_icmp_unreach(FastRG_t *fastrg_ccb)
     TEST_ASSERT(new_ip_hdr->dst_addr == ip_hdr.src_addr,
         "ICMP IP dst_addr", "IP dst should be original src (0x%08x vs 0x%08x)",
         new_ip_hdr->dst_addr, ip_hdr.src_addr);
-    TEST_ASSERT(new_ip_hdr->src_addr == dhcp_ccb.dhcp_server_ip,
+    TEST_ASSERT(new_ip_hdr->src_addr == dhcp_ccb->dhcp_server_ip,
         "ICMP IP src_addr", "IP src should be DHCP server IP (0x%08x vs 0x%08x)",
-        new_ip_hdr->src_addr, dhcp_ccb.dhcp_server_ip);
+        new_ip_hdr->src_addr, dhcp_ccb->dhcp_server_ip);
     TEST_ASSERT(new_ip_hdr->next_proto_id == IPPROTO_ICMP,
         "ICMP IP protocol", "IP protocol should be ICMP");
 

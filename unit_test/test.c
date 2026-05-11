@@ -97,6 +97,9 @@ int main()
     struct rlimit rlim;
     int ret = 0;
 
+    /* Disable stdout buffering so output is visible in CI even if the process crashes */
+    setbuf(stdout, NULL);
+
     // Set ulimit to unlimited for core dumps and file descriptors
     rlim.rlim_cur = RLIM_INFINITY;
     rlim.rlim_max = RLIM_INFINITY;
