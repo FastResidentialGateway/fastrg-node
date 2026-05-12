@@ -545,8 +545,6 @@ void fastrg_stop()
     if (fastrg_ccb.node_uuid) fastrg_mfree(fastrg_ccb.node_uuid);
     fastrg_mfree(fastrg_ccb.vlan_userid_map);
     fastrg_cleanup_subscriber_stats(&fastrg_ccb, total_ccbs);
-
-    exit(0);
 }
 
 int fastrg_start(int argc, char **argv)
@@ -564,7 +562,9 @@ int fastrg_start(int argc, char **argv)
     int ret = rte_eal_init(argc, argv);
     if (ret < 0) {
         FastRG_LOG(ERR, fastrg_ccb.fp, NULL, NULL, "rte initlize fail.\n");
-        goto err;
+        grpc_shutdown();
+        close(sfd);
+        return -1;
     }
 
     if (rte_lcore_count() < 7) {
@@ -759,6 +759,8 @@ int fastrg_start(int argc, char **argv)
 
     close(sfd);
 
+    rte_eal_cleanup();
+
     return 0;
 
 err:
@@ -771,5 +773,6 @@ err:
     if (fastrg_ccb.controller_address) free(fastrg_ccb.controller_address);
     if (fastrg_ccb.etcd_endpoints) free(fastrg_ccb.etcd_endpoints);
     grpc_shutdown();
+    rte_eal_cleanup();
     return -1;
 }
