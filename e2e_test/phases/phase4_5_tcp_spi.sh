@@ -87,7 +87,7 @@ phase4_5_tcp_spi() {
     info "Injecting SYN to ESTABLISHED 4-tuple (flag mismatch)..."
     ssh_wan "python3 -c \"
 from scapy.all import Ether,IP,TCP,sendp
-pkt = Ether(dst='${FASTRG_NODE_MAC}', src='${WAN_HOST_MAC}') \
+pkt = Ether(dst='${FASTRG_NODE_WAN_MAC}', src='${WAN_HOST_MAC}') \
     / IP(src='${WAN_IP}', dst='${FASTRG_PUB_IP}', ttl=64) \
     / TCP(sport=${SRV_PORT}, dport=${NAT_PORT}, flags='S', seq=0x12345678)
 sendp(pkt, iface='${WAN_NIC}', verbose=0)
@@ -114,12 +114,12 @@ sendp(pkt, iface='${WAN_NIC}', verbose=0)
     info "Injecting ACK with out-of-window seq..."
     ssh_wan "python3 -c \"
 from scapy.all import Ether,IP,TCP,sendp
-pkt = Ether(dst='${FASTRG_NODE_MAC}', src='${WAN_HOST_MAC}') \
+pkt = Ether(dst='${FASTRG_NODE_WAN_MAC}', src='${WAN_HOST_MAC}') \
     / IP(src='${WAN_IP}', dst='${FASTRG_PUB_IP}', ttl=64) \
     / TCP(sport=${SRV_PORT}, dport=${NAT_PORT}, flags='A', seq=0xDEADBEEF, ack=0xCAFEBABE)
 sendp(pkt, iface='${WAN_NIC}', verbose=0)
 \" 2>&1 || true"
-    sleep 2
+    sleep 5
 
     DROP_AFTER=$(_spi_drop_count)
     DROP_DELTA=$(( DROP_AFTER - DROP_BEFORE ))

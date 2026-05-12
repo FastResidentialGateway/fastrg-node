@@ -102,15 +102,15 @@ NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 # ---------------------------------------------------------------------------
 # KV 1 — DNS static record for USER_ID=2
 # ---------------------------------------------------------------------------
-KEY_DNS="configs/${NODE_UUID}/2/dns/www.google.org"
-VAL_DNS='{"domain":"www.google.org","ip":"192.168.201.10","ttl":30}'
+KEY_DNS="configs/${NODE_UUID}/2/dns/www.fastrg.org"
+VAL_DNS='{"domain":"www.fastrg.org","ip":"192.168.201.11","ttl":30}'
 
 # ---------------------------------------------------------------------------
 # KV 2 — HSI config for USER_ID=2
 # ---------------------------------------------------------------------------
 KEY_HSI="configs/${NODE_UUID}/hsi/2"
 VAL_HSI=$(printf \
-    '{"config":{"account_name":"admin","dhcp_addr_pool":"192.168.3.2-192.168.3.10","dhcp_gateway":"192.168.3.1","dhcp_subnet":"255.255.255.0","password":"admin","port-mapping":[{"dip":"192.168.3.2","dport":"8081","eport":"12345","index":"0"}],"user_id":"2","vlan_id":"2"},"metadata":{"enableStatus":"enabled","node":"%s","resourceVersion":"1","updatedAt":"%s","updatedBy":"restore_etcd_config"}}' \
+    '{"config":{"account_name":"admin","dhcp_addr_pool":"192.168.4.2-192.168.4.10","dhcp_gateway":"192.168.4.1","dhcp_subnet":"255.255.255.0","password":"admin","port-mapping":[{"dip":"192.168.4.2","dport":"8081","eport":"12345","index":"0"}],"user_id":"2","vlan_id":"2"},"metadata":{"enableStatus":"enabled","node":"%s","resourceVersion":"1","updatedAt":"%s","updatedBy":"restore_etcd_config"}}' \
     "${NODE_UUID}" "${NOW}")
 
 # ---------------------------------------------------------------------------

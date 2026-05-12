@@ -99,7 +99,7 @@ phase0_setup() {
     if [[ -z "$FASTRG_PID" ]]; then
         warn "fastrg is NOT running — attempting to start..."
         _FASTRG_DAEMON="/root/fastrg-node/fastrg"
-        _FASTRG_START_CMD="${_FASTRG_DAEMON} -l 1-9 -n 4 -a 0000:04:00.0 -a 0000:08:00.0"
+        _FASTRG_START_CMD="${_FASTRG_DAEMON} -l 1-9 -n 4 -a 0000:07:00.0 -a 0000:08:00.0"
         info "Starting: ${_FASTRG_START_CMD}"
         ssh_node "nohup ${_FASTRG_START_CMD} >/var/log/fastrg.log 2>&1 &"
         _FASTRG_STARTED_BY_SCRIPT=1

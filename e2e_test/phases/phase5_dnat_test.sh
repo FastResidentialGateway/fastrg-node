@@ -45,7 +45,7 @@ phase5_dnat_test() {
     sleep 2
 
     # Send UDP packet from WAN host using scapy to WAN IP:eport
-    SCAPY_CMD="python3 -c \"from scapy.all import Ether,IP,UDP,Raw,sendp; pkt=Ether(dst='${FASTRG_NODE_MAC}',src='${WAN_HOST_MAC}')/IP(src='${WAN_IP}',dst='${DNAT_PPP_IP}',ttl=64,id=0x4003)/UDP(sport=54321,dport=${DNAT_EPORT})/Raw(load=b'hello'); sendp(pkt, iface='${WAN_NIC}')\" 2>&1"
+    SCAPY_CMD="python3 -c \"from scapy.all import Ether,IP,UDP,Raw,sendp; pkt=Ether(dst='${FASTRG_NODE_WAN_MAC}',src='${WAN_HOST_MAC}')/IP(src='${WAN_IP}',dst='${DNAT_PPP_IP}',ttl=64,id=0x4003)/UDP(sport=54321,dport=${DNAT_EPORT})/Raw(load=b'hello'); sendp(pkt, iface='${WAN_NIC}')\" 2>&1"
     SCAPY_OUT=$(ssh_wan "$SCAPY_CMD" 2>&1 || true)
     info "  scapy output: ${SCAPY_OUT}"
 
