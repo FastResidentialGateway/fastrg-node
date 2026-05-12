@@ -1,53 +1,102 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # ---------------------------------------------------------------------------
-# Phase 7 — User 1 gRPC→etcd→fastrg Config Tests (Steps 12–19)
+# Phase 7 — Dynamic New Subscriber gRPC→etcd→fastrg Config Tests (Steps 17–24)
 #
-# Creates a fresh HSI config for user 1, exercises all major gRPC
-# configuration commands, verifies each produces the correct etcd state
-# and that fastrg_node applies changes locally.  All user-1 config is
-# cleaned up at the end.  User 2 traffic (steps 1-11) is not re-tested.
+# Determines the current subscriber count (N), creates subscriber N+1,
+# applies the same config as subscriber 1 (with VLAN 100), exercises all
+# major gRPC configuration commands, verifies each produces the correct
+# etcd state and that fastrg_node applies changes locally.  The new
+# subscriber config is cleaned up and the subscriber count is restored.
 # ---------------------------------------------------------------------------
 
-# Helper: remove user 1 HSI config from etcd via gRPC (idempotent).
+# Helper: remove newly-created subscriber config + restore count (idempotent).
 # Called at end of phase7 AND from cleanup_fastrg trap.
-_cleanup_user1_config() {
+_cleanup_new_subscriber_config() {
     [[ -z "${NODE_UUID:-}" ]] && return
+    [[ -z "${_NEW_USER_ID:-}" ]] && return
     local _chk
-    _chk=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/1" 2>/dev/null || true)
+    _chk=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/${_NEW_USER_ID}" 2>/dev/null || true)
     if [[ -n "$_chk" ]]; then
-        info "Cleanup: removing user 1 config (RemoveConfig gRPC)..."
-        fastrg_grpc remove_config "1" >/dev/null 2>&1 || true
+        info "Cleanup: removing user ${_NEW_USER_ID} config (RemoveConfig gRPC)..."
+        fastrg_grpc remove_config "${_NEW_USER_ID}" >/dev/null 2>&1 || true
         sleep 1
-        _chk=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/1" 2>/dev/null || true)
+        _chk=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/${_NEW_USER_ID}" 2>/dev/null || true)
         if [[ -z "$_chk" ]]; then
-            info "Cleanup: user 1 config removed from etcd."
+            info "Cleanup: user ${_NEW_USER_ID} config removed from etcd."
         else
-            warn "Cleanup: user 1 config still in etcd after RemoveConfig — manual cleanup may be needed."
+            warn "Cleanup: user ${_NEW_USER_ID} config still in etcd after RemoveConfig — manual cleanup may be needed."
         fi
+    fi
+    if [[ -n "${_ORIG_SUB_COUNT:-}" ]]; then
+        info "Cleanup: restoring subscriber count to ${_ORIG_SUB_COUNT}..."
+        fastrg_grpc set_subscriber_count "${_ORIG_SUB_COUNT}" >/dev/null 2>&1 || true
     fi
 }
 
-phase7_user1_config_tests() {
+phase7_extra_user_config_tests() {
     bold "═══════════════════════════════════════════════════════"
-    bold " Phase 7 — User 1 gRPC→etcd Config Tests (Steps 17-24)"
+    bold " Phase 7 — Extra User gRPC→etcd Config Tests (Steps 17-24)"
     bold "═══════════════════════════════════════════════════════"
-
-    # User 1 test parameters (must not overlap with user 2: VLAN 2, pool 192.168.3.x)
-    local U1=1
-    local U1_VLAN=3
-    local U1_ACCOUNT="test1"
-    local U1_PASSWORD="test1pass"
-    local U1_POOL_START="192.168.4.2"
-    local U1_POOL_END="192.168.4.10"
-    local U1_SUBNET="255.255.255.0"
-    local U1_GATEWAY="192.168.4.1"
-    local U1_DNS_DOMAIN="user1test.fastrg.local"
-    local U1_DNS_IP="10.1.0.1"
-    local U1_DNS_TTL=60
 
     # ------------------------------------------------------------------
-    # Step 17 — ApplyConfig user 1 → etcd key written correctly
+    # Determine current subscriber count and derive new subscriber ID
+    # ------------------------------------------------------------------
+    info "Determining current subscriber count..."
+    _sc_sys=$(fastrg_grpc get_system_info)
+    _ORIG_SUB_COUNT=$(printf '%s' "$_sc_sys" | jq -r '.num_users // 0' 2>/dev/null || echo 0)
+    _ORIG_SUB_COUNT=$(( ${_ORIG_SUB_COUNT:-0} + 0 ))
+    if [[ $_ORIG_SUB_COUNT -eq 0 ]]; then
+        warn "Cannot determine current subscriber count — skipping Phase 7"
+        return
+    fi
+    _NEW_USER_ID=$(( _ORIG_SUB_COUNT + 1 ))
+    info "Current subscriber count: ${_ORIG_SUB_COUNT} → new subscriber ID: ${_NEW_USER_ID}"
+
+    # ------------------------------------------------------------------
+    # Read subscriber 1's config from etcd as the base config
+    # ------------------------------------------------------------------
+    info "Reading subscriber 1 config from etcd (configs/${NODE_UUID}/hsi/1)..."
+    _s1_etcd=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/1" 2>/dev/null || true)
+    if [[ -z "$_s1_etcd" ]]; then
+        warn "Subscriber 1 config not found in etcd — skipping Phase 7"
+        return
+    fi
+
+    # ------------------------------------------------------------------
+    # New subscriber parameters — same as subscriber 1, with VLAN 100
+    # ------------------------------------------------------------------
+    local U1=${_NEW_USER_ID}
+    local U1_VLAN=100
+    local U1_ACCOUNT
+    local U1_PASSWORD
+    local U1_POOL
+    local U1_POOL_START
+    local U1_POOL_END
+    local U1_SUBNET
+    local U1_GATEWAY
+    U1_ACCOUNT=$(printf '%s'    "$_s1_etcd" | jq -r '.config.account_name // empty')
+    U1_PASSWORD=$(printf '%s'   "$_s1_etcd" | jq -r '.config.password // empty')
+    U1_POOL=$(printf '%s'       "$_s1_etcd" | jq -r '.config.dhcp_addr_pool // empty')
+    U1_POOL_START=$(printf '%s' "$U1_POOL"  | awk -F'[-~]' '{print $1}')
+    U1_POOL_END=$(printf '%s'   "$U1_POOL"  | awk -F'[-~]' '{print $2}')
+    U1_SUBNET=$(printf '%s'     "$_s1_etcd" | jq -r '.config.dhcp_subnet // empty')
+    U1_GATEWAY=$(printf '%s'    "$_s1_etcd" | jq -r '.config.dhcp_gateway // empty')
+    local U1_DNS_DOMAIN="user${_NEW_USER_ID}test.fastrg.local"
+    local U1_DNS_IP="10.1.0.${_NEW_USER_ID}"
+    local U1_DNS_TTL=60
+
+    info "New subscriber ${U1}: VLAN=${U1_VLAN} account=${U1_ACCOUNT} pool=${U1_POOL} subnet=${U1_SUBNET} gw=${U1_GATEWAY}"
+
+    # ------------------------------------------------------------------
+    # Expand subscriber count to accommodate the new subscriber
+    # ------------------------------------------------------------------
+    info "Expanding subscriber count to ${_NEW_USER_ID}..."
+    fastrg_grpc set_subscriber_count "${_NEW_USER_ID}" >/dev/null 2>&1 || true
+    sleep 1
+
+    # ------------------------------------------------------------------
+    # Step 17 — ApplyConfig new subscriber → etcd key written correctly
     # ------------------------------------------------------------------
     info "Step 17: ApplyConfig user ${U1} (VLAN=${U1_VLAN} account=${U1_ACCOUNT} pool=${U1_POOL_START}-${U1_POOL_END})..."
     _apply_reply=$(fastrg_grpc apply_config \
@@ -58,14 +107,14 @@ phase7_user1_config_tests() {
     if [[ -z "$_apply_status" ]]; then
         fail "Step 17: ApplyConfig user ${U1}" \
             "gRPC ApplyConfig returned no status — response: $(printf '%s' "$_apply_reply")"
-        warn "Skipping Steps 12-18 (ApplyConfig failed)"
-        skip "Step 18: fastrg applies user 1 config"  "ApplyConfig failed"
-        skip "Step 19: ConnectHsi user 1"             "ApplyConfig failed"
-        skip "Step 20: DisconnectHsi user 1"          "ApplyConfig failed"
-        skip "Step 21: DhcpServerStart user 1"        "ApplyConfig failed"
-        skip "Step 22: DhcpServerStop user 1"         "ApplyConfig failed"
-        skip "Step 23: AddDnsRecord user 1"           "ApplyConfig failed"
-        skip "Step 24: RemoveDnsRecord user 1"        "ApplyConfig failed"
+        warn "Skipping Steps 18-24 (ApplyConfig failed)"
+        skip "Step 18: fastrg applies user ${U1} config"  "ApplyConfig failed"
+        skip "Step 19: ConnectHsi user ${U1}"             "ApplyConfig failed"
+        skip "Step 20: DisconnectHsi user ${U1}"          "ApplyConfig failed"
+        skip "Step 21: DhcpServerStart user ${U1}"        "ApplyConfig failed"
+        skip "Step 22: DhcpServerStop user ${U1}"         "ApplyConfig failed"
+        skip "Step 23: AddDnsRecord user ${U1}"           "ApplyConfig failed"
+        skip "Step 24: RemoveDnsRecord user ${U1}"        "ApplyConfig failed"
         return
     fi
 
@@ -308,7 +357,7 @@ phase7_user1_config_tests() {
     fi
 
     # ------------------------------------------------------------------
-    # Cleanup — remove user 1 config from etcd
+    # Cleanup — remove new subscriber config and restore subscriber count
     # ------------------------------------------------------------------
-    _cleanup_user1_config
+    _cleanup_new_subscriber_config
 }
