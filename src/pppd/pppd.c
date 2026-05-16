@@ -235,6 +235,8 @@ STATUS pppd_allocate_ccbs(FastRG_t *fastrg_ccb, U16 start_id, U16 count, ppp_ccb
                 rte_mempool_avail_count(fastrg_ccb->ppp_ccb_mp));
 
             for(U16 j=start_id; j<ccb_id; j++) {
+                mac_table_free(array[j]->mac_table);
+                arp_pending_cleanup_queue(&array[j]->arp_pq, fastrg_ccb->arp_pending_mp);
                 rte_mempool_put(fastrg_ccb->ppp_ccb_mp, array[j]);
                 array[j] = NULL;
             }
@@ -248,6 +250,8 @@ STATUS pppd_allocate_ccbs(FastRG_t *fastrg_ccb, U16 start_id, U16 count, ppp_ccb
         if (ppp_init_config_by_user(fastrg_ccb, array[ccb_id], ccb_id, 0, 
                 "asdf", "zxcv") == ERROR) {
             for(U16 j=start_id; j<=ccb_id; j++) {
+                mac_table_free(array[j]->mac_table);
+                arp_pending_cleanup_queue(&array[j]->arp_pq, fastrg_ccb->arp_pending_mp);
                 rte_mempool_put(fastrg_ccb->ppp_ccb_mp, array[j]);
                 array[j] = NULL;
             }
