@@ -27,7 +27,6 @@
 #include "dnsd/dnsd.h"
 #include <ip_codec.h>
 #include "config.h"
-#include "timer.h"
 #include "controller.h"
 #include "etcd_integration.h"
 #include "utils.h"
@@ -686,7 +685,6 @@ int fastrg_start(int argc, char **argv)
 
     /* --- Launch fixed threads --- */
     rte_eal_remote_launch((lcore_function_t *)control_plane, (void *)&fastrg_ccb, fastrg_ccb.lcore.ctrl_thread);
-    rte_eal_remote_launch((lcore_function_t *)timer_loop, (void *)&fastrg_ccb, fastrg_ccb.lcore.timer_thread);
 
     if (use_multiqueue) {
         /* ICE PMD or i40e+DDP: separate ctrl + data threads with multi-queue RSS */
@@ -729,12 +727,21 @@ int fastrg_start(int argc, char **argv)
 
     rte_atomic16_set(&start_flag, 1);
 
+    uint64_t timer_resolution_cycles = fastrg_get_cycles_in_sec() / 100; /* 10ms */
+    uint64_t prev_tsc = 0;
+
     while(1) {
+        uint64_t cur_tsc = fastrg_get_cur_cycles();
+        if (cur_tsc - prev_tsc > timer_resolution_cycles) {
+            rte_timer_manage();
+            prev_tsc = cur_tsc;
+        }
+
         struct signalfd_siginfo si;
         ssize_t s = read(sfd, &si, sizeof(si));
         if (s < 0) {
             if (errno == EAGAIN || errno == EINTR) {
-                usleep(100000); // prevent busy waiting
+                usleep(10000); // 10ms — matches timer resolution
                 continue;
             }
             FastRG_LOG(ERR, fastrg_ccb.fp, NULL, NULL, "signalfd read error: %s", strerror(errno));
