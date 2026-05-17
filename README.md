@@ -19,7 +19,8 @@
 - DPDK capable NIC with at least 2 ports
 	- Suggest to use Intel E800 series NICs to acquire best performance.
 - 8GB RAM
-- At least 7 CPU cores.
+- At least 4 CPU cores.
+	- For Intel E800 and X700 series NICs, at least 6 CPUs
 
 ## How to use:
 
@@ -59,19 +60,19 @@ Then
 
 e.g.
 
-	# fastrg -l 0-8 -n 4 -a 0000:04:00.0 -a 0000:08:00.0
+	# fastrg -l 0-7 -n 4 -a 0000:04:00.0 -a 0000:08:00.0
 
 For using FastRG system data plane in Docker,
 
 	# docker build --no-cache -t fastrg:latest .
 	# mount -t hugetlbfs -o pagesize=1G none /dev/hugepages1G
 	# docker run -d --net=host --privileged -v /sys/bus/pci/devices:/sys/bus/pci/devices \
-	-v /sys/kernel/mm/hugepages:/sys/kernel/mm/hugepages -v /sys/devices/system/node:/sys/devices/system/node -v /dev:/dev -v /etc/fastrg:/etc/fastrg fastrg:latest fastrg -l 0-8 -n 4 -a 0000:04:00.0 -a 0000:08:00.0
+	-v /sys/kernel/mm/hugepages:/sys/kernel/mm/hugepages -v /sys/devices/system/node:/sys/devices/system/node -v /dev:/dev -v /etc/fastrg:/etc/fastrg fastrg:latest fastrg -l 0-5 -n 4 -a 0000:04:00.0 -a 0000:08:00.0
 
 For Intel E800 series NICs, please use this command to start Docker container
 
 	# docker run -d --net=host --privileged -v /sys/bus/pci/devices:/sys/bus/pci/devices \
-	-v /sys/kernel/mm/hugepages:/sys/kernel/mm/hugepages -v /sys/devices/system/node:/sys/devices/system/node -v /dev:/dev -v /etc/fastrg:/etc/fastrg -v/lib/firmware/updates/intel/ice/ddp/:/lib/firmware/updates/intel/ice/ddp/ -v /lib/firmware/intel/ice/ddp:/lib/firmware/intel/ice/ddp fastrg:latest fastrg -l 0-8 -n 4 -a 0000:04:00.0 -a 0000:08:00.0
+	-v /sys/kernel/mm/hugepages:/sys/kernel/mm/hugepages -v /sys/devices/system/node:/sys/devices/system/node -v /dev:/dev -v /etc/fastrg:/etc/fastrg -v/lib/firmware/updates/intel/ice/ddp/:/lib/firmware/updates/intel/ice/ddp/ -v /lib/firmware/intel/ice/ddp:/lib/firmware/intel/ice/ddp fastrg:latest fastrg -l 0-7 -n 4 -a 0000:04:00.0 -a 0000:08:00.0
 
 ### SDN mode(Control plane + Data plane)
 
