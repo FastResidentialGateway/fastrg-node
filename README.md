@@ -17,7 +17,7 @@
 ## System required:
 
 - DPDK capable NIC with at least 2 ports
-	- Suggest to use Intel E800 series NICs to acquire best performance.
+	- Suggest to use Intel E800 or X700 series NICs to acquire best performance.
 - 8GB RAM
 - At least 4 CPU cores.
 	- For Intel E800 and X700 series NICs, at least 6 CPUs
@@ -60,7 +60,9 @@ Then
 
 e.g.
 
-	# fastrg -l 0-7 -n 4 -a 0000:04:00.0 -a 0000:08:00.0
+	# fastrg -l 0-3 -n 4 -a 0000:04:00.0 -a 0000:08:00.0
+For 4 more CPU cores and PPPoE RSS support with Intel E800 and X700 series NICs
+	# fastrg -l 0-11 -n 4 -a 0000:04:00.0 -a 0000:08:00.0 
 
 For using FastRG system data plane in Docker,
 
@@ -73,6 +75,8 @@ For Intel E800 series NICs, please use this command to start Docker container
 
 	# docker run -d --net=host --privileged -v /sys/bus/pci/devices:/sys/bus/pci/devices \
 	-v /sys/kernel/mm/hugepages:/sys/kernel/mm/hugepages -v /sys/devices/system/node:/sys/devices/system/node -v /dev:/dev -v /etc/fastrg:/etc/fastrg -v/lib/firmware/updates/intel/ice/ddp/:/lib/firmware/updates/intel/ice/ddp/ -v /lib/firmware/intel/ice/ddp:/lib/firmware/intel/ice/ddp fastrg:latest fastrg -l 0-7 -n 4 -a 0000:04:00.0 -a 0000:08:00.0
+
+For Intel X700 series NICs, please remember to include DDP file in Docker container and specify the DDP file in ***config.cfg*** file to enable PPPoE RSS feature.
 
 ### SDN mode(Control plane + Data plane)
 
@@ -128,8 +132,9 @@ For hugepages, NIC binding and other system configuration, please refer to DPDK 
 	- The value range can be set from 1 to 4000.
 3. In data plane, all packets received at FastRG system should include a single tag vlan.
 4. All DPDK EAL lcores should be on the same CPU socket.
-5. The FastRG node supports PPPoE RSS while using Intel E800 series NICs. For every two more CPU cores, the FastRG node uses 1 more Rx queue pair for LAN and WAN port. Minimum Rx queue count is 2, the maximum is 16. 
-	- Please replace DDP package to ice_comms.pkg in /lib/firmware/updates/intel/ice/ddp/ and /lib/firmware/intel/ice/ddp/ and rename it to ice.pkg to enable PPPoE RSS feature. Th DDP package can be download from https://www.intel.com/content/www/us/en/download/19660/intel-ethernet-800-series-dynamic-device-personalization-ddp-for-telecommunication-comms-package.html
+5. The FastRG node supports PPPoE RSS while using Intel E800 and X700 series NICs. For every two more CPU cores, the FastRG node uses 1 more Rx queue pair for LAN and WAN port. Minimum Rx queue count is 2, the maximum is 16. 
+	- For E800, please replace DDP package to ice_comms.pkg in /lib/firmware/updates/intel/ice/ddp/ and /lib/firmware/intel/ice/ddp/ and rename it to ice.pkg to enable PPPoE RSS feature. Th DDP package can be download from https://www.intel.com/content/www/us/en/download/19660/intel-ethernet-800-series-dynamic-device-personalization-ddp-for-telecommunication-comms-package.html
+	- For X700, please download latest DDP from https://www.intel.com/content/www/us/en/download/15084/intel-ethernet-adapter-complete-driver-pack.html and specify the DDP package in ***config.cfg*** file to enable PPPoE RSS feature.
 
 ## Test environment:
 
