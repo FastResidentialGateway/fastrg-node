@@ -480,8 +480,8 @@ void pppd_cleanup_ccb(FastRG_t *fastrg_ccb, U16 total_ccb_count)
 
 STATUS pppd_init(FastRG_t *fastrg_ccb)
 {
-    // calculate mempool size as the next power of 2 greater than user_count
-    unsigned int mempool_size = 1U << (31 - __builtin_clz(fastrg_ccb->user_count) + 1);
+    // calculate mempool size as the next power of 2 greater than max_user_count
+    unsigned int mempool_size = 1U << (31 - __builtin_clz(fastrg_ccb->max_user_count) + 1);
 
     if (pppd_init_rcu(fastrg_ccb) == ERROR) {
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG, 

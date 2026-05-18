@@ -22,7 +22,8 @@ void test_parse_config_valid(FastRG_t *fastrg_ccb)
     FILE *fp = fopen(test_config, "w");
     TEST_ASSERT(fp != NULL, "Mock config file", "Create test config file failed");
 
-    fprintf(fp, "UserCount = 100;\n");
+    fprintf(fp, "MaxUserCount = 100;\n");
+    fprintf(fp, "InitUserCount = 10;\n");
     fprintf(fp, "Loglvl = \"INFO\";\n");
     fprintf(fp, "HeartbeatInterval = 60;\n");
     fclose(fp);
@@ -30,8 +31,10 @@ void test_parse_config_valid(FastRG_t *fastrg_ccb)
     STATUS ret = parse_config(test_config, fastrg_ccb, &cfg);
     TEST_ASSERT(ret == SUCCESS, "Check parse_config return value", 
         "parse_config returns ERROR");
-    TEST_ASSERT(fastrg_ccb->user_count == 100, "check user count", 
-        "UserCount != 100");
+    TEST_ASSERT(fastrg_ccb->max_user_count == 100, "check max user count", 
+        "MaxUserCount != 100");
+    TEST_ASSERT(fastrg_ccb->user_count == 10, "check initial user count", 
+        "InitUserCount != 10");
     TEST_ASSERT(cfg.heartbeat_interval == 60, "check heartbeat interval", 
         "HeartbeatInterval != 60");
 
@@ -51,12 +54,13 @@ void test_parse_config_invalid(FastRG_t *fastrg_ccb)
     TEST_ASSERT(fp != NULL, "Mock config file", 
         "Create test config file failed");
 
-    fprintf(fp, "UserCount = 0;\n");  /* Invalid */
+    fprintf(fp, "MaxUserCount = 0;\n");  /* Invalid */
+    fprintf(fp, "InitUserCount = 0;\n");  /* Invalid */
     fclose(fp);
 
     STATUS ret = parse_config(test_config, fastrg_ccb, &cfg);
     TEST_ASSERT(ret == ERROR, "Check parse_config return value", 
-        "parse_config returns SUCCESS for invalid UserCount");
+        "parse_config returns SUCCESS for invalid MaxUserCount");
 
     unlink(test_config);
 
