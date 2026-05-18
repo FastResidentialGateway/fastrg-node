@@ -69,6 +69,7 @@ typedef struct FastRG {
     char                    *build_date;    /* build date */
     char                    *eal_args;      /* DPDK EAL args */
     U16                     user_count;     /* total FastRG subscriptor */
+    U16                     max_user_count; /* max FastRG subscriptor supported */
     struct lcore_map        lcore;          /* lcore map */
     char                    *unix_sock_path;/* FastRG unix socket file path */
     char                    *node_grpc_ip_port; /* FastRG node grpc ip:port */

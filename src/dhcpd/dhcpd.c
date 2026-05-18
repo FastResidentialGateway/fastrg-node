@@ -404,7 +404,7 @@ void dhcpd_cleanup_ccb(FastRG_t *fastrg_ccb, U16 total_ccb_count)
 
 STATUS dhcp_init(FastRG_t *fastrg_ccb)
 {
-    unsigned int mempool_size = 1U << (31 - __builtin_clz(fastrg_ccb->user_count) + 1);
+    unsigned int mempool_size = 1U << (31 - __builtin_clz(fastrg_ccb->max_user_count) + 1);
 
     if (dhcpd_init_rcu(fastrg_ccb) == ERROR) {
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, DHCPLOGMSG, 
@@ -432,7 +432,7 @@ STATUS dhcp_init(FastRG_t *fastrg_ccb)
 
     /* Create shared per-LAN-user mempool */
     struct rte_mempool *dhcp_per_lan_user_mempool = rte_mempool_create("DHCP_PER_LAN_USER_MEMPOOL", 
-        DHCP_MAX_POOL_SIZE_PER_USER * fastrg_ccb->user_count, 
+        DHCP_MAX_POOL_SIZE_PER_USER * fastrg_ccb->max_user_count, 
         sizeof(dhcp_ccb_per_lan_user_t), RTE_MEMPOOL_CACHE_MAX_SIZE, 0, NULL, NULL, NULL, NULL, 
         rte_socket_id(), 0);
     if (dhcp_per_lan_user_mempool == NULL) {
