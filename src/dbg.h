@@ -40,6 +40,8 @@ char *DHCP_state2str(U16 state);
 #ifdef UNIT_TEST
 #define FastRG_LOG(lvl, fp, ccb, ccb2str, ...) \
     LOGGER(LOGUNKNOWN, BASENAME_FILE(__FILE__), __LINE__, fp, ccb, ccb2str, __VA_ARGS__)
+#elif NB_TEST
+#define FastRG_LOG(lvl, fp, ccb, ccb2str, ...)
 #else
 #define FastRG_LOG(lvl, fp, ccb, ccb2str, ...) \
     LOGGER(LOG ## lvl, (__FILE__), __LINE__, fp, ccb, ccb2str, __VA_ARGS__)
