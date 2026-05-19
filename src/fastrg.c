@@ -369,7 +369,7 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
                 } else if (dhcp_msg->cmd == DHCP_CMD_ENABLE) {
                     FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "User %d dhcp server is spawning\n", dhcp_msg->ccb_id + 1);
                     rte_atomic16_cmpset((uint16_t *)&dhcp_ccb->dhcp_bool.cnt, 0, 1);
-                    FastRG_LOG(INFO, fastrg_ccb->fp, &dhcp_ccb, DHCPLOGMSG, "User %d dhcp server is spawned\n", dhcp_msg->ccb_id + 1);
+                    FastRG_LOG(INFO, fastrg_ccb->fp, dhcp_ccb, DHCPLOGMSG, "User %d dhcp server is spawned\n", dhcp_msg->ccb_id + 1);
                 }
                 rte_ring_enqueue(free_mail_ring, mail[i]);
                 break;
