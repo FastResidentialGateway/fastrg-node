@@ -320,6 +320,7 @@ source "${_E2E_PHASES_DIR}/phase4_5_tcp_spi.sh"
 source "${_E2E_PHASES_DIR}/phase5_dnat_test.sh"
 source "${_E2E_PHASES_DIR}/phase6_dns_ping.sh"
 source "${_E2E_PHASES_DIR}/phase7_extra_user_config_tests.sh"
+source "${_E2E_PHASES_DIR}/phase9_cli_config_sync.sh"
 source "${_E2E_PHASES_DIR}/phase8_summary.sh"
 
 # ---------------------------------------------------------------------------
@@ -330,6 +331,7 @@ cleanup_fastrg() {
 
     # Best-effort: remove new subscriber config if the test left it in etcd
     _cleanup_new_subscriber_config 2>/dev/null || true
+    _cleanup_phase9_user 2>/dev/null || true
 
     if [[ "${_FASTRG_STARTED_BY_SCRIPT:-0}" -eq 1 ]]; then
         info "Stopping fastrg (started by this script)..."
@@ -367,6 +369,7 @@ main() {
     phase5_dnat_test
     phase6_dns_ping
     phase7_extra_user_config_tests
+    phase9_cli_config_sync
     phase8_summary || true
 }
 
