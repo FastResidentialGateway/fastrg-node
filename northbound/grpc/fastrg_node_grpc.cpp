@@ -205,7 +205,7 @@ grpc::Status FastRGNodeServiceImpl::ConnectHsi(::grpc::ServerContext* context, c
                 continue;
             }
             if (rte_atomic16_read(&ppp_ccb->ppp_bool) == 1) {
-                cout << "User " << i + 1 << " is already connectiing/connected, skip connecting" << endl;
+                cout << "User " << i + 1 << " is already connecting/connected, skip connecting" << endl;
                 continue;
             }
             if (fastrg_gen_northbound_event(EV_NORTHBOUND_PPPoE, PPPoE_CMD_ENABLE, i) == ERROR) {
@@ -222,7 +222,7 @@ grpc::Status FastRGNodeServiceImpl::ConnectHsi(::grpc::ServerContext* context, c
             return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, err);
         }
         if (rte_atomic16_read(&ppp_ccb->ppp_bool) == 1) {
-            cout << "User " << ccb_id + 1 << " is already connectiing/connected, skip connecting" << endl;
+            cout << "User " << ccb_id + 1 << " is already connecting/connected, skip connecting" << endl;
             std::string err = "Error! User " + std::to_string(user_id) + " is already connected/connecting by other client";
             cout << err << endl;
             return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, err);
@@ -266,7 +266,7 @@ grpc::Status FastRGNodeServiceImpl::DisconnectHsi(::grpc::ServerContext* context
                 continue;
             }
             if (rte_atomic16_read(&ppp_ccb->ppp_bool) == 0) {
-                cout << "User " << i + 1 << " is already disconnectiing/disconnected, skip disconnecting" << endl;
+                cout << "User " << i + 1 << " is already disconnecting/disconnected, skip disconnecting" << endl;
                 continue;
             }
             if (fastrg_gen_northbound_event(EV_NORTHBOUND_PPPoE, PPPoE_CMD_DISABLE, i) == ERROR) {
@@ -293,7 +293,7 @@ grpc::Status FastRGNodeServiceImpl::DisconnectHsi(::grpc::ServerContext* context
             return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, err);
         }
         if (rte_atomic16_read(&ppp_ccb->ppp_bool) == 0) {
-            cout << "User " << ccb_id + 1 << " is already disconnectiing/disconnected, skip disconnecting" << endl;
+            cout << "User " << ccb_id + 1 << " is already disconnecting/disconnected, skip disconnecting" << endl;
             std::string err = "Error! User " + std::to_string(user_id) + " is already disconnected/disconnecting by other client";
             cout << err << endl;
             return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, err);
