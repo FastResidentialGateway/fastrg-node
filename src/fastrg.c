@@ -346,12 +346,34 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
                 ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, pppoe_msg->ccb_id);
                 if (pppoe_msg->cmd == PPPoE_CMD_DISABLE) {
                     FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "User %d pppoe is terminating\n", pppoe_msg->ccb_id + 1);
-                    if (ppp_disconnect(ppp_ccb) == SUCCESS)
+                    if (ppp_disconnect(ppp_ccb) == SUCCESS) {
                         fastrg_ccb->cur_user--;
+                        int64_t revision = 0;
+                        char user_id_str[6] = { 0 };
+                        snprintf(user_id_str, sizeof(user_id_str), "%u", pppoe_msg->ccb_id + 1);
+                        etcd_mark_pending_event(HSI_ACTION_UPDATE, pppoe_msg->ccb_id);
+                        if (etcd_client_modify_hsi_config_status(fastrg_ccb->node_uuid, user_id_str, 
+                                ENABLE_STATUS_DISABLING, &revision) == ETCD_SUCCESS) {
+                            etcd_confirm_pending_event(HSI_ACTION_UPDATE, pppoe_msg->ccb_id, revision);
+                        } else {
+                            etcd_remove_event(HSI_ACTION_UPDATE, pppoe_msg->ccb_id);
+                        }
+                    }
                 } else if (pppoe_msg->cmd == PPPoE_CMD_ENABLE) {
                     FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "User %d pppoe is spawning\n", pppoe_msg->ccb_id + 1);
-                    if (ppp_connect(ppp_ccb) == SUCCESS)
+                    if (ppp_connect(ppp_ccb) == SUCCESS) {
                         fastrg_ccb->cur_user++;
+                        int64_t revision = 0;
+                        char user_id_str[6] = { 0 };
+                        snprintf(user_id_str, sizeof(user_id_str), "%u", pppoe_msg->ccb_id + 1);
+                        etcd_mark_pending_event(HSI_ACTION_UPDATE, pppoe_msg->ccb_id);
+                        if (etcd_client_modify_hsi_config_status(fastrg_ccb->node_uuid, user_id_str, 
+                                ENABLE_STATUS_ENABLING, &revision) == ETCD_SUCCESS) {
+                            etcd_confirm_pending_event(HSI_ACTION_UPDATE, pppoe_msg->ccb_id, revision);
+                        } else {
+                            etcd_remove_event(HSI_ACTION_UPDATE, pppoe_msg->ccb_id);
+                        }
+                    }
                 } else if (pppoe_msg->cmd == PPPoE_CMD_FORCE_DISABLE) {
                     FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "User %d pppoe is force terminating\n", pppoe_msg->ccb_id + 1);
                     fastrg_force_terminate_hsi(ppp_ccb);
