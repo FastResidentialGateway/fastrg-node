@@ -386,6 +386,9 @@ STATUS etcd_integration_start(FastRG_t *fastrg_ccb)
         }
     }
 
+    // Register matchers for sync dedupe
+    etcd_client_set_matchers(hsi_config_matches_local, dns_record_matches_local);
+
     // Start etcd watching
     etcd_status_t status = etcd_client_start_watch(
         fastrg_ccb->node_uuid, 
@@ -450,6 +453,159 @@ int parse_user_id(const char *user_id_str, int max_count)
         return -1;
 
     return ccb_id;
+}
+
+BOOL hsi_config_matches_local(const char *user_id,
+    const hsi_config_t *etcd_config, void *user_data)
+{
+    FastRG_t *fastrg_ccb = (FastRG_t *)user_data;
+    if (!fastrg_ccb || !user_id || !etcd_config)
+        return FALSE;
+
+    int ccb_id = parse_user_id(user_id, fastrg_ccb->user_count);
+    if (ccb_id < 0 || !is_valid_ccb_id(fastrg_ccb, ccb_id))
+        return FALSE;
+
+    ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
+    dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
+    if (!ppp_ccb || !dhcp_ccb)
+        return FALSE;
+
+    U16 etcd_vlan;
+    if (parse_vlan_id(etcd_config->vlan_id, &etcd_vlan) == ERROR) {
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "Sync match[%s]: bad etcd vlan_id=\"%s\"", user_id, etcd_config->vlan_id);
+        return FALSE;
+    }
+    U16 local_vlan = (U16)rte_atomic16_read(&ppp_ccb->vlan_id);
+    if (local_vlan != etcd_vlan) {
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "Sync match[%s]: VLAN mismatch local=%u etcd=%u", user_id, local_vlan, etcd_vlan);
+        return FALSE;
+    }
+
+    if (ppp_ccb->ppp_user_acc == NULL ||
+        strcmp((const char *)ppp_ccb->ppp_user_acc, etcd_config->account_name) != 0) {
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "Sync match[%s]: account mismatch local=\"%s\" etcd=\"%s\"",
+            user_id, ppp_ccb->ppp_user_acc ? (const char *)ppp_ccb->ppp_user_acc : "(null)",
+            etcd_config->account_name);
+        return FALSE;
+    }
+    if (ppp_ccb->ppp_passwd == NULL ||
+        strcmp((const char *)ppp_ccb->ppp_passwd, etcd_config->password) != 0) {
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "Sync match[%s]: password mismatch", user_id);
+        return FALSE;
+    }
+
+    U32 etcd_gw, etcd_subnet, etcd_ip_start, etcd_ip_end;
+    if (parse_ip(etcd_config->dhcp_gateway, &etcd_gw) == ERROR ||
+            parse_ip(etcd_config->dhcp_subnet, &etcd_subnet) == ERROR ||
+            parse_ip_range(etcd_config->dhcp_addr_pool, &etcd_ip_start, &etcd_ip_end) == ERROR) {
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "Sync match[%s]: failed to parse etcd dhcp fields", user_id);
+        return FALSE;
+    }
+    if (dhcp_ccb->dhcp_server_ip != etcd_gw) {
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "Sync match[%s]: gateway mismatch local=0x%08x etcd=0x%08x",
+            user_id, dhcp_ccb->dhcp_server_ip, etcd_gw);
+        return FALSE;
+    }
+    if (dhcp_ccb->subnet_mask != etcd_subnet) {
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "Sync match[%s]: subnet mismatch local=0x%08x etcd=0x%08x",
+            user_id, dhcp_ccb->subnet_mask, etcd_subnet);
+        return FALSE;
+    }
+
+    U32 expected_pool_len = rte_be_to_cpu_32(etcd_ip_end) >= rte_be_to_cpu_32(etcd_ip_start) ?
+        rte_be_to_cpu_32(etcd_ip_end) - rte_be_to_cpu_32(etcd_ip_start) + 1 :
+        rte_be_to_cpu_32(etcd_ip_start) - rte_be_to_cpu_32(etcd_ip_end) + 1;
+    if (dhcp_ccb->per_lan_user_pool_len != expected_pool_len) {
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "Sync match[%s]: pool_len mismatch local=%u etcd=%u",
+            user_id, dhcp_ccb->per_lan_user_pool_len, expected_pool_len);
+        return FALSE;
+    }
+    if (expected_pool_len > 0 && dhcp_ccb->per_lan_user_pool &&
+        dhcp_ccb->per_lan_user_pool[0] &&
+        dhcp_ccb->per_lan_user_pool[0]->ip_pool.ip_addr != etcd_ip_start) {
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "Sync match[%s]: pool_start mismatch local=0x%08x etcd=0x%08x",
+            user_id, dhcp_ccb->per_lan_user_pool[0]->ip_pool.ip_addr, etcd_ip_start);
+        return FALSE;
+    }
+
+    int local_active = 0;
+    for(int i=0; i<PORT_FWD_TABLE_SIZE; i++) {
+        if (rte_atomic16_read(&ppp_ccb->port_fwd_table[i].is_active) == 1)
+            local_active++;
+    }
+    if (local_active != etcd_config->port_mapping_count) {
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "Sync match[%s]: port_mapping count mismatch local=%d etcd=%d",
+            user_id, local_active, etcd_config->port_mapping_count);
+        return FALSE;
+    }
+    for(int i=0; i<etcd_config->port_mapping_count; i++) {
+        const port_mapping_t *pm = &etcd_config->port_mappings[i];
+        if (pm->eport >= PORT_FWD_TABLE_SIZE)
+            return FALSE;
+        const port_fwd_entry_t *e = &ppp_ccb->port_fwd_table[pm->eport];
+        if (rte_atomic16_read((rte_atomic16_t *)&e->is_active) != 1) {
+            FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                "Sync match[%s]: port_fwd[%u] inactive in local", user_id, pm->eport);
+            return FALSE;
+        }
+        if (e->iport != pm->dport) {
+            FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                "Sync match[%s]: port_fwd[%u] iport mismatch local=%u etcd=%u",
+                user_id, pm->eport, e->iport, pm->dport);
+            return FALSE;
+        }
+        U32 etcd_dip;
+        if (parse_ip(pm->dip, &etcd_dip) == ERROR || e->dip != etcd_dip) {
+            FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                "Sync match[%s]: port_fwd[%u] dip mismatch local=0x%08x etcd=\"%s\"",
+                user_id, pm->eport, e->dip, pm->dip);
+            return FALSE;
+        }
+    }
+
+    return TRUE;
+}
+
+BOOL dns_record_matches_local(const char *user_id,
+    const dns_record_config_t *etcd_record, void *user_data)
+{
+    FastRG_t *fastrg_ccb = (FastRG_t *)user_data;
+    if (!fastrg_ccb || !user_id || !etcd_record)
+        return FALSE;
+
+    int ccb_id = atoi(user_id) - 1;
+    if (!is_valid_ccb_id(fastrg_ccb, ccb_id))
+        return FALSE;
+
+    dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
+    if (!dhcp_ccb)
+        return FALSE;
+
+    dns_static_record_t *local_rec =
+        dns_static_lookup(&dhcp_ccb->dns_state.static_table, etcd_record->domain);
+    if (!local_rec || !local_rec->active)
+        return FALSE;
+
+    U32 etcd_ip = 0;
+    if (etcd_record->ip[0] != '\0' && parse_ip(etcd_record->ip, &etcd_ip) == ERROR)
+        return FALSE;
+    if (local_rec->ip_addr != etcd_ip)
+        return FALSE;
+    if (local_rec->ttl != etcd_record->ttl)
+        return FALSE;
+
+    return TRUE;
 }
 
 STATUS hsi_config_changed_callback(const char *node_id, const char *user_id, 

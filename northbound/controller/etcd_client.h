@@ -131,6 +131,19 @@ typedef STATUS (*dns_record_callback_t)(const char *node_id, const char *user_id
     const dns_record_config_t *record, etcd_action_type_t action,
     int64_t revision, void *user_data);
 
+// Matcher callbacks: used by sync_state_with_etcd to skip applying configs
+// that already match local state. Return TRUE if the etcd config matches the
+// current local state for the given user; FALSE otherwise.
+typedef BOOL (*hsi_config_matches_local_t)(const char *user_id,
+    const hsi_config_t *etcd_config, void *user_data);
+
+typedef BOOL (*dns_record_matches_local_t)(const char *user_id,
+    const dns_record_config_t *etcd_record, void *user_data);
+
+/* Register matcher callbacks used by sync to skip unchanged configs */
+void etcd_client_set_matchers(hsi_config_matches_local_t hsi_matcher,
+    dns_record_matches_local_t dns_matcher);
+
 /* Initialize etcd client */
 etcd_status_t etcd_client_init(const char *etcd_endpoints, void* user_data);
 

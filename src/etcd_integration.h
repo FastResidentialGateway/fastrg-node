@@ -221,4 +221,33 @@ STATUS dns_record_changed_callback(const char *node_id, const char *user_id,
     const dns_record_config_t *record, etcd_action_type_t action,
     int64_t revision, void *user_data);
 
+/**
+ * @fn hsi_config_matches_local
+ *
+ * @brief
+ *      Compare etcd HSI config against current local state for a user.
+ *      Used by sync_state_with_etcd to skip applying unchanged configs.
+ *      Compares: VLAN, account, password, DHCP gateway/subnet/pool length,
+ *      dns_state primary/secondary DNS, and port_fwd_table entries.
+ * @param user_id
+ *      User identifier (start from 1)
+ * @param etcd_config
+ *      HSI config fetched from etcd
+ * @param user_data
+ *      User data pointer (FastRG context)
+ * @return TRUE if etcd config matches local state; FALSE otherwise
+ */
+BOOL hsi_config_matches_local(const char *user_id,
+    const hsi_config_t *etcd_config, void *user_data);
+
+/**
+ * @fn dns_record_matches_local
+ *
+ * @brief
+ *      Compare etcd DNS static record against the local dns_static_table
+ *      entry for the given user/domain. TRUE if domain, IP and TTL all match.
+ */
+BOOL dns_record_matches_local(const char *user_id,
+    const dns_record_config_t *etcd_record, void *user_data);
+
 #endif /* _ETCD_INTEGRATION_H_ */
