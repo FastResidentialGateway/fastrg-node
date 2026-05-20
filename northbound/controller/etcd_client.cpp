@@ -36,6 +36,8 @@ private:
     user_count_changed_callback_t user_count_callback_;
     sync_request_callback_t sync_request_callback_;
     dns_record_callback_t dns_record_callback_;
+    hsi_config_matches_local_t hsi_matches_local_;
+    dns_record_matches_local_t dns_matches_local_;
     FastRG_t* fastrg_ccb;
     
     // Track self-initiated status modifications to avoid processing our own updates
@@ -69,6 +71,7 @@ public:
     EtcdClientImpl() : watch_running_(false), hsi_callback_(nullptr), 
                        command_callback_(nullptr), user_count_callback_(nullptr),
                        sync_request_callback_(nullptr), dns_record_callback_(nullptr),
+                       hsi_matches_local_(nullptr), dns_matches_local_(nullptr),
                        fastrg_ccb(nullptr), 
                        reconnect_running_(false), watchdog_running_(false) {
         last_watch_activity_.store(std::chrono::steady_clock::now());
@@ -164,22 +167,23 @@ public:
                     break;
                 }
 
-                // Check if watch is active
-                auto now = std::chrono::steady_clock::now();
-                auto last_activity = last_watch_activity_.load();
-                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - last_activity).count();
+                // Test etcd reachability every tick. When reachable, reconcile local state
+                // with etcd so we don't have to wait for a reconnect to recover from missed events.
+                if (test_etcd_connection()) {
+                    FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "Watchdog: etcd reachable, syncing state with etcd...");
+                    sync_state_with_etcd();
+                    update_watch_activity();
+                } else {
+                    // Not reachable — preserve existing tolerance: only trigger reconnect when
+                    // watchers have also been inactive longer than WATCH_TIMEOUT_SEC.
+                    auto now = std::chrono::steady_clock::now();
+                    auto last_activity = last_watch_activity_.load();
+                    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - last_activity).count();
 
-                FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "Watchdog check: %ld seconds since last watch activity", elapsed);
+                    FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL, "Watchdog: etcd not reachable, %ld s since last watch activity", elapsed);
 
-                if (elapsed > WATCH_TIMEOUT_SEC) {
-                    FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL, "Watchdog detected inactive watchers (%ld s), testing connection...", elapsed);
-
-                    // Test if etcd is actually reachable
-                    if (test_etcd_connection()) {
-                        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "Etcd is reachable but watchers are inactive");
-                        update_watch_activity();
-                    } else {
-                        FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL, "Etcd is not reachable, watchers expected to be inactive, try to reconnect...");
+                    if (elapsed > WATCH_TIMEOUT_SEC) {
+                        FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL, "Watchdog: triggering reconnect");
                         // Set flag to exit watchdog to avoid joining in self thread
                         watchdog_running_ = false;
 
@@ -195,6 +199,12 @@ public:
 
             FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "Watchdog thread exiting");
         });
+    }
+
+    void set_matchers(hsi_config_matches_local_t hsi_matcher,
+                      dns_record_matches_local_t dns_matcher) {
+        hsi_matches_local_ = hsi_matcher;
+        dns_matches_local_ = dns_matcher;
     }
 
     etcd_status_t init(const char* etcd_endpoints, void* user_data) {
@@ -566,21 +576,140 @@ public:
                 FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Error checking HSI configs in etcd: %s", hsi_response.error_message().c_str());
             }
 
-            // Step 3: Load existing configs from etcd (this updates local state if etcd has data)
-            FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "Reloading existing configs from etcd for node: %s", node_uuid_.c_str());
-            etcd_status_t status = load_existing_configs(
-                node_uuid_.c_str(),
-                hsi_callback_,
-                command_callback_,
-                user_count_callback_,
-                dns_record_callback_,
-                fastrg_ccb
-            );
-            
-            if (status == ETCD_SUCCESS) {
-                FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "Successfully reloaded configs from etcd");
-            } else {
-                FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Failed to reload configs from etcd, status: %d", status);
+            // Step 3: Reconcile configs from etcd, skipping entries whose local state already matches.
+            FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                "Reconciling configs from etcd for node: %s", node_uuid_.c_str());
+
+            // Step 3a: user_counts — callback has its own dedupe (skips when new_count == current_count).
+            std::string user_count_prefix = "user_counts/" + node_uuid_ + "/";
+            auto user_count_response = client_->ls(user_count_prefix).get();
+            if (user_count_response.error_code() == 0) {
+                for (size_t i = 0; i < user_count_response.keys().size(); ++i) {
+                    std::string key = user_count_response.key(i);
+                    std::string value = user_count_response.value(i).as_string();
+                    std::regex user_count_regex("user_counts/([^/]+)/");
+                    std::smatch matches;
+                    if (!std::regex_match(key, matches, user_count_regex) || matches.size() != 2) {
+                        continue;
+                    }
+                    std::string node_id = matches[1].str();
+                    user_count_config_t uc_config;
+                    if (parse_user_count_config(value, &uc_config)) {
+                        user_count_callback_(node_id.c_str(), &uc_config, HSI_ACTION_UPDATE,
+                            user_count_response.index(), fastrg_ccb);
+                    }
+                }
+            }
+
+            // Step 3b: HSI configs — skip via hsi_matches_local_ matcher.
+            int hsi_total = 0, hsi_skipped = 0, hsi_applied = 0;
+            if (hsi_response.error_code() == 0) {
+                for (size_t i = 0; i < hsi_response.keys().size(); ++i) {
+                    std::string key = hsi_response.key(i);
+                    std::string value = hsi_response.value(i).as_string();
+                    std::regex hsi_regex("configs/([^/]+)/hsi/(.+)");
+                    std::smatch matches;
+                    if (!std::regex_match(key, matches, hsi_regex) || matches.size() != 3) {
+                        continue;
+                    }
+                    std::string node_id = matches[1].str();
+                    std::string user_id = matches[2].str();
+                    hsi_total++;
+
+                    hsi_config_t config;
+                    bool is_enabled = false;
+                    if (!parse_hsi_config(value, &config, &is_enabled)) {
+                        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+                            "Sync: failed to parse HSI config for user %s", user_id.c_str());
+                        continue;
+                    }
+
+                    if (hsi_matches_local_ &&
+                            hsi_matches_local_(user_id.c_str(), &config, fastrg_ccb)) {
+                        hsi_skipped++;
+                        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                            "Sync: HSI config for user %s already matches local state, skipping",
+                            user_id.c_str());
+                        hsi_config_free_port_mappings(&config);
+                        continue;
+                    }
+
+                    int64_t revision = hsi_response.index();
+                    STATUS ret = hsi_callback_(node_id.c_str(), user_id.c_str(), &config,
+                        HSI_ACTION_UPDATE, revision, fastrg_ccb);
+                    if (ret == SUCCESS) {
+                        hsi_applied++;
+                        if (is_enabled && command_callback_) {
+                            pppoe_command_t command = { 0 };
+                            std::strncpy(command.action, "dial", sizeof(command.action) - 1);
+                            std::strncpy(command.user_id, config.user_id, sizeof(command.user_id) - 1);
+                            std::strncpy(command.vlan, config.vlan_id, sizeof(command.vlan) - 1);
+                            std::strncpy(command.account, config.account_name, sizeof(command.account) - 1);
+                            std::strncpy(command.password, config.password, sizeof(command.password) - 1);
+                            command.timestamp = std::time(nullptr);
+                            command_callback_(node_id.c_str(), &command, fastrg_ccb);
+                        }
+                    } else {
+                        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+                            "Sync: HSI callback failed for user %s", user_id.c_str());
+                    }
+                    hsi_config_free_port_mappings(&config);
+                }
+            }
+            FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                "Sync: HSI configs total=%d skipped=%d applied=%d", hsi_total, hsi_skipped, hsi_applied);
+
+            // Step 3c: DNS static records — skip via dns_matches_local_ matcher.
+            if (dns_record_callback_) {
+                std::string dns_base_prefix = "configs/" + node_uuid_ + "/";
+                std::regex dns_regex("configs/([^/]+)/([^/]+)/dns/(.+)");
+                auto dns_response = client_->ls(dns_base_prefix).get();
+                if (dns_response.error_code() == 0) {
+                    int dns_total = 0, dns_skipped = 0, dns_applied = 0;
+                    for (size_t i = 0; i < dns_response.keys().size(); ++i) {
+                        std::string key = dns_response.key(i);
+                        std::smatch dns_matches;
+                        if (!std::regex_match(key, dns_matches, dns_regex) || dns_matches.size() != 4) {
+                            continue;
+                        }
+                        std::string dns_node_id = dns_matches[1].str();
+                        std::string dns_user_id = dns_matches[2].str();
+                        std::string dns_domain  = dns_matches[3].str();
+                        std::string dns_value   = dns_response.value(i).as_string();
+                        dns_total++;
+
+                        dns_record_config_t dns_rec;
+                        memset(&dns_rec, 0, sizeof(dns_rec));
+                        strncpy(dns_rec.domain, dns_domain.c_str(), sizeof(dns_rec.domain) - 1);
+                        try {
+                            Json::Value root;
+                            Json::Reader reader;
+                            if (!reader.parse(dns_value, root)) {
+                                continue;
+                            }
+                            if (root.isMember("ip"))
+                                strncpy(dns_rec.ip, root["ip"].asString().c_str(), sizeof(dns_rec.ip) - 1);
+                            dns_rec.ttl = root.isMember("ttl") ? root["ttl"].asUInt() : 3600;
+                        } catch (const std::exception& e) {
+                            continue;
+                        }
+
+                        if (dns_matches_local_ &&
+                                dns_matches_local_(dns_user_id.c_str(), &dns_rec, fastrg_ccb)) {
+                            dns_skipped++;
+                            continue;
+                        }
+
+                        int64_t dns_revision = dns_response.index();
+                        STATUS dns_ret = dns_record_callback_(dns_node_id.c_str(), dns_user_id.c_str(),
+                            &dns_rec, HSI_ACTION_CREATE, dns_revision, fastrg_ccb);
+                        if (dns_ret == SUCCESS) {
+                            dns_applied++;
+                        }
+                    }
+                    FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                        "Sync: DNS records total=%d skipped=%d applied=%d", dns_total, dns_skipped, dns_applied);
+                }
             }
 
             // Step 4: If etcd doesn't have data, request upper layer to write local data to etcd
@@ -2089,6 +2218,13 @@ etcd_status_t etcd_client_start_watch(const char* node_uuid,
     return g_etcd_client->start_watch(node_uuid, hsi_callback, 
         command_callback, user_count_callback, sync_request_callback,
         dns_record_callback);
+}
+
+void etcd_client_set_matchers(hsi_config_matches_local_t hsi_matcher,
+    dns_record_matches_local_t dns_matcher) {
+    if (g_etcd_client) {
+        g_etcd_client->set_matchers(hsi_matcher, dns_matcher);
+    }
 }
 
 void etcd_client_stop_watch(void) {
