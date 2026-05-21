@@ -244,16 +244,16 @@ STATUS execute_pppoe_dial(FastRG_t *fastrg_ccb, int ccb_id, const pppoe_command_
     }
 
     if (is_pppoe_enabled == FALSE && 
-            fastrg_gen_northbound_event(EV_NORTHBOUND_PPPoE, PPPoE_CMD_ENABLE, ccb_id) == ERROR) {
+            fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_PPPoE, PPPoE_CMD_ENABLE, ccb_id) == ERROR) {
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Failed to generate PPPoE enable event for user %d", ccb_id + 1);
         return ERROR;
     }
 
     if (is_dhcp_enabled == FALSE && 
-            fastrg_gen_northbound_event(EV_NORTHBOUND_DHCP, DHCP_CMD_ENABLE, ccb_id) == ERROR) {
+            fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_DHCP, DHCP_CMD_ENABLE, ccb_id) == ERROR) {
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Failed to generate DHCP enable event for user %d", ccb_id + 1);
         if (is_pppoe_enabled == FALSE && 
-                fastrg_gen_northbound_event(EV_NORTHBOUND_PPPoE, PPPoE_CMD_DISABLE, ccb_id) == ERROR) {
+                fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_PPPoE, PPPoE_CMD_DISABLE, ccb_id) == ERROR) {
             FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Failed to generate PPPoE disable event for user %d", ccb_id + 1);
             return ERROR;
         }
@@ -284,12 +284,12 @@ STATUS execute_pppoe_hangup(FastRG_t *fastrg_ccb, int ccb_id)
     if (rte_atomic16_read(&dhcp_ccb->dhcp_bool) == 0)
         FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL, "DHCP is already disabled for user %d", ccb_id + 1);
 
-    if (fastrg_gen_northbound_event(EV_NORTHBOUND_PPPoE, PPPoE_CMD_DISABLE, ccb_id) == ERROR) {
+    if (fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_PPPoE, PPPoE_CMD_DISABLE, ccb_id) == ERROR) {
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Failed to generate PPPoE disable event for user %d", ccb_id + 1);
         return ERROR;
     }
 
-    if (fastrg_gen_northbound_event(EV_NORTHBOUND_DHCP, DHCP_CMD_DISABLE, ccb_id) == ERROR) {
+    if (fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_DHCP, DHCP_CMD_DISABLE, ccb_id) == ERROR) {
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Failed to generate DHCP disable event for user %d", ccb_id + 1);
         return ERROR;
     }

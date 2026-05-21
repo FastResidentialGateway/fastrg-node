@@ -291,15 +291,15 @@ STATUS fastrg_modify_subscriber_count(FastRG_t *fastrg_ccb, U16 new_count,
     return ret;
 }
 
-STATUS fastrg_gen_northbound_event(fastrg_event_type_t event_type, U8 cmd_type,
-    U16 ccb_id)
+STATUS fastrg_gen_northbound_event(FastRG_t *fastrg_ccb, fastrg_event_type_t event_type,
+    U8 cmd_type, U16 ccb_id)
 {
     /* Try to get a free mail slot from free_mail_ring */
     tFastRG_MBX *slot = NULL;
     fastrg_event_northbound_msg_t *northbound_msg;
 
     /* Get a free mail slot */
-    if (rte_ring_dequeue(free_mail_ring, (void **)&slot) == 0) {
+    if (rte_ring_dequeue(fastrg_ccb->free_mail_ring, (void **)&slot) == 0) {
         /* Deep copy packet data to slot's refp buffer to avoid data buffer being overwritten by rx_burst */
         northbound_msg = (fastrg_event_northbound_msg_t *)slot->refp;
         northbound_msg->cmd = cmd_type;
@@ -307,8 +307,8 @@ STATUS fastrg_gen_northbound_event(fastrg_event_type_t event_type, U8 cmd_type,
         slot->type = event_type;
         slot->len = sizeof(fastrg_event_northbound_msg_t);
         /* cp_q is full: return slot to free_mail_ring */
-        if (rte_ring_enqueue(cp_q, slot) != 0) {
-            rte_ring_enqueue(free_mail_ring, slot);
+        if (rte_ring_enqueue(fastrg_ccb->cp_q, slot) != 0) {
+            rte_ring_enqueue(fastrg_ccb->free_mail_ring, slot);
             return ERROR;
         }
         return SUCCESS;
@@ -319,7 +319,7 @@ STATUS fastrg_gen_northbound_event(fastrg_event_type_t event_type, U8 cmd_type,
 void link_disconnect(__attribute__((unused)) struct rte_timer *tim, FastRG_t *fastrg_ccb)
 {
     for(int i=0; i<fastrg_ccb->user_count; i++)
-        fastrg_gen_northbound_event(EV_NORTHBOUND_PPPoE, PPPoE_CMD_FORCE_DISABLE, i);
+        fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_PPPoE, PPPoE_CMD_FORCE_DISABLE, i);
 }
 
 /***************************************************************
@@ -336,7 +336,7 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
     uint64_t timer_resolution_cycles = fastrg_get_cycles_in_sec() / 10; /* check every 100ms */
 
     while(rte_atomic16_read(&stop_flag) == 0) {
-        burst_size = rte_ring_dequeue_burst(cp_q, (void **)mail, RING_BURST_SIZE, NULL);
+        burst_size = rte_ring_dequeue_burst(fastrg_ccb->cp_q, (void **)mail, RING_BURST_SIZE, NULL);
         for(int i=0; i<burst_size; i++) {
             recv_type = mail[i]->type;
             switch(recv_type) {
@@ -378,7 +378,7 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
                     FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "User %d pppoe is force terminating\n", pppoe_msg->ccb_id + 1);
                     fastrg_force_terminate_hsi(ppp_ccb);
                 }
-                rte_ring_enqueue(free_mail_ring, mail[i]);
+                rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
                 break;
             }
             case EV_NORTHBOUND_DHCP: {
@@ -393,7 +393,7 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
                     rte_atomic16_cmpset((uint16_t *)&dhcp_ccb->dhcp_bool.cnt, 0, 1);
                     FastRG_LOG(INFO, fastrg_ccb->fp, dhcp_ccb, DHCPLOGMSG, "User %d dhcp server is spawned\n", dhcp_msg->ccb_id + 1);
                 }
-                rte_ring_enqueue(free_mail_ring, mail[i]);
+                rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
                 break;
             }
             case EV_LINK: {
@@ -417,11 +417,11 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
                 U8 *pkt_data = rte_pktmbuf_mtod(mail[i]->mbuf, U8 *);
                 if (ppp_process(fastrg_ccb, pkt_data, mail[i]->len) == ERROR) {
                     rte_pktmbuf_free(mail[i]->mbuf);
-                    rte_ring_enqueue(free_mail_ring, mail[i]);
+                    rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
                     continue;
                 }
                 rte_pktmbuf_free(mail[i]->mbuf);
-                rte_ring_enqueue(free_mail_ring, mail[i]);
+                rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
                 break;
             }
             case EV_DP_DHCP: {
@@ -440,7 +440,7 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
                     wan_ctrl_tx(fastrg_ccb, ccb_id, pkt_data, mail[i]->len);
                 }
                 rte_pktmbuf_free(mail[i]->mbuf);
-                rte_ring_enqueue(free_mail_ring, mail[i]);
+                rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
                 break;
             }
             case EV_DP_DNS: {
@@ -463,14 +463,24 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
                     }
                 }
                 rte_pktmbuf_free(mail[i]->mbuf);
-                rte_ring_enqueue(free_mail_ring, mail[i]);
+                rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
                 break;
             }
             default:
                 /* Return unknown type slot to free_mail_ring */
-                rte_ring_enqueue(free_mail_ring, mail[i]);
+                rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
             }
             mail[i] = NULL;
+        }
+
+        /* Drain etcd config events. Applying them here (and nowhere else)
+         * makes the control-plane loop the single writer of CCB state. */
+        etcd_event_t *etcd_evs[RING_BURST_SIZE];
+        U16 etcd_burst = rte_ring_dequeue_burst(fastrg_ccb->etcd_event_q,
+            (void **)etcd_evs, RING_BURST_SIZE, NULL);
+        for(int i=0; i<etcd_burst; i++) {
+            etcd_event_dispatch(fastrg_ccb, etcd_evs[i]);
+            etcd_event_free(etcd_evs[i]);
         }
 
         cur_tsc = fastrg_get_cur_cycles();
@@ -543,7 +553,12 @@ void fastrg_stop()
     // Cleanup controller client
     controller_cleanup(&fastrg_ccb);
 
-    rte_ring_free(cp_q);
+    rte_ring_free(fastrg_ccb.cp_q);
+    /* drain any etcd events left unconsumed before freeing the ring */
+    etcd_event_t *ev;
+    while (rte_ring_dequeue(fastrg_ccb.etcd_event_q, (void **)&ev) == 0)
+        etcd_event_free(ev);
+    rte_ring_free(fastrg_ccb.etcd_event_q);
     close(fastrg_ccb.unix_sock_fd);
     U16 total_ccbs = fastrg_ccb.user_count;
     fastrg_ccb.user_count = 0;

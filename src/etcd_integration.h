@@ -6,6 +6,10 @@
 #include "fastrg.h"
 #include "../northbound/controller/etcd_client.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /**
  * Pending event tracking for etcd operations
  * Used to detect self-generated events during watch callbacks
@@ -249,5 +253,40 @@ BOOL hsi_config_matches_local(const char *user_id,
  */
 BOOL dns_record_matches_local(const char *user_id,
     const dns_record_config_t *etcd_record, void *user_data);
+
+/**
+ * @fn etcd_event_dispatch
+ *
+ * @brief
+ *      Apply one etcd_event_t to local CCB state. Called exclusively from the
+ *      control-plane loop (fastrg_loop) after dequeuing from etcd_event_q, so
+ *      every CCB mutation happens on a single thread with no locking.
+ *      Does NOT free the event; the caller owns it.
+ * @param fastrg_ccb
+ *      Pointer to FastRG context
+ * @param ev
+ *      Event dequeued from FastRG_t.etcd_event_q
+ * @return
+ *      void
+ */
+void etcd_event_dispatch(FastRG_t *fastrg_ccb, etcd_event_t *ev);
+
+/**
+ * @fn parse_user_id
+ *
+ * @brief
+ *      Parse a user_id string ("1".."N") into a 0-based CCB id.
+ * @param user_id_str
+ *      User identifier string (1-based)
+ * @param max_count
+ *      Unused; kept for signature stability
+ * @return
+ *      0-based ccb_id, or -1 if the string is not a valid user id
+ */
+int parse_user_id(const char *user_id_str, int max_count);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _ETCD_INTEGRATION_H_ */

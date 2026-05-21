@@ -45,7 +45,6 @@
 #define	IPV6_MTU_DEFAULT	RTE_ETHER_MTU
 
 extern struct rte_mempool 		*direct_pool[PORT_AMOUNT], *indirect_pool[PORT_AMOUNT];
-extern struct rte_ring 			*cp_q, *free_mail_ring;
 static U16 						nb_rxd = RX_RING_SIZE;
 static U16 						nb_txd = TX_RING_SIZE;
 
@@ -244,15 +243,15 @@ static inline void send2cp(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt,
     tFastRG_MBX *slot = NULL;
     U16 ccb_id = ((mbuf_priv_t *)rte_mbuf_to_priv(single_pkt))->ccb_id;
 
-    if (rte_ring_dequeue(free_mail_ring, (void **)&slot) == 0) {
+    if (rte_ring_dequeue(fastrg_ccb->free_mail_ring, (void **)&slot) == 0) {
         slot->mbuf = single_pkt;
         slot->type = evt_type;
         slot->len = single_pkt->pkt_len;
         slot->ccb_id = ccb_id;
         slot->port_id = port_id;
         /* cp_q is full: return slot to free_mail_ring */
-        if (rte_ring_enqueue(cp_q, slot) != 0) {
-            rte_ring_enqueue(free_mail_ring, slot);
+        if (rte_ring_enqueue(fastrg_ccb->cp_q, slot) != 0) {
+            rte_ring_enqueue(fastrg_ccb->free_mail_ring, slot);
             drop_packet(fastrg_ccb, single_pkt, port_id, ccb_id);
         } else {
             count_rx_packet(fastrg_ccb, single_pkt, port_id, ccb_id);
@@ -1457,7 +1456,7 @@ static int lsi_event_callback(U16 port_id, enum rte_eth_event_type type, void *p
     mail->type = EV_LINK;
     mail->len = 1;
     //enqueue down event to main thread
-    rte_ring_enqueue(cp_q, (void *)mail);
+    rte_ring_enqueue(fastrg_ccb->cp_q, (void *)mail);
 
     return 0;
 }
