@@ -603,10 +603,6 @@ int fastrg_start(int argc, char **argv)
         return -1;
     }
 
-    if (rte_lcore_count() < 7) {
-        FastRG_LOG(ERR, fastrg_ccb.fp, NULL, NULL, "We need at least 7 cores.\n");
-        goto err;
-    }
     if (rte_eth_dev_count_avail() < 2) {
         FastRG_LOG(ERR, fastrg_ccb.fp, NULL, NULL, "We need at least 2 eth ports.\n");
         goto err;
@@ -699,6 +695,11 @@ int fastrg_start(int argc, char **argv)
         fastrg_ccb.i40e_ddp_enabled ? "yes" : "no");
     BOOL use_multiqueue = (is_ice_pmd || is_i40e_ddp);
     if (use_multiqueue) {
+        if (rte_lcore_count() < 6 || rte_lcore_count() % 2 != 0) {
+            FastRG_LOG(ERR, fastrg_ccb.fp, NULL, NULL, 
+                "We need at least 6 cores and the lcore count must be even.\n");
+            goto err;
+        }
         struct rte_flow_error flow_error;
         U16 total_q = fastrg_calc_queue_count(rte_lcore_count());
         FastRG_LOG(INFO, fastrg_ccb.fp, NULL, NULL,
@@ -714,6 +715,11 @@ int fastrg_start(int argc, char **argv)
             }
         }
     } else {
+        if (rte_lcore_count() < 4 || rte_lcore_count() % 2 != 0) {
+            FastRG_LOG(ERR, fastrg_ccb.fp, NULL, NULL, 
+                "We need at least 4 cores and the lcore count must be even.\n");
+            goto err;
+        }
         FastRG_LOG(INFO, fastrg_ccb.fp, NULL, NULL,
             "Non-ICE/i40e PMD (%s) detected, using single queue per port, "
             "rte_flow rules skipped",
