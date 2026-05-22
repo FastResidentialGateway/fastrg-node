@@ -131,35 +131,77 @@ typedef STATUS (*dns_record_callback_t)(const char *node_id, const char *user_id
     const dns_record_config_t *record, etcd_action_type_t action,
     int64_t revision, void *user_data);
 
-// Matcher callbacks: used by sync_state_with_etcd to skip applying configs
-// that already match local state. Return TRUE if the etcd config matches the
-// current local state for the given user; FALSE otherwise.
-typedef BOOL (*hsi_config_matches_local_t)(const char *user_id,
-    const hsi_config_t *etcd_config, void *user_data);
+/* ---- Asynchronous etcd event delivery -----------------------------------
+ * etcd watcher threads parse + self-event-filter, then hand a heap-allocated
+ * etcd_event_t to the control-plane loop (fastrg_loop) via the etcd_event_q
+ * ring. fastrg_loop is the single thread that applies changes to CCBs, so the
+ * apply path needs no locking.
+ */
+typedef enum {
+    ETCD_EVENT_HSI = 1,        /* HSI config create/update/delete         */
+    ETCD_EVENT_USER_COUNT,     /* subscriber-count change                 */
+    ETCD_EVENT_DNS_RECORD,     /* DNS static record create/update/delete  */
+    ETCD_EVENT_PPPOE_COMMAND,  /* PPPoE dial/hangup command               */
+    ETCD_EVENT_HSI_SWEEP       /* reconcile: keep ccb_ids present in etcd       */
+} etcd_event_kind_t;
 
-typedef BOOL (*dns_record_matches_local_t)(const char *user_id,
-    const dns_record_config_t *etcd_record, void *user_data);
+typedef struct etcd_event {
+    etcd_event_kind_t  kind;
+    etcd_action_type_t action;          /* CREATE/UPDATE/DELETE; unused for command/sweep */
+    int64_t            revision;
+    BOOL               from_reconcile;  /* TRUE: periodic reconcile; FALSE: live watch event */
+    char               node_id[64];
+    char               user_id[64];
+    union {
+        struct {
+            hsi_config_t config;        /* config.port_mappings is heap-owned by this event */
+            BOOL         is_enabled;    /* reconcile: also issue a dial when TRUE */
+            char        *raw_value;     /* heap-owned raw JSON: new value (PUT) or deleted
+                                           value (DELETE); for failed_events/ records */
+        } hsi;
+        user_count_config_t user_count;
+        dns_record_config_t dns_record;
+        pppoe_command_t     command;
+        struct {
+            int *present_ccb_ids;       /* heap-owned: ccb_ids that exist in etcd */
+            int  count;
+        } sweep;
+    } event_data;
+} etcd_event_t;
 
-/* Register matcher callbacks used by sync to skip unchanged configs */
-void etcd_client_set_matchers(hsi_config_matches_local_t hsi_matcher,
-    dns_record_matches_local_t dns_matcher);
+/* Free an etcd_event_t and any heap payload it owns. */
+static inline void etcd_event_free(etcd_event_t *ev) {
+    if (!ev)
+        return;
+    if (ev->kind == ETCD_EVENT_HSI) {
+        hsi_config_free_port_mappings(&ev->event_data.hsi.config);
+        free(ev->event_data.hsi.raw_value);
+    } else if (ev->kind == ETCD_EVENT_HSI_SWEEP) {
+        free(ev->event_data.sweep.present_ccb_ids);
+    }
+    free(ev);
+}
 
 /* Initialize etcd client */
 etcd_status_t etcd_client_init(const char *etcd_endpoints, void* user_data);
 
-/* Start watching etcd for changes */
+/* Start watching etcd for changes. Watch/reconcile events are delivered to the
+ * control-plane loop via FastRG_t.etcd_event_q; only sync_request_callback
+ * (invoked when etcd has no data for this node) is passed through here. */
 etcd_status_t etcd_client_start_watch(const char *node_uuid,
-    hsi_config_callback_t hsi_callback,
-    pppoe_command_callback_t command_callback,
-    user_count_changed_callback_t user_count_callback,
-    sync_request_callback_t sync_request_callback,
-    dns_record_callback_t dns_record_callback);
+    sync_request_callback_t sync_request_callback);
 
 /* Stop watching etcd */
 void etcd_client_stop_watch(void);
 
 /* Delete processed command from etcd */
 etcd_status_t etcd_client_delete_command(const char *command_key);
+
+/* Write a fallback-error record to etcd's failed_events/ namespace. Used by the
+ * control-plane loop to report a config event it could not apply. */
+void etcd_client_write_fallback_error(const char *event_type, const char *key,
+    const char *node_id, const char *user_id, etcd_error_reason_t reason,
+    const char *error_detail, const char *original_value);
 
 /* Check if etcd client is initialized */
 int etcd_client_is_initialized(void);

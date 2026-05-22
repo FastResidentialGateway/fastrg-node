@@ -2,6 +2,7 @@
 #include "etcd_client.h"
 #include "../../src/dbg.h"
 #include "../../src/fastrg.h"
+#include "../../src/etcd_integration.h"
 #include <etcd/Client.hpp>
 #include <etcd/Watcher.hpp>
 #include <etcd/Response.hpp>
@@ -28,18 +29,17 @@ private:
     std::unique_ptr<etcd::Watcher> user_count_watcher_;
     std::unique_ptr<etcd::Watcher> dns_record_watcher_;
     std::atomic<bool> watch_running_;
+    std::atomic<bool> shutting_down_{false};   // set once during teardown; blocks new reconnect attempts
     std::string node_uuid_;
     std::string etcd_endpoints_;
     
-    hsi_config_callback_t hsi_callback_;
-    pppoe_command_callback_t command_callback_;
-    user_count_changed_callback_t user_count_callback_;
+    // Watch/reconcile events are delivered to the control-plane loop via
+    // FastRG_t.etcd_event_q; the apply-side callbacks are no longer stored
+    // here. sync_request_callback_ is the one exception — Step 4 of
+    // sync_state_with_etcd() still invokes it directly.
     sync_request_callback_t sync_request_callback_;
-    dns_record_callback_t dns_record_callback_;
-    hsi_config_matches_local_t hsi_matches_local_;
-    dns_record_matches_local_t dns_matches_local_;
     FastRG_t* fastrg_ccb;
-    
+
     // Track self-initiated status modifications to avoid processing our own updates
     struct PendingModification {
         U16 ccb_id;
@@ -68,11 +68,9 @@ private:
     static constexpr int WATCH_TIMEOUT_SEC = 180;               // Reconnect if no activity for 3 minutes
 
 public:
-    EtcdClientImpl() : watch_running_(false), hsi_callback_(nullptr), 
-                       command_callback_(nullptr), user_count_callback_(nullptr),
-                       sync_request_callback_(nullptr), dns_record_callback_(nullptr),
-                       hsi_matches_local_(nullptr), dns_matches_local_(nullptr),
-                       fastrg_ccb(nullptr), 
+    EtcdClientImpl() : watch_running_(false),
+                       sync_request_callback_(nullptr),
+                       fastrg_ccb(nullptr),
                        reconnect_running_(false), watchdog_running_(false) {
         last_watch_activity_.store(std::chrono::steady_clock::now());
     }
@@ -102,13 +100,19 @@ public:
         last_watch_activity_.store(std::chrono::steady_clock::now());
     }
 
+    // Signal the watchdog loop to exit without joining it. Safe to call from
+    // any thread, including the watchdog thread itself.
+    void signal_watchdog_stop() {
+        watchdog_running_ = false;
+        watchdog_cv_.notify_all();
+    }
+
+    // Signal and join the watchdog thread. Must NOT be called from the
+    // watchdog thread itself (would self-join). Only stop_watch() uses this.
     void stop_watchdog() {
-        if (watchdog_running_) {
-            watchdog_running_ = false;
-            watchdog_cv_.notify_all();
-            if (watchdog_thread_.joinable()) {
-                watchdog_thread_.join();
-            }
+        signal_watchdog_stop();
+        if (watchdog_thread_.joinable()) {
+            watchdog_thread_.join();
         }
     }
 
@@ -184,27 +188,17 @@ public:
 
                     if (elapsed > WATCH_TIMEOUT_SEC) {
                         FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL, "Watchdog: triggering reconnect");
-                        // Set flag to exit watchdog to avoid joining in self thread
+                        // trigger_reconnect() only signals the watchdog (never joins
+                        // it), so calling it directly from this thread is deadlock-free
+                        // and needs no detached helper thread.
                         watchdog_running_ = false;
-
-                        // Use thread to trigger reconnection to avoid deadlock
-                        std::thread([this]() {
-                            // Set short delay to ensure watchdog fully exits
-                            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                            trigger_reconnect();
-                        }).detach();
+                        trigger_reconnect();
                     }
                 }
             }
 
             FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "Watchdog thread exiting");
         });
-    }
-
-    void set_matchers(hsi_config_matches_local_t hsi_matcher,
-                      dns_record_matches_local_t dns_matcher) {
-        hsi_matches_local_ = hsi_matcher;
-        dns_matches_local_ = dns_matcher;
     }
 
     etcd_status_t init(const char* etcd_endpoints, void* user_data) {
@@ -235,22 +229,14 @@ public:
     }
 
     etcd_status_t start_watch(const char* node_uuid,
-        hsi_config_callback_t hsi_callback,
-        pppoe_command_callback_t command_callback,
-        user_count_changed_callback_t user_count_callback,
-        sync_request_callback_t sync_request_callback,
-        dns_record_callback_t dns_record_callback) {
+        sync_request_callback_t sync_request_callback) {
 
         if (!client_) {
             return ETCD_ERROR;
         }
 
         node_uuid_ = node_uuid;
-        hsi_callback_ = hsi_callback;
-        command_callback_ = command_callback;
-        user_count_callback_ = user_count_callback;
         sync_request_callback_ = sync_request_callback;
-        dns_record_callback_ = dns_record_callback;
         watch_running_ = true;
 
         return create_watchers();
@@ -384,35 +370,33 @@ public:
             );
 
             // Watch DNS static records: configs/{nodeId}/{subscriberId}/dns/
-            if (dns_record_callback_) {
-                std::string dns_prefix = "configs/" + node_uuid_ + "/";
-                dns_record_watcher_ = std::make_unique<etcd::Watcher>(
-                    *client_,
-                    dns_prefix,
-                    [this](etcd::Response response) {
-                        if (!watch_running_) return;
-                        update_watch_activity();
-                        if (response.error_code() == 0) {
-                            for (const auto& event : response.events()) {
-                                process_dns_record_event(event);
-                            }
-                        } else {
-                            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
-                                "DNS record watch error: %s", response.error_message().c_str());
-                            trigger_reconnect();
+            std::string dns_prefix = "configs/" + node_uuid_ + "/";
+            dns_record_watcher_ = std::make_unique<etcd::Watcher>(
+                *client_,
+                dns_prefix,
+                [this](etcd::Response response) {
+                    if (!watch_running_) return;
+                    update_watch_activity();
+                    if (response.error_code() == 0) {
+                        for (const auto& event : response.events()) {
+                            process_dns_record_event(event);
                         }
-                    },
-                    [this](bool connected) {
-                        update_watch_activity();
-                        if (!connected && watch_running_) {
-                            FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
-                                "DNS record watcher disconnected, triggering reconnect...");
-                            trigger_reconnect();
-                        }
-                    },
-                    true  // recursive
-                );
-            }
+                    } else {
+                        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+                            "DNS record watch error: %s", response.error_message().c_str());
+                        trigger_reconnect();
+                    }
+                },
+                [this](bool connected) {
+                    update_watch_activity();
+                    if (!connected && watch_running_) {
+                        FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
+                            "DNS record watcher disconnected, triggering reconnect...");
+                        trigger_reconnect();
+                    }
+                },
+                true  // recursive
+            );
 
             FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "Etcd watchers started successfully");
             
@@ -429,24 +413,34 @@ public:
 
     // Trigger reconnection in a separate thread
     void trigger_reconnect() {
+        // Never start a reconnect while the client is shutting down — the
+        // resulting thread would outlive teardown and use freed memory.
+        if (shutting_down_) {
+            return;
+        }
+
         std::lock_guard<std::mutex> lock(reconnect_mutex_);
-        
+
+        // Re-check under the lock: stop_watch() sets shutting_down_ and then
+        // takes this same lock as a barrier, so once it has, any reconnect
+        // started here is guaranteed visible to stop_reconnect_thread().
+        if (shutting_down_) {
+            return;
+        }
+
         // Only start reconnect thread if not already running
         if (!reconnect_running_) {
             reconnect_running_ = true;
-            
-            // stop watchdog (if still running)
-            // Note: if this function is called from the watchdog thread, watchdog_running_ should already be set to false
-            if (watchdog_running_) {
-                stop_watchdog();
-            } else if (watchdog_thread_.joinable()) {
-                // Watchdog has been marked to stop but the thread has not joined yet, wait for it
-                watchdog_thread_.join();
-            }
 
-            FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, 
-                "watch dog stopped, triggering etcd reconnection...");
-            
+            // Only signal the watchdog to stop; never join it here. Joining is
+            // done by stop_watch() (shutdown) or start_watchdog() (next cycle).
+            // This keeps trigger_reconnect() safe to call from the watchdog
+            // thread itself without self-joining.
+            signal_watchdog_stop();
+
+            FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                "watch dog signalled, triggering etcd reconnection...");
+
             // Stop current watchers
             if (hsi_watcher_) {
                 hsi_watcher_->Cancel();
@@ -454,9 +448,11 @@ public:
             if (command_watcher_) {
                 command_watcher_->Cancel();
             }
-            
             if (user_count_watcher_) {
                 user_count_watcher_->Cancel();
+            }
+            if (dns_record_watcher_) {
+                dns_record_watcher_->Cancel();
             }
 
             // Start reconnection thread
@@ -535,12 +531,44 @@ public:
         reconnect_cv_.notify_all();
     }
 
+    // Allocate a zeroed etcd_event_t of the given kind.
+    static etcd_event_t *alloc_etcd_event(etcd_event_kind_t kind) {
+        etcd_event_t *ev = (etcd_event_t *)calloc(1, sizeof(etcd_event_t));
+        if (ev)
+            ev->kind = kind;
+        return ev;
+    }
+
+    // Heap copy of a std::string (caller owns; NULL on OOM).
+    static char *dup_string(const std::string& s) {
+        char *p = (char *)malloc(s.size() + 1);
+        if (p)
+            memcpy(p, s.c_str(), s.size() + 1);
+        return p;
+    }
+
+    // Hand an etcd_event_t to the control-plane loop. Takes ownership: on
+    // success the loop frees it; on failure (ring full / unavailable) it is
+    // freed here. Returns true if enqueued.
+    bool enqueue_etcd_event(etcd_event_t *ev) {
+        if (!ev)
+            return false;
+        if (!fastrg_ccb || !fastrg_ccb->etcd_event_q ||
+                rte_ring_enqueue(fastrg_ccb->etcd_event_q, ev) != 0) {
+            FastRG_LOG(WARN, fastrg_ccb ? fastrg_ccb->fp : NULL, NULL, NULL,
+                "etcd_event_q unavailable/full, dropping event (kind=%d)", ev->kind);
+            etcd_event_free(ev);
+            return false;
+        }
+        return true;
+    }
+
     // Synchronize state with etcd after reconnection
     void sync_state_with_etcd() {
         FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "Starting state synchronization with etcd...");
         
-        if (!hsi_callback_ || !user_count_callback_) {
-            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Cannot sync state: callbacks not set");
+        if (!client_) {
+            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Cannot sync state: etcd client not initialized");
             return;
         }
 
@@ -592,123 +620,130 @@ public:
                     if (!std::regex_match(key, matches, user_count_regex) || matches.size() != 2) {
                         continue;
                     }
-                    std::string node_id = matches[1].str();
-                    user_count_config_t uc_config;
-                    if (parse_user_count_config(value, &uc_config)) {
-                        user_count_callback_(node_id.c_str(), &uc_config, HSI_ACTION_UPDATE,
-                            user_count_response.index(), fastrg_ccb);
+                    etcd_event_t *ev = alloc_etcd_event(ETCD_EVENT_USER_COUNT);
+                    if (!ev)
+                        continue;
+                    ev->action = HSI_ACTION_UPDATE;
+                    ev->revision = user_count_response.index();
+                    ev->from_reconcile = TRUE;
+                    std::strncpy(ev->node_id, matches[1].str().c_str(), sizeof(ev->node_id) - 1);
+                    if (!parse_user_count_config(value, &ev->event_data.user_count)) {
+                        etcd_event_free(ev);
+                        continue;
                     }
+                    enqueue_etcd_event(ev);
                 }
             }
 
-            // Step 3b: HSI configs — skip via hsi_matches_local_ matcher.
-            int hsi_total = 0, hsi_skipped = 0, hsi_applied = 0;
+            // Step 3b: HSI configs — enqueue for the control-plane loop, and
+            // collect the ccb_ids present in etcd for the sweep below.
+            int hsi_total = 0;
+            std::vector<int> present_ccb_ids;
             if (hsi_response.error_code() == 0) {
                 for (size_t i = 0; i < hsi_response.keys().size(); ++i) {
                     std::string key = hsi_response.key(i);
                     std::string value = hsi_response.value(i).as_string();
                     std::regex hsi_regex("configs/([^/]+)/hsi/(.+)");
                     std::smatch matches;
-                    if (!std::regex_match(key, matches, hsi_regex) || matches.size() != 3) {
+                    if (!std::regex_match(key, matches, hsi_regex) || matches.size() != 3)
                         continue;
-                    }
                     std::string node_id = matches[1].str();
                     std::string user_id = matches[2].str();
                     hsi_total++;
 
-                    hsi_config_t config;
+                    int ccb_id = parse_user_id(user_id.c_str(), 0);
+                    if (ccb_id >= 0)
+                        present_ccb_ids.push_back(ccb_id);
+
+                    etcd_event_t *ev = alloc_etcd_event(ETCD_EVENT_HSI);
+                    if (!ev)
+                        continue;
+                    ev->action = HSI_ACTION_UPDATE;
+                    ev->revision = hsi_response.index();
+                    ev->from_reconcile = TRUE;
+                    std::strncpy(ev->node_id, node_id.c_str(), sizeof(ev->node_id) - 1);
+                    std::strncpy(ev->user_id, user_id.c_str(), sizeof(ev->user_id) - 1);
                     bool is_enabled = false;
-                    if (!parse_hsi_config(value, &config, &is_enabled)) {
+                    if (!parse_hsi_config(value, &ev->event_data.hsi.config, &is_enabled)) {
                         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
                             "Sync: failed to parse HSI config for user %s", user_id.c_str());
+                        etcd_event_free(ev);
                         continue;
                     }
-
-                    if (hsi_matches_local_ &&
-                            hsi_matches_local_(user_id.c_str(), &config, fastrg_ccb)) {
-                        hsi_skipped++;
-                        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
-                            "Sync: HSI config for user %s already matches local state, skipping",
-                            user_id.c_str());
-                        hsi_config_free_port_mappings(&config);
-                        continue;
-                    }
-
-                    int64_t revision = hsi_response.index();
-                    STATUS ret = hsi_callback_(node_id.c_str(), user_id.c_str(), &config,
-                        HSI_ACTION_UPDATE, revision, fastrg_ccb);
-                    if (ret == SUCCESS) {
-                        hsi_applied++;
-                        if (is_enabled && command_callback_) {
-                            pppoe_command_t command = { 0 };
-                            std::strncpy(command.action, "dial", sizeof(command.action) - 1);
-                            std::strncpy(command.user_id, config.user_id, sizeof(command.user_id) - 1);
-                            std::strncpy(command.vlan, config.vlan_id, sizeof(command.vlan) - 1);
-                            std::strncpy(command.account, config.account_name, sizeof(command.account) - 1);
-                            std::strncpy(command.password, config.password, sizeof(command.password) - 1);
-                            command.timestamp = std::time(nullptr);
-                            command_callback_(node_id.c_str(), &command, fastrg_ccb);
-                        }
-                    } else {
-                        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
-                            "Sync: HSI callback failed for user %s", user_id.c_str());
-                    }
-                    hsi_config_free_port_mappings(&config);
+                    ev->event_data.hsi.is_enabled = is_enabled ? TRUE : FALSE;
+                    enqueue_etcd_event(ev);
                 }
             }
             FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
-                "Sync: HSI configs total=%d skipped=%d applied=%d", hsi_total, hsi_skipped, hsi_applied);
+                "Sync: enqueued %d HSI config(s) for reconcile", hsi_total);
 
-            // Step 3c: DNS static records — skip via dns_matches_local_ matcher.
-            if (dns_record_callback_) {
+            // Step 3b-sweep: hand the loop the set of ccb_ids present in etcd so
+            // it can remove subscribers active locally but no longer in etcd.
+            if (hsi_response.error_code() == 0) {
+                etcd_event_t *sweep = alloc_etcd_event(ETCD_EVENT_HSI_SWEEP);
+                if (sweep) {
+                    sweep->from_reconcile = TRUE;
+                    sweep->event_data.sweep.count = (int)present_ccb_ids.size();
+                    if (sweep->event_data.sweep.count > 0) {
+                        sweep->event_data.sweep.present_ccb_ids =
+                            (int *)malloc(sizeof(int) * sweep->event_data.sweep.count);
+                        if (!sweep->event_data.sweep.present_ccb_ids) {
+                            etcd_event_free(sweep);
+                            sweep = nullptr;
+                        }
+                    }
+                    if (sweep) {
+                        for (int i = 0; i < sweep->event_data.sweep.count; ++i)
+                            sweep->event_data.sweep.present_ccb_ids[i] = present_ccb_ids[(size_t)i];
+                        enqueue_etcd_event(sweep);
+                    }
+                }
+            }
+
+            // Step 3c: DNS static records — enqueue for the control-plane loop.
+            {
                 std::string dns_base_prefix = "configs/" + node_uuid_ + "/";
                 std::regex dns_regex("configs/([^/]+)/([^/]+)/dns/(.+)");
                 auto dns_response = client_->ls(dns_base_prefix).get();
                 if (dns_response.error_code() == 0) {
-                    int dns_total = 0, dns_skipped = 0, dns_applied = 0;
+                    int dns_total = 0;
                     for (size_t i = 0; i < dns_response.keys().size(); ++i) {
                         std::string key = dns_response.key(i);
                         std::smatch dns_matches;
-                        if (!std::regex_match(key, dns_matches, dns_regex) || dns_matches.size() != 4) {
+                        if (!std::regex_match(key, dns_matches, dns_regex) || dns_matches.size() != 4)
                             continue;
-                        }
-                        std::string dns_node_id = dns_matches[1].str();
-                        std::string dns_user_id = dns_matches[2].str();
-                        std::string dns_domain  = dns_matches[3].str();
-                        std::string dns_value   = dns_response.value(i).as_string();
+                        std::string dns_value = dns_response.value(i).as_string();
                         dns_total++;
 
-                        dns_record_config_t dns_rec;
-                        memset(&dns_rec, 0, sizeof(dns_rec));
-                        strncpy(dns_rec.domain, dns_domain.c_str(), sizeof(dns_rec.domain) - 1);
+                        etcd_event_t *ev = alloc_etcd_event(ETCD_EVENT_DNS_RECORD);
+                        if (!ev)
+                            continue;
+                        ev->action = HSI_ACTION_CREATE;
+                        ev->revision = dns_response.index();
+                        ev->from_reconcile = TRUE;
+                        std::strncpy(ev->node_id, dns_matches[1].str().c_str(), sizeof(ev->node_id) - 1);
+                        std::strncpy(ev->user_id, dns_matches[2].str().c_str(), sizeof(ev->user_id) - 1);
+                        std::strncpy(ev->event_data.dns_record.domain, dns_matches[3].str().c_str(),
+                            sizeof(ev->event_data.dns_record.domain) - 1);
                         try {
                             Json::Value root;
                             Json::Reader reader;
                             if (!reader.parse(dns_value, root)) {
+                                etcd_event_free(ev);
                                 continue;
                             }
                             if (root.isMember("ip"))
-                                strncpy(dns_rec.ip, root["ip"].asString().c_str(), sizeof(dns_rec.ip) - 1);
-                            dns_rec.ttl = root.isMember("ttl") ? root["ttl"].asUInt() : 3600;
+                                std::strncpy(ev->event_data.dns_record.ip, root["ip"].asString().c_str(),
+                                    sizeof(ev->event_data.dns_record.ip) - 1);
+                            ev->event_data.dns_record.ttl = root.isMember("ttl") ? root["ttl"].asUInt() : 3600;
                         } catch (const std::exception& e) {
+                            etcd_event_free(ev);
                             continue;
                         }
-
-                        if (dns_matches_local_ &&
-                                dns_matches_local_(dns_user_id.c_str(), &dns_rec, fastrg_ccb)) {
-                            dns_skipped++;
-                            continue;
-                        }
-
-                        int64_t dns_revision = dns_response.index();
-                        STATUS dns_ret = dns_record_callback_(dns_node_id.c_str(), dns_user_id.c_str(),
-                            &dns_rec, HSI_ACTION_CREATE, dns_revision, fastrg_ccb);
-                        if (dns_ret == SUCCESS) {
-                            dns_applied++;
-                        }
+                        enqueue_etcd_event(ev);
                     }
                     FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
-                        "Sync: DNS records total=%d skipped=%d applied=%d", dns_total, dns_skipped, dns_applied);
+                        "Sync: enqueued %d DNS record(s) for reconcile", dns_total);
                 }
             }
 
@@ -727,23 +762,47 @@ public:
 
     void stop_watch() {
         FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "Stopping watch...");
+
+        // Mark teardown first so any in-flight watch/connection callback that
+        // calls trigger_reconnect() becomes a no-op and cannot spawn a thread
+        // that would outlive cleanup.
+        shutting_down_ = true;
         watch_running_ = false;
-        
-        // Stop watchdog first
-        stop_watchdog();
-        
-        // Stop reconnection thread first
+
+        // Barrier: after we have held reconnect_mutex_ with shutting_down_ set,
+        // every trigger_reconnect() has either already finished (its thread is
+        // visible to stop_reconnect_thread() below) or will observe
+        // shutting_down_ and bail out. Lock is released immediately — never
+        // held across a join — to stay deadlock-free.
+        {
+            std::lock_guard<std::mutex> lock(reconnect_mutex_);
+        }
+
+        // Stop the reconnect thread before the watchdog: the reconnect loop is
+        // the only thing that can recreate the watchdog, so once it is joined
+        // the watchdog can be joined without racing a restart.
         stop_reconnect_thread();
 
+        // Now signal and join the watchdog.
+        stop_watchdog();
+
+        // Cancel and destroy every watcher. reset() blocks until the watcher's
+        // in-flight callback returns, so after this no watch callback can run.
         if (hsi_watcher_) {
             hsi_watcher_->Cancel();
+            hsi_watcher_.reset();
         }
         if (command_watcher_) {
             command_watcher_->Cancel();
+            command_watcher_.reset();
         }
-
         if (user_count_watcher_) {
             user_count_watcher_->Cancel();
+            user_count_watcher_.reset();
+        }
+        if (dns_record_watcher_) {
+            dns_record_watcher_->Cancel();
+            dns_record_watcher_.reset();
         }
 
         FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "Etcd watchers stopped");
@@ -1568,9 +1627,8 @@ public:
     }
 
 private:
+    // Watcher thread: parse, self-event-filter, and enqueue for the control loop.
     STATUS process_hsi_event(const etcd::Event& event) {
-        if (!hsi_callback_) return ERROR;
-
         std::cout << "Processing HSI event: " << event.kv().key() << std::endl;
 
         std::string key = event.kv().key();
@@ -1580,16 +1638,13 @@ private:
         // Extract user_id from key: configs/{nodeId}/hsi/{userId}
         std::regex hsi_regex("configs/([^/]+)/hsi/(.+)");
         std::smatch matches;
-
         if (!std::regex_match(key, matches, hsi_regex) || matches.size() != 3) {
             std::cerr << "Invalid HSI config key format: " << key << std::endl;
             write_fallback_error("hsi_config", key, node_uuid_, "",
                 ERROR_REASON_INVALID_FORMAT, 
-                "Key does not match expected format: configs/{nodeId}/hsi/{userId}",
-                value);
+                "Key does not match expected format: configs/{nodeId}/hsi/{userId}", value);
             return ERROR;
         }
-
         std::string node_id = matches[1].str();
         std::string user_id = matches[2].str();
 
@@ -1598,11 +1653,7 @@ private:
             case etcd::Event::EventType::PUT:
                 // Distinguish between CREATE and UPDATE by checking if prev_kv exists
                 try {
-                    if (event.prev_kv().key().empty() || event.prev_kv().key().length() == 0) {
-                        action = HSI_ACTION_CREATE;  // No previous value = new key
-                    } else {
-                        action = HSI_ACTION_UPDATE;  // Has previous value = update
-                    }
+                    action = (event.prev_kv().key().empty()) ? HSI_ACTION_CREATE : HSI_ACTION_UPDATE;
                 } catch (...) {
                     // If prev_kv() throws or is not available, treat as CREATE
                     action = HSI_ACTION_CREATE;
@@ -1615,64 +1666,59 @@ private:
                 return ERROR; // Ignore other event types
         }
 
-        if (action == HSI_ACTION_DELETE) {
-            // For delete events, try to get prev_value if available
-            std::string prev_value;
-            try {
-                if (event.prev_kv().key().length() > 0) {
-                    prev_value = event.prev_kv().as_string();
-                }
-            } catch (...) {
-                // prev_kv not available
-            }
-
-            // Call callback with nullptr config and revision
-            STATUS ret = hsi_callback_(node_id.c_str(), user_id.c_str(), nullptr, action, revision, fastrg_ccb);
-
-            // If callback failed, write fallback error
-            if (ret != SUCCESS) {
-                std::cerr << "HSI DELETE callback failed for: " << node_id << "/" << user_id << std::endl;
-                write_fallback_error("hsi_config", key, node_id, user_id,
-                    ERROR_REASON_CALLBACK_FAILED,
-                    "HSI DELETE callback returned error",
-                    prev_value);
-            }
-
-            return ret;
+        // Self-event filtering runs on the watcher thread so the slow retry in
+        // etcd_is_self_event() never blocks the control-plane loop.
+        etcd_action_type_t self_key =
+            (action == HSI_ACTION_DELETE) ? HSI_ACTION_DELETE : HSI_ACTION_UPDATE;
+        int ccb_id = parse_user_id(user_id.c_str(), 0);
+        if (ccb_id >= 0 && etcd_is_self_event(self_key, (U16)ccb_id, revision)) {
+            FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                "Ignoring self-initiated HSI event for user %s (revision %ld)",
+                user_id.c_str(), (long)revision);
+            return SUCCESS;
         }
 
-        // Parse HSI config from JSON
-        hsi_config_t config;
-        bool is_enabled = false;
-        if (parse_hsi_config(value, &config, &is_enabled)) {
-            STATUS ret = hsi_callback_(node_id.c_str(), user_id.c_str(), &config, 
-                action, revision, fastrg_ccb);
-
-            // If callback failed, write fallback error
-            if (ret != SUCCESS) {
-                std::cerr << "HSI callback failed for: " << node_id << "/" << user_id << std::endl;
-                write_fallback_error("hsi_config", key, node_id, user_id,
-                    ERROR_REASON_CALLBACK_FAILED, "HSI callback returned error", value);
-            }
-
-            hsi_config_free_port_mappings(&config);
-            return ret;
-        } else {
-            std::cerr << "Failed to parse HSI config: " << value << std::endl;
-            write_fallback_error("hsi_config", key, node_id, user_id,
-                ERROR_REASON_PARSE_FAILED,
-                "JSON parsing failed or missing required fields",
-                value);
+        etcd_event_t *ev = alloc_etcd_event(ETCD_EVENT_HSI);
+        if (!ev)
             return ERROR;
+        ev->action = action;
+        ev->revision = revision;
+        ev->from_reconcile = FALSE;
+        std::strncpy(ev->node_id, node_id.c_str(), sizeof(ev->node_id) - 1);
+        std::strncpy(ev->user_id, user_id.c_str(), sizeof(ev->user_id) - 1);
+
+        if (action != HSI_ACTION_DELETE) {
+            bool is_enabled = false;
+            if (!parse_hsi_config(value, &ev->event_data.hsi.config, &is_enabled)) {
+                std::cerr << "Failed to parse HSI config: " << value << std::endl;
+                write_fallback_error("hsi_config", key, node_id, user_id,
+                    ERROR_REASON_PARSE_FAILED,
+                    "JSON parsing failed or missing required fields", value);
+                etcd_event_free(ev);
+                return ERROR;
+            }
+            ev->event_data.hsi.is_enabled = is_enabled ? TRUE : FALSE;
+            // Keep the raw JSON so the control-plane loop can record it in
+            // failed_events/ if the apply fails.
+            ev->event_data.hsi.raw_value = dup_string(value);
+        } else {
+            // DELETE: the new kv carries no value; the deleted config is in
+            // prev_kv. Keep it for the failed_events/ record on apply failure.
+            try {
+                if (!event.prev_kv().key().empty())
+                    ev->event_data.hsi.raw_value = dup_string(event.prev_kv().as_string());
+            } catch (...) {
+                // prev_kv unavailable — leave raw_value NULL
+            }
         }
+        enqueue_etcd_event(ev);
+        return SUCCESS;
     }
 
     // Return SUCCESS if this event is PUT and it must be removed after processed
     STATUS process_command_event(const etcd::Event& event) {
         std::string key = event.kv().key();
         std::string value = event.kv().as_string();
-
-        if (!command_callback_) return ERROR;
 
         std::cout << "Processing command event: " << key << std::endl;
 
@@ -1685,7 +1731,6 @@ private:
         // Extract node_id from key: commands/{nodeId}/pppoe_{action}_{userId}
         std::regex command_regex("commands/([^/]+)/pppoe_(dial|hangup)_(.+)");
         std::smatch matches;
-
         if (!std::regex_match(key, matches, command_regex) || matches.size() != 4) {
             // Not a PPPoE command, ignore and write fallback error
             std::cerr << "Invalid command key format: " << key << std::endl;
@@ -1695,69 +1740,58 @@ private:
                 value);
             return SUCCESS;
         }
-
         std::string node_id = matches[1].str();
-        std::string action = matches[2].str();
         std::string user_id = matches[3].str();
 
-        // Parse command from JSON
-        pppoe_command_t command;
-        if (parse_pppoe_command(value, &command)) {
-            STATUS ret = command_callback_(node_id.c_str(), &command, fastrg_ccb);
-            if (ret != SUCCESS) {
-                // Callback failed, write fallback error and keep command for retry
-                std::cerr << "Command callback failed for: " << node_id << "/" << user_id << std::endl;
-                write_fallback_error("pppoe_command", key, node_id, user_id,
-                    ERROR_REASON_CALLBACK_FAILED,
-                    "PPPoE command callback returned error",
-                    value);
-            }
+        etcd_event_t *ev = alloc_etcd_event(ETCD_EVENT_PPPOE_COMMAND);
+        if (!ev)
             return SUCCESS;
-        } else {
+        ev->from_reconcile = FALSE;
+        std::strncpy(ev->node_id, node_id.c_str(), sizeof(ev->node_id) - 1);
+        std::strncpy(ev->user_id, user_id.c_str(), sizeof(ev->user_id) - 1);
+
+        if (!parse_pppoe_command(value, &ev->event_data.command)) {
             std::cerr << "Failed to parse PPPoE command: " << value << std::endl;
             write_fallback_error("pppoe_command", key, node_id, user_id,
                 ERROR_REASON_PARSE_FAILED,
                 "JSON parsing failed or missing required fields", value);
+            etcd_event_free(ev);
             return SUCCESS;
         }
+
+        if (!enqueue_etcd_event(ev)) {
+            // A command is imperative and not recovered by reconcile — record the loss.
+            write_fallback_error("pppoe_command", key, node_id, user_id,
+                ERROR_REASON_RESOURCE_UNAVAILABLE,
+                "etcd_event_q full, PPPoE command dropped", value);
+        }
+        return SUCCESS;
     }
 
     STATUS process_user_count_change_event(const etcd::Event& event) {
-        if (!user_count_callback_) return ERROR;
-
         std::cout << "Processing user count change event: " << event.kv().key() << std::endl;
 
         std::string key = event.kv().key();
         std::string value = event.kv().as_string();
         int64_t revision = event.kv().modified_index();
 
-        // Extract node_id from key: user_counts/{nodeId}/
         std::regex user_count_regex("user_counts/([^/]+)/");
         std::smatch matches;
-
         if (!std::regex_match(key, matches, user_count_regex) || matches.size() != 2) {
             std::cerr << "Invalid user count config key format: " << key << std::endl;
             write_fallback_error("user_count_config", key, node_uuid_, "",
                 ERROR_REASON_INVALID_FORMAT,
-                "Key does not match expected format: user_counts/{nodeId}/",
-                value);
+                "Key does not match expected format: user_counts/{nodeId}/", value);
             return ERROR;
         }
-
         std::string node_id = matches[1].str();
 
         etcd_action_type_t action;
         switch (event.event_type()) {
             case etcd::Event::EventType::PUT:
-                // Distinguish between CREATE and UPDATE by checking if prev_kv exists
                 try {
-                    if (event.prev_kv().key().empty() || event.prev_kv().key().length() == 0) {
-                        action = HSI_ACTION_CREATE;  // No previous value = new key
-                    } else {
-                        action = HSI_ACTION_UPDATE;  // Has previous value = update
-                    }
+                    action = (event.prev_kv().key().empty()) ? HSI_ACTION_CREATE : HSI_ACTION_UPDATE;
                 } catch (...) {
-                    // If prev_kv() throws or is not available, treat as CREATE
                     action = HSI_ACTION_CREATE;
                 }
                 break;
@@ -1765,58 +1799,29 @@ private:
                 action = HSI_ACTION_DELETE;
                 break;
             default:
-                return ERROR; // Ignore other event types
+                return ERROR;
         }
 
-        if (action == HSI_ACTION_DELETE) {
-            // For delete events, try to get prev_value if available
-            std::string prev_value;
-            try {
-                if (event.prev_kv().key().length() > 0) {
-                    prev_value = event.prev_kv().as_string();
-                }
-            } catch (...) {
-                // prev_kv not available
-            }
-
-            // Call callback with nullptr config and revision
-            STATUS ret = user_count_callback_(node_id.c_str(), nullptr, action, revision, fastrg_ccb);
-
-            // If callback failed, write fallback error
-            if (ret != SUCCESS) {
-                std::cerr << "User count DELETE callback failed for node: " << node_id << std::endl;
-                write_fallback_error("user_count_config", key, node_id, "",
-                    ERROR_REASON_CALLBACK_FAILED,
-                    "User count DELETE callback returned error",
-                    prev_value);
-            }
-
-            return ret;
-        }
-
-        // Parse user count config from JSON
-        user_count_config_t config;
-        if (parse_user_count_config(value, &config)) {
-            STATUS ret = user_count_callback_(node_id.c_str(), &config, action, revision, fastrg_ccb);
-
-            // If callback failed, write fallback error
-            if (ret != SUCCESS) {
-                std::cerr << "User count callback failed for node: " << node_id << std::endl;
-                write_fallback_error("user_count_config", key, node_id, "",
-                    ERROR_REASON_CALLBACK_FAILED,
-                    "User count callback returned error",
-                    value);
-            }
-
-            return ret;
-        } else {
-            std::cerr << "Failed to parse user count config: " << value << std::endl;
-            write_fallback_error("user_count_config", key, node_id, "",
-                ERROR_REASON_PARSE_FAILED,
-                "JSON parsing failed or missing required fields",
-                value);
+        etcd_event_t *ev = alloc_etcd_event(ETCD_EVENT_USER_COUNT);
+        if (!ev)
             return ERROR;
+        ev->action = action;
+        ev->revision = revision;
+        ev->from_reconcile = FALSE;
+        std::strncpy(ev->node_id, node_id.c_str(), sizeof(ev->node_id) - 1);
+
+        if (action != HSI_ACTION_DELETE) {
+            if (!parse_user_count_config(value, &ev->event_data.user_count)) {
+                std::cerr << "Failed to parse user count config: " << value << std::endl;
+                write_fallback_error("user_count_config", key, node_id, "",
+                    ERROR_REASON_PARSE_FAILED,
+                    "JSON parsing failed or missing required fields", value);
+                etcd_event_free(ev);
+                return ERROR;
+            }
         }
+        enqueue_etcd_event(ev);
+        return SUCCESS;
     }
 
     bool parse_user_count_config(const std::string& json_str, user_count_config_t* config) {
@@ -1978,16 +1983,13 @@ private:
 
     // DNS record event processing
     STATUS process_dns_record_event(const etcd::Event& event) {
-        if (!dns_record_callback_) return ERROR;
-
         std::string key = event.kv().key();
 
         // Only process keys matching configs/{nodeId}/{subscriberId}/dns/{domain}
         std::regex dns_regex("configs/([^/]+)/([^/]+)/dns/(.+)");
         std::smatch matches;
-        if (!std::regex_match(key, matches, dns_regex) || matches.size() != 4) {
+        if (!std::regex_match(key, matches, dns_regex) || matches.size() != 4)
             return ERROR; // Not a DNS record key, skip silently
-        }
 
         std::string node_id = matches[1].str();
         std::string user_id = matches[2].str();
@@ -2001,10 +2003,7 @@ private:
         switch (event.event_type()) {
             case etcd::Event::EventType::PUT:
                 try {
-                    if (event.prev_kv().key().empty() || event.prev_kv().key().length() == 0)
-                        action = HSI_ACTION_CREATE;
-                    else
-                        action = HSI_ACTION_UPDATE;
+                    action = (event.prev_kv().key().empty()) ? HSI_ACTION_CREATE : HSI_ACTION_UPDATE;
                 } catch (...) {
                     action = HSI_ACTION_CREATE;
                 }
@@ -2016,37 +2015,39 @@ private:
                 return ERROR;
         }
 
-        dns_record_config_t record;
-        memset(&record, 0, sizeof(record));
-        strncpy(record.domain, domain.c_str(), sizeof(record.domain) - 1);
+        etcd_event_t *ev = alloc_etcd_event(ETCD_EVENT_DNS_RECORD);
+        if (!ev)
+            return ERROR;
+        ev->action = action;
+        ev->revision = revision;
+        ev->from_reconcile = FALSE;
+        std::strncpy(ev->node_id, node_id.c_str(), sizeof(ev->node_id) - 1);
+        std::strncpy(ev->user_id, user_id.c_str(), sizeof(ev->user_id) - 1);
+        std::strncpy(ev->event_data.dns_record.domain, domain.c_str(),
+            sizeof(ev->event_data.dns_record.domain) - 1);
 
-        if (action == HSI_ACTION_DELETE) {
-            return dns_record_callback_(node_id.c_str(), user_id.c_str(),
-                &record, action, revision, fastrg_ccb);
-        }
-
-        // Parse JSON value
-        std::string value = event.kv().as_string();
-        try {
-            Json::Value root;
-            Json::Reader reader;
-            if (!reader.parse(value, root)) {
-                std::cerr << "Failed to parse DNS record JSON: " << value << std::endl;
+        if (action != HSI_ACTION_DELETE) {
+            std::string value = event.kv().as_string();
+            try {
+                Json::Value root;
+                Json::Reader reader;
+                if (!reader.parse(value, root)) {
+                    std::cerr << "Failed to parse DNS record JSON: " << value << std::endl;
+                    etcd_event_free(ev);
+                    return ERROR;
+                }
+                if (root.isMember("ip"))
+                    std::strncpy(ev->event_data.dns_record.ip, root["ip"].asString().c_str(),
+                        sizeof(ev->event_data.dns_record.ip) - 1);
+                ev->event_data.dns_record.ttl = root.isMember("ttl") ? root["ttl"].asUInt() : 3600;
+            } catch (const std::exception& e) {
+                std::cerr << "Exception parsing DNS record: " << e.what() << std::endl;
+                etcd_event_free(ev);
                 return ERROR;
             }
-            if (root.isMember("ip"))
-                strncpy(record.ip, root["ip"].asString().c_str(), sizeof(record.ip) - 1);
-            if (root.isMember("ttl"))
-                record.ttl = root["ttl"].asUInt();
-            else
-                record.ttl = 3600; // default TTL
-        } catch (const std::exception& e) {
-            std::cerr << "Exception parsing DNS record: " << e.what() << std::endl;
-            return ERROR;
         }
-
-        return dns_record_callback_(node_id.c_str(), user_id.c_str(),
-            &record, action, revision, fastrg_ccb);
+        enqueue_etcd_event(ev);
+        return SUCCESS;
     }
 
     // Put DNS record to etcd
@@ -2145,6 +2146,9 @@ public:
                 }
 
                 int64_t revision = response.index();
+                /* load_dns_records runs on the control-plane thread (PPPoE
+                 * session establishment), the same thread that applies queued
+                 * etcd events, so calling the callback directly is race-free. */
                 if (dns_record_callback(node_uuid, user_id, &rec,
                         HSI_ACTION_CREATE, revision, user_data) == SUCCESS)
                     loaded++;
@@ -2206,25 +2210,12 @@ etcd_status_t etcd_client_init(const char* etcd_endpoints, void* user_data) {
 }
 
 etcd_status_t etcd_client_start_watch(const char* node_uuid,
-    hsi_config_callback_t hsi_callback,
-    pppoe_command_callback_t command_callback,
-    user_count_changed_callback_t user_count_callback,
-    sync_request_callback_t sync_request_callback,
-    dns_record_callback_t dns_record_callback) {
+    sync_request_callback_t sync_request_callback) {
 
     if (!g_etcd_client) {
         return ETCD_ERROR;
     }
-    return g_etcd_client->start_watch(node_uuid, hsi_callback, 
-        command_callback, user_count_callback, sync_request_callback,
-        dns_record_callback);
-}
-
-void etcd_client_set_matchers(hsi_config_matches_local_t hsi_matcher,
-    dns_record_matches_local_t dns_matcher) {
-    if (g_etcd_client) {
-        g_etcd_client->set_matchers(hsi_matcher, dns_matcher);
-    }
+    return g_etcd_client->start_watch(node_uuid, sync_request_callback);
 }
 
 void etcd_client_stop_watch(void) {
@@ -2238,6 +2229,18 @@ etcd_status_t etcd_client_delete_command(const char* command_key) {
         return ETCD_ERROR;
     }
     return g_etcd_client->delete_command(command_key);
+}
+
+void etcd_client_write_fallback_error(const char *event_type, const char *key,
+    const char *node_id, const char *user_id, etcd_error_reason_t reason,
+    const char *error_detail, const char *original_value) {
+    if (!g_etcd_client)
+        return;
+    g_etcd_client->write_fallback_error(
+        event_type ? event_type : "", key ? key : "",
+        node_id ? node_id : "", user_id ? user_id : "",
+        reason, error_detail ? error_detail : "",
+        original_value ? original_value : "");
 }
 
 int etcd_client_is_initialized(void) {

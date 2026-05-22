@@ -27,8 +27,8 @@
 #define NUM_MBUFS 		8191
 #define MBUF_CACHE_SIZE 512
 #define RING_SIZE 		16384
+#define ETCD_EVENT_RING_SIZE 4096
 
-struct rte_ring    *cp_q, *free_mail_ring;
 struct rte_mempool *direct_pool[PORT_AMOUNT];
 struct rte_mempool *indirect_pool[PORT_AMOUNT];
 
@@ -55,16 +55,23 @@ void cleanup_mem()
     }
 }
 
-void cleanup_ring()
+void cleanup_ring(FastRG_t *fastrg_ccb)
 {
-    if (free_mail_ring != NULL) {
+    if (fastrg_ccb->free_mail_ring != NULL) {
         void *mail_slot;
-        while (rte_ring_dequeue(free_mail_ring, &mail_slot) == 0)
+        while (rte_ring_dequeue(fastrg_ccb->free_mail_ring, &mail_slot) == 0)
             fastrg_mfree(mail_slot);
-        rte_ring_free(free_mail_ring);
+        rte_ring_free(fastrg_ccb->free_mail_ring);
+        fastrg_ccb->free_mail_ring = NULL;
     }
-    if (cp_q != NULL)
-        rte_ring_free(cp_q);
+    if (fastrg_ccb->cp_q != NULL) {
+        rte_ring_free(fastrg_ccb->cp_q);
+        fastrg_ccb->cp_q = NULL;
+    }
+    if (fastrg_ccb->etcd_event_q != NULL) {
+        rte_ring_free(fastrg_ccb->etcd_event_q);
+        fastrg_ccb->etcd_event_q = NULL;
+    }
 }
 
 /**
@@ -139,15 +146,15 @@ err:
 
 STATUS init_ring(FastRG_t *fastrg_ccb)
 {
-    cp_q = rte_ring_create("state_machine",RING_SIZE,rte_socket_id(),0);
-    if (!cp_q) {
+    fastrg_ccb->cp_q = rte_ring_create("state_machine",RING_SIZE,rte_socket_id(),0);
+    if (!fastrg_ccb->cp_q) {
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Cannot create state_machine ring: %s", rte_strerror(rte_errno));
         return ERROR;
     }
 
     /* Create free mail ring for pre-allocated mail slots */
-    free_mail_ring = rte_ring_create("free_mail_ring", RING_BURST_SIZE, rte_socket_id(), RING_F_SC_DEQ);
-    if (!free_mail_ring) {
+    fastrg_ccb->free_mail_ring = rte_ring_create("free_mail_ring", RING_BURST_SIZE, rte_socket_id(), RING_F_SC_DEQ);
+    if (!fastrg_ccb->free_mail_ring) {
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Cannot create free_mail_ring", rte_strerror(rte_errno));
         goto err;
     }
@@ -159,17 +166,25 @@ STATUS init_ring(FastRG_t *fastrg_ccb)
             FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Cannot allocate memory for mail_slot: %s", rte_strerror(rte_errno));
             goto err;
         }
-        if (rte_ring_enqueue(free_mail_ring, mail_slot) != 0) {
+        if (rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail_slot) != 0) {
             FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Cannot enqueue mail_slot to free_mail_ring: %s", rte_strerror(rte_errno));
             fastrg_mfree(mail_slot);
             goto err;
         }
     }
 
+    /* etcd watcher threads (multi-producer) -> fastrg_loop (single consumer) */
+    fastrg_ccb->etcd_event_q = rte_ring_create("etcd_event_q", ETCD_EVENT_RING_SIZE,
+        rte_socket_id(), RING_F_SC_DEQ);
+    if (!fastrg_ccb->etcd_event_q) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Cannot create etcd_event_q: %s", rte_strerror(rte_errno));
+        goto err;
+    }
+
     return SUCCESS;
 
 err:
-    cleanup_ring();
+    cleanup_ring(fastrg_ccb);
     return ERROR;
 }
 
@@ -315,7 +330,7 @@ STATUS sys_init(FastRG_t *fastrg_ccb, struct fastrg_config *fastrg_cfg)
 
     return SUCCESS;
 err:
-    cleanup_ring();
+    cleanup_ring(fastrg_ccb);
     cleanup_mem();
     arp_pending_cleanup_pool(&fastrg_ccb->arp_pending_mp);
     if (fastrg_ccb->per_subscriber_stats_rcu) {
@@ -351,6 +366,6 @@ void sys_cleanup(FastRG_t *fastrg_ccb)
         fastrg_ccb->node_uuid = NULL;
     }
 
-    cleanup_ring();
+    cleanup_ring(fastrg_ccb);
     cleanup_mem();
 }

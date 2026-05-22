@@ -386,17 +386,10 @@ STATUS etcd_integration_start(FastRG_t *fastrg_ccb)
         }
     }
 
-    // Register matchers for sync dedupe
-    etcd_client_set_matchers(hsi_config_matches_local, dns_record_matches_local);
-
-    // Start etcd watching
+    // Start etcd watching. Watch/reconcile events are delivered to fastrg_loop
+    // via FastRG_t.etcd_event_q; only sync_request_callback is passed through.
     etcd_status_t status = etcd_client_start_watch(
-        fastrg_ccb->node_uuid, 
-        hsi_config_changed_callback, 
-        pppoe_command_received_callback,
-        user_count_changed_callback,
-        sync_request_callback,
-        dns_record_changed_callback);
+        fastrg_ccb->node_uuid, sync_request_callback);
 
     if (status != ETCD_SUCCESS) {
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Failed to start etcd watching for node: %s", fastrg_ccb->node_uuid);
@@ -624,26 +617,17 @@ STATUS hsi_config_changed_callback(const char *node_id, const char *user_id,
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Invalid user_id: %s (valid range: 1~%d)", 
             user_id, fastrg_ccb->user_count);
         return ERROR;
-    } else if (ccb_id >= fastrg_ccb->user_count && etcd_is_self_event(action, ccb_id, revision)) {
-        // If ccb_id exceeds current user_count but is a self-event, ignore it
-        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, 
-            "Ignoring self-initiated modification for out-of-range user %s (revision %" PRId64 ")", user_id, revision);
-        return SUCCESS;
     }
 
+    /* Self-event filtering already happened on the watcher thread before this
+     * event was enqueued (see process_hsi_event), so no etcd_is_self_event()
+     * check is needed here. */
     switch (action) {
         /* CREATE action is treated as an update with is_update = FALSE */
         case HSI_ACTION_CREATE:
             is_update = FALSE;
             /* fallthrough */
         case HSI_ACTION_UPDATE:
-            // Check if this is a self-initiated modification (e.g., from modify_hsi_config_status)
-            if (etcd_is_self_event(HSI_ACTION_UPDATE, ccb_id, revision)) {
-                FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, 
-                    "Ignoring self-initiated modification for user %s (revision %" PRId64 ")", user_id, revision);
-                return SUCCESS;
-            }
-
             if (!config) {
                 FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Null config for HSI user %s", user_id);
                 return ERROR;
@@ -692,14 +676,6 @@ STATUS hsi_config_changed_callback(const char *node_id, const char *user_id,
             break;
 
         case HSI_ACTION_DELETE:
-            // Check if this is a self-initiated deletion (from failed apply above)
-            if (etcd_is_self_event(HSI_ACTION_DELETE, ccb_id, revision)) {
-                FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, 
-                    "Ignoring self-initiated delete event for user %s (revision %ld)", user_id, revision);
-                ret = SUCCESS;
-                break;
-            }
-
             FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, 
                 "HSI config deleted for user %s (revision %ld)", user_id, revision);
 
@@ -1085,5 +1061,112 @@ STATUS dns_record_changed_callback(const char *node_id, const char *user_id,
             FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
                 "DNS record callback: unknown action %d", action);
             return ERROR;
+    }
+}
+
+/* Reconcile sweep: remove subscribers active locally but no longer present in
+ * etcd. Runs on the control-plane loop, so reading CCB state here is race-free. */
+static void etcd_reconcile_sweep(FastRG_t *fastrg_ccb, const int *present, int count)
+{
+    for(int ccb_id=0; ccb_id<fastrg_ccb->user_count; ccb_id++) {
+        ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
+        if (ppp_ccb == NULL || rte_atomic16_read(&ppp_ccb->vlan_id) == 0)
+            continue;   /* not active locally */
+
+        BOOL in_etcd = FALSE;
+        for(int i=0; i<count; i++) {
+            if (present[i] == ccb_id) {
+                in_etcd = TRUE;
+                break;
+            }
+        }
+        if (in_etcd == FALSE) {
+            FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                "Reconcile sweep: user %d active locally but absent from etcd, removing",
+                ccb_id + 1);
+            remove_hsi_config(fastrg_ccb, ccb_id);
+        }
+    }
+}
+
+void etcd_event_dispatch(FastRG_t *fastrg_ccb, etcd_event_t *ev)
+{
+    if (fastrg_ccb == NULL || ev == NULL)
+        return;
+
+    switch (ev->kind) {
+        case ETCD_EVENT_HSI: {
+            const hsi_config_t *cfg =
+                (ev->action == HSI_ACTION_DELETE) ? NULL : &ev->event_data.hsi.config;
+
+            /* Reconcile events skip configs whose local state already matches. */
+            if (ev->from_reconcile && cfg != NULL &&
+                    hsi_config_matches_local(ev->user_id, cfg, fastrg_ccb)) {
+                FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                    "Reconcile: HSI user %s already matches local state, skipping",
+                    ev->user_id);
+                break;
+            }
+
+            STATUS ret = hsi_config_changed_callback(ev->node_id, ev->user_id, cfg,
+                ev->action, ev->revision, fastrg_ccb);
+
+            /* Reconcile: re-dial subscribers that etcd says should be enabled. */
+            if (ret == SUCCESS && ev->from_reconcile && ev->event_data.hsi.is_enabled &&
+                    ev->action != HSI_ACTION_DELETE) {
+                pppoe_command_t cmd;
+                memset(&cmd, 0, sizeof(cmd));
+                snprintf(cmd.action, sizeof(cmd.action), "dial");
+                snprintf(cmd.user_id, sizeof(cmd.user_id), "%s", ev->event_data.hsi.config.user_id);
+                snprintf(cmd.vlan, sizeof(cmd.vlan), "%s", ev->event_data.hsi.config.vlan_id);
+                snprintf(cmd.account, sizeof(cmd.account), "%s", ev->event_data.hsi.config.account_name);
+                snprintf(cmd.password, sizeof(cmd.password), "%s", ev->event_data.hsi.config.password);
+                cmd.timestamp = time(NULL);
+                pppoe_command_received_callback(ev->node_id, &cmd, fastrg_ccb);
+            }
+
+            /* A failed apply: record it in failed_events/ with the config's
+             * raw value (new value for PUT, deleted value for DELETE) so the
+             * controller can see what could not be applied. */
+            if (ret != SUCCESS) {
+                char fkey[200];
+                snprintf(fkey, sizeof(fkey), "configs/%s/hsi/%s", ev->node_id, ev->user_id);
+                etcd_client_write_fallback_error("hsi_config", fkey,
+                    ev->node_id, ev->user_id, ERROR_REASON_CALLBACK_FAILED,
+                    ev->action == HSI_ACTION_DELETE ? "HSI DELETE apply returned error"
+                                                    : "HSI apply returned error",
+                    ev->event_data.hsi.raw_value ? ev->event_data.hsi.raw_value : "");
+            }
+            break;
+        }
+
+        case ETCD_EVENT_USER_COUNT:
+            user_count_changed_callback(ev->node_id, &ev->event_data.user_count,
+                ev->action, ev->revision, fastrg_ccb);
+            break;
+
+        case ETCD_EVENT_DNS_RECORD:
+            if (ev->from_reconcile && ev->action != HSI_ACTION_DELETE &&
+                    dns_record_matches_local(ev->user_id, &ev->event_data.dns_record, fastrg_ccb)) {
+                FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                    "Reconcile: DNS record for user %s already matches, skipping", ev->user_id);
+                break;
+            }
+            dns_record_changed_callback(ev->node_id, ev->user_id, &ev->event_data.dns_record,
+                ev->action, ev->revision, fastrg_ccb);
+            break;
+
+        case ETCD_EVENT_PPPOE_COMMAND:
+            pppoe_command_received_callback(ev->node_id, &ev->event_data.command, fastrg_ccb);
+            break;
+
+        case ETCD_EVENT_HSI_SWEEP:
+            etcd_reconcile_sweep(fastrg_ccb, ev->event_data.sweep.present_ccb_ids, ev->event_data.sweep.count);
+            break;
+
+        default:
+            FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
+                "etcd_event_dispatch: unknown event kind %d", ev->kind);
+            break;
     }
 }
