@@ -17,6 +17,8 @@
 #include <rte_ip.h>
 #include <rte_ethdev.h>
 
+#include <ip_codec.h>
+
 #include "protocol.h"
 #include "init.h"
 #include "pppd/nat.h"
@@ -423,12 +425,24 @@ static int decaps_tcp(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt,
     rte_ether_addr_copy(&entry->mac_addr, &eth_hdr->dst_addr);
 
     /* SPI: drop packets that are inconsistent with the tracked TCP state */
-    if (unlikely(!tcp_conntrack_inbound_valid(entry->tcp_state, tcphdr->tcp_flags))) {
+    if (unlikely(tcp_conntrack_inbound_valid(entry->tcp_state, tcphdr->tcp_flags) == FALSE)) {
+        drop_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
+        return 0;
+    }
+
+    U16 ip_hdr_len  = (ip_hdr->version_ihl & 0x0F) * 4;
+    U16 tcp_hdr_len = ((tcphdr->data_off >> 4) & 0x0F) * 4;
+    U16 payload_len = rte_be_to_cpu_16(ip_hdr->total_length) - ip_hdr_len - tcp_hdr_len;
+
+    /* Sequence/ack window check: drop blind injection from a WAN attacker who
+     * knows the 4-tuple but not the live seq window. */
+    if (unlikely(tcp_conntrack_seq_valid(entry, tcphdr, TRUE) == FALSE)) {
         drop_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
         return 0;
     }
 
     tcp_conntrack_fsm(entry, tcphdr->tcp_flags, TRUE);
+    tcp_conntrack_seq_update(entry, tcphdr, payload_len, TRUE);
     ip_hdr->dst_addr = entry->src_ip;
     tcphdr->dst_port = entry->src_port;
     ip_hdr->hdr_checksum = rte_ipv4_cksum(ip_hdr);

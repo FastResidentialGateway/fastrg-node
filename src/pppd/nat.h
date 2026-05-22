@@ -228,6 +228,12 @@ static inline U16 nat_learning_port_reuse(struct rte_ether_hdr *eth_hdr,
                     entry->nat_port = nat_port;
                     entry->tcp_state = TCP_CONNTRACK_NONE;
                     entry->tcp_fin_flags = 0;
+                    entry->max_seq_end_lan = 0;
+                    entry->max_seq_end_wan = 0;
+                    entry->max_ack_lan     = 0;
+                    entry->max_ack_wan     = 0;
+                    entry->max_win_lan     = 0;
+                    entry->max_win_wan     = 0;
                     rte_atomic64_set(&entry->expire_at, nat_expiry_cycles());
 
                     rte_atomic_thread_fence(rte_memory_order_release);
@@ -269,6 +275,12 @@ static inline U16 nat_learning_port_reuse(struct rte_ether_hdr *eth_hdr,
                             entry->nat_port = nat_port;
                             entry->tcp_state = TCP_CONNTRACK_NONE;
                             entry->tcp_fin_flags = 0;
+                            entry->max_seq_end_lan = 0;
+                            entry->max_seq_end_wan = 0;
+                            entry->max_ack_lan     = 0;
+                            entry->max_ack_wan     = 0;
+                            entry->max_win_lan     = 0;
+                            entry->max_win_wan     = 0;
                             rte_atomic64_set(&entry->expire_at, nat_expiry_cycles());
                             rte_atomic_thread_fence(rte_memory_order_release);
                             rte_atomic16_set(&entry->is_fill, NAT_ENTRY_READY);
@@ -453,7 +465,7 @@ static inline U16 nat_tcp_learning(struct rte_ether_hdr *eth_hdr,
         addr_table, port_fwd_table);
 
     if (nat_port != 0) {
-        /* Find the entry and run the TCP conntrack FSM (originator direction) */
+        /* Find the entry and run the TCP conntrack FSM (LAN direction) */
         U32 table_idx = compute_nat_table_index(nat_port,
             ip_hdr->dst_addr, tcphdr->dst_port);
         U32 start_idx = table_idx;
@@ -462,7 +474,14 @@ static inline U16 nat_tcp_learning(struct rte_ether_hdr *eth_hdr,
             if (rte_atomic16_read(&entry->is_fill) == NAT_ENTRY_READY &&
                     nat_entry_matches_key(entry, nat_port,
                         ip_hdr->dst_addr, tcphdr->dst_port)) {
+                /* LAN→WAN: trusted, no seq validation; just run FSM and update
+                 * the LAN-direction baseline so WAN→LAN can be checked. */
                 tcp_conntrack_fsm(entry, tcphdr->tcp_flags, FALSE);
+                U16 ip_hdr_len  = (ip_hdr->version_ihl & 0x0F) * 4;
+                U16 tcp_hdr_len = ((tcphdr->data_off >> 4) & 0x0F) * 4;
+                U16 payload_len = rte_be_to_cpu_16(ip_hdr->total_length) -
+                                  ip_hdr_len - tcp_hdr_len;
+                tcp_conntrack_seq_update(entry, tcphdr, payload_len, FALSE);
                 break;
             }
             table_idx++;

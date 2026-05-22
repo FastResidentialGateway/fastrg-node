@@ -57,9 +57,17 @@ typedef struct addr_table {
     U16                   dst_port; // dst port where LAN user wants to visit
     U16                   nat_port;
     U8                    tcp_state; // TCP conntrack state (tcp_conntrack_state_t), 0 = NONE
-    U8                    tcp_fin_flags; // bitmask: bit0 = originator FIN, bit1 = responder FIN
+    U8                    tcp_fin_flags; // bitmask: bit0 = LAN FIN, bit1 = WAN FIN
     rte_atomic16_t        is_fill;   // is this entry filled or not
     rte_atomic64_t        expire_at; // absolute TSC timestamp when entry expires
+    /* TCP seq/ack window tracking (host order).  Used by tcp_conntrack_seq_valid
+     * to drop blind injection from WAN side; LAN→WAN only updates these fields. */
+    U32                   max_seq_end_lan; // highest (seq + payload + SYN/FIN) seen from LAN
+    U32                   max_seq_end_wan; // same from WAN
+    U32                   max_ack_lan;     // highest ack from LAN
+    U32                   max_ack_wan;     // same from WAN
+    U16                   max_win_lan;     // last advertised window from LAN (no scaling)
+    U16                   max_win_wan;     // same from WAN
 }__rte_cache_aligned addr_table_t;
 
 /**

@@ -8,6 +8,7 @@
 /\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\*/
 
 #include <rte_atomic.h>
+#include <rte_byteorder.h>
 
 #include <common.h>
 
@@ -18,102 +19,150 @@
     ACTION HANDLERS
     Each handler performs one side-effect on the NAT entry during a state transition.
     All handlers are static — the state table (below) is the only caller.
+    The is_reply parameter lets a handler take direction-dependent action; most
+    handlers ignore it.
 ///////////////////////////////////////////////////////////////////////////////////*/
 
-static STATUS tcp_act_timeout_none(struct addr_table *entry)
+static STATUS tcp_act_timeout_syn_sent(struct addr_table *entry, BOOL is_reply)
 {
-    rte_atomic64_set(&((addr_table_t *)entry)->expire_at,
-        fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_NONE * fastrg_get_cycles_in_sec());
-    return SUCCESS;
-}
-
-static STATUS tcp_act_timeout_syn_sent(struct addr_table *entry)
-{
+    (void)is_reply;
     rte_atomic64_set(&((addr_table_t *)entry)->expire_at,
         fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_SYN_SENT * fastrg_get_cycles_in_sec());
     return SUCCESS;
 }
 
-static STATUS tcp_act_timeout_syn_recv(struct addr_table *entry)
+static STATUS tcp_act_timeout_syn_recv(struct addr_table *entry, BOOL is_reply)
 {
+    (void)is_reply;
     rte_atomic64_set(&((addr_table_t *)entry)->expire_at,
         fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_SYN_RECV * fastrg_get_cycles_in_sec());
     return SUCCESS;
 }
 
-static STATUS tcp_act_timeout_established(struct addr_table *entry)
+static STATUS tcp_act_timeout_established(struct addr_table *entry, BOOL is_reply)
 {
+    (void)is_reply;
     rte_atomic64_set(&((addr_table_t *)entry)->expire_at,
         fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_ESTABLISHED * fastrg_get_cycles_in_sec());
     return SUCCESS;
 }
 
-static STATUS tcp_act_timeout_fin_wait(struct addr_table *entry)
+static STATUS tcp_act_timeout_fin_wait(struct addr_table *entry, BOOL is_reply)
 {
+    (void)is_reply;
     rte_atomic64_set(&((addr_table_t *)entry)->expire_at,
         fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_FIN_WAIT * fastrg_get_cycles_in_sec());
     return SUCCESS;
 }
 
-static STATUS tcp_act_timeout_close_wait(struct addr_table *entry)
+static STATUS tcp_act_timeout_close_wait(struct addr_table *entry, BOOL is_reply)
 {
+    (void)is_reply;
     rte_atomic64_set(&((addr_table_t *)entry)->expire_at,
         fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_CLOSE_WAIT * fastrg_get_cycles_in_sec());
     return SUCCESS;
 }
 
-static STATUS tcp_act_timeout_last_ack(struct addr_table *entry)
+static STATUS tcp_act_timeout_last_ack(struct addr_table *entry, BOOL is_reply)
 {
+    (void)is_reply;
     rte_atomic64_set(&((addr_table_t *)entry)->expire_at,
         fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_LAST_ACK * fastrg_get_cycles_in_sec());
     return SUCCESS;
 }
 
-static STATUS tcp_act_timeout_time_wait(struct addr_table *entry)
+static STATUS tcp_act_timeout_time_wait(struct addr_table *entry, BOOL is_reply)
 {
+    (void)is_reply;
     rte_atomic64_set(&((addr_table_t *)entry)->expire_at,
         fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_TIME_WAIT * fastrg_get_cycles_in_sec());
     return SUCCESS;
 }
 
-static STATUS tcp_act_timeout_close(struct addr_table *entry)
+static STATUS tcp_act_timeout_close(struct addr_table *entry, BOOL is_reply)
 {
+    (void)is_reply;
     rte_atomic64_set(&((addr_table_t *)entry)->expire_at,
         fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_CLOSE * fastrg_get_cycles_in_sec());
     return SUCCESS;
 }
 
-static STATUS tcp_act_set_fin_orig(struct addr_table *entry)
+static STATUS tcp_act_timeout_mid_stream(struct addr_table *entry, BOOL is_reply)
 {
-    ((addr_table_t *)entry)->tcp_fin_flags |= TCP_FIN_FLAG_ORIGINATOR;
+    (void)is_reply;
+    rte_atomic64_set(&((addr_table_t *)entry)->expire_at,
+        fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_MID_STREAM * fastrg_get_cycles_in_sec());
     return SUCCESS;
 }
 
-static STATUS tcp_act_set_fin_resp(struct addr_table *entry)
+/* MID_STREAM + ACK: only promote to ESTABLISHED when the ACK comes from the
+ * WAN side — that's the bidirectional confirmation we were waiting for.
+ * On a LAN-side ACK we just refresh the MID_STREAM timeout. */
+static STATUS tcp_act_mid_stream_ack(struct addr_table *entry, BOOL is_reply)
 {
-    ((addr_table_t *)entry)->tcp_fin_flags |= TCP_FIN_FLAG_RESPONDER;
+    addr_table_t *e = (addr_table_t *)entry;
+
+    if (is_reply) {
+        e->tcp_state = TCP_CONNTRACK_ESTABLISHED;
+        rte_atomic64_set(&e->expire_at,
+            fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_ESTABLISHED * fastrg_get_cycles_in_sec());
+    } else {
+        rte_atomic64_set(&e->expire_at,
+            fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_MID_STREAM * fastrg_get_cycles_in_sec());
+    }
     return SUCCESS;
 }
 
-static STATUS tcp_act_reset_fin_flags(struct addr_table *entry)
+static STATUS tcp_act_set_fin_lan(struct addr_table *entry, BOOL is_reply)
 {
+    (void)is_reply;
+    ((addr_table_t *)entry)->tcp_fin_flags |= TCP_FIN_FLAG_LAN;
+    return SUCCESS;
+}
+
+static STATUS tcp_act_set_fin_wan(struct addr_table *entry, BOOL is_reply)
+{
+    (void)is_reply;
+    ((addr_table_t *)entry)->tcp_fin_flags |= TCP_FIN_FLAG_WAN;
+    return SUCCESS;
+}
+
+static STATUS tcp_act_reset_fin_flags(struct addr_table *entry, BOOL is_reply)
+{
+    (void)is_reply;
     ((addr_table_t *)entry)->tcp_fin_flags = 0;
     return SUCCESS;
 }
 
 /*//////////////////////////////////////////////////////////////////////////////////
     STATE            EVENT              NEXT-STATE              HANDLERS
-    Splitting TCP_EV_FIN into TCP_EV_FIN_ORIG / TCP_EV_FIN_RESP eliminates
+    Splitting TCP_EV_FIN into TCP_EV_FIN_LAN / TCP_EV_FIN_WAN eliminates
     the need for any direction special-casing in the FSM body.
 ///////////////////////////////////////////////////////////////////////////////////*/
 static tcp_conntrack_state_tbl_t tcp_conntrack_tbl[] = {
-    /* NONE: initial state for new TCP entries */
-    { TCP_CONNTRACK_NONE,        TCP_EV_SYN,       TCP_CONNTRACK_SYN_SENT,     { tcp_act_timeout_syn_sent,  NULL } },
-    { TCP_CONNTRACK_NONE,        TCP_EV_SYN_ACK,   TCP_CONNTRACK_SYN_RECV,     { tcp_act_timeout_syn_recv,  NULL } },
-    { TCP_CONNTRACK_NONE,        TCP_EV_ACK,       TCP_CONNTRACK_NONE,          { tcp_act_timeout_none,      NULL } },
+    /* NONE: initial state for new TCP entries.  A non-SYN first packet means the flow
+     * was already established before we started tracking it (e.g. FastRG restarted while
+     * LAN clients held long-lived connections); on bare ACK we route via MID_STREAM
+     * (60s probationary timeout) instead of jumping straight to ESTABLISHED, so we
+     * don't grant a 7200s lease on something we haven't seen the WAN-side ACK confirm. */
+    { TCP_CONNTRACK_NONE,        TCP_EV_SYN,       TCP_CONNTRACK_SYN_SENT,      { tcp_act_timeout_syn_sent,  NULL } },
+    { TCP_CONNTRACK_NONE,        TCP_EV_SYN_ACK,   TCP_CONNTRACK_SYN_RECV,      { tcp_act_timeout_syn_recv,  NULL } },
+    { TCP_CONNTRACK_NONE,        TCP_EV_ACK,       TCP_CONNTRACK_MID_STREAM,    { tcp_act_timeout_mid_stream, NULL } },
+    { TCP_CONNTRACK_NONE,        TCP_EV_FIN_LAN,   TCP_CONNTRACK_FIN_WAIT,      { tcp_act_set_fin_lan, tcp_act_timeout_fin_wait,   NULL } },
+    { TCP_CONNTRACK_NONE,        TCP_EV_FIN_WAN,   TCP_CONNTRACK_CLOSE_WAIT,    { tcp_act_set_fin_wan, tcp_act_timeout_close_wait, NULL } },
     { TCP_CONNTRACK_NONE,        TCP_EV_RST,       TCP_CONNTRACK_CLOSE,         { tcp_act_timeout_close,     NULL } },
 
-    /* SYN_SENT: SYN sent from originator, awaiting SYN-ACK */
+    /* MID_STREAM: probationary state for loose pickup.  Promote to ESTABLISHED only
+     * on a WAN-side ACK (handled inside tcp_act_mid_stream_ack); LAN-side
+     * traffic just refreshes the 60s timeout. */
+    { TCP_CONNTRACK_MID_STREAM,  TCP_EV_ACK,       TCP_CONNTRACK_MID_STREAM,    { tcp_act_mid_stream_ack, NULL } },
+    { TCP_CONNTRACK_MID_STREAM,  TCP_EV_SYN,       TCP_CONNTRACK_SYN_SENT,      { tcp_act_reset_fin_flags, tcp_act_timeout_syn_sent, NULL } },
+    { TCP_CONNTRACK_MID_STREAM,  TCP_EV_SYN_ACK,   TCP_CONNTRACK_MID_STREAM,    { tcp_act_timeout_mid_stream, NULL } },
+    { TCP_CONNTRACK_MID_STREAM,  TCP_EV_FIN_LAN,   TCP_CONNTRACK_FIN_WAIT,      { tcp_act_set_fin_lan, tcp_act_timeout_fin_wait,   NULL } },
+    { TCP_CONNTRACK_MID_STREAM,  TCP_EV_FIN_WAN,   TCP_CONNTRACK_CLOSE_WAIT,    { tcp_act_set_fin_wan, tcp_act_timeout_close_wait, NULL } },
+    { TCP_CONNTRACK_MID_STREAM,  TCP_EV_RST,       TCP_CONNTRACK_CLOSE,         { tcp_act_timeout_close, NULL } },
+
+    /* SYN_SENT: SYN sent from LAN, awaiting SYN-ACK */
     { TCP_CONNTRACK_SYN_SENT,    TCP_EV_SYN,       TCP_CONNTRACK_SYN_SENT,      { tcp_act_timeout_syn_sent,  NULL } },  /* SYN retransmit */
     { TCP_CONNTRACK_SYN_SENT,    TCP_EV_SYN_ACK,   TCP_CONNTRACK_SYN_RECV,      { tcp_act_timeout_syn_recv,  NULL } },
     { TCP_CONNTRACK_SYN_SENT,    TCP_EV_RST,       TCP_CONNTRACK_CLOSE,         { tcp_act_timeout_close,     NULL } },
@@ -121,28 +170,35 @@ static tcp_conntrack_state_tbl_t tcp_conntrack_tbl[] = {
     /* SYN_RECV: SYN-ACK seen, awaiting final ACK */
     { TCP_CONNTRACK_SYN_RECV,    TCP_EV_ACK,       TCP_CONNTRACK_ESTABLISHED,   { tcp_act_timeout_established, NULL } },
     { TCP_CONNTRACK_SYN_RECV,    TCP_EV_SYN_ACK,   TCP_CONNTRACK_SYN_RECV,      { tcp_act_timeout_syn_recv,    NULL } },  /* SYN-ACK retransmit */
-    { TCP_CONNTRACK_SYN_RECV,    TCP_EV_FIN_ORIG,  TCP_CONNTRACK_FIN_WAIT,      { tcp_act_set_fin_orig, tcp_act_timeout_fin_wait, NULL } },
-    { TCP_CONNTRACK_SYN_RECV,    TCP_EV_FIN_RESP,  TCP_CONNTRACK_FIN_WAIT,      { tcp_act_set_fin_resp, tcp_act_timeout_fin_wait, NULL } },
+    { TCP_CONNTRACK_SYN_RECV,    TCP_EV_FIN_LAN,   TCP_CONNTRACK_FIN_WAIT,      { tcp_act_set_fin_lan, tcp_act_timeout_fin_wait, NULL } },
+    { TCP_CONNTRACK_SYN_RECV,    TCP_EV_FIN_WAN,   TCP_CONNTRACK_FIN_WAIT,      { tcp_act_set_fin_wan, tcp_act_timeout_fin_wait, NULL } },
     { TCP_CONNTRACK_SYN_RECV,    TCP_EV_RST,       TCP_CONNTRACK_CLOSE,         { tcp_act_timeout_close, NULL } },
 
-    /* ESTABLISHED: connection fully open */
+    /* ESTABLISHED: connection fully open.  SYN means the client reused the ephemeral
+     * port before the NAT entry expired (7200s) — reset to SYN_SENT so the new
+     * handshake can complete.  SYN-ACK in ESTABLISHED is always a server retransmit:
+     * the server didn't receive our final ACK and is resending its SYN-ACK; stay in
+     * ESTABLISHED and just refresh the timeout — do NOT regress to SYN_RECV, which
+     * would cause state oscillation every time the server retransmits. */
     { TCP_CONNTRACK_ESTABLISHED, TCP_EV_ACK,       TCP_CONNTRACK_ESTABLISHED,   { tcp_act_timeout_established,  NULL } },
-    { TCP_CONNTRACK_ESTABLISHED, TCP_EV_FIN_ORIG,  TCP_CONNTRACK_FIN_WAIT,      { tcp_act_set_fin_orig, tcp_act_timeout_fin_wait,   NULL } },
-    { TCP_CONNTRACK_ESTABLISHED, TCP_EV_FIN_RESP,  TCP_CONNTRACK_CLOSE_WAIT,    { tcp_act_set_fin_resp, tcp_act_timeout_close_wait, NULL } },
+    { TCP_CONNTRACK_ESTABLISHED, TCP_EV_SYN,       TCP_CONNTRACK_SYN_SENT,      { tcp_act_reset_fin_flags, tcp_act_timeout_syn_sent, NULL } },
+    { TCP_CONNTRACK_ESTABLISHED, TCP_EV_SYN_ACK,   TCP_CONNTRACK_ESTABLISHED,   { tcp_act_timeout_established, NULL } },
+    { TCP_CONNTRACK_ESTABLISHED, TCP_EV_FIN_LAN,   TCP_CONNTRACK_FIN_WAIT,      { tcp_act_set_fin_lan, tcp_act_timeout_fin_wait,   NULL } },
+    { TCP_CONNTRACK_ESTABLISHED, TCP_EV_FIN_WAN,   TCP_CONNTRACK_CLOSE_WAIT,    { tcp_act_set_fin_wan, tcp_act_timeout_close_wait, NULL } },
     { TCP_CONNTRACK_ESTABLISHED, TCP_EV_RST,       TCP_CONNTRACK_CLOSE,         { tcp_act_timeout_close, NULL } },
 
-    /* FIN_WAIT: FIN sent by originator, awaiting FIN from responder */
-    { TCP_CONNTRACK_FIN_WAIT,    TCP_EV_FIN_RESP,  TCP_CONNTRACK_TIME_WAIT,     { tcp_act_set_fin_resp, tcp_act_timeout_time_wait, NULL } },
-    { TCP_CONNTRACK_FIN_WAIT,    TCP_EV_FIN_ORIG,  TCP_CONNTRACK_FIN_WAIT,      { tcp_act_set_fin_orig, tcp_act_timeout_fin_wait,  NULL } },  /* FIN retransmit */
+    /* FIN_WAIT: FIN sent by LAN, awaiting FIN from WAN */
+    { TCP_CONNTRACK_FIN_WAIT,    TCP_EV_FIN_WAN,   TCP_CONNTRACK_TIME_WAIT,     { tcp_act_set_fin_wan, tcp_act_timeout_time_wait, NULL } },
+    { TCP_CONNTRACK_FIN_WAIT,    TCP_EV_FIN_LAN,   TCP_CONNTRACK_FIN_WAIT,      { tcp_act_set_fin_lan, tcp_act_timeout_fin_wait,  NULL } },  /* FIN retransmit */
     { TCP_CONNTRACK_FIN_WAIT,    TCP_EV_ACK,       TCP_CONNTRACK_FIN_WAIT,      { tcp_act_timeout_fin_wait, NULL } },
     { TCP_CONNTRACK_FIN_WAIT,    TCP_EV_RST,       TCP_CONNTRACK_CLOSE,         { tcp_act_timeout_close, NULL } },
 
-    /* CLOSE_WAIT: FIN received from responder, waiting for originator to close */
-    { TCP_CONNTRACK_CLOSE_WAIT,  TCP_EV_FIN_ORIG,  TCP_CONNTRACK_LAST_ACK,      { tcp_act_set_fin_orig, tcp_act_timeout_last_ack,   NULL } },
+    /* CLOSE_WAIT: FIN received from WAN, waiting for LAN to close */
+    { TCP_CONNTRACK_CLOSE_WAIT,  TCP_EV_FIN_LAN,   TCP_CONNTRACK_LAST_ACK,      { tcp_act_set_fin_lan, tcp_act_timeout_last_ack,   NULL } },
     { TCP_CONNTRACK_CLOSE_WAIT,  TCP_EV_ACK,       TCP_CONNTRACK_CLOSE_WAIT,    { tcp_act_timeout_close_wait, NULL } },
     { TCP_CONNTRACK_CLOSE_WAIT,  TCP_EV_RST,       TCP_CONNTRACK_CLOSE,         { tcp_act_timeout_close, NULL } },
 
-    /* LAST_ACK: waiting for final ACK after originator sent FIN in CLOSE_WAIT */
+    /* LAST_ACK: waiting for final ACK after LAN sent FIN in CLOSE_WAIT */
     { TCP_CONNTRACK_LAST_ACK,    TCP_EV_ACK,       TCP_CONNTRACK_TIME_WAIT,     { tcp_act_timeout_time_wait, NULL } },
     { TCP_CONNTRACK_LAST_ACK,    TCP_EV_RST,       TCP_CONNTRACK_CLOSE,         { tcp_act_timeout_close, NULL } },
 
@@ -151,10 +207,10 @@ static tcp_conntrack_state_tbl_t tcp_conntrack_tbl[] = {
     { TCP_CONNTRACK_TIME_WAIT,   TCP_EV_RST,       TCP_CONNTRACK_CLOSE,         { tcp_act_timeout_close, NULL } },
     { TCP_CONNTRACK_TIME_WAIT,   TCP_EV_SYN,       TCP_CONNTRACK_SYN_SENT,      { tcp_act_reset_fin_flags, tcp_act_timeout_syn_sent, NULL } },  /* new connection reuse during 2MSL */
 
-    /* CLOSE: RST or fully closed */
+    /* CLOSE: RST or fully closed.  No SYN_ACK rule: SNAT entries are generated at LAN → WAN, 
+     * so a LAN-side SYN_ACK on a CLOSE entry has no legitimate path — leave it. */
     { TCP_CONNTRACK_CLOSE,       TCP_EV_RST,       TCP_CONNTRACK_CLOSE,         { tcp_act_timeout_close, NULL } },
-    { TCP_CONNTRACK_CLOSE,       TCP_EV_SYN,       TCP_CONNTRACK_SYN_SENT,      { tcp_act_reset_fin_flags, tcp_act_timeout_syn_sent, NULL } },    /* new connection from originator */
-    { TCP_CONNTRACK_CLOSE,       TCP_EV_SYN_ACK,   TCP_CONNTRACK_SYN_RECV,      { tcp_act_reset_fin_flags, tcp_act_timeout_syn_recv, NULL } },    /* new passive connection */
+    { TCP_CONNTRACK_CLOSE,       TCP_EV_SYN,       TCP_CONNTRACK_SYN_SENT,      { tcp_act_reset_fin_flags, tcp_act_timeout_syn_sent, NULL } },    /* new connection from LAN */
 
     /* Sentinel */
     { TCP_CONNTRACK_INVLD, 0, 0, { NULL } },
@@ -189,9 +245,11 @@ STATUS tcp_conntrack_fsm(struct addr_table *entry, U8 tcp_flags, BOOL is_reply)
     /* State transition */
     e->tcp_state = tcp_conntrack_tbl[i].next_state;
 
-    /* Execute NULL-terminated handler chain */
+    /* Execute NULL-terminated handler chain.  A handler may further mutate
+     * tcp_state (e.g. tcp_act_mid_stream_ack promotes MID_STREAM→ESTABLISHED on
+     * WAN-side ACK), so we log the final state after handlers run. */
     for(int j=0; tcp_conntrack_tbl[i].hdl[j]; j++) {
-        if ((*tcp_conntrack_tbl[i].hdl[j])(entry) == ERROR)
+        if ((*tcp_conntrack_tbl[i].hdl[j])(entry, is_reply) == ERROR)
             return ERROR;
     }
 
@@ -210,6 +268,7 @@ const char *tcp_conntrack_state2str(U8 state)
         [TCP_CONNTRACK_LAST_ACK]    = "LAST_ACK",
         [TCP_CONNTRACK_TIME_WAIT]   = "TIME_WAIT",
         [TCP_CONNTRACK_CLOSE]       = "CLOSE",
+        [TCP_CONNTRACK_MID_STREAM]  = "MID_STREAM",
     };
 
     if (state >= TCP_CONNTRACK_INVLD)

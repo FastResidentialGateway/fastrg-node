@@ -6,7 +6,7 @@ GRPC_CPP_PLUGIN_PATH ?= `which $(GRPC_CPP_PLUGIN)`
 PROTOS_PATH = proto
 PROTO_FILE = $(PROTOS_PATH)/controller.proto
 
-CXXFLAGS = -std=c++17 -g -O3 $(shell pkg-config --cflags protobuf grpc++) $(shell pkg-config --cflags jsoncpp)
+CXXFLAGS = -std=c++17 -g -O3 -DNB_TEST $(shell pkg-config --cflags protobuf grpc++) $(shell pkg-config --cflags jsoncpp)
 LDFLAGS = $(shell pkg-config --libs protobuf grpc++) $(shell pkg-config --libs jsoncpp) -letcd-cpp-api
 
 PROTO_SOURCES = $(PROTOS_PATH)/controller.pb.cc $(PROTOS_PATH)/controller.grpc.pb.cc

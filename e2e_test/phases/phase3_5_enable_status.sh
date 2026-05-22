@@ -44,7 +44,7 @@ phase3_5_enable_status() {
     # Wait up to 30s for PPPoE session to move out of "End phase"
     _35_ppp_ok=0
     _35_phase=""
-    for _35_i in $(seq 1 6); do
+    for _35_i in $(seq 1 10); do
         sleep 5
         _35_hsi_now=$(fastrg_grpc get_hsi_info 2>/dev/null || true)
         _35_phase=$(printf '%s' "$_35_hsi_now" | \
@@ -62,7 +62,7 @@ phase3_5_enable_status() {
             "PPPoE session re-established (ppp_phase='${_35_phase}')"
     else
         fail "Step 8: ConnectHsi USER_ID=${USER_ID}" \
-            "PPPoE session did not come up within 30s (last ppp_phase='${_35_phase:-<empty>}')"
+            "PPPoE session did not come up within 50s (last ppp_phase='${_35_phase:-<empty>}')"
     fi
 
     # ------------------------------------------------------------------

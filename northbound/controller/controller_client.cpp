@@ -9,6 +9,8 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <cstring>
+#include <fstream>
+#include <sstream>
 
 using grpc::Channel;
 using grpc::ClientContext;
@@ -56,6 +58,22 @@ public:
         heartbeat.set_node_uuid(node_uuid);
         heartbeat.set_uptime_timestamp(uptime_timestamp);
         heartbeat.set_ip(ip);
+        
+        // Read OS pretty name from /etc/os-release (e.g. "Ubuntu 26.04 LTS")
+        std::string host_os = "Unknown OS";
+        std::ifstream os_release("/etc/os-release");
+        if (os_release.is_open()) {
+            std::string line;
+            while (std::getline(os_release, line)) {
+                if (line.rfind("PRETTY_NAME=", 0) == 0) {
+                    host_os = line.substr(12);
+                    if (!host_os.empty() && host_os.front() == '"')
+                        host_os = host_os.substr(1, host_os.size() - 2);
+                    break;
+                }
+            }
+        }
+        heartbeat.set_host_os(host_os);
 
         google::protobuf::Empty reply;
         ClientContext context;

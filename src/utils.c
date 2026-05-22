@@ -28,16 +28,17 @@
 
 /**
  * fastrg_calc_rss_queue_count - number of RSS worker queues.
- * Thread budget: 5 fixed (main + ctrl + wan_ctrl + lan_ctrl + timer)
+ * Thread budget: 4 fixed (main + ctrl + wan_ctrl + lan_ctrl)
  *                + 2 * N data (wan_data + lan_data per RSS queue)
- * => N = max(1, (cpu_count - 5) / 2)
+ * Northbound and related timer management run on the main lcore, no dedicated thread.
+ * => N = max(1, (cpu_count - 4) / 2)
  */
 static U16 fastrg_calc_rss_queue_count(unsigned int cpu_count)
 {
-    if (cpu_count <= 5)
+    if (cpu_count <= 4)
         return 1;
 
-    U16 data_queue_count = (U16)((cpu_count - 5) / 2);
+    U16 data_queue_count = (U16)((cpu_count - 4) / 2);
     return data_queue_count > MAX_DATA_QUEUES ? MAX_DATA_QUEUES : data_queue_count;
 }
 
@@ -45,17 +46,17 @@ void get_all_lcore_id(struct lcore_map *lcore, unsigned int cpu_count)
 {
     memset(lcore, 0, sizeof(*lcore));
 
-    /* Fixed threads: ctrl, wan_ctrl, lan_ctrl, timer */
+    /* Fixed threads: ctrl, wan_ctrl, lan_ctrl. Northbound and related timer management run on the main lcore. */
     lcore->ctrl_thread = rte_get_next_lcore(rte_lcore_id(), 1, 0);
     lcore->wan_ctrl_thread = rte_get_next_lcore(lcore->ctrl_thread, 1, 0);
     lcore->lan_ctrl_thread = rte_get_next_lcore(lcore->wan_ctrl_thread, 1, 0);
-    lcore->timer_thread = rte_get_next_lcore(lcore->lan_ctrl_thread, 1, 0);
+    lcore->timer_thread = rte_lcore_id();
 
     /* Dynamic data threads: wan_data[i] + lan_data[i] per RSS queue */
     U16 rss_count = fastrg_calc_rss_queue_count(cpu_count);
     lcore->num_data_queues = rss_count;
 
-    unsigned int prev = lcore->timer_thread;
+    unsigned int prev = lcore->lan_ctrl_thread;
     for(U16 i=0; i<rss_count; i++) {
         lcore->wan_data_threads[i] = rte_get_next_lcore(prev, 1, 0);
         lcore->lan_data_threads[i] = rte_get_next_lcore(lcore->wan_data_threads[i], 1, 0);

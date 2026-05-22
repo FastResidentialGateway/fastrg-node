@@ -386,14 +386,10 @@ STATUS etcd_integration_start(FastRG_t *fastrg_ccb)
         }
     }
 
-    // Start etcd watching
+    // Start etcd watching. Watch/reconcile events are delivered to fastrg_loop
+    // via FastRG_t.etcd_event_q; only sync_request_callback is passed through.
     etcd_status_t status = etcd_client_start_watch(
-        fastrg_ccb->node_uuid, 
-        hsi_config_changed_callback, 
-        pppoe_command_received_callback,
-        user_count_changed_callback,
-        sync_request_callback,
-        dns_record_changed_callback);
+        fastrg_ccb->node_uuid, sync_request_callback);
 
     if (status != ETCD_SUCCESS) {
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Failed to start etcd watching for node: %s", fastrg_ccb->node_uuid);
@@ -452,6 +448,159 @@ int parse_user_id(const char *user_id_str, int max_count)
     return ccb_id;
 }
 
+BOOL hsi_config_matches_local(const char *user_id,
+    const hsi_config_t *etcd_config, void *user_data)
+{
+    FastRG_t *fastrg_ccb = (FastRG_t *)user_data;
+    if (!fastrg_ccb || !user_id || !etcd_config)
+        return FALSE;
+
+    int ccb_id = parse_user_id(user_id, fastrg_ccb->user_count);
+    if (ccb_id < 0 || !is_valid_ccb_id(fastrg_ccb, ccb_id))
+        return FALSE;
+
+    ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
+    dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
+    if (!ppp_ccb || !dhcp_ccb)
+        return FALSE;
+
+    U16 etcd_vlan;
+    if (parse_vlan_id(etcd_config->vlan_id, &etcd_vlan) == ERROR) {
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "Sync match[%s]: bad etcd vlan_id=\"%s\"", user_id, etcd_config->vlan_id);
+        return FALSE;
+    }
+    U16 local_vlan = (U16)rte_atomic16_read(&ppp_ccb->vlan_id);
+    if (local_vlan != etcd_vlan) {
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "Sync match[%s]: VLAN mismatch local=%u etcd=%u", user_id, local_vlan, etcd_vlan);
+        return FALSE;
+    }
+
+    if (ppp_ccb->ppp_user_acc == NULL ||
+        strcmp((const char *)ppp_ccb->ppp_user_acc, etcd_config->account_name) != 0) {
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "Sync match[%s]: account mismatch local=\"%s\" etcd=\"%s\"",
+            user_id, ppp_ccb->ppp_user_acc ? (const char *)ppp_ccb->ppp_user_acc : "(null)",
+            etcd_config->account_name);
+        return FALSE;
+    }
+    if (ppp_ccb->ppp_passwd == NULL ||
+        strcmp((const char *)ppp_ccb->ppp_passwd, etcd_config->password) != 0) {
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "Sync match[%s]: password mismatch", user_id);
+        return FALSE;
+    }
+
+    U32 etcd_gw, etcd_subnet, etcd_ip_start, etcd_ip_end;
+    if (parse_ip(etcd_config->dhcp_gateway, &etcd_gw) == ERROR ||
+            parse_ip(etcd_config->dhcp_subnet, &etcd_subnet) == ERROR ||
+            parse_ip_range(etcd_config->dhcp_addr_pool, &etcd_ip_start, &etcd_ip_end) == ERROR) {
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "Sync match[%s]: failed to parse etcd dhcp fields", user_id);
+        return FALSE;
+    }
+    if (dhcp_ccb->dhcp_server_ip != etcd_gw) {
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "Sync match[%s]: gateway mismatch local=0x%08x etcd=0x%08x",
+            user_id, dhcp_ccb->dhcp_server_ip, etcd_gw);
+        return FALSE;
+    }
+    if (dhcp_ccb->subnet_mask != etcd_subnet) {
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "Sync match[%s]: subnet mismatch local=0x%08x etcd=0x%08x",
+            user_id, dhcp_ccb->subnet_mask, etcd_subnet);
+        return FALSE;
+    }
+
+    U32 expected_pool_len = rte_be_to_cpu_32(etcd_ip_end) >= rte_be_to_cpu_32(etcd_ip_start) ?
+        rte_be_to_cpu_32(etcd_ip_end) - rte_be_to_cpu_32(etcd_ip_start) + 1 :
+        rte_be_to_cpu_32(etcd_ip_start) - rte_be_to_cpu_32(etcd_ip_end) + 1;
+    if (dhcp_ccb->per_lan_user_pool_len != expected_pool_len) {
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "Sync match[%s]: pool_len mismatch local=%u etcd=%u",
+            user_id, dhcp_ccb->per_lan_user_pool_len, expected_pool_len);
+        return FALSE;
+    }
+    if (expected_pool_len > 0 && dhcp_ccb->per_lan_user_pool &&
+        dhcp_ccb->per_lan_user_pool[0] &&
+        dhcp_ccb->per_lan_user_pool[0]->ip_pool.ip_addr != etcd_ip_start) {
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "Sync match[%s]: pool_start mismatch local=0x%08x etcd=0x%08x",
+            user_id, dhcp_ccb->per_lan_user_pool[0]->ip_pool.ip_addr, etcd_ip_start);
+        return FALSE;
+    }
+
+    int local_active = 0;
+    for(int i=0; i<PORT_FWD_TABLE_SIZE; i++) {
+        if (rte_atomic16_read(&ppp_ccb->port_fwd_table[i].is_active) == 1)
+            local_active++;
+    }
+    if (local_active != etcd_config->port_mapping_count) {
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "Sync match[%s]: port_mapping count mismatch local=%d etcd=%d",
+            user_id, local_active, etcd_config->port_mapping_count);
+        return FALSE;
+    }
+    for(int i=0; i<etcd_config->port_mapping_count; i++) {
+        const port_mapping_t *pm = &etcd_config->port_mappings[i];
+        if (pm->eport >= PORT_FWD_TABLE_SIZE)
+            return FALSE;
+        const port_fwd_entry_t *e = &ppp_ccb->port_fwd_table[pm->eport];
+        if (rte_atomic16_read((rte_atomic16_t *)&e->is_active) != 1) {
+            FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                "Sync match[%s]: port_fwd[%u] inactive in local", user_id, pm->eport);
+            return FALSE;
+        }
+        if (e->iport != pm->dport) {
+            FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                "Sync match[%s]: port_fwd[%u] iport mismatch local=%u etcd=%u",
+                user_id, pm->eport, e->iport, pm->dport);
+            return FALSE;
+        }
+        U32 etcd_dip;
+        if (parse_ip(pm->dip, &etcd_dip) == ERROR || e->dip != etcd_dip) {
+            FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                "Sync match[%s]: port_fwd[%u] dip mismatch local=0x%08x etcd=\"%s\"",
+                user_id, pm->eport, e->dip, pm->dip);
+            return FALSE;
+        }
+    }
+
+    return TRUE;
+}
+
+BOOL dns_record_matches_local(const char *user_id,
+    const dns_record_config_t *etcd_record, void *user_data)
+{
+    FastRG_t *fastrg_ccb = (FastRG_t *)user_data;
+    if (!fastrg_ccb || !user_id || !etcd_record)
+        return FALSE;
+
+    int ccb_id = atoi(user_id) - 1;
+    if (!is_valid_ccb_id(fastrg_ccb, ccb_id))
+        return FALSE;
+
+    dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
+    if (!dhcp_ccb)
+        return FALSE;
+
+    dns_static_record_t *local_rec =
+        dns_static_lookup(&dhcp_ccb->dns_state.static_table, etcd_record->domain);
+    if (!local_rec || !local_rec->active)
+        return FALSE;
+
+    U32 etcd_ip = 0;
+    if (etcd_record->ip[0] != '\0' && parse_ip(etcd_record->ip, &etcd_ip) == ERROR)
+        return FALSE;
+    if (local_rec->ip_addr != etcd_ip)
+        return FALSE;
+    if (local_rec->ttl != etcd_record->ttl)
+        return FALSE;
+
+    return TRUE;
+}
+
 STATUS hsi_config_changed_callback(const char *node_id, const char *user_id, 
     const hsi_config_t *config, etcd_action_type_t action, 
     int64_t revision, void *user_data)
@@ -468,26 +617,17 @@ STATUS hsi_config_changed_callback(const char *node_id, const char *user_id,
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Invalid user_id: %s (valid range: 1~%d)", 
             user_id, fastrg_ccb->user_count);
         return ERROR;
-    } else if (ccb_id >= fastrg_ccb->user_count && etcd_is_self_event(action, ccb_id, revision)) {
-        // If ccb_id exceeds current user_count but is a self-event, ignore it
-        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, 
-            "Ignoring self-initiated modification for out-of-range user %s (revision %" PRId64 ")", user_id, revision);
-        return SUCCESS;
     }
 
+    /* Self-event filtering already happened on the watcher thread before this
+     * event was enqueued (see process_hsi_event), so no etcd_is_self_event()
+     * check is needed here. */
     switch (action) {
         /* CREATE action is treated as an update with is_update = FALSE */
         case HSI_ACTION_CREATE:
             is_update = FALSE;
             /* fallthrough */
         case HSI_ACTION_UPDATE:
-            // Check if this is a self-initiated modification (e.g., from modify_hsi_config_status)
-            if (etcd_is_self_event(HSI_ACTION_UPDATE, ccb_id, revision)) {
-                FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, 
-                    "Ignoring self-initiated modification for user %s (revision %" PRId64 ")", user_id, revision);
-                return SUCCESS;
-            }
-
             if (!config) {
                 FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Null config for HSI user %s", user_id);
                 return ERROR;
@@ -536,14 +676,6 @@ STATUS hsi_config_changed_callback(const char *node_id, const char *user_id,
             break;
 
         case HSI_ACTION_DELETE:
-            // Check if this is a self-initiated deletion (from failed apply above)
-            if (etcd_is_self_event(HSI_ACTION_DELETE, ccb_id, revision)) {
-                FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, 
-                    "Ignoring self-initiated delete event for user %s (revision %ld)", user_id, revision);
-                ret = SUCCESS;
-                break;
-            }
-
             FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, 
                 "HSI config deleted for user %s (revision %ld)", user_id, revision);
 
@@ -602,20 +734,32 @@ STATUS user_count_changed_callback(const char *node_id,
                 if (pppd_add_ccb(fastrg_ccb, to_add) != SUCCESS) {
                     FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
                         "Failed to add %u PPPoE CCBs", to_add);
-                    ret = ERROR;
+                    char subscriber_count_str[8] = { 0 };
+                    snprintf(subscriber_count_str, sizeof(subscriber_count_str), "%u", current_count);
+                    etcd_client_put_subscriber_count(fastrg_ccb->node_uuid, subscriber_count_str, "fastrg_node");
+                    return ERROR;
                 }
 
                 // Add DHCP CCBs
                 if (dhcpd_add_ccb(fastrg_ccb, to_add) != SUCCESS) {
                     FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
                         "Failed to add %u DHCP CCBs", to_add);
-                    ret = ERROR;
+                    pppd_disable_ccb(fastrg_ccb, to_add, current_count + to_add); // Disable the PPPoE CCBs that were just added
+                    char subscriber_count_str[8] = { 0 };
+                    snprintf(subscriber_count_str, sizeof(subscriber_count_str), "%u", current_count);
+                    etcd_client_put_subscriber_count(fastrg_ccb->node_uuid, subscriber_count_str, "fastrg_node");
+                    return ERROR;
                 }
 
                 if (fastrg_modify_subscriber_count(fastrg_ccb, new_count, current_count) != SUCCESS) {
                     FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
                         "Failed to modify internal subscriber count to %d", new_count);
-                    ret = ERROR;
+                    pppd_disable_ccb(fastrg_ccb, to_add, current_count + to_add); // Disable the PPPoE CCBs that were just added
+                    dhcpd_disable_ccb(fastrg_ccb, to_add, current_count + to_add); // Disable the DHCP CCBs that were just added
+                    char subscriber_count_str[8] = { 0 };
+                    snprintf(subscriber_count_str, sizeof(subscriber_count_str), "%u", current_count);
+                    etcd_client_put_subscriber_count(fastrg_ccb->node_uuid, subscriber_count_str, "fastrg_node");
+                    return ERROR;
                 }
 
                 if (ret == SUCCESS) {
@@ -917,5 +1061,112 @@ STATUS dns_record_changed_callback(const char *node_id, const char *user_id,
             FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
                 "DNS record callback: unknown action %d", action);
             return ERROR;
+    }
+}
+
+/* Reconcile sweep: remove subscribers active locally but no longer present in
+ * etcd. Runs on the control-plane loop, so reading CCB state here is race-free. */
+static void etcd_reconcile_sweep(FastRG_t *fastrg_ccb, const int *present, int count)
+{
+    for(int ccb_id=0; ccb_id<fastrg_ccb->user_count; ccb_id++) {
+        ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
+        if (ppp_ccb == NULL || rte_atomic16_read(&ppp_ccb->vlan_id) == 0)
+            continue;   /* not active locally */
+
+        BOOL in_etcd = FALSE;
+        for(int i=0; i<count; i++) {
+            if (present[i] == ccb_id) {
+                in_etcd = TRUE;
+                break;
+            }
+        }
+        if (in_etcd == FALSE) {
+            FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                "Reconcile sweep: user %d active locally but absent from etcd, removing",
+                ccb_id + 1);
+            remove_hsi_config(fastrg_ccb, ccb_id);
+        }
+    }
+}
+
+void etcd_event_dispatch(FastRG_t *fastrg_ccb, etcd_event_t *ev)
+{
+    if (fastrg_ccb == NULL || ev == NULL)
+        return;
+
+    switch (ev->kind) {
+        case ETCD_EVENT_HSI: {
+            const hsi_config_t *cfg =
+                (ev->action == HSI_ACTION_DELETE) ? NULL : &ev->event_data.hsi.config;
+
+            /* Reconcile events skip configs whose local state already matches. */
+            if (ev->from_reconcile && cfg != NULL &&
+                    hsi_config_matches_local(ev->user_id, cfg, fastrg_ccb)) {
+                FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                    "Reconcile: HSI user %s already matches local state, skipping",
+                    ev->user_id);
+                break;
+            }
+
+            STATUS ret = hsi_config_changed_callback(ev->node_id, ev->user_id, cfg,
+                ev->action, ev->revision, fastrg_ccb);
+
+            /* Reconcile: re-dial subscribers that etcd says should be enabled. */
+            if (ret == SUCCESS && ev->from_reconcile && ev->event_data.hsi.is_enabled &&
+                    ev->action != HSI_ACTION_DELETE) {
+                pppoe_command_t cmd;
+                memset(&cmd, 0, sizeof(cmd));
+                snprintf(cmd.action, sizeof(cmd.action), "dial");
+                snprintf(cmd.user_id, sizeof(cmd.user_id), "%s", ev->event_data.hsi.config.user_id);
+                snprintf(cmd.vlan, sizeof(cmd.vlan), "%s", ev->event_data.hsi.config.vlan_id);
+                snprintf(cmd.account, sizeof(cmd.account), "%s", ev->event_data.hsi.config.account_name);
+                snprintf(cmd.password, sizeof(cmd.password), "%s", ev->event_data.hsi.config.password);
+                cmd.timestamp = time(NULL);
+                pppoe_command_received_callback(ev->node_id, &cmd, fastrg_ccb);
+            }
+
+            /* A failed apply: record it in failed_events/ with the config's
+             * raw value (new value for PUT, deleted value for DELETE) so the
+             * controller can see what could not be applied. */
+            if (ret != SUCCESS) {
+                char fkey[200];
+                snprintf(fkey, sizeof(fkey), "configs/%s/hsi/%s", ev->node_id, ev->user_id);
+                etcd_client_write_fallback_error("hsi_config", fkey,
+                    ev->node_id, ev->user_id, ERROR_REASON_CALLBACK_FAILED,
+                    ev->action == HSI_ACTION_DELETE ? "HSI DELETE apply returned error"
+                                                    : "HSI apply returned error",
+                    ev->event_data.hsi.raw_value ? ev->event_data.hsi.raw_value : "");
+            }
+            break;
+        }
+
+        case ETCD_EVENT_USER_COUNT:
+            user_count_changed_callback(ev->node_id, &ev->event_data.user_count,
+                ev->action, ev->revision, fastrg_ccb);
+            break;
+
+        case ETCD_EVENT_DNS_RECORD:
+            if (ev->from_reconcile && ev->action != HSI_ACTION_DELETE &&
+                    dns_record_matches_local(ev->user_id, &ev->event_data.dns_record, fastrg_ccb)) {
+                FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                    "Reconcile: DNS record for user %s already matches, skipping", ev->user_id);
+                break;
+            }
+            dns_record_changed_callback(ev->node_id, ev->user_id, &ev->event_data.dns_record,
+                ev->action, ev->revision, fastrg_ccb);
+            break;
+
+        case ETCD_EVENT_PPPOE_COMMAND:
+            pppoe_command_received_callback(ev->node_id, &ev->event_data.command, fastrg_ccb);
+            break;
+
+        case ETCD_EVENT_HSI_SWEEP:
+            etcd_reconcile_sweep(fastrg_ccb, ev->event_data.sweep.present_ccb_ids, ev->event_data.sweep.count);
+            break;
+
+        default:
+            FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
+                "etcd_event_dispatch: unknown event kind %d", ev->kind);
+            break;
     }
 }

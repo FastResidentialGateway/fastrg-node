@@ -14,6 +14,7 @@ extern "C" {
 #include <rte_ether.h>
 #include <rte_timer.h>
 #include <rte_rcu_qsbr.h>
+#include <rte_ring.h>
 
 #include "protocol.h"
 #include "utils.h"
@@ -69,6 +70,7 @@ typedef struct FastRG {
     char                    *build_date;    /* build date */
     char                    *eal_args;      /* DPDK EAL args */
     U16                     user_count;     /* total FastRG subscriptor */
+    U16                     max_user_count; /* max FastRG subscriptor supported */
     struct lcore_map        lcore;          /* lcore map */
     char                    *unix_sock_path;/* FastRG unix socket file path */
     char                    *node_grpc_ip_port; /* FastRG node grpc ip:port */
@@ -96,12 +98,15 @@ typedef struct FastRG {
     struct rte_timer        link;           /* for physical link checking timer */
     struct rte_timer        heartbeat_timer;/* for controller heartbeat timer */
     BOOL                    i40e_ddp_enabled; /* TRUE if i40e DDP package loaded */
+    struct rte_ring         *cp_q;            /* data/ctrl plane -> control loop event ring */
+    struct rte_ring         *free_mail_ring;  /* pre-allocated tFastRG_MBX slot pool */
+    struct rte_ring         *etcd_event_q;    /* etcd watcher threads -> control loop event ring */
 } __rte_cache_aligned FastRG_t;
 
 STATUS fastrg_disable_subscriber_stats(FastRG_t *fastrg_ccb, U16 disable_count, 
     U16 old_count);
-STATUS fastrg_gen_northbound_event(fastrg_event_type_t event_type, U8 cmd_type,
-    U16 ccb_id);
+STATUS fastrg_gen_northbound_event(FastRG_t *fastrg_ccb, fastrg_event_type_t event_type,
+    U8 cmd_type, U16 ccb_id);
 STATUS fastrg_modify_subscriber_count(FastRG_t *fastrg_ccb, U16 new_count, 
     U16 old_count);
 

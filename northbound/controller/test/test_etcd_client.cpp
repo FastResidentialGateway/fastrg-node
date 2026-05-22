@@ -1,123 +1,38 @@
 #include <iostream>
 #include <unistd.h>
 #include <cstring>
+#include <cstdlib>
 #include "../etcd_client.h"
+
+// etcd_client.o calls these from its watcher-thread self-event filter; the real
+// definitions live in src/etcd_integration.c. This standalone test links only
+// etcd_client.o, so provide minimal stand-ins.
+extern "C" {
+int parse_user_id(const char *user_id_str, int max_count) {
+    (void)max_count;
+    if (!user_id_str || user_id_str[0] == '\0')
+        return -1;
+    char *endptr;
+    long val = strtol(user_id_str, &endptr, 10);
+    if (endptr == user_id_str || *endptr != '\0')
+        return -1;
+    int ccb_id = (int)val - 1;
+    return ccb_id < 0 ? -1 : ccb_id;
+}
+BOOL etcd_is_self_event(etcd_action_type_t action, U16 ccb_id, int64_t revision) {
+    (void)action; (void)ccb_id; (void)revision;
+    return FALSE;  // no pending-events tracking in the standalone test
+}
+}
 
 // Global flag to control callback failure for testing
 static bool simulate_callback_failure = false;
 static int callback_count = 0;
 
-STATUS hsi_config_callback(const char *node_id, const char *user_id, 
-    const hsi_config_t *config, etcd_action_type_t action, 
-    int64_t revision, void *user_data) {
-    callback_count++;
-
-    const char* action_str;
-    switch (action) {
-        case HSI_ACTION_CREATE: action_str = "CREATE"; break;
-        case HSI_ACTION_UPDATE: action_str = "UPDATE"; break; 
-        case HSI_ACTION_DELETE: action_str = "DELETE"; break;
-        default: action_str = "UNKNOWN"; break;
-    }
-
-    std::cout << "=== HSI Config Event ===" << std::endl;
-    std::cout << "Action: " << action_str << std::endl;
-    std::cout << "Node ID: " << node_id << std::endl;
-    std::cout << "User ID: " << user_id << std::endl;
-
-    if (config) {
-        std::cout << "Config Details:" << std::endl;
-        std::cout << "  VLAN ID: " << config->vlan_id << std::endl;
-        std::cout << "  Account: " << config->account_name << std::endl;
-        std::cout << "  DHCP Pool: " << config->dhcp_addr_pool << std::endl;
-        std::cout << "  DHCP Subnet: " << config->dhcp_subnet << std::endl;
-        std::cout << "  DHCP Gateway: " << config->dhcp_gateway << std::endl;
-    } else {
-        std::cout << "Config: (null - deleted)" << std::endl;
-    }
-
-    // Simulate failure for testing fallback error mechanism
-    if (simulate_callback_failure) {
-        std::cout << "!!! SIMULATING CALLBACK FAILURE !!!" << std::endl;
-        std::cout << "========================" << std::endl;
-        return ERROR;
-    }
-
-    std::cout << "========================" << std::endl;
-    return SUCCESS;
-}
-
-STATUS pppoe_command_callback(const char* node_id, const pppoe_command_t* command, void* user_data) {
-    callback_count++;
-
-    std::cout << "=== PPPoE Command Event ===" << std::endl;
-    std::cout << "Node ID: " << node_id << std::endl;
-    std::cout << "Action: " << command->action << std::endl;
-    std::cout << "User ID: " << command->user_id << std::endl;
-    std::cout << "VLAN: " << command->vlan << std::endl;
-    std::cout << "Account: " << command->account << std::endl;
-    std::cout << "Timestamp: " << command->timestamp << std::endl;
-
-    // Simulate failure for testing fallback error mechanism
-    if (simulate_callback_failure) {
-        std::cout << "!!! SIMULATING CALLBACK FAILURE !!!" << std::endl;
-        std::cout << "===========================" << std::endl;
-        return ERROR;
-    }
-
-    std::cout << "===========================" << std::endl;
-    return SUCCESS;
-}
-
-STATUS user_count_changed_callback(const char* node_id,
-    const user_count_config_t* config, etcd_action_type_t action,
-    int64_t revision, void* user_data) {
-    callback_count++;
-
-    const char* action_str;
-    switch (action) {
-        case HSI_ACTION_CREATE: action_str = "CREATE"; break;
-        case HSI_ACTION_UPDATE: action_str = "UPDATE"; break; 
-        case HSI_ACTION_DELETE: action_str = "DELETE"; break;
-        default: action_str = "UNKNOWN"; break;
-    }
-
-    std::cout << "=== User Count Change Event ===" << std::endl;
-    std::cout << "Action: " << action_str << std::endl;
-    std::cout << "Node ID: " << node_id << std::endl;
-    std::cout << "New User Count: " << config->user_count << std::endl;
-
-    // Simulate failure for testing fallback error mechanism
-    if (simulate_callback_failure) {
-        std::cout << "!!! SIMULATING CALLBACK FAILURE !!!" << std::endl;
-        std::cout << "==============================" << std::endl;
-        return ERROR;
-    }
-
-    std::cout << "==============================" << std::endl;
-    return SUCCESS;
-}
-
 void sync_request_callback(const char* node_id, void* user_data) {
     std::cout << "=== Sync Request Event ===" << std::endl;
     std::cout << "Node ID: " << node_id << std::endl;
     std::cout << "==========================" << std::endl;
-}
-
-STATUS dns_record_callback(const char *node_id, const char *user_id,
-    const dns_record_config_t *record, etcd_action_type_t action,
-    int64_t revision, void *user_data) {
-    callback_count++;
-    std::cout << "=== DNS Record Event ===" << std::endl;
-    std::cout << "Node ID: " << node_id << std::endl;
-    std::cout << "User ID: " << user_id << std::endl;
-    if (record) {
-        std::cout << "Domain: " << record->domain << std::endl;
-        std::cout << "Action: " << (action == HSI_ACTION_DELETE ? "DELETE" : "UNKNOWN") << std::endl;
-    }
-    std::cout << "========================" << std::endl;
-
-    return SUCCESS;
 }
 
 int main() {
@@ -144,9 +59,7 @@ int main() {
 
     // Start watching for test node
     const char* test_node_uuid = "test-node-12345";
-    status = etcd_client_start_watch(test_node_uuid, hsi_config_callback, 
-        pppoe_command_callback, user_count_changed_callback, 
-        sync_request_callback, dns_record_callback);
+    status = etcd_client_start_watch(test_node_uuid, sync_request_callback);
 
     if (status != ETCD_SUCCESS) {
         std::cerr << "Failed to start etcd watching" << std::endl;

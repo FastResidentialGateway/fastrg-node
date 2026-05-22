@@ -718,6 +718,7 @@ void test_nat_table_almost_full(void)
         test_addr_table[i].dst_ip = htonl(0xC0A80001);      // Different from our targets
         test_addr_table[i].dst_port = htons(443);
         test_addr_table[i].nat_port = htons(SYS_MAX_PORT + (i % NAT_PORT_RANGE));
+        rte_atomic64_set(&test_addr_table[i].expire_at, nat_expiry_cycles());
         filled_count++;
     }
 
@@ -786,8 +787,15 @@ void test_nat_table_almost_full(void)
     }
 
     printf("\nTest 5: \"%s\"\n", "Need to check unable to add new entry when table is truly full");
-    /* Now fill the last remaining slot to make table truly full */
-    U32 extra_src_ip = htonl(0xC0A80064);    // 172.16.0.100
+    /*
+     * Block ALL nat ports via port_fwd_table to simulate resource exhaustion.
+     * This avoids an O(NAT_PORT_RANGE * MAX_NAT_ENTRIES) scan that would exceed
+     * NAT_ENTRY_TIMEOUT_SEC and cause dummy entries to appear expired (allowing eviction).
+     */
+    for(U32 p=SYS_MAX_PORT; p<TOTAL_SOCK_PORT; p++)
+        rte_atomic16_set(&test_port_fwd_table[p].is_active, 1);
+
+    U32 extra_src_ip = htonl(0xAC100064);    // 172.16.0.100
     U16 extra_src_port = htons(12345);
     U32 extra_dst_ip = htonl(0x08080808);    // 8.8.8.8
     U16 extra_dst_port = htons(53);
@@ -795,9 +803,13 @@ void test_nat_table_almost_full(void)
     U16 extra_nat_port = nat_learning_port_reuse(&eth_hdr, extra_src_ip, extra_dst_ip,
         extra_src_port, extra_dst_port, test_addr_table, test_port_fwd_table);
 
-    TEST_ASSERT(extra_nat_port != 0,
+    TEST_ASSERT(extra_nat_port == 0,
         "Extra entry failed to be created as table is full",
         "got non 0 (nat table should be full)");
+
+    /* Restore port_fwd_table so it does not affect subsequent tests */
+    for(U32 p=SYS_MAX_PORT; p<TOTAL_SOCK_PORT; p++)
+        rte_atomic16_set(&test_port_fwd_table[p].is_active, 0);
 
     printf("\n  Test completed: Almost-full table scenario handled correctly\n");
 }

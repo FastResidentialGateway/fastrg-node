@@ -9,6 +9,7 @@ Commands:
     get_hsi_info                                            - GetFastrgHsiInfo  → JSON
     get_dhcp_info                                           - GetFastrgDhcpInfo → JSON
     get_system_info                                         - GetFastrgSystemInfo → JSON
+    get_user_drop_count <user_id> [port_idx]               - GetFastrgSystemStats, WAN dropped_packets for user
     get_port_fwd_info <user_id>                             - GetPortFwdInfo    → JSON
     get_dns_static <user_id>                                - GetDnsStaticRecords → JSON
     apply_config <uid> <vlan> <acct> <pw> <start> <end> <subnet> <gw>
@@ -21,6 +22,8 @@ Commands:
     add_dns_record <user_id> <domain> <ip> <ttl>            - AddDnsRecord → JSON
     remove_dns_record <user_id> <domain>                    - RemoveDnsRecord → JSON
     set_subscriber_count <count>                            - SetSubscriberCount → JSON
+    set_snat_config <user_id> <eport> <dip> <iport>         - SetSnatConfig → JSON
+    remove_snat_config <user_id> <eport>                    - RemoveSnatConfig → JSON
 
 Requirements:
     - python3 (stdlib only)
@@ -212,6 +215,36 @@ def set_subscriber_count(node_addr, subscriber_count):
     return {"status": resp.get("status", "")}
 
 
+def set_snat_config(node_addr, user_id, eport, dip, iport):
+    resp = _grpcurl(node_addr, 'SetSnatConfig', {
+        'user_id': int(user_id),
+        'eport':   int(eport),
+        'dip':     dip,
+        'iport':   int(iport),
+    })
+    return {"status": resp.get("status", "")}
+
+
+def remove_snat_config(node_addr, user_id, eport):
+    resp = _grpcurl(node_addr, 'RemoveSnatConfig', {
+        'user_id': int(user_id),
+        'eport':   int(eport),
+    })
+    return {"status": resp.get("status", "")}
+
+
+def get_user_drop_count(node_addr, user_id, port_idx=1):
+    """Return dropped_packets for user_id on port_idx (1=WAN_PORT, 0=LAN_PORT)."""
+    resp = _grpcurl(node_addr, 'GetFastrgSystemStats')
+    stats_list = resp.get('stats', [])
+    if port_idx >= len(stats_list):
+        return {"dropped_packets": 0}
+    for u in stats_list[port_idx].get('per_user_stats', []):
+        if int(u.get('user_id', -1)) == int(user_id):
+            return {"dropped_packets": int(u.get('dropped_packets', 0))}
+    return {"dropped_packets": 0}
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -292,6 +325,25 @@ def main():
                 print(json.dumps({"error": "set_subscriber_count requires <count>"}), file=sys.stderr)
                 sys.exit(1)
             result = set_subscriber_count(opts.node, opts.args[0])
+        elif opts.command == "set_snat_config":
+            if len(opts.args) < 4:
+                print(json.dumps({"error": "set_snat_config requires <user_id> <eport> <dip> <iport>"}),
+                      file=sys.stderr)
+                sys.exit(1)
+            result = set_snat_config(opts.node, opts.args[0], opts.args[1], opts.args[2], opts.args[3])
+        elif opts.command == "remove_snat_config":
+            if len(opts.args) < 2:
+                print(json.dumps({"error": "remove_snat_config requires <user_id> <eport>"}),
+                      file=sys.stderr)
+                sys.exit(1)
+            result = remove_snat_config(opts.node, opts.args[0], opts.args[1])
+        elif opts.command == "get_user_drop_count":
+            if not opts.args:
+                print(json.dumps({"error": "get_user_drop_count requires <user_id> [port_idx]"}),
+                      file=sys.stderr)
+                sys.exit(1)
+            port_idx = int(opts.args[1]) if len(opts.args) > 1 else 1
+            result = get_user_drop_count(opts.node, int(opts.args[0]), port_idx)
         else:
             print(json.dumps({"error": f"Unknown command: {opts.command}"}), file=sys.stderr)
             sys.exit(1)

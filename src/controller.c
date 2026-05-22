@@ -1,4 +1,5 @@
 #include <time.h>
+#include <sys/sysinfo.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -19,8 +20,9 @@ void controller_heartbeat_timer_cb(__rte_unused struct rte_timer *tim, void *arg
         return;
     }
 
-    // Get current timestamp
-    time_t current_time = time(NULL);
+    // Get host uptime in seconds since boot
+    struct sysinfo si;
+    time_t current_time = (sysinfo(&si) == 0) ? (time_t)si.uptime : time(NULL);
 
     U8 ip_addr[INET6_ADDRSTRLEN];
     if (get_local_ip_for_server(fastrg_ccb->controller_address, ip_addr, sizeof(ip_addr)) != 0) {
