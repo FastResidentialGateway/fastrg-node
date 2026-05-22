@@ -862,6 +862,28 @@ public:
             root["error_detail"] = error_detail;
             root["timestamp"] = static_cast<Json::Int64>(now);
 
+            // Record the instance's local UTC offset, e.g. "UTC+8". localtime()'s
+            // shared static buffer is fine here — we only read the (effectively
+            // constant) timezone offset, not the time itself.
+            char tz_raw[8] = {0};
+            struct tm *local_tm = std::localtime(&now);
+            if (local_tm)
+                std::strftime(tz_raw, sizeof(tz_raw), "%z", local_tm);  // e.g. "+0800"
+            std::string tz_str = "UTC";
+            if (std::strlen(tz_raw) >= 5) {
+                int hh = (tz_raw[1] - '0') * 10 + (tz_raw[2] - '0');
+                int mm = (tz_raw[3] - '0') * 10 + (tz_raw[4] - '0');
+                tz_str += tz_raw[0];                       // '+' or '-'
+                tz_str += std::to_string(hh);
+                if (mm != 0) {
+                    tz_str += ':';
+                    if (mm < 10)
+                        tz_str += '0';
+                    tz_str += std::to_string(mm);
+                }
+            }
+            root["timezone"] = tz_str;
+
             // Include original value if available (for DELETE events with prev_kv)
             if (!original_value.empty()) {
                 root["original_value"] = original_value;
