@@ -334,7 +334,7 @@ int wan_ctrl_rx(void *arg)
             }
 
             /* PPPoE session data on queue 0 (fallback rule): strip PPPoE, handle ICMP */
-            if (unlikely(rte_atomic16_read(&ppp_ccb->dp_start_bool) == (BIT16)0)) {
+            if (unlikely(rte_atomic16_read(&ppp_ccb->dp_start_bool) == (S16)0)) {
                 drop_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
                 continue;
             }
@@ -425,7 +425,7 @@ int wan_data_rx(void *arg)
             ccb_id = mbuf_priv->ccb_id;
 
             ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
-            if (unlikely(rte_atomic16_read(&ppp_ccb->dp_start_bool) == (BIT16)0)) {
+            if (unlikely(rte_atomic16_read(&ppp_ccb->dp_start_bool) == (S16)0)) {
                 drop_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
                 continue;
             }
@@ -660,7 +660,7 @@ int lan_ctrl_rx(void *arg)
                         wan_pkt[total_wan_tx++] = single_pkt;
                         continue;
                     }
-                    if (unlikely(rte_atomic16_read(&ppp_ccb->dp_start_bool) == (BIT16)0)) {
+                    if (unlikely(rte_atomic16_read(&ppp_ccb->dp_start_bool) == (S16)0)) {
                         drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                         continue;
                     }
@@ -820,7 +820,7 @@ int lan_data_rx(void *arg)
                     wan_pkt[total_wan_tx++] = single_pkt;
                     continue;
                 }
-                if (unlikely(rte_atomic16_read(&ppp_ccb->dp_start_bool) == (BIT16)0)) {
+                if (unlikely(rte_atomic16_read(&ppp_ccb->dp_start_bool) == (S16)0)) {
                     drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                     continue;
                 }
@@ -855,7 +855,7 @@ int lan_data_rx(void *arg)
                     wan_pkt[total_wan_tx++] = single_pkt;
                     continue;
                 }
-                if (unlikely(rte_atomic16_read(&ppp_ccb->dp_start_bool) == (BIT16)0)) {
+                if (unlikely(rte_atomic16_read(&ppp_ccb->dp_start_bool) == (S16)0)) {
                     drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                     continue;
                 }
@@ -962,7 +962,7 @@ int wan_combined_rx(void *arg)
             }
 
             /* PPPoE session data → strip PPPoE header */
-            if (unlikely(rte_atomic16_read(&ppp_ccb->dp_start_bool) == (BIT16)0)) {
+            if (unlikely(rte_atomic16_read(&ppp_ccb->dp_start_bool) == (S16)0)) {
                 drop_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
                 continue;
             }
@@ -1236,7 +1236,7 @@ int lan_combined_rx(void *arg)
                     icmphdr = (struct rte_icmp_hdr *)(rte_pktmbuf_mtod(single_pkt,
                         unsigned char *) + sizeof(struct rte_ether_hdr) +
                         sizeof(vlan_header_t) + sizeof(struct rte_ipv4_hdr));
-                    if (unlikely(rte_atomic16_read(&ppp_ccb->dp_start_bool) == (BIT16)0)) {
+                    if (unlikely(rte_atomic16_read(&ppp_ccb->dp_start_bool) == (S16)0)) {
                         drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                         continue;
                     }
@@ -1289,7 +1289,7 @@ int lan_combined_rx(void *arg)
                         wan_pkt[total_wan_tx++] = single_pkt;
                         continue;
                     }
-                    if (unlikely(rte_atomic16_read(&ppp_ccb->dp_start_bool) == (BIT16)0)) {
+                    if (unlikely(rte_atomic16_read(&ppp_ccb->dp_start_bool) == (S16)0)) {
                         drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                         continue;
                     }
@@ -1324,7 +1324,7 @@ int lan_combined_rx(void *arg)
                         wan_pkt[total_wan_tx++] = single_pkt;
                         continue;
                     }
-                    if (unlikely(rte_atomic16_read(&ppp_ccb->dp_start_bool) == (BIT16)0)) {
+                    if (unlikely(rte_atomic16_read(&ppp_ccb->dp_start_bool) == (S16)0)) {
                         drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                         continue;
                     }

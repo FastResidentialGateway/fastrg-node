@@ -293,7 +293,7 @@ int dnsd_cp_process_lan_udp_query(FastRG_t *fastrg_ccb, U8 *pkt_data, U16 pkt_le
 
     /* Priority 3: forward to upstream DNS server */
     ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
-    if (rte_atomic16_read(&ppp_ccb->dp_start_bool) != (BIT16)0 && state->active_dns != 0) {
+    if (rte_atomic16_read(&ppp_ccb->dp_start_bool) != (S16)0 && state->active_dns != 0) {
         dns_pending_query_t *pending = find_free_pending(state);
         if (pending != NULL) {
             memset(pending, 0, sizeof(*pending));

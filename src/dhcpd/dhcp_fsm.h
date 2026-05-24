@@ -49,7 +49,7 @@ typedef enum {
     E_INFORM,
 } DHCP_EVENT_TYPE;
 
-STATUS dhcp_fsm(dhcp_ccb_t *dhcp_ccb, U32 lan_user_id, BIT16 event);
+STATUS dhcp_fsm(dhcp_ccb_t *dhcp_ccb, U32 lan_user_id, S16 event);
 
 /*======================= external ==========================*/
 #ifdef __cplusplus

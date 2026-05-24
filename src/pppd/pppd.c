@@ -45,7 +45,7 @@ void PPP_bye(ppp_ccb_t *s_ppp_ccb)
     rte_timer_stop(&(s_ppp_ccb->ppp));
     rte_timer_stop(&(s_ppp_ccb->pppoe));
     rte_timer_stop(&(s_ppp_ccb->ppp_alive));
-    rte_atomic16_cmpset((volatile uint16_t *)&s_ppp_ccb->dp_start_bool.cnt, (BIT16)1, (BIT16)0);
+    rte_atomic16_cmpset((volatile uint16_t *)&s_ppp_ccb->dp_start_bool.cnt, (S16)1, (S16)0);
     switch(s_ppp_ccb->phase) {
         case END_PHASE:
             rte_atomic16_set(&s_ppp_ccb->ppp_bool, 0);

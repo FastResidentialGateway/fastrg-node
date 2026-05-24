@@ -63,7 +63,7 @@ tDHCP_STATE_TBL  dhcp_fsm_tbl[] = {
  *           event -
  * return  : error status
  ***********************************************************************/
-STATUS dhcp_fsm(dhcp_ccb_t *dhcp_ccb, U32 lan_user_id, BIT16 event)
+STATUS dhcp_fsm(dhcp_ccb_t *dhcp_ccb, U32 lan_user_id, S16 event)
 {	
     int      i;
     BOOL     retval;
