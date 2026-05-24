@@ -477,7 +477,7 @@ int dhcpd(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt,
     struct rte_ether_hdr *eth_hdr, vlan_header_t *vlan_header, 
     struct rte_ipv4_hdr *ip_hdr, struct rte_udp_hdr *udp_hdr, U16 ccb_id)
 {
-    BIT16 event;
+    S16 event;
     int cur_tmp_pool_index = -1;
 
     if (ccb_id >= fastrg_ccb->user_count) {

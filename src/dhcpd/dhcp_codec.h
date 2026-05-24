@@ -23,7 +23,7 @@
 #define DHCP_MAGIC_COOKIE 0x63825363
 #define DHCP_HW_TYPE_ETHERNET 0x01
 
-BIT16 dhcp_decode(dhcp_ccb_t *dhcp_ccb, 
+S16 dhcp_decode(dhcp_ccb_t *dhcp_ccb, 
     dhcp_ccb_per_lan_user_t *per_lan_user, int *cur_tmp_pool_index,
     struct rte_ether_hdr *eth_hdr, vlan_header_t *vlan_header, 
     struct rte_ipv4_hdr *ip_hdr, struct rte_udp_hdr *udp_hdr);

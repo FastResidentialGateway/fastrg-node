@@ -707,7 +707,7 @@ STATUS A_this_layer_up(__attribute__((unused)) struct rte_timer *ppp_timer, ppp_
         FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " LCP connection establish successfully.", s_ppp_ccb->user_num);
         FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " starting Authentication.", s_ppp_ccb->user_num);
     } else if (s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].ppp_payload.ppp_protocol == rte_cpu_to_be_16(IPCP_PROTOCOL)) {
-        rte_atomic16_set(&s_ppp_ccb->dp_start_bool, (BIT16)1);
+        rte_atomic16_set(&s_ppp_ccb->dp_start_bool, (S16)1);
         s_ppp_ccb->phase = DATA_PHASE;
         FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " IPCP connection establish successfully.", s_ppp_ccb->user_num);
         FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "Now user %" PRIu16 " can start to send data via pppoe session id 0x%x and vlan is %" 
@@ -765,7 +765,7 @@ STATUS A_this_layer_down(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb)
     if (s_ppp_ccb->cp == 1) {
         FastRG_LOG(DBG, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "IPCP layer is down");
         PPP_FSM(ppp_timer, s_ppp_ccb, E_CLOSE);
-        rte_atomic16_set(&s_ppp_ccb->dp_start_bool, (BIT16)0);
+        rte_atomic16_set(&s_ppp_ccb->dp_start_bool, (S16)0);
     } else if (s_ppp_ccb->cp == 0) {
         PPP_FSM(ppp_timer, s_ppp_ccb, E_CLOSE);
         FastRG_LOG(DBG, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "LCP layer is down");

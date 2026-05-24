@@ -641,13 +641,13 @@ STATUS build_dhcp_ack_inform(dhcp_ccb_per_lan_user_t *per_lan_user,
     return SUCCESS;
 }
 
-BIT16 dhcp_decode(dhcp_ccb_t *dhcp_ccb, 
+S16 dhcp_decode(dhcp_ccb_t *dhcp_ccb, 
     dhcp_ccb_per_lan_user_t *per_lan_user, int *cur_tmp_pool_index, 
     struct rte_ether_hdr *eth_hdr, vlan_header_t *vlan_header, 
     struct rte_ipv4_hdr *ip_hdr, struct rte_udp_hdr *udp_hdr)
 {
     dhcp_opt_t *cur; 
-    BIT16 event = -1;
+    S16 event = -1;
 
     dhcp_ccb->eth_hdr = eth_hdr;
     dhcp_ccb->vlan_hdr = vlan_header;
