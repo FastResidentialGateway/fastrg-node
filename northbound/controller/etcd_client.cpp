@@ -369,7 +369,7 @@ public:
                 true  // recursive
             );
 
-            // Watch DNS static records: configs/{nodeId}/{subscriberId}/dns/
+            // Watch DNS static records: configs/{nodeId}/{subscriberId}/dns
             std::string dns_prefix = "configs/" + node_uuid_ + "/";
             dns_record_watcher_ = std::make_unique<etcd::Watcher>(
                 *client_,
@@ -701,46 +701,54 @@ public:
             }
 
             // Step 3c: DNS static records — enqueue for the control-plane loop.
+            // Key format: configs/{nodeId}/{userId}/dns  value: JSON array of records
             {
                 std::string dns_base_prefix = "configs/" + node_uuid_ + "/";
-                std::regex dns_regex("configs/([^/]+)/([^/]+)/dns/(.+)");
+                std::regex dns_key_regex("configs/([^/]+)/([^/]+)/dns");
                 auto dns_response = client_->ls(dns_base_prefix).get();
                 if (dns_response.error_code() == 0) {
                     int dns_total = 0;
                     for (size_t i = 0; i < dns_response.keys().size(); ++i) {
                         std::string key = dns_response.key(i);
                         std::smatch dns_matches;
-                        if (!std::regex_match(key, dns_matches, dns_regex) || dns_matches.size() != 4)
+                        if (!std::regex_match(key, dns_matches, dns_key_regex) || dns_matches.size() != 3)
                             continue;
+                        std::string dns_node_id = dns_matches[1].str();
+                        std::string dns_user_id = dns_matches[2].str();
                         std::string dns_value = dns_response.value(i).as_string();
-                        dns_total++;
 
-                        etcd_event_t *ev = alloc_etcd_event(ETCD_EVENT_DNS_RECORD);
-                        if (!ev)
-                            continue;
-                        ev->action = HSI_ACTION_CREATE;
-                        ev->revision = dns_response.index();
-                        ev->from_reconcile = TRUE;
-                        std::strncpy(ev->node_id, dns_matches[1].str().c_str(), sizeof(ev->node_id) - 1);
-                        std::strncpy(ev->user_id, dns_matches[2].str().c_str(), sizeof(ev->user_id) - 1);
-                        std::strncpy(ev->event_data.dns_record.domain, dns_matches[3].str().c_str(),
-                            sizeof(ev->event_data.dns_record.domain) - 1);
                         try {
-                            Json::Value root;
+                            Json::Value records;
                             Json::Reader reader;
-                            if (!reader.parse(dns_value, root)) {
-                                etcd_event_free(ev);
+                            if (!reader.parse(dns_value, records) || !records.isArray())
                                 continue;
-                            }
-                            if (root.isMember("ip"))
-                                std::strncpy(ev->event_data.dns_record.ip, root["ip"].asString().c_str(),
+                            for (const Json::Value& entry : records) {
+                                if (!entry.isMember("domain") || !entry.isMember("ip"))
+                                    continue;
+                                etcd_event_t *ev = alloc_etcd_event(ETCD_EVENT_DNS_RECORD);
+                                if (!ev)
+                                    continue;
+                                ev->action = HSI_ACTION_CREATE;
+                                ev->revision = dns_response.index();
+                                ev->from_reconcile = TRUE;
+                                std::strncpy(ev->node_id, dns_node_id.c_str(), sizeof(ev->node_id) - 1);
+                                std::strncpy(ev->user_id, dns_user_id.c_str(), sizeof(ev->user_id) - 1);
+                                std::strncpy(ev->event_data.dns_record.domain,
+                                    entry["domain"].asString().c_str(),
+                                    sizeof(ev->event_data.dns_record.domain) - 1);
+                                std::strncpy(ev->event_data.dns_record.ip,
+                                    entry["ip"].asString().c_str(),
                                     sizeof(ev->event_data.dns_record.ip) - 1);
-                            ev->event_data.dns_record.ttl = root.isMember("ttl") ? root["ttl"].asUInt() : 3600;
+                                ev->event_data.dns_record.ttl =
+                                    entry.isMember("ttl") ? entry["ttl"].asUInt() : 3600;
+                                enqueue_etcd_event(ev);
+                                dns_total++;
+                            }
                         } catch (const std::exception& e) {
-                            etcd_event_free(ev);
-                            continue;
+                            FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
+                                "Sync: failed to parse DNS records for key %s: %s",
+                                key.c_str(), e.what());
                         }
-                        enqueue_etcd_event(ev);
                     }
                     FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
                         "Sync: enqueued %d DNS record(s) for reconcile", dns_total);
@@ -1586,50 +1594,55 @@ public:
             std::cout << "Loaded " << count << " existing HSI config(s) for node: " << node_uuid << std::endl;
 
             // Load existing DNS static records:
-            // configs/{nodeId}/{userId}/dns/{domain}
+            // key: configs/{nodeId}/{userId}/dns  value: JSON array of records
             if (dns_record_callback) {
                 std::string dns_base_prefix = "configs/" + std::string(node_uuid) + "/";
-                std::regex dns_regex("configs/([^/]+)/([^/]+)/dns/(.+)");
+                std::regex dns_key_regex("configs/([^/]+)/([^/]+)/dns");
                 auto dns_response = client_->ls(dns_base_prefix).get();
                 if (dns_response.error_code() == 0) {
                     int dns_count = 0;
                     for (size_t i = 0; i < dns_response.keys().size(); ++i) {
                         std::string key = dns_response.key(i);
                         std::smatch dns_matches;
-                        if (!std::regex_match(key, dns_matches, dns_regex) || dns_matches.size() != 4)
+                        if (!std::regex_match(key, dns_matches, dns_key_regex) || dns_matches.size() != 3)
                             continue;
 
                         std::string dns_node_id = dns_matches[1].str();
                         std::string dns_user_id = dns_matches[2].str();
-                        std::string dns_domain  = dns_matches[3].str();
                         std::string dns_value   = dns_response.value(i).as_string();
-
-                        dns_record_config_t dns_rec;
-                        memset(&dns_rec, 0, sizeof(dns_rec));
-                        strncpy(dns_rec.domain, dns_domain.c_str(), sizeof(dns_rec.domain) - 1);
+                        int64_t dns_revision    = dns_response.index();
 
                         try {
-                            Json::Value root;
+                            Json::Value records;
                             Json::Reader reader;
-                            if (!reader.parse(dns_value, root)) {
-                                std::cerr << "Failed to parse DNS record JSON during load: " << key << std::endl;
+                            if (!reader.parse(dns_value, records) || !records.isArray()) {
+                                std::cerr << "Failed to parse DNS records JSON array during load: "
+                                          << key << std::endl;
                                 continue;
                             }
-                            if (root.isMember("ip"))
-                                strncpy(dns_rec.ip, root["ip"].asString().c_str(), sizeof(dns_rec.ip) - 1);
-                            dns_rec.ttl = root.isMember("ttl") ? root["ttl"].asUInt() : 3600;
-                        } catch (const std::exception& e) {
-                            std::cerr << "Exception parsing DNS record during load: " << e.what() << std::endl;
-                            continue;
-                        }
+                            for (const Json::Value& entry : records) {
+                                if (!entry.isMember("domain") || !entry.isMember("ip"))
+                                    continue;
+                                dns_record_config_t dns_rec;
+                                memset(&dns_rec, 0, sizeof(dns_rec));
+                                strncpy(dns_rec.domain, entry["domain"].asString().c_str(),
+                                    sizeof(dns_rec.domain) - 1);
+                                strncpy(dns_rec.ip, entry["ip"].asString().c_str(),
+                                    sizeof(dns_rec.ip) - 1);
+                                dns_rec.ttl = entry.isMember("ttl") ? entry["ttl"].asUInt() : 3600;
 
-                        int64_t dns_revision = dns_response.index();
-                        STATUS dns_ret = dns_record_callback(dns_node_id.c_str(), dns_user_id.c_str(),
-                            &dns_rec, HSI_ACTION_CREATE, dns_revision, user_data);
-                        if (dns_ret == SUCCESS) {
-                            dns_count++;
-                            std::cout << "Loaded DNS record: " << dns_domain
-                                      << " for user " << dns_user_id << std::endl;
+                                STATUS dns_ret = dns_record_callback(dns_node_id.c_str(),
+                                    dns_user_id.c_str(), &dns_rec,
+                                    HSI_ACTION_CREATE, dns_revision, user_data);
+                                if (dns_ret == SUCCESS) {
+                                    dns_count++;
+                                    std::cout << "Loaded DNS record: " << dns_rec.domain
+                                              << " for user " << dns_user_id << std::endl;
+                                }
+                            }
+                        } catch (const std::exception& e) {
+                            std::cerr << "Exception parsing DNS records during load: "
+                                      << e.what() << std::endl;
                         }
                     }
                     std::cout << "Loaded " << dns_count << " DNS static record(s) for node: "
@@ -2007,95 +2020,152 @@ private:
     STATUS process_dns_record_event(const etcd::Event& event) {
         std::string key = event.kv().key();
 
-        // Only process keys matching configs/{nodeId}/{subscriberId}/dns/{domain}
-        std::regex dns_regex("configs/([^/]+)/([^/]+)/dns/(.+)");
+        // Only process keys matching configs/{nodeId}/{subscriberId}/dns (no domain suffix)
+        std::regex dns_regex("configs/([^/]+)/([^/]+)/dns");
         std::smatch matches;
-        if (!std::regex_match(key, matches, dns_regex) || matches.size() != 4)
+        if (!std::regex_match(key, matches, dns_regex) || matches.size() != 3)
             return ERROR; // Not a DNS record key, skip silently
 
         std::string node_id = matches[1].str();
         std::string user_id = matches[2].str();
-        std::string domain = matches[3].str();
 
         if (node_id != node_uuid_) return ERROR; // Not for us
 
         int64_t revision = event.kv().modified_index();
 
-        etcd_action_type_t action;
         switch (event.event_type()) {
-            case etcd::Event::EventType::PUT:
+            case etcd::Event::EventType::PUT: {
+                etcd_action_type_t action;
                 try {
                     action = (event.prev_kv().key().empty()) ? HSI_ACTION_CREATE : HSI_ACTION_UPDATE;
                 } catch (...) {
                     action = HSI_ACTION_CREATE;
                 }
+                std::string value = event.kv().as_string();
+                try {
+                    Json::Value records;
+                    Json::Reader reader;
+                    if (!reader.parse(value, records) || !records.isArray()) {
+                        std::cerr << "Failed to parse DNS records JSON array: " << value << std::endl;
+                        return ERROR;
+                    }
+                    for (const Json::Value& entry : records) {
+                        if (!entry.isMember("domain") || !entry.isMember("ip"))
+                            continue;
+                        etcd_event_t *ev = alloc_etcd_event(ETCD_EVENT_DNS_RECORD);
+                        if (!ev)
+                            continue;
+                        ev->action = action;
+                        ev->revision = revision;
+                        ev->from_reconcile = FALSE;
+                        std::strncpy(ev->node_id, node_id.c_str(), sizeof(ev->node_id) - 1);
+                        std::strncpy(ev->user_id, user_id.c_str(), sizeof(ev->user_id) - 1);
+                        std::strncpy(ev->event_data.dns_record.domain,
+                            entry["domain"].asString().c_str(),
+                            sizeof(ev->event_data.dns_record.domain) - 1);
+                        std::strncpy(ev->event_data.dns_record.ip,
+                            entry["ip"].asString().c_str(),
+                            sizeof(ev->event_data.dns_record.ip) - 1);
+                        ev->event_data.dns_record.ttl =
+                            entry.isMember("ttl") ? entry["ttl"].asUInt() : 3600;
+                        enqueue_etcd_event(ev);
+                    }
+                } catch (const std::exception& e) {
+                    std::cerr << "Exception parsing DNS records: " << e.what() << std::endl;
+                    return ERROR;
+                }
                 break;
-            case etcd::Event::EventType::DELETE_:
-                action = HSI_ACTION_DELETE;
+            }
+            case etcd::Event::EventType::DELETE_: {
+                // Parse prev_kv to emit per-record DELETE events
+                std::string prev_value;
+                try {
+                    if (!event.prev_kv().key().empty())
+                        prev_value = event.prev_kv().as_string();
+                } catch (...) {}
+
+                if (prev_value.empty())
+                    return SUCCESS; // No prev_kv — cannot determine deleted records
+
+                try {
+                    Json::Value records;
+                    Json::Reader reader;
+                    if (!reader.parse(prev_value, records) || !records.isArray())
+                        return ERROR;
+                    for (const Json::Value& entry : records) {
+                        if (!entry.isMember("domain"))
+                            continue;
+                        etcd_event_t *ev = alloc_etcd_event(ETCD_EVENT_DNS_RECORD);
+                        if (!ev)
+                            continue;
+                        ev->action = HSI_ACTION_DELETE;
+                        ev->revision = revision;
+                        ev->from_reconcile = FALSE;
+                        std::strncpy(ev->node_id, node_id.c_str(), sizeof(ev->node_id) - 1);
+                        std::strncpy(ev->user_id, user_id.c_str(), sizeof(ev->user_id) - 1);
+                        std::strncpy(ev->event_data.dns_record.domain,
+                            entry["domain"].asString().c_str(),
+                            sizeof(ev->event_data.dns_record.domain) - 1);
+                        enqueue_etcd_event(ev);
+                    }
+                } catch (const std::exception& e) {
+                    std::cerr << "Exception parsing DNS records for delete: " << e.what() << std::endl;
+                    return ERROR;
+                }
                 break;
+            }
             default:
                 return ERROR;
         }
-
-        etcd_event_t *ev = alloc_etcd_event(ETCD_EVENT_DNS_RECORD);
-        if (!ev)
-            return ERROR;
-        ev->action = action;
-        ev->revision = revision;
-        ev->from_reconcile = FALSE;
-        std::strncpy(ev->node_id, node_id.c_str(), sizeof(ev->node_id) - 1);
-        std::strncpy(ev->user_id, user_id.c_str(), sizeof(ev->user_id) - 1);
-        std::strncpy(ev->event_data.dns_record.domain, domain.c_str(),
-            sizeof(ev->event_data.dns_record.domain) - 1);
-
-        if (action != HSI_ACTION_DELETE) {
-            std::string value = event.kv().as_string();
-            try {
-                Json::Value root;
-                Json::Reader reader;
-                if (!reader.parse(value, root)) {
-                    std::cerr << "Failed to parse DNS record JSON: " << value << std::endl;
-                    etcd_event_free(ev);
-                    return ERROR;
-                }
-                if (root.isMember("ip"))
-                    std::strncpy(ev->event_data.dns_record.ip, root["ip"].asString().c_str(),
-                        sizeof(ev->event_data.dns_record.ip) - 1);
-                ev->event_data.dns_record.ttl = root.isMember("ttl") ? root["ttl"].asUInt() : 3600;
-            } catch (const std::exception& e) {
-                std::cerr << "Exception parsing DNS record: " << e.what() << std::endl;
-                etcd_event_free(ev);
-                return ERROR;
-            }
-        }
-        enqueue_etcd_event(ev);
         return SUCCESS;
     }
 
-    // Put DNS record to etcd
+    // Put DNS record to etcd — all records for a subscriber share one key
 public:
     etcd_status_t put_dns_record(const char* node_id, const char* user_id,
         const dns_record_config_t* record) {
         if (!client_ || !node_id || !user_id || !record) return ETCD_ERROR;
 
         try {
-            std::stringstream ss;
-            ss << "configs/" << node_id << "/" << user_id << "/dns/" << record->domain;
-            std::string key = ss.str();
+            std::string key = std::string("configs/") + node_id + "/" + user_id + "/dns";
+            std::string domain_str(record->domain);
 
-            Json::Value root;
-            root["domain"] = std::string(record->domain);
-            root["ip"] = std::string(record->ip);
-            root["ttl"] = record->ttl;
+            // Read existing records
+            Json::Value records(Json::arrayValue);
+            auto get_resp = client_->get(key).get();
+            if (get_resp.error_code() == 0) {
+                Json::Reader reader;
+                Json::Value existing;
+                if (reader.parse(get_resp.value().as_string(), existing) && existing.isArray())
+                    records = existing;
+            }
+
+            // Update existing entry or append new one
+            bool found = false;
+            for (Json::Value& entry : records) {
+                if (entry.isMember("domain") && entry["domain"].asString() == domain_str) {
+                    entry["ip"] = std::string(record->ip);
+                    entry["ttl"] = record->ttl;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                Json::Value entry;
+                entry["domain"] = domain_str;
+                entry["ip"] = std::string(record->ip);
+                entry["ttl"] = record->ttl;
+                records.append(entry);
+            }
 
             Json::StreamWriterBuilder writer;
             writer["indentation"] = "";
-            std::string payload = Json::writeString(writer, root);
+            std::string payload = Json::writeString(writer, records);
 
             auto response = client_->set(key, payload).get();
             if (response.error_code() == 0) {
                 FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
-                    "Wrote DNS record to: %s", key.c_str());
+                    "Wrote DNS records to: %s", key.c_str());
                 return ETCD_SUCCESS;
             } else {
                 FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
@@ -2117,57 +2187,38 @@ public:
             return ETCD_ERROR;
 
         try {
-            std::string prefix = "configs/" + std::string(node_uuid) + "/"
-                + std::string(user_id) + "/dns/";
-            std::regex dns_regex("configs/([^/]+)/([^/]+)/dns/(.+)");
+            std::string key = std::string("configs/") + node_uuid + "/" + user_id + "/dns";
 
-            auto response = client_->ls(prefix).get();
+            auto response = client_->get(key).get();
             if (response.error_code() != 0) {
-                /* error_code 100 = key not found; treat as empty, not a hard error */
                 if (response.error_code() == 100)
-                    return ETCD_SUCCESS;
+                    return ETCD_SUCCESS; // No records — not an error
                 FastRG_LOG(ERR, fastrg_ccb ? fastrg_ccb->fp : nullptr, NULL, NULL,
-                    "load_user_dns_records: ls failed for prefix %s: %s",
-                    prefix.c_str(), response.error_message().c_str());
+                    "load_dns_records: get failed for key %s: %s",
+                    key.c_str(), response.error_message().c_str());
+                return ETCD_ERROR;
+            }
+
+            std::string value = response.value().as_string();
+            Json::Value records;
+            Json::Reader reader;
+            if (!reader.parse(value, records) || !records.isArray()) {
+                FastRG_LOG(WARN, fastrg_ccb ? fastrg_ccb->fp : nullptr, NULL, NULL,
+                    "load_dns_records: failed to parse JSON array for key %s", key.c_str());
                 return ETCD_ERROR;
             }
 
             int loaded = 0;
-            for (size_t i = 0; i < response.keys().size(); ++i) {
-                std::string key   = response.key(i);
-                std::string value = response.value(i).as_string();
-                std::smatch m;
-
-                if (!std::regex_match(key, m, dns_regex) || m.size() != 4)
+            int64_t revision = response.index();
+            for (const Json::Value& entry : records) {
+                if (!entry.isMember("domain") || !entry.isMember("ip"))
                     continue;
-
-                /* m[3] is the domain name part after .../dns/ */
-                std::string domain = m[3].str();
-
                 dns_record_config_t rec;
                 memset(&rec, 0, sizeof(rec));
-                strncpy(rec.domain, domain.c_str(), sizeof(rec.domain) - 1);
+                strncpy(rec.domain, entry["domain"].asString().c_str(), sizeof(rec.domain) - 1);
+                strncpy(rec.ip, entry["ip"].asString().c_str(), sizeof(rec.ip) - 1);
+                rec.ttl = entry.isMember("ttl") ? entry["ttl"].asUInt() : 3600;
 
-                try {
-                    Json::Value root;
-                    Json::Reader reader;
-                    if (!reader.parse(value, root)) {
-                        FastRG_LOG(WARN, fastrg_ccb ? fastrg_ccb->fp : nullptr, NULL, NULL,
-                            "load_user_dns_records: failed to parse JSON for key %s",
-                            key.c_str());
-                        continue;
-                    }
-                    if (root.isMember("ip"))
-                        strncpy(rec.ip, root["ip"].asString().c_str(), sizeof(rec.ip) - 1);
-                    rec.ttl = root.isMember("ttl") ? root["ttl"].asUInt() : 3600;
-                } catch (const std::exception &e) {
-                    FastRG_LOG(WARN, fastrg_ccb ? fastrg_ccb->fp : nullptr, NULL, NULL,
-                        "load_user_dns_records: exception parsing %s: %s",
-                        key.c_str(), e.what());
-                    continue;
-                }
-
-                int64_t revision = response.index();
                 /* load_dns_records runs on the control-plane thread (PPPoE
                  * session establishment), the same thread that applies queued
                  * etcd events, so calling the callback directly is race-free. */
@@ -2177,37 +2228,74 @@ public:
             }
 
             FastRG_LOG(INFO, fastrg_ccb ? fastrg_ccb->fp : nullptr, NULL, NULL,
-                "load_user_dns_records: loaded %d DNS record(s) for user %s",
+                "load_dns_records: loaded %d DNS record(s) for user %s",
                 loaded, user_id);
             return ETCD_SUCCESS;
 
         } catch (const std::exception &e) {
             FastRG_LOG(ERR, fastrg_ccb ? fastrg_ccb->fp : nullptr, NULL, NULL,
-                "load_user_dns_records: exception: %s", e.what());
+                "load_dns_records: exception: %s", e.what());
             return ETCD_ERROR;
         }
     }
 
-    // Delete DNS record from etcd
+    // Delete a specific DNS record from the combined subscriber DNS key
     etcd_status_t delete_dns_record(const char* node_id, const char* user_id,
         const char* domain) {
         if (!client_ || !node_id || !user_id || !domain) return ETCD_ERROR;
 
         try {
-            std::stringstream ss;
-            ss << "configs/" << node_id << "/" << user_id << "/dns/" << domain;
-            std::string key = ss.str();
+            std::string key = std::string("configs/") + node_id + "/" + user_id + "/dns";
+            std::string domain_str(domain);
 
-            auto response = client_->rm(key).get();
-            if (response.error_code() == 0) {
-                FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
-                    "Deleted DNS record: %s", key.c_str());
-                return ETCD_SUCCESS;
-            } else {
+            auto get_resp = client_->get(key).get();
+            if (get_resp.error_code() == 100)
+                return ETCD_SUCCESS; // Key not found — nothing to delete
+            if (get_resp.error_code() != 0) {
                 FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
-                    "Failed to delete DNS record: %s", response.error_message().c_str());
+                    "Failed to get DNS records for delete: %s",
+                    get_resp.error_message().c_str());
                 return ETCD_ERROR;
             }
+
+            // Rebuild array without the removed domain
+            Json::Value remaining(Json::arrayValue);
+            Json::Reader reader;
+            Json::Value existing;
+            if (reader.parse(get_resp.value().as_string(), existing) && existing.isArray()) {
+                for (const Json::Value& entry : existing) {
+                    if (entry.isMember("domain") && entry["domain"].asString() == domain_str)
+                        continue;
+                    remaining.append(entry);
+                }
+            }
+
+            if (remaining.empty()) {
+                // No records left — remove the key entirely
+                auto rm_resp = client_->rm(key).get();
+                if (rm_resp.error_code() == 0 || rm_resp.error_code() == 100) {
+                    FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                        "Deleted DNS key (no remaining records): %s", key.c_str());
+                    return ETCD_SUCCESS;
+                }
+                FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+                    "Failed to delete DNS key: %s", rm_resp.error_message().c_str());
+                return ETCD_ERROR;
+            }
+
+            Json::StreamWriterBuilder writer;
+            writer["indentation"] = "";
+            std::string payload = Json::writeString(writer, remaining);
+            auto set_resp = client_->set(key, payload).get();
+            if (set_resp.error_code() == 0) {
+                FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                    "Removed domain %s from DNS records at: %s", domain, key.c_str());
+                return ETCD_SUCCESS;
+            }
+            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+                "Failed to update DNS records after delete: %s",
+                set_resp.error_message().c_str());
+            return ETCD_ERROR;
         } catch (const std::exception& e) {
             FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
                 "Exception deleting DNS record: %s", e.what());
