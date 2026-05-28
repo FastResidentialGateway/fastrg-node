@@ -305,18 +305,21 @@ phase7_extra_user_config_tests() {
         skip "Step 25: RemoveDnsRecord user 1" "AddDnsRecord failed"
     else
         sleep 1
-        _dns24_etcd=$(etcdctl_get_value \
-            "configs/${NODE_UUID}/${U1}/dns/${U1_DNS_DOMAIN}" 2>/dev/null || true)
+        # DNS records are stored as a JSON array at configs/{node}/{user}/dns
+        _dns24_etcd_arr=$(etcdctl_get_value \
+            "configs/${NODE_UUID}/${U1}/dns" 2>/dev/null || true)
+        _dns24_etcd_entry=$(printf '%s' "$_dns24_etcd_arr" | \
+            jq -r ".[]? | select(.domain == \"${U1_DNS_DOMAIN}\")" 2>/dev/null || true)
         _dns24_grpc=$(fastrg_grpc get_dns_static "${U1}")
         _dns24_match=$(printf '%s' "$_dns24_grpc" | \
             jq -r ".entries[] | select(.domain == \"${U1_DNS_DOMAIN}\") | .domain" 2>/dev/null || true)
 
         MISMATCH=""
-        if [[ -z "$_dns24_etcd" ]]; then
-            MISMATCH="${MISMATCH} etcd-key-missing"
+        if [[ -z "$_dns24_etcd_entry" ]]; then
+            MISMATCH="${MISMATCH} etcd-entry-missing"
         else
-            _e24_ip=$(printf '%s' "$_dns24_etcd" | jq -r '.ip // empty')
-            _e24_ttl=$(printf '%s' "$_dns24_etcd" | jq -r '.ttl // empty')
+            _e24_ip=$(printf '%s' "$_dns24_etcd_entry" | jq -r '.ip // empty')
+            _e24_ttl=$(printf '%s' "$_dns24_etcd_entry" | jq -r '.ttl // empty')
             [[ "$_e24_ip"  != "$U1_DNS_IP"  ]] && MISMATCH="${MISMATCH} ip(etcd=${_e24_ip} expected=${U1_DNS_IP})"
             [[ "$_e24_ttl" != "$U1_DNS_TTL" ]] && MISMATCH="${MISMATCH} ttl(etcd=${_e24_ttl} expected=${U1_DNS_TTL})"
         fi
@@ -330,7 +333,7 @@ phase7_extra_user_config_tests() {
         fi
 
         # ------------------------------------------------------------------
-        # Step 25 — RemoveDnsRecord user 1 → etcd deleted + fastrg removes
+        # Step 25 — RemoveDnsRecord user 1 → etcd array updated + fastrg removes
         # ------------------------------------------------------------------
         info "Step 25: RemoveDnsRecord user ${U1} domain=${U1_DNS_DOMAIN}..."
         _dns_del_reply=$(fastrg_grpc remove_dns_record "${U1}" "${U1_DNS_DOMAIN}")
@@ -341,19 +344,21 @@ phase7_extra_user_config_tests() {
                 "gRPC RemoveDnsRecord returned no status — response: $(printf '%s' "$_dns_del_reply")"
         else
             sleep 1
-            _dns25_gone=$(etcdctl_get_value \
-                "configs/${NODE_UUID}/${U1}/dns/${U1_DNS_DOMAIN}" 2>/dev/null || true)
+            _dns25_etcd_arr=$(etcdctl_get_value \
+                "configs/${NODE_UUID}/${U1}/dns" 2>/dev/null || true)
+            _dns25_etcd_still=$(printf '%s' "$_dns25_etcd_arr" | \
+                jq -r ".[]? | select(.domain == \"${U1_DNS_DOMAIN}\") | .domain" 2>/dev/null || true)
             _dns25_grpc=$(fastrg_grpc get_dns_static "${U1}")
-            _dns25_still=$(printf '%s' "$_dns25_grpc" | \
+            _dns25_grpc_still=$(printf '%s' "$_dns25_grpc" | \
                 jq -r ".entries[] | select(.domain == \"${U1_DNS_DOMAIN}\") | .domain" 2>/dev/null || true)
 
             MISMATCH=""
-            [[ -n "$_dns25_gone"  ]] && MISMATCH="${MISMATCH} etcd-key-still-present"
-            [[ -n "$_dns25_still" ]] && MISMATCH="${MISMATCH} grpc-record-still-present"
+            [[ -n "$_dns25_etcd_still"  ]] && MISMATCH="${MISMATCH} etcd-entry-still-present"
+            [[ -n "$_dns25_grpc_still" ]] && MISMATCH="${MISMATCH} grpc-record-still-present"
 
             if [[ -z "$MISMATCH" ]]; then
                 pass "Step 25: RemoveDnsRecord user ${U1}" \
-                    "etcd key deleted, fastrg record removed"
+                    "etcd entry removed from array, fastrg record removed"
             else
                 fail "Step 25: RemoveDnsRecord user ${U1}" "Mismatch:${MISMATCH}"
             fi

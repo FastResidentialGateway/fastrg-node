@@ -30,9 +30,22 @@ phase6_dns_ping() {
 
     # -----------------------------------------------------------------------
     # Step 17 — DNS proxy on/off toggle via gRPC SetDnsProxy
+    #
+    # DNS resolution is tested by querying the subscriber gateway IP directly
+    # with dig (bypasses OS-level DNS cache entirely).  ping is used only for
+    # the proxy-ON verification where OS caching is not a concern.
     # -----------------------------------------------------------------------
     bold "---"
-    info "Step 17: Toggle DNS proxy off → ping should fail; toggle back on → ping should succeed"
+    info "Step 17: Toggle DNS proxy off → DNS query should fail; toggle back on → ping should succeed"
+
+    # Determine the subscriber gateway IP (= fastrg DNS proxy IP on the LAN).
+    _P6_GW=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/${USER_ID}" 2>/dev/null | \
+        jq -r '.config.dhcp_gateway // empty' 2>/dev/null || true)
+    if [[ -z "$_P6_GW" ]]; then
+        warn "  Cannot determine subscriber gateway IP — skipping Step 17"
+        return
+    fi
+    info "  Subscriber gateway (DNS proxy IP): ${_P6_GW}"
 
     # --- 17a: disable DNS proxy ---
     info "  [17a] Disabling DNS proxy for user ${USER_ID} via gRPC..."
@@ -46,18 +59,19 @@ phase6_dns_ping() {
 
     sleep 1
 
-    # --- 17b: ping should fail (DNS not proxied → domain unresolvable) ---
-    info "  [17b] Pinging www.fastrg.org with DNS proxy OFF; expecting failure..."
-    _PING_OFF=$(ssh_lan "ping -c 4 -W 5 www.fastrg.org 2>&1" || true)
-    info "  ping output (proxy OFF):"
-    printf '%s\n' "$_PING_OFF" | while IFS= read -r line; do
-        printf "    %s\n" "$line"
-    done
+    # --- 17b: direct DNS query to fastrg gateway should fail ---
+    # Use dig to query fastrg directly (bypasses OS DNS cache).
+    # When proxy is OFF, fastrg drops DNS queries → dig returns no answer / times out.
+    info "  [17b] Querying www.fastrg.org directly from fastrg DNS (${_P6_GW}) with proxy OFF; expecting no answer..."
+    _DIG_OFF=$(ssh_lan "dig @${_P6_GW} +time=3 +tries=1 +short www.fastrg.org 2>&1" || true)
+    info "  dig output (proxy OFF): '${_DIG_OFF}'"
 
-    if printf '%s' "$_PING_OFF" | grep -q "from ${WAN_IP}"; then
-        fail "Step 17: DNS proxy toggle — proxy OFF" "Got ICMP reply from ${WAN_IP} even though DNS proxy is disabled"
+    if printf '%s' "$_DIG_OFF" | grep -qF "${WAN_IP}"; then
+        fail "Step 17: DNS proxy toggle — proxy OFF" \
+            "fastrg DNS at ${_P6_GW} returned ${WAN_IP} even though DNS proxy is disabled"
     else
-        pass "Step 17: DNS proxy toggle — proxy OFF" "No ICMP reply from ${WAN_IP} as expected"
+        pass "Step 17: DNS proxy toggle — proxy OFF" \
+            "fastrg DNS returned no answer for www.fastrg.org (proxy off)"
     fi
 
     # --- 17c: re-enable DNS proxy ---
