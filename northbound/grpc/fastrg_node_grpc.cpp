@@ -72,12 +72,13 @@ grpc::Status FastRGNodeServiceImpl::ApplyConfig(::grpc::ServerContext* context, 
     snprintf(hsi_config.dhcp_addr_pool, sizeof(hsi_config.dhcp_addr_pool), "%s-%s", dhcp_pool_start.c_str(), dhcp_pool_end.c_str());
     strncpy(hsi_config.dhcp_subnet, dhcp_subnet_mask.c_str(), sizeof(hsi_config.dhcp_subnet) - 1);
     strncpy(hsi_config.dhcp_gateway, dhcp_gateway.c_str(), sizeof(hsi_config.dhcp_gateway) - 1);
+    hsi_config.dns_proxy_enable = TRUE;
 
     // Write the config to etcd to trigger etcd watcher (only if etcd is initialized)
     if (etcd_client_is_initialized() && fastrg_ccb && fastrg_ccb->node_uuid) {
         std::string user_id_str = std::to_string(user_id);
         etcd_status_t s = etcd_client_put_hsi_config(fastrg_ccb->node_uuid, 
-            user_id_str.c_str(), &hsi_config, ENABLE_STATUS_DISABLED, "fastrg-node-grpc");
+            user_id_str.c_str(), &hsi_config, ENABLE_STATUS_DISABLED, "fastrg-node-grpc", NULL);
         if (s != ETCD_SUCCESS) {
             std::string err = "Failed to write configuration to etcd for user " + user_id_str;
             cout << err << endl;
@@ -465,7 +466,7 @@ grpc::Status FastRGNodeServiceImpl::SetSnatConfig(::grpc::ServerContext* context
         }
 
         etcd_status_t put_s = etcd_client_put_hsi_config(fastrg_ccb->node_uuid,
-            user_id_str.c_str(), cfg, full_config.enable_status, "fastrg-node-grpc");
+            user_id_str.c_str(), cfg, full_config.enable_status, "fastrg-node-grpc", NULL);
         hsi_config_free_port_mappings(cfg);
 
         if (put_s != ETCD_SUCCESS) {
@@ -536,7 +537,7 @@ grpc::Status FastRGNodeServiceImpl::RemoveSnatConfig(::grpc::ServerContext* cont
         }
 
         etcd_status_t put_s = etcd_client_put_hsi_config(fastrg_ccb->node_uuid,
-            user_id_str.c_str(), cfg, full_config.enable_status, "fastrg-node-grpc");
+            user_id_str.c_str(), cfg, full_config.enable_status, "fastrg-node-grpc", NULL);
         hsi_config_free_port_mappings(cfg);
 
         if (put_s != ETCD_SUCCESS) {
@@ -1249,5 +1250,68 @@ grpc::Status FastRGNodeServiceImpl::FlushDnsCache(::grpc::ServerContext* context
     U32 flushed = dns_cache_flush(&dhcp_ccb->dns_state.cache);
     response->set_status("ok");
     response->set_flushed_count(flushed);
+    return grpc::Status::OK;
+}
+
+grpc::Status FastRGNodeServiceImpl::SetDnsProxy(::grpc::ServerContext* context,
+    const ::fastrgnodeservice::SetDnsProxyRequest* request,
+    ::fastrgnodeservice::SetDnsProxyReply* response)
+{
+    cout << "SetDnsProxy called" << endl;
+
+    U16 user_id = request->user_id();
+    bool enable = request->enable();
+    U16 ccb_id = user_id - 1;
+
+    if (user_id == 0 || user_id > fastrg_ccb->user_count) {
+        std::string err = "Invalid user_id " + std::to_string(user_id);
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, err);
+    }
+
+    dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
+    if (!dhcp_ccb) {
+        std::string err = "DHCP CCB not initialized for user " + std::to_string(user_id);
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+
+    /* Update local state first so it takes effect immediately on the data plane. */
+    dhcp_ccb->dns_state.dns_proxy_enabled = enable ? TRUE : FALSE;
+
+    /* Persist to etcd if available. Mark as self-event so the watcher does not
+     * call apply_hsi_config() (which would needlessly reset the DHCP pool). */
+    if (etcd_client_is_initialized() && fastrg_ccb && fastrg_ccb->node_uuid) {
+        std::string user_id_str = std::to_string(user_id);
+
+        hsi_config_full_t full_config = { 0 };
+        etcd_status_t get_s = etcd_client_get_hsi_config(fastrg_ccb->node_uuid,
+            user_id_str.c_str(), &full_config);
+        if (get_s != ETCD_SUCCESS) {
+            std::string err = "Failed to get HSI config from etcd for user " + user_id_str;
+            cout << err << endl;
+            return grpc::Status(grpc::StatusCode::INTERNAL, err);
+        }
+
+        full_config.config.dns_proxy_enable = enable ? TRUE : FALSE;
+
+        int64_t revision = 0;
+        etcd_mark_pending_event(HSI_ACTION_UPDATE, ccb_id);
+        etcd_status_t put_s = etcd_client_put_hsi_config(fastrg_ccb->node_uuid,
+            user_id_str.c_str(), &full_config.config, full_config.enable_status,
+            "fastrg-node-grpc", &revision);
+        hsi_config_free_port_mappings(&full_config.config);
+
+        if (put_s == ETCD_SUCCESS) {
+            etcd_confirm_pending_event(HSI_ACTION_UPDATE, ccb_id, revision);
+        } else {
+            etcd_remove_event(HSI_ACTION_UPDATE, ccb_id);
+            std::string err = "Failed to write dns_proxy_enable to etcd for user " + user_id_str;
+            cout << err << endl;
+            return grpc::Status(grpc::StatusCode::INTERNAL, err);
+        }
+        cout << "dns_proxy_enable=" << (enable ? "true" : "false")
+             << " synced to etcd for user " << user_id_str << endl;
+    }
+
+    response->set_status("ok");
     return grpc::Status::OK;
 }

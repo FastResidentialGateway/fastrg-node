@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # ---------------------------------------------------------------------------
-# Phase 7 — Dynamic New Subscriber gRPC→etcd→fastrg Config Tests (Steps 17–24)
+# Phase 7 — Dynamic New Subscriber gRPC→etcd→fastrg Config Tests (Steps 18–25)
 #
 # Determines the current subscriber count (N), creates subscriber N+1,
 # applies the same config as subscriber 1 (with VLAN 100), exercises all
@@ -36,7 +36,7 @@ _cleanup_new_subscriber_config() {
 
 phase7_extra_user_config_tests() {
     bold "═══════════════════════════════════════════════════════"
-    bold " Phase 7 — Extra User gRPC→etcd Config Tests (Steps 17-24)"
+    bold " Phase 7 — Extra User gRPC→etcd Config Tests (Steps 18-25)"
     bold "═══════════════════════════════════════════════════════"
 
     # ------------------------------------------------------------------
@@ -96,32 +96,32 @@ phase7_extra_user_config_tests() {
     sleep 1
 
     # ------------------------------------------------------------------
-    # Step 17 — ApplyConfig new subscriber → etcd key written correctly
+    # Step 18 — ApplyConfig new subscriber → etcd key written correctly
     # ------------------------------------------------------------------
-    info "Step 17: ApplyConfig user ${U1} (VLAN=${U1_VLAN} account=${U1_ACCOUNT} pool=${U1_POOL_START}-${U1_POOL_END})..."
+    info "Step 18: ApplyConfig user ${U1} (VLAN=${U1_VLAN} account=${U1_ACCOUNT} pool=${U1_POOL_START}-${U1_POOL_END})..."
     _apply_reply=$(fastrg_grpc apply_config \
         "${U1}" "${U1_VLAN}" "${U1_ACCOUNT}" "${U1_PASSWORD}" \
         "${U1_POOL_START}" "${U1_POOL_END}" "${U1_SUBNET}" "${U1_GATEWAY}")
     _apply_status=$(printf '%s' "$_apply_reply" | jq -r '.status // empty' 2>/dev/null || true)
 
     if [[ -z "$_apply_status" ]]; then
-        fail "Step 17: ApplyConfig user ${U1}" \
+        fail "Step 18: ApplyConfig user ${U1}" \
             "gRPC ApplyConfig returned no status — response: $(printf '%s' "$_apply_reply")"
-        warn "Skipping Steps 18-24 (ApplyConfig failed)"
-        skip "Step 18: fastrg applies user ${U1} config"  "ApplyConfig failed"
-        skip "Step 19: ConnectHsi user ${U1}"             "ApplyConfig failed"
-        skip "Step 20: DisconnectHsi user ${U1}"          "ApplyConfig failed"
-        skip "Step 21: DhcpServerStart user ${U1}"        "ApplyConfig failed"
-        skip "Step 22: DhcpServerStop user ${U1}"         "ApplyConfig failed"
-        skip "Step 23: AddDnsRecord user ${U1}"           "ApplyConfig failed"
-        skip "Step 24: RemoveDnsRecord user ${U1}"        "ApplyConfig failed"
+        warn "Skipping Steps 19-25 (ApplyConfig failed)"
+        skip "Step 19: fastrg applies user ${U1} config"  "ApplyConfig failed"
+        skip "Step 20: ConnectHsi user ${U1}"             "ApplyConfig failed"
+        skip "Step 21: DisconnectHsi user ${U1}"          "ApplyConfig failed"
+        skip "Step 22: DhcpServerStart user ${U1}"        "ApplyConfig failed"
+        skip "Step 23: DhcpServerStop user ${U1}"         "ApplyConfig failed"
+        skip "Step 24: AddDnsRecord user ${U1}"           "ApplyConfig failed"
+        skip "Step 25: RemoveDnsRecord user ${U1}"        "ApplyConfig failed"
         return
     fi
 
     sleep 1  # allow etcd write to propagate
     _u1_etcd=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/${U1}" 2>/dev/null || true)
     if [[ -z "$_u1_etcd" ]]; then
-        fail "Step 17: ApplyConfig user ${U1}" \
+        fail "Step 18: ApplyConfig user ${U1}" \
             "etcd key configs/${NODE_UUID}/hsi/${U1} not found after ApplyConfig"
     else
         _e_account=$(printf '%s' "$_u1_etcd" | jq -r '.config.account_name // empty')
@@ -130,28 +130,32 @@ phase7_extra_user_config_tests() {
         _e_enable=$(printf '%s'  "$_u1_etcd" | jq -r '.metadata.enableStatus // empty')
         _e_subnet=$(printf '%s'  "$_u1_etcd" | jq -r '.config.dhcp_subnet // empty')
         _e_gw=$(printf '%s'      "$_u1_etcd" | jq -r '.config.dhcp_gateway // empty')
+        # dns_proxy_enable: ApplyConfig should default it to true in etcd.
+        # jq returns "true"/"false" for booleans, or "null" if the key is missing.
+        _e_dns_proxy=$(printf '%s' "$_u1_etcd" | jq -r '.config.dns_proxy_enable')
         _expect_pool="${U1_POOL_START}-${U1_POOL_END}"
 
         MISMATCH=""
-        [[ "$_e_account" != "$U1_ACCOUNT"    ]] && MISMATCH="${MISMATCH} account(etcd=${_e_account} expected=${U1_ACCOUNT})"
-        [[ "$_e_vlan"    != "$U1_VLAN"       ]] && MISMATCH="${MISMATCH} vlan(etcd=${_e_vlan} expected=${U1_VLAN})"
-        [[ "$_e_pool"    != "$_expect_pool"  ]] && MISMATCH="${MISMATCH} dhcp_pool(etcd=${_e_pool} expected=${_expect_pool})"
-        [[ "$_e_enable"  != "disabled"       ]] && MISMATCH="${MISMATCH} enableStatus(etcd=${_e_enable} expected=disabled)"
-        [[ "$_e_subnet"  != "$U1_SUBNET"     ]] && MISMATCH="${MISMATCH} subnet(etcd=${_e_subnet} expected=${U1_SUBNET})"
-        [[ "$_e_gw"      != "$U1_GATEWAY"    ]] && MISMATCH="${MISMATCH} gateway(etcd=${_e_gw} expected=${U1_GATEWAY})"
+        [[ "$_e_account"   != "$U1_ACCOUNT"   ]] && MISMATCH="${MISMATCH} account(etcd=${_e_account} expected=${U1_ACCOUNT})"
+        [[ "$_e_vlan"      != "$U1_VLAN"      ]] && MISMATCH="${MISMATCH} vlan(etcd=${_e_vlan} expected=${U1_VLAN})"
+        [[ "$_e_pool"      != "$_expect_pool" ]] && MISMATCH="${MISMATCH} dhcp_pool(etcd=${_e_pool} expected=${_expect_pool})"
+        [[ "$_e_enable"    != "disabled"      ]] && MISMATCH="${MISMATCH} enableStatus(etcd=${_e_enable} expected=disabled)"
+        [[ "$_e_subnet"    != "$U1_SUBNET"    ]] && MISMATCH="${MISMATCH} subnet(etcd=${_e_subnet} expected=${U1_SUBNET})"
+        [[ "$_e_gw"        != "$U1_GATEWAY"   ]] && MISMATCH="${MISMATCH} gateway(etcd=${_e_gw} expected=${U1_GATEWAY})"
+        [[ "$_e_dns_proxy" != "true"          ]] && MISMATCH="${MISMATCH} dns_proxy_enable(etcd=${_e_dns_proxy} expected=true)"
 
         if [[ -z "$MISMATCH" ]]; then
-            pass "Step 17: ApplyConfig user ${U1}" \
-                "account=${_e_account} vlan=${_e_vlan} pool=${_e_pool} enableStatus=${_e_enable}"
+            pass "Step 18: ApplyConfig user ${U1}" \
+                "account=${_e_account} vlan=${_e_vlan} pool=${_e_pool} enableStatus=${_e_enable} dns_proxy_enable=${_e_dns_proxy}"
         else
-            fail "Step 17: ApplyConfig user ${U1}" "etcd mismatch:${MISMATCH}"
+            fail "Step 18: ApplyConfig user ${U1}" "etcd mismatch:${MISMATCH}"
         fi
     fi
 
     # ------------------------------------------------------------------
-    # Step 18 — fastrg watches etcd → applies user 1 config locally
+    # Step 19 — fastrg watches etcd → applies user 1 config locally
     # ------------------------------------------------------------------
-    info "Step 18: Verifying fastrg applied user ${U1} config locally (GetFastrgHsiInfo + GetFastrgDhcpInfo)..."
+    info "Step 19: Verifying fastrg applied user ${U1} config locally (GetFastrgHsiInfo + GetFastrgDhcpInfo)..."
     sleep 1  # ensure etcd watcher has fired
     _u1_hsi=$(fastrg_grpc get_hsi_info)
     _u1_hsi_user=$(printf '%s' "$_u1_hsi" | \
@@ -161,7 +165,7 @@ phase7_extra_user_config_tests() {
         jq -r ".dhcp_infos[] | select(.user_id == ${U1})" 2>/dev/null || true)
 
     if [[ -z "$_u1_hsi_user" ]] || [[ -z "$_u1_dhcp_user" ]]; then
-        fail "Step 18: fastrg applies user ${U1} config" \
+        fail "Step 19: fastrg applies user ${U1} config" \
             "User ${U1} not found in gRPC response — hsi:$( [[ -n "$_u1_hsi_user" ]] && echo ok || echo missing) dhcp:$( [[ -n "$_u1_dhcp_user" ]] && echo ok || echo missing)"
     else
         _g_vlan=$(printf '%s'  "$_u1_hsi_user"  | jq -r '.vlan_id // empty')
@@ -180,19 +184,19 @@ phase7_extra_user_config_tests() {
         [[ "$_g_subnet"     != "$U1_SUBNET"   ]] && MISMATCH="${MISMATCH} subnet(grpc=${_g_subnet} expected=${U1_SUBNET})"
 
         if [[ -z "$MISMATCH" ]]; then
-            pass "Step 18: fastrg applies user ${U1} config" \
+            pass "Step 19: fastrg applies user ${U1} config" \
                 "vlan=${_g_vlan} pool=${_g_range} gw=${_g_gw}"
         else
-            fail "Step 18: fastrg applies user ${U1} config" "Mismatch:${MISMATCH}"
+            fail "Step 19: fastrg applies user ${U1} config" "Mismatch:${MISMATCH}"
         fi
     fi
 
     # ------------------------------------------------------------------
-    # Step 19 — ConnectHsi user 1 → PPPoE phase starts
+    # Step 20 — ConnectHsi user 1 → PPPoE phase starts
     # PPPoE will fail (no server for user 1) — that is expected.
     # We verify the command was processed by observing the phase change.
     # ------------------------------------------------------------------
-    info "Step 19: ConnectHsi user ${U1} → verify PPPoE phase changes from 'End phase'..."
+    info "Step 20: ConnectHsi user ${U1} → verify PPPoE phase changes from 'End phase'..."
     _before_phase=$(fastrg_grpc get_hsi_info | \
         python3 -c "import sys,json; d=json.load(sys.stdin); \
         u=[h for h in d.get('hsi_infos',[]) if h.get('user_id')==${U1}]; \
@@ -216,18 +220,18 @@ phase7_extra_user_config_tests() {
     done
 
     if [[ $_phase_changed -eq 1 ]]; then
-        pass "Step 19: ConnectHsi user ${U1}" \
+        pass "Step 20: ConnectHsi user ${U1}" \
             "PPPoE phase: '${_before_phase}' → '${_new_phase}' (failure expected — no server)"
     else
-        fail "Step 19: ConnectHsi user ${U1}" \
+        fail "Step 20: ConnectHsi user ${U1}" \
             "PPPoE phase did not change from '${_before_phase}' — ConnectHsi may not have been processed"
     fi
 
     # ------------------------------------------------------------------
-    # Step 20 — DisconnectHsi user 1 → PPPoE returns to End phase
+    # Step 21 — DisconnectHsi user 1 → PPPoE returns to End phase
     # Called while PPPoE is still retrying PADI (within ~5 s of ConnectHsi).
     # ------------------------------------------------------------------
-    info "Step 20: DisconnectHsi user ${U1} → verify PPPoE returns to 'End phase'..."
+    info "Step 21: DisconnectHsi user ${U1} → verify PPPoE returns to 'End phase'..."
     fastrg_grpc disconnect_hsi "${U1}" >/dev/null 2>&1 || true
 
     _disc_ok=0
@@ -246,112 +250,112 @@ phase7_extra_user_config_tests() {
     done
 
     if [[ $_disc_ok -eq 1 ]]; then
-        pass "Step 20: DisconnectHsi user ${U1}" "PPPoE returned to 'End phase'"
+        pass "Step 21: DisconnectHsi user ${U1}" "PPPoE returned to 'End phase'"
     else
-        fail "Step 20: DisconnectHsi user ${U1}" \
+        fail "Step 21: DisconnectHsi user ${U1}" \
             "PPPoE still in '${_disc_phase:-unknown}' after DisconnectHsi + 15 s"
     fi
 
     # ------------------------------------------------------------------
-    # Step 21 — DhcpServerStart user 1 → DHCP server on
+    # Step 22 — DhcpServerStart user 1 → DHCP server on
     # ------------------------------------------------------------------
-    info "Step 21: DhcpServerStart user ${U1} → verify DHCP server starts..."
+    info "Step 22: DhcpServerStart user ${U1} → verify DHCP server starts..."
     fastrg_grpc start_dhcp_server "${U1}" >/dev/null 2>&1 || true
     sleep 1
-    _dhcp15=$(fastrg_grpc get_dhcp_info | \
+    _dhcp22=$(fastrg_grpc get_dhcp_info | \
         python3 -c "import sys,json; d=json.load(sys.stdin); \
         u=[h for h in d.get('dhcp_infos',[]) if h.get('user_id')==${U1}]; \
         print(u[0].get('status','') if u else '')" 2>/dev/null || true)
 
-    if [[ "$_dhcp15" == "DHCP server is on" ]]; then
-        pass "Step 21: DhcpServerStart user ${U1}" "status='${_dhcp15}'"
+    if [[ "$_dhcp22" == "DHCP server is on" ]]; then
+        pass "Step 22: DhcpServerStart user ${U1}" "status='${_dhcp22}'"
     else
-        fail "Step 21: DhcpServerStart user ${U1}" \
-            "expected 'DHCP server is on', got '${_dhcp15:-empty}'"
+        fail "Step 22: DhcpServerStart user ${U1}" \
+            "expected 'DHCP server is on', got '${_dhcp22:-empty}'"
     fi
 
     # ------------------------------------------------------------------
-    # Step 22 — DhcpServerStop user 1 → DHCP server off
+    # Step 23 — DhcpServerStop user 1 → DHCP server off
     # ------------------------------------------------------------------
-    info "Step 22: DhcpServerStop user ${U1} → verify DHCP server stops..."
+    info "Step 23: DhcpServerStop user ${U1} → verify DHCP server stops..."
     fastrg_grpc stop_dhcp_server "${U1}" >/dev/null 2>&1 || true
     sleep 1
-    _dhcp16=$(fastrg_grpc get_dhcp_info | \
+    _dhcp23=$(fastrg_grpc get_dhcp_info | \
         python3 -c "import sys,json; d=json.load(sys.stdin); \
         u=[h for h in d.get('dhcp_infos',[]) if h.get('user_id')==${U1}]; \
         print(u[0].get('status','') if u else '')" 2>/dev/null || true)
 
-    if [[ "$_dhcp16" != "DHCP server is on" ]]; then
-        pass "Step 22: DhcpServerStop user ${U1}" "status='${_dhcp16:-off}'"
+    if [[ "$_dhcp23" != "DHCP server is on" ]]; then
+        pass "Step 23: DhcpServerStop user ${U1}" "status='${_dhcp23:-off}'"
     else
-        fail "Step 22: DhcpServerStop user ${U1}" \
-            "expected DHCP off, got '${_dhcp16}'"
+        fail "Step 23: DhcpServerStop user ${U1}" \
+            "expected DHCP off, got '${_dhcp23}'"
     fi
 
     # ------------------------------------------------------------------
-    # Step 23 — AddDnsRecord user 1 → etcd write + fastrg loads locally
+    # Step 24 — AddDnsRecord user 1 → etcd write + fastrg loads locally
     # ------------------------------------------------------------------
-    info "Step 23: AddDnsRecord user ${U1} domain=${U1_DNS_DOMAIN} ip=${U1_DNS_IP} ttl=${U1_DNS_TTL}..."
+    info "Step 24: AddDnsRecord user ${U1} domain=${U1_DNS_DOMAIN} ip=${U1_DNS_IP} ttl=${U1_DNS_TTL}..."
     _dns_add_reply=$(fastrg_grpc add_dns_record "${U1}" "${U1_DNS_DOMAIN}" "${U1_DNS_IP}" "${U1_DNS_TTL}")
     _dns_add_status=$(printf '%s' "$_dns_add_reply" | jq -r '.status // empty' 2>/dev/null || true)
 
     if [[ -z "$_dns_add_status" ]]; then
-        fail "Step 23: AddDnsRecord user ${U1}" \
+        fail "Step 24: AddDnsRecord user ${U1}" \
             "gRPC AddDnsRecord returned no status — response: $(printf '%s' "$_dns_add_reply")"
-        skip "Step 24: RemoveDnsRecord user 1" "AddDnsRecord failed"
+        skip "Step 25: RemoveDnsRecord user 1" "AddDnsRecord failed"
     else
         sleep 1
-        _dns17_etcd=$(etcdctl_get_value \
+        _dns24_etcd=$(etcdctl_get_value \
             "configs/${NODE_UUID}/${U1}/dns/${U1_DNS_DOMAIN}" 2>/dev/null || true)
-        _dns17_grpc=$(fastrg_grpc get_dns_static "${U1}")
-        _dns17_match=$(printf '%s' "$_dns17_grpc" | \
+        _dns24_grpc=$(fastrg_grpc get_dns_static "${U1}")
+        _dns24_match=$(printf '%s' "$_dns24_grpc" | \
             jq -r ".entries[] | select(.domain == \"${U1_DNS_DOMAIN}\") | .domain" 2>/dev/null || true)
 
         MISMATCH=""
-        if [[ -z "$_dns17_etcd" ]]; then
+        if [[ -z "$_dns24_etcd" ]]; then
             MISMATCH="${MISMATCH} etcd-key-missing"
         else
-            _e17_ip=$(printf '%s' "$_dns17_etcd" | jq -r '.ip // empty')
-            _e17_ttl=$(printf '%s' "$_dns17_etcd" | jq -r '.ttl // empty')
-            [[ "$_e17_ip"  != "$U1_DNS_IP"  ]] && MISMATCH="${MISMATCH} ip(etcd=${_e17_ip} expected=${U1_DNS_IP})"
-            [[ "$_e17_ttl" != "$U1_DNS_TTL" ]] && MISMATCH="${MISMATCH} ttl(etcd=${_e17_ttl} expected=${U1_DNS_TTL})"
+            _e24_ip=$(printf '%s' "$_dns24_etcd" | jq -r '.ip // empty')
+            _e24_ttl=$(printf '%s' "$_dns24_etcd" | jq -r '.ttl // empty')
+            [[ "$_e24_ip"  != "$U1_DNS_IP"  ]] && MISMATCH="${MISMATCH} ip(etcd=${_e24_ip} expected=${U1_DNS_IP})"
+            [[ "$_e24_ttl" != "$U1_DNS_TTL" ]] && MISMATCH="${MISMATCH} ttl(etcd=${_e24_ttl} expected=${U1_DNS_TTL})"
         fi
-        [[ -z "$_dns17_match" ]] && MISMATCH="${MISMATCH} grpc-record-missing"
+        [[ -z "$_dns24_match" ]] && MISMATCH="${MISMATCH} grpc-record-missing"
 
         if [[ -z "$MISMATCH" ]]; then
-            pass "Step 23: AddDnsRecord user ${U1}" \
-                "etcd ip=${_e17_ip} ttl=${_e17_ttl} grpc=ok"
+            pass "Step 24: AddDnsRecord user ${U1}" \
+                "etcd ip=${_e24_ip} ttl=${_e24_ttl} grpc=ok"
         else
-            fail "Step 23: AddDnsRecord user ${U1}" "Mismatch:${MISMATCH}"
+            fail "Step 24: AddDnsRecord user ${U1}" "Mismatch:${MISMATCH}"
         fi
 
         # ------------------------------------------------------------------
-        # Step 24 — RemoveDnsRecord user 1 → etcd deleted + fastrg removes
+        # Step 25 — RemoveDnsRecord user 1 → etcd deleted + fastrg removes
         # ------------------------------------------------------------------
-        info "Step 24: RemoveDnsRecord user ${U1} domain=${U1_DNS_DOMAIN}..."
+        info "Step 25: RemoveDnsRecord user ${U1} domain=${U1_DNS_DOMAIN}..."
         _dns_del_reply=$(fastrg_grpc remove_dns_record "${U1}" "${U1_DNS_DOMAIN}")
         _dns_del_status=$(printf '%s' "$_dns_del_reply" | jq -r '.status // empty' 2>/dev/null || true)
 
         if [[ -z "$_dns_del_status" ]]; then
-            fail "Step 24: RemoveDnsRecord user ${U1}" \
+            fail "Step 25: RemoveDnsRecord user ${U1}" \
                 "gRPC RemoveDnsRecord returned no status — response: $(printf '%s' "$_dns_del_reply")"
         else
             sleep 1
-            _dns18_gone=$(etcdctl_get_value \
+            _dns25_gone=$(etcdctl_get_value \
                 "configs/${NODE_UUID}/${U1}/dns/${U1_DNS_DOMAIN}" 2>/dev/null || true)
-            _dns18_grpc=$(fastrg_grpc get_dns_static "${U1}")
-            _dns18_still=$(printf '%s' "$_dns18_grpc" | \
+            _dns25_grpc=$(fastrg_grpc get_dns_static "${U1}")
+            _dns25_still=$(printf '%s' "$_dns25_grpc" | \
                 jq -r ".entries[] | select(.domain == \"${U1_DNS_DOMAIN}\") | .domain" 2>/dev/null || true)
 
             MISMATCH=""
-            [[ -n "$_dns18_gone"  ]] && MISMATCH="${MISMATCH} etcd-key-still-present"
-            [[ -n "$_dns18_still" ]] && MISMATCH="${MISMATCH} grpc-record-still-present"
+            [[ -n "$_dns25_gone"  ]] && MISMATCH="${MISMATCH} etcd-key-still-present"
+            [[ -n "$_dns25_still" ]] && MISMATCH="${MISMATCH} grpc-record-still-present"
 
             if [[ -z "$MISMATCH" ]]; then
-                pass "Step 24: RemoveDnsRecord user ${U1}" \
+                pass "Step 25: RemoveDnsRecord user ${U1}" \
                     "etcd key deleted, fastrg record removed"
             else
-                fail "Step 24: RemoveDnsRecord user ${U1}" "Mismatch:${MISMATCH}"
+                fail "Step 25: RemoveDnsRecord user ${U1}" "Mismatch:${MISMATCH}"
             fi
         fi
     fi

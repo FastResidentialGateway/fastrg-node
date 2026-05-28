@@ -233,6 +233,14 @@ def remove_snat_config(node_addr, user_id, eport):
     return {"status": resp.get("status", "")}
 
 
+def set_dns_proxy(node_addr, user_id, enable):
+    resp = _grpcurl(node_addr, 'SetDnsProxy', {
+        'user_id': int(user_id),
+        'enable':  bool(enable),
+    })
+    return {"status": resp.get("status", "")}
+
+
 def get_user_drop_count(node_addr, user_id, port_idx=1):
     """Return dropped_packets for user_id on port_idx (1=WAN_PORT, 0=LAN_PORT)."""
     resp = _grpcurl(node_addr, 'GetFastrgSystemStats')
@@ -337,6 +345,13 @@ def main():
                       file=sys.stderr)
                 sys.exit(1)
             result = remove_snat_config(opts.node, opts.args[0], opts.args[1])
+        elif opts.command == "set_dns_proxy":
+            if len(opts.args) < 2:
+                print(json.dumps({"error": "set_dns_proxy requires <user_id> <true|false>"}),
+                      file=sys.stderr)
+                sys.exit(1)
+            enable = opts.args[1].lower() not in ("false", "0", "off")
+            result = set_dns_proxy(opts.node, opts.args[0], enable)
         elif opts.command == "get_user_drop_count":
             if not opts.args:
                 print(json.dumps({"error": "get_user_drop_count requires <user_id> [port_idx]"}),

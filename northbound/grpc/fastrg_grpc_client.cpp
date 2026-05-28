@@ -568,6 +568,21 @@ void fastrg_grpc_flush_dns_cache(U16 user_id) {
     }
 }
 
+void fastrg_grpc_set_dns_proxy(U16 user_id, bool enable) {
+    SetDnsProxyRequest request;
+    SetDnsProxyReply reply;
+    request.set_user_id(user_id);
+    request.set_enable(enable);
+    ClientContext context;
+    Status status = fastrg_client->stub_->SetDnsProxy(&context, request, &reply);
+    if (status.ok()) {
+        std::cout << "dns_proxy " << (enable ? "enabled" : "disabled")
+                  << " for user " << user_id << std::endl;
+    } else {
+        std::cout << "Failed to set dns_proxy: " << status.error_message() << std::endl;
+    }
+}
+
 #ifdef __cplusplus
 }
 #endif

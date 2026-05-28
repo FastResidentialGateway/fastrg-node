@@ -57,6 +57,7 @@ typedef struct {
     char dhcp_gateway[32];
     char dns_primary[32];       /* primary DNS server IP (e.g. "8.8.8.8") */
     char dns_secondary[32];     /* secondary DNS server IP (e.g. "1.1.1.1") */
+    BOOL dns_proxy_enable;      /* per-subscriber DNS proxy enable; defaults to TRUE when absent in etcd */
     port_mapping_t *port_mappings;  // heap-allocated; use hsi_config_free_port_mappings() to free
     int port_mapping_count;
 } hsi_config_t;
@@ -210,8 +211,9 @@ int etcd_client_is_initialized(void);
  * key: configs/{nodeId}/hsi/{userId}
  * value: JSON matching HSIConfigWithMetadata
  */
-etcd_status_t etcd_client_put_hsi_config(const char *node_id, const char *user_id, 
-    const hsi_config_t *config, hsi_enable_status_t enable_status, const char *updated_by);
+etcd_status_t etcd_client_put_hsi_config(const char *node_id, const char *user_id,
+    const hsi_config_t *config, hsi_enable_status_t enable_status, const char *updated_by,
+    int64_t *revision);
 /**
  * @fn etcd_client_delete_hsi_config
  * 
