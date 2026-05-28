@@ -531,6 +531,16 @@ BOOL hsi_config_matches_local(const char *user_id,
         return FALSE;
     }
 
+    BOOL local_dns_proxy_enable = dhcp_ccb->dns_state.dns_proxy_enabled;
+    BOOL etcd_dns_proxy_enable = etcd_config->dns_proxy_enable;
+    if (local_dns_proxy_enable != etcd_dns_proxy_enable) {
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "Sync match[%s]: dns_proxy_enable mismatch local=%s etcd=%s",
+            user_id, local_dns_proxy_enable ? "true" : "false",
+            etcd_dns_proxy_enable ? "true" : "false");
+        return FALSE;
+    }
+
     int local_active = 0;
     for(int i=0; i<PORT_FWD_TABLE_SIZE; i++) {
         if (rte_atomic16_read(&ppp_ccb->port_fwd_table[i].is_active) == 1)
@@ -884,6 +894,8 @@ void sync_request_callback(const char *node_id, void *user_data)
         }
         snprintf(config.dhcp_gateway, sizeof(config.dhcp_gateway), "%s", gateway_addr_str);
 
+        config.dns_proxy_enable = dhcp_ccb->dns_state.dns_proxy_enabled;
+
         /* Populate port-mapping from local port_fwd_table */
         /* First pass: count active entries to size the heap allocation */
         int active_port_mapping_count = 0;
@@ -918,7 +930,7 @@ void sync_request_callback(const char *node_id, void *user_data)
             enable_status = ENABLE_STATUS_ENABLING; // Treat other phases as in-progress
         }
         etcd_status_t hsi_status = etcd_client_put_hsi_config(
-            fastrg_ccb->node_uuid, config.user_id, &config, enable_status, "etcd_reconnect_sync");
+            fastrg_ccb->node_uuid, config.user_id, &config, enable_status, "etcd_reconnect_sync", NULL);
         hsi_config_free_port_mappings(&config);
 
         if (hsi_status == ETCD_SUCCESS) {

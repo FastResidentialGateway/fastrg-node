@@ -48,7 +48,11 @@ typedef struct dns_proxy_state {
     U32                 active_dns;         /* currently active upstream DNS (network order) */
     U64                 last_response_time; /* last successful response from active DNS */
     U16                 next_upstream_id;   /* rolling query ID for upstream queries */
-    BOOL                dns_proxy_enabled;  /* per-subscriber DNS proxy enable */
+    /* Per-subscriber DNS proxy enable. Written by control plane (apply_hsi_config
+     * / SetDnsProxy), read on every packet by data-plane cores. 1-byte aligned
+     * store/load is atomic on x86 (TSO); volatile blocks the compiler from
+     * hoisting/caching the load. Single-writer config flag, no fence needed. */
+    volatile BOOL       dns_proxy_enabled;
 } dns_proxy_state_t;
 
 /**

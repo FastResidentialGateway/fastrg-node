@@ -32,6 +32,7 @@ class FastRGNodeServiceImpl final : public fastrgnodeservice::FastrgService::Ser
     ::grpc::Status GetDnsCache(::grpc::ServerContext* context, const ::fastrgnodeservice::DnsCacheRequest* request, ::fastrgnodeservice::DnsCacheReply* response) override;
     ::grpc::Status GetDnsStaticRecords(::grpc::ServerContext* context, const ::fastrgnodeservice::DnsStaticRequest* request, ::fastrgnodeservice::DnsStaticReply* response) override;
     ::grpc::Status FlushDnsCache(::grpc::ServerContext* context, const ::fastrgnodeservice::DnsCacheFlushRequest* request, ::fastrgnodeservice::DnsCacheFlushReply* response) override;
+    ::grpc::Status SetDnsProxy(::grpc::ServerContext* context, const ::fastrgnodeservice::SetDnsProxyRequest* request, ::fastrgnodeservice::SetDnsProxyReply* response) override;
 
     private:
     FastRG_t* fastrg_ccb;

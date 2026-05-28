@@ -921,7 +921,8 @@ public:
 
     // Put HSI config into etcd under configs/{nodeId}/hsi/{userId}
     etcd_status_t put_hsi_config(const char* node_id, const char* user_id, 
-        const hsi_config_t* config, hsi_enable_status_t enable_status, const char* updated_by) {
+        const hsi_config_t* config, hsi_enable_status_t enable_status, const char* updated_by,
+        int64_t* revision) {
         if (!client_ || !node_id || !user_id || !config) return ETCD_ERROR;
 
         try {
@@ -938,6 +939,7 @@ public:
             cfg["dhcp_addr_pool"] = std::string(config->dhcp_addr_pool);
             cfg["dhcp_subnet"] = std::string(config->dhcp_subnet);
             cfg["dhcp_gateway"] = std::string(config->dhcp_gateway);
+            cfg["dns_proxy_enable"] = (config->dns_proxy_enable == TRUE);
 
             // Serialize port-mapping array
             if (config->port_mapping_count > 0 && config->port_mappings != NULL) {
@@ -995,7 +997,10 @@ public:
             auto response_task = client_->set(key, payload);
             auto response = response_task.get();
             if (response.error_code() == 0) {
-                FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "Wrote HSI config to: %s", key.c_str());
+                if (revision)
+                    *revision = response.index();
+                FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "Wrote HSI config to: %s (revision: %lld)",
+                    key.c_str(), (long long)response.index());
                 return ETCD_SUCCESS;
             } else {
                 FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Failed to put HSI config: %s", response.error_message().c_str());
@@ -1101,6 +1106,18 @@ public:
             std::strncpy(output->config.dhcp_gateway, 
                 config_obj.get("dhcp_gateway", "").asString().c_str(), 
                 sizeof(output->config.dhcp_gateway) - 1);
+
+            // dns_proxy_enable defaults to TRUE when absent in etcd
+            output->config.dns_proxy_enable = TRUE;
+            if (config_obj.isMember("dns_proxy_enable")) {
+                const Json::Value& v = config_obj["dns_proxy_enable"];
+                if (v.isBool())
+                    output->config.dns_proxy_enable = v.asBool() ? TRUE : FALSE;
+                else if (v.isString())
+                    output->config.dns_proxy_enable = (v.asString() == "false") ? FALSE : TRUE;
+                else if (v.isIntegral())
+                    output->config.dns_proxy_enable = v.asInt() != 0 ? TRUE : FALSE;
+            }
 
             // Parse port-mapping array (dynamic allocation — caller must call hsi_config_free_port_mappings)
             output->config.port_mappings = NULL;
@@ -1935,6 +1952,18 @@ private:
             config->dhcp_subnet[sizeof(config->dhcp_subnet) - 1] = '\0';
             config->dhcp_gateway[sizeof(config->dhcp_gateway) - 1] = '\0';
 
+            // dns_proxy_enable defaults to TRUE when the field is absent in etcd
+            config->dns_proxy_enable = TRUE;
+            if (config_obj.isMember("dns_proxy_enable")) {
+                const Json::Value& v = config_obj["dns_proxy_enable"];
+                if (v.isBool())
+                    config->dns_proxy_enable = v.asBool() ? TRUE : FALSE;
+                else if (v.isString())
+                    config->dns_proxy_enable = (v.asString() == "false") ? FALSE : TRUE;
+                else if (v.isIntegral())
+                    config->dns_proxy_enable = v.asInt() != 0 ? TRUE : FALSE;
+            }
+
             // Parse port-mapping array (dynamic allocation — caller must call hsi_config_free_port_mappings)
             config->port_mappings = NULL;
             config->port_mapping_count = 0;
@@ -2358,9 +2387,10 @@ int etcd_client_is_initialized(void) {
 }
 
 etcd_status_t etcd_client_put_hsi_config(const char* node_id, const char* user_id, 
-    const hsi_config_t* config, hsi_enable_status_t enable_status, const char* updated_by) {
+    const hsi_config_t* config, hsi_enable_status_t enable_status, const char* updated_by,
+    int64_t* revision) {
     if (!g_etcd_client) return ETCD_ERROR;
-    return g_etcd_client->put_hsi_config(node_id, user_id, config, enable_status, updated_by);
+    return g_etcd_client->put_hsi_config(node_id, user_id, config, enable_status, updated_by, revision);
 }
 
 etcd_status_t etcd_client_get_hsi_config(const char* node_id, 

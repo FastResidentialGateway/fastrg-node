@@ -120,7 +120,8 @@ void dhcp_init_by_user(dhcp_ccb_t *dhcp_ccb, U16 ccb_id,
     dhcp_ccb->ccb_id = ccb_id;
     rte_atomic16_init(&dhcp_ccb->dhcp_bool);
     rte_atomic32_init(&dhcp_ccb->active_count);
-    // TODO: make this configurable via northbound interface
+    /* Default before any HSI config is applied; overridden per-subscriber
+     * by apply_hsi_config() using dns_proxy_enable from etcd. */
     dhcp_ccb->dns_state.dns_proxy_enabled = TRUE;
 
     // critical section

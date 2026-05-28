@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # ---------------------------------------------------------------------------
-# Phase 9 — CLI Add Config → etcd → Local Sync (Steps 25-33)
+# Phase 9 — CLI Add Config → etcd → Local Sync (Steps 26-34)
 #
 # Fills the coverage gaps left by Phases 2/3.5/7:
-#   - Steps 25/26: SetSnatConfig / RemoveSnatConfig at runtime
+#   - Steps 26/27: SetSnatConfig / RemoveSnatConfig at runtime
 #                  (Phase 2 only validates pre-existing port-mappings; Phase 5
 #                   only exercises data-plane DNAT)
-#   - Step 27   : ApplyConfig upsert with mutated DHCP pool/subnet/gateway
+#   - Step 28   : ApplyConfig upsert with mutated DHCP pool/subnet/gateway
 #                  (Phase 7 only tests fresh ApplyConfig on a new subscriber)
-#   - Step 28   : sanity that unrelated fields (vlan_id) survive Step 27
-#   - Step 29   : RemoveConfig promoted to graded step
+#   - Step 29   : sanity that unrelated fields (vlan_id) survive Step 28
+#   - Step 30   : RemoveConfig promoted to graded step
 #                  (Phase 7 runs it silently in cleanup)
-#   - Steps 30-33: full PPPoE enableStatus lifecycle observation
+#   - Steps 31-34: full PPPoE enableStatus lifecycle observation
 #                  enabled → disabling → disabled → enabling → enabled
 #                  (Phase 3.5 only verifies the "enabled" terminal state)
 #
-# Steps 25-29 use a synthetic subscriber (_P9_USER_ID = orig_count + 1).
-# Steps 30-33 use USER_ID (the real subscriber with a live PPPoE server).
+# Steps 26-30 use a synthetic subscriber (_P9_USER_ID = orig_count + 1).
+# Steps 31-34 use USER_ID (the real subscriber with a live PPPoE server).
 # ---------------------------------------------------------------------------
 
 # Helper: remove the Phase 9 synthetic subscriber + restore subscriber count.
@@ -101,7 +101,7 @@ _p9_extract_status_sequence() {
 
 phase9_cli_config_sync() {
     bold "═══════════════════════════════════════════════════════"
-    bold " Phase 9 — CLI Config → etcd → Local Sync (Steps 25-33)"
+    bold " Phase 9 — CLI Config → etcd → Local Sync (Steps 26-34)"
     bold "═══════════════════════════════════════════════════════"
 
     # ------------------------------------------------------------------
@@ -113,15 +113,15 @@ phase9_cli_config_sync() {
     _P9_ORIG_SUB_COUNT=$(( ${_P9_ORIG_SUB_COUNT:-0} + 0 ))
     if [[ $_P9_ORIG_SUB_COUNT -eq 0 ]]; then
         warn "Cannot determine subscriber count — skipping Phase 9"
-        skip "Step 25: Add port forwarding"        "subscriber count unknown"
-        skip "Step 26: Remove port forwarding"     "subscriber count unknown"
-        skip "Step 27: Change HSI DHCP config"     "subscriber count unknown"
-        skip "Step 28: vlan_id unchanged"          "subscriber count unknown"
-        skip "Step 29: Remove HSI config"          "subscriber count unknown"
-        skip "Step 30: DisconnectHsi → disabling"  "subscriber count unknown"
-        skip "Step 31: DisconnectHsi → disabled"   "subscriber count unknown"
-        skip "Step 32: ConnectHsi → enabling"      "subscriber count unknown"
-        skip "Step 33: ConnectHsi → enabled"       "subscriber count unknown"
+        skip "Step 26: Add port forwarding"        "subscriber count unknown"
+        skip "Step 27: Remove port forwarding"     "subscriber count unknown"
+        skip "Step 28: Change HSI DHCP config"     "subscriber count unknown"
+        skip "Step 29: vlan_id unchanged"          "subscriber count unknown"
+        skip "Step 30: Remove HSI config"          "subscriber count unknown"
+        skip "Step 31: DisconnectHsi → disabling"  "subscriber count unknown"
+        skip "Step 32: DisconnectHsi → disabled"   "subscriber count unknown"
+        skip "Step 33: ConnectHsi → enabling"      "subscriber count unknown"
+        skip "Step 34: ConnectHsi → enabled"       "subscriber count unknown"
         return
     fi
     _P9_USER_ID=$(( _P9_ORIG_SUB_COUNT + 1 ))
@@ -134,15 +134,15 @@ phase9_cli_config_sync() {
     _p9_s1=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/1" 2>/dev/null || true)
     if [[ -z "$_p9_s1" ]]; then
         warn "Subscriber 1 config not found in etcd — skipping Phase 9"
-        skip "Step 25: Add port forwarding"        "no baseline config"
-        skip "Step 26: Remove port forwarding"     "no baseline config"
-        skip "Step 27: Change HSI DHCP config"     "no baseline config"
-        skip "Step 28: vlan_id unchanged"          "no baseline config"
-        skip "Step 29: Remove HSI config"          "no baseline config"
-        skip "Step 30: DisconnectHsi → disabling"  "no baseline config"
-        skip "Step 31: DisconnectHsi → disabled"   "no baseline config"
-        skip "Step 32: ConnectHsi → enabling"      "no baseline config"
-        skip "Step 33: ConnectHsi → enabled"       "no baseline config"
+        skip "Step 26: Add port forwarding"        "no baseline config"
+        skip "Step 27: Remove port forwarding"     "no baseline config"
+        skip "Step 28: Change HSI DHCP config"     "no baseline config"
+        skip "Step 29: vlan_id unchanged"          "no baseline config"
+        skip "Step 30: Remove HSI config"          "no baseline config"
+        skip "Step 31: DisconnectHsi → disabling"  "no baseline config"
+        skip "Step 32: DisconnectHsi → disabled"   "no baseline config"
+        skip "Step 33: ConnectHsi → enabling"      "no baseline config"
+        skip "Step 34: ConnectHsi → enabled"       "no baseline config"
         return
     fi
 
@@ -169,34 +169,34 @@ phase9_cli_config_sync() {
     _p9_baseline=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/${_P9_USER_ID}" 2>/dev/null || true)
     if [[ -z "$_p9_baseline" ]]; then
         warn "Baseline ApplyConfig for user ${_P9_USER_ID} did not land in etcd — skipping Phase 9"
-        skip "Step 25: Add port forwarding"        "baseline ApplyConfig failed"
-        skip "Step 26: Remove port forwarding"     "baseline ApplyConfig failed"
-        skip "Step 27: Change HSI DHCP config"     "baseline ApplyConfig failed"
-        skip "Step 28: vlan_id unchanged"          "baseline ApplyConfig failed"
-        skip "Step 29: Remove HSI config"          "baseline ApplyConfig failed"
-        skip "Step 30: DisconnectHsi → disabling"  "baseline ApplyConfig failed"
-        skip "Step 31: DisconnectHsi → disabled"   "baseline ApplyConfig failed"
-        skip "Step 32: ConnectHsi → enabling"      "baseline ApplyConfig failed"
-        skip "Step 33: ConnectHsi → enabled"       "baseline ApplyConfig failed"
+        skip "Step 26: Add port forwarding"        "baseline ApplyConfig failed"
+        skip "Step 27: Remove port forwarding"     "baseline ApplyConfig failed"
+        skip "Step 28: Change HSI DHCP config"     "baseline ApplyConfig failed"
+        skip "Step 29: vlan_id unchanged"          "baseline ApplyConfig failed"
+        skip "Step 30: Remove HSI config"          "baseline ApplyConfig failed"
+        skip "Step 31: DisconnectHsi → disabling"  "baseline ApplyConfig failed"
+        skip "Step 32: DisconnectHsi → disabled"   "baseline ApplyConfig failed"
+        skip "Step 33: ConnectHsi → enabling"      "baseline ApplyConfig failed"
+        skip "Step 34: ConnectHsi → enabled"       "baseline ApplyConfig failed"
         _cleanup_phase9_user
         return
     fi
 
     # ------------------------------------------------------------------
-    # Step 25 — Add port forwarding (SetSnatConfig)
+    # Step 26 — Add port forwarding (SetSnatConfig)
     # ------------------------------------------------------------------
     local P9_EPORT=18888
     local P9_DIP="192.168.4.20"
     local P9_IPORT=8080
 
-    info "Step 25: SetSnatConfig user ${_P9_USER_ID} eport=${P9_EPORT} dip=${P9_DIP} iport=${P9_IPORT}..."
+    info "Step 26: SetSnatConfig user ${_P9_USER_ID} eport=${P9_EPORT} dip=${P9_DIP} iport=${P9_IPORT}..."
     _p9_snat_add=$(fastrg_grpc set_snat_config "${_P9_USER_ID}" "${P9_EPORT}" "${P9_DIP}" "${P9_IPORT}")
     _p9_snat_add_status=$(printf '%s' "$_p9_snat_add" | jq -r '.status // empty' 2>/dev/null || true)
 
     if [[ -z "$_p9_snat_add_status" ]]; then
-        fail "Step 25: Add port forwarding" \
+        fail "Step 26: Add port forwarding" \
             "gRPC SetSnatConfig returned no status — response: $(printf '%s' "$_p9_snat_add")"
-        skip "Step 26: Remove port forwarding" "SetSnatConfig failed"
+        skip "Step 27: Remove port forwarding" "SetSnatConfig failed"
     else
         sleep 2
         _p9_etcd_pm=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/${_P9_USER_ID}" 2>/dev/null || true)
@@ -221,21 +221,21 @@ phase9_cli_config_sync() {
         fi
 
         if [[ -z "$MISMATCH" ]]; then
-            pass "Step 25: Add port forwarding" \
+            pass "Step 26: Add port forwarding" \
                 "etcd dip=${_p9_e_dip} dport=${_p9_e_dport}; grpc entry present"
         else
-            fail "Step 25: Add port forwarding" "Mismatch:${MISMATCH}"
+            fail "Step 26: Add port forwarding" "Mismatch:${MISMATCH}"
         fi
 
         # ------------------------------------------------------------------
-        # Step 26 — Remove port forwarding (RemoveSnatConfig)
+        # Step 27 — Remove port forwarding (RemoveSnatConfig)
         # ------------------------------------------------------------------
-        info "Step 26: RemoveSnatConfig user ${_P9_USER_ID} eport=${P9_EPORT}..."
+        info "Step 27: RemoveSnatConfig user ${_P9_USER_ID} eport=${P9_EPORT}..."
         _p9_snat_del=$(fastrg_grpc remove_snat_config "${_P9_USER_ID}" "${P9_EPORT}")
         _p9_snat_del_status=$(printf '%s' "$_p9_snat_del" | jq -r '.status // empty' 2>/dev/null || true)
 
         if [[ -z "$_p9_snat_del_status" ]]; then
-            fail "Step 26: Remove port forwarding" \
+            fail "Step 27: Remove port forwarding" \
                 "gRPC RemoveSnatConfig returned no status — response: $(printf '%s' "$_p9_snat_del")"
         else
             sleep 2
@@ -251,22 +251,22 @@ phase9_cli_config_sync() {
             [[ -n "$_p9_grpc_entry2" ]] && MISMATCH="${MISMATCH} grpc-entry-still-present"
 
             if [[ -z "$MISMATCH" ]]; then
-                pass "Step 26: Remove port forwarding" "etcd + grpc no longer contain eport=${P9_EPORT}"
+                pass "Step 27: Remove port forwarding" "etcd + grpc no longer contain eport=${P9_EPORT}"
             else
-                fail "Step 26: Remove port forwarding" "Mismatch:${MISMATCH}"
+                fail "Step 27: Remove port forwarding" "Mismatch:${MISMATCH}"
             fi
         fi
     fi
 
     # ------------------------------------------------------------------
-    # Step 27 — Change HSI DHCP config (re-ApplyConfig with new pool)
+    # Step 28 — Change HSI DHCP config (re-ApplyConfig with new pool)
     # ------------------------------------------------------------------
     local P9_NEW_POOL_START="10.99.1.10"
     local P9_NEW_POOL_END="10.99.1.50"
     local P9_NEW_SUBNET="255.255.255.0"
     local P9_NEW_GATEWAY="10.99.1.1"
 
-    info "Step 27: Re-ApplyConfig user ${_P9_USER_ID} with new DHCP pool=${P9_NEW_POOL_START}-${P9_NEW_POOL_END} gw=${P9_NEW_GATEWAY}..."
+    info "Step 28: Re-ApplyConfig user ${_P9_USER_ID} with new DHCP pool=${P9_NEW_POOL_START}-${P9_NEW_POOL_END} gw=${P9_NEW_GATEWAY}..."
     _p9_chg=$(fastrg_grpc apply_config \
         "${_P9_USER_ID}" "${P9_VLAN}" "${P9_ACCOUNT}" "${P9_PASSWORD}" \
         "${P9_NEW_POOL_START}" "${P9_NEW_POOL_END}" "${P9_NEW_SUBNET}" "${P9_NEW_GATEWAY}")
@@ -274,9 +274,9 @@ phase9_cli_config_sync() {
     sleep 1
 
     if [[ -z "$_p9_chg_status" ]]; then
-        fail "Step 27: Change HSI DHCP config" \
+        fail "Step 28: Change HSI DHCP config" \
             "gRPC ApplyConfig returned no status — response: $(printf '%s' "$_p9_chg")"
-        skip "Step 28: vlan_id unchanged" "Change HSI failed"
+        skip "Step 29: vlan_id unchanged" "Change HSI failed"
     else
         sleep 1
         _p9_chg_etcd=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/${_P9_USER_ID}" 2>/dev/null || true)
@@ -305,16 +305,16 @@ phase9_cli_config_sync() {
         [[ "$_p9_chg_g_gw"     != "$P9_NEW_GATEWAY"       ]] && MISMATCH="${MISMATCH} grpc-gw(got=${_p9_chg_g_gw} expected=${P9_NEW_GATEWAY})"
 
         if [[ -z "$MISMATCH" ]]; then
-            pass "Step 27: Change HSI DHCP config" \
+            pass "Step 28: Change HSI DHCP config" \
                 "pool=${_p9_chg_e_pool} subnet=${_p9_chg_e_subnet} gw=${_p9_chg_e_gw}"
         else
-            fail "Step 27: Change HSI DHCP config" "Mismatch:${MISMATCH}"
+            fail "Step 28: Change HSI DHCP config" "Mismatch:${MISMATCH}"
         fi
 
         # ------------------------------------------------------------------
-        # Step 28 — vlan_id unchanged after Step 27 (regression guard)
+        # Step 29 — vlan_id unchanged after Step 28 (regression guard)
         # ------------------------------------------------------------------
-        info "Step 28: Verifying vlan_id=${P9_VLAN} survived the DHCP change..."
+        info "Step 29: Verifying vlan_id=${P9_VLAN} survived the DHCP change..."
         _p9_v_hsi=$(fastrg_grpc get_hsi_info | \
             jq -r ".hsi_infos[] | select(.user_id == ${_P9_USER_ID}) | .vlan_id" 2>/dev/null || true)
         _p9_v_etcd=$(printf '%s' "$_p9_chg_etcd" | jq -r '.config.vlan_id // empty')
@@ -324,21 +324,21 @@ phase9_cli_config_sync() {
         [[ "$_p9_v_etcd" != "$P9_VLAN" ]] && MISMATCH="${MISMATCH} etcd-vlan(got=${_p9_v_etcd} expected=${P9_VLAN})"
 
         if [[ -z "$MISMATCH" ]]; then
-            pass "Step 28: vlan_id unchanged" "vlan_id=${P9_VLAN} in both etcd and grpc"
+            pass "Step 29: vlan_id unchanged" "vlan_id=${P9_VLAN} in both etcd and grpc"
         else
-            fail "Step 28: vlan_id unchanged" "Mismatch:${MISMATCH}"
+            fail "Step 29: vlan_id unchanged" "Mismatch:${MISMATCH}"
         fi
     fi
 
     # ------------------------------------------------------------------
-    # Step 29 — Remove HSI config (RemoveConfig as graded step)
+    # Step 30 — Remove HSI config (RemoveConfig as graded step)
     # ------------------------------------------------------------------
-    info "Step 29: RemoveConfig user ${_P9_USER_ID}..."
+    info "Step 30: RemoveConfig user ${_P9_USER_ID}..."
     _p9_rm=$(fastrg_grpc remove_config "${_P9_USER_ID}")
     _p9_rm_status=$(printf '%s' "$_p9_rm" | jq -r '.status // empty' 2>/dev/null || true)
 
     if [[ -z "$_p9_rm_status" ]]; then
-        fail "Step 29: Remove HSI config" \
+        fail "Step 30: Remove HSI config" \
             "gRPC RemoveConfig returned no status — response: $(printf '%s' "$_p9_rm")"
     else
         sleep 1
@@ -351,16 +351,16 @@ phase9_cli_config_sync() {
         [[ -n "$_p9_rm_grpc" ]] && MISMATCH="${MISMATCH} grpc-entry-still-present"
 
         if [[ -z "$MISMATCH" ]]; then
-            pass "Step 29: Remove HSI config" "etcd key deleted; grpc no longer lists user ${_P9_USER_ID}"
+            pass "Step 30: Remove HSI config" "etcd key deleted; grpc no longer lists user ${_P9_USER_ID}"
         else
-            fail "Step 29: Remove HSI config" "Mismatch:${MISMATCH}"
+            fail "Step 30: Remove HSI config" "Mismatch:${MISMATCH}"
         fi
     fi
 
     # ------------------------------------------------------------------
-    # Steps 30-33 — PPPoE enableStatus lifecycle on real subscriber USER_ID
+    # Steps 31-34 — PPPoE enableStatus lifecycle on real subscriber USER_ID
     # ------------------------------------------------------------------
-    info "Step 30-33 prerequisite: reading current enableStatus for USER_ID=${USER_ID}..."
+    info "Step 31-34 prerequisite: reading current enableStatus for USER_ID=${USER_ID}..."
     _p9_start=$(_p9_etcd_enable_status "${USER_ID}")
     info "  current metadata.enableStatus = '${_p9_start:-<empty>}'"
 
@@ -369,22 +369,22 @@ phase9_cli_config_sync() {
         fastrg_grpc connect_hsi "${USER_ID}" >/dev/null 2>&1 || true
         _P9_SEEN=""
         if ! _p9_poll_enable_status "${USER_ID}" "enabled" 30 1; then
-            warn "Could not bring USER_ID=${USER_ID} to 'enabled' — skipping Steps 30-33"
-            skip "Step 30: DisconnectHsi → disabling" "could not establish 'enabled' baseline (seen=${_P9_SEEN:-none})"
-            skip "Step 31: DisconnectHsi → disabled"  "could not establish 'enabled' baseline"
-            skip "Step 32: ConnectHsi → enabling"     "could not establish 'enabled' baseline"
-            skip "Step 33: ConnectHsi → enabled"      "could not establish 'enabled' baseline"
+            warn "Could not bring USER_ID=${USER_ID} to 'enabled' — skipping Steps 31-34"
+            skip "Step 31: DisconnectHsi → disabling" "could not establish 'enabled' baseline (seen=${_P9_SEEN:-none})"
+            skip "Step 32: DisconnectHsi → disabled"  "could not establish 'enabled' baseline"
+            skip "Step 33: ConnectHsi → enabling"     "could not establish 'enabled' baseline"
+            skip "Step 34: ConnectHsi → enabled"      "could not establish 'enabled' baseline"
             _cleanup_phase9_user
             return
         fi
     fi
 
     # ------------------------------------------------------------------
-    # Steps 30+31 — DisconnectHsi: capture "disabling" (transient) + "disabled" (terminal)
+    # Steps 31+32 — DisconnectHsi: capture "disabling" (transient) + "disabled" (terminal)
     # Strategy: start etcdctl watch in background BEFORE the action so every
     # revision is captured; then poll for the terminal state via etcd snapshot.
     # ------------------------------------------------------------------
-    info "Step 30+31: starting etcd watch on USER_ID=${USER_ID}, then DisconnectHsi..."
+    info "Step 31+32: starting etcd watch on USER_ID=${USER_ID}, then DisconnectHsi..."
     _p9_watch_start "${USER_ID}"
     fastrg_grpc disconnect_hsi "${USER_ID}" >/dev/null 2>&1 || true
 
@@ -396,27 +396,27 @@ phase9_cli_config_sync() {
     _p9_dis_log=$(_p9_watch_stop_and_read "${USER_ID}")
     _p9_dis_seq=$(_p9_extract_status_sequence "$_p9_dis_log")
 
-    # Step 30 — verify watch captured "disabling"
+    # Step 31 — verify watch captured "disabling"
     if printf '%s' "$_p9_dis_log" | grep -q '"enableStatus":"disabling"'; then
-        pass "Step 30: DisconnectHsi → disabling" "watch captured sequence: ${_p9_dis_seq:-none}"
+        pass "Step 31: DisconnectHsi → disabling" "watch captured sequence: ${_p9_dis_seq:-none}"
     else
-        fail "Step 30: DisconnectHsi → disabling" \
+        fail "Step 31: DisconnectHsi → disabling" \
             "watch did not capture 'disabling' (sequence: ${_p9_dis_seq:-none})"
     fi
 
-    # Step 31 — terminal state reached via polling
+    # Step 32 — terminal state reached via polling
     if [[ $_p9_dis_terminal_ok -eq 1 ]]; then
-        pass "Step 31: DisconnectHsi → disabled" "terminal state reached (sequence: ${_p9_dis_seq:-none})"
+        pass "Step 32: DisconnectHsi → disabled" "terminal state reached (sequence: ${_p9_dis_seq:-none})"
     else
         _p9_now=$(_p9_etcd_enable_status "${USER_ID}")
-        fail "Step 31: DisconnectHsi → disabled" \
+        fail "Step 32: DisconnectHsi → disabled" \
             "still '${_p9_now:-unknown}' after 15 s (sequence: ${_p9_dis_seq:-none})"
     fi
 
     # ------------------------------------------------------------------
-    # Steps 32+33 — ConnectHsi: capture "enabling" (transient) + "enabled" (terminal)
+    # Steps 33+34 — ConnectHsi: capture "enabling" (transient) + "enabled" (terminal)
     # ------------------------------------------------------------------
-    info "Step 32+33: starting etcd watch on USER_ID=${USER_ID}, then ConnectHsi..."
+    info "Step 33+34: starting etcd watch on USER_ID=${USER_ID}, then ConnectHsi..."
     _p9_watch_start "${USER_ID}"
     fastrg_grpc connect_hsi "${USER_ID}" >/dev/null 2>&1 || true
 
@@ -428,20 +428,20 @@ phase9_cli_config_sync() {
     _p9_en_log=$(_p9_watch_stop_and_read "${USER_ID}")
     _p9_en_seq=$(_p9_extract_status_sequence "$_p9_en_log")
 
-    # Step 32 — verify watch captured "enabling"
+    # Step 33 — verify watch captured "enabling"
     if printf '%s' "$_p9_en_log" | grep -q '"enableStatus":"enabling"'; then
-        pass "Step 32: ConnectHsi → enabling" "watch captured sequence: ${_p9_en_seq:-none}"
+        pass "Step 33: ConnectHsi → enabling" "watch captured sequence: ${_p9_en_seq:-none}"
     else
-        fail "Step 32: ConnectHsi → enabling" \
+        fail "Step 33: ConnectHsi → enabling" \
             "watch did not capture 'enabling' (sequence: ${_p9_en_seq:-none})"
     fi
 
-    # Step 33 — terminal state reached
+    # Step 34 — terminal state reached
     if [[ $_p9_en_terminal_ok -eq 1 ]]; then
-        pass "Step 33: ConnectHsi → enabled" "terminal state reached (sequence: ${_p9_en_seq:-none})"
+        pass "Step 34: ConnectHsi → enabled" "terminal state reached (sequence: ${_p9_en_seq:-none})"
     else
         _p9_now=$(_p9_etcd_enable_status "${USER_ID}")
-        fail "Step 33: ConnectHsi → enabled" \
+        fail "Step 34: ConnectHsi → enabled" \
             "still '${_p9_now:-unknown}' after 20 s (sequence: ${_p9_en_seq:-none})"
     fi
 

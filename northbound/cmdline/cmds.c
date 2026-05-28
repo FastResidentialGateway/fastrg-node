@@ -200,6 +200,8 @@ static void cmd_help_parsed(__attribute__((unused)) void *parsed_result,
                       "show system <info|stats|xstats> to show system info/stats/xstats\n"
                       "config <add|del> user <id> pppoe-dhcp vlan <id> account <account> password <password> pool <start~end> subnet <mask> gateway <ip> to add/update/del PPPoE/DHCP configuration\n"
                       "configure SNAT port forwarding: config <add|del> user <id> snat eport <port> dip <ip> iport <port>\n"
+                      "config set subscriber_count <count> to set subscriber pool size\n"
+                      "config set subscriber <id> dns_proxy <on|off> to toggle per-subscriber DNS proxy\n"
                       "show user <id> nat port-forwarding to show port forwarding entries\n"
                       "show user <id> arp-table [count] to show subscriber ARP table (default: 100 entries)\n"
                       "exec hsi <start|stop> <user id | all> to start/stop HSI (PPPoE + DHCP)\n"
@@ -500,19 +502,82 @@ cmdline_parse_token_string_t cmd_config_subscriber_config =
 cmdline_parse_token_string_t cmd_config_set_str =
     TOKEN_STRING_INITIALIZER(struct cmd_config_subscriber_count_result, cmd_str, "set");
 cmdline_parse_token_string_t cmd_config_subscriber_str =
-    TOKEN_STRING_INITIALIZER(struct cmd_config_subscriber_count_result, subscriber_str, "subscriber");
+    TOKEN_STRING_INITIALIZER(struct cmd_config_subscriber_count_result, subscriber_str, "subscriber_count");
 cmdline_parse_token_num_t cmd_config_subscriber_count =
     TOKEN_NUM_INITIALIZER(struct cmd_config_subscriber_count_result, subscriber_count, RTE_UINT16);
 
 cmdline_parse_inst_t cmd_config_set_subscriber = {
     .f = cmd_config_parse_subscriber_count,  /* function to call */
     .data = NULL,      /* 2nd arg of func */
-    .help_str = "configure subscriber count: config set subscriber <count>",
+    .help_str = "configure subscriber count: config set subscriber_count <count>",
     .tokens = {        /* token list, NULL terminated */
         (void *)&cmd_config_subscriber_config,
         (void *)&cmd_config_set_str,
         (void *)&cmd_config_subscriber_str,
         (void *)&cmd_config_subscriber_count,
+        NULL,
+    },
+};
+
+/**********************************************************/
+/* config set subscriber <id> dns_proxy on|off            */
+/**********************************************************/
+
+struct cmd_config_dns_proxy_result {
+    cmdline_fixed_string_t  config;
+    cmdline_fixed_string_t  cmd_str;        /* set */
+    cmdline_fixed_string_t  subscriber_str; /* subscriber */
+    uint16_t                user_id;
+    cmdline_fixed_string_t  dns_proxy_str;  /* dns_proxy */
+    cmdline_fixed_string_t  onoff;          /* on/off */
+};
+
+static void cmd_config_parse_dns_proxy(void *parsed_result,
+                struct cmdline *cl,
+                __attribute__((unused)) void *data)
+{
+    struct cmd_config_dns_proxy_result *res = parsed_result;
+    bool enable;
+
+    if (strcmp(res->onoff, "on") == 0) {
+        enable = true;
+    } else if (strcmp(res->onoff, "off") == 0) {
+        enable = false;
+    } else {
+        cmdline_printf(cl, "Invalid value '%s' for dns_proxy (use on|off)\n", res->onoff);
+        return;
+    }
+
+    cmdline_printf(cl, "Setting dns_proxy=%s for subscriber %u\n",
+        enable ? "on" : "off", res->user_id);
+
+    fastrg_grpc_set_dns_proxy(res->user_id, enable);
+}
+
+cmdline_parse_token_string_t cmd_dns_proxy_config =
+    TOKEN_STRING_INITIALIZER(struct cmd_config_dns_proxy_result, config, "config");
+cmdline_parse_token_string_t cmd_dns_proxy_set =
+    TOKEN_STRING_INITIALIZER(struct cmd_config_dns_proxy_result, cmd_str, "set");
+cmdline_parse_token_string_t cmd_dns_proxy_subscriber =
+    TOKEN_STRING_INITIALIZER(struct cmd_config_dns_proxy_result, subscriber_str, "subscriber");
+cmdline_parse_token_num_t cmd_dns_proxy_user_id =
+    TOKEN_NUM_INITIALIZER(struct cmd_config_dns_proxy_result, user_id, RTE_UINT16);
+cmdline_parse_token_string_t cmd_dns_proxy_keyword =
+    TOKEN_STRING_INITIALIZER(struct cmd_config_dns_proxy_result, dns_proxy_str, "dns_proxy");
+cmdline_parse_token_string_t cmd_dns_proxy_onoff =
+    TOKEN_STRING_INITIALIZER(struct cmd_config_dns_proxy_result, onoff, "on#off");
+
+cmdline_parse_inst_t cmd_config_set_dns_proxy = {
+    .f = cmd_config_parse_dns_proxy,
+    .data = NULL,
+    .help_str = "toggle per-subscriber DNS proxy: config set subscriber <id> dns_proxy on|off",
+    .tokens = {
+        (void *)&cmd_dns_proxy_config,
+        (void *)&cmd_dns_proxy_set,
+        (void *)&cmd_dns_proxy_subscriber,
+        (void *)&cmd_dns_proxy_user_id,
+        (void *)&cmd_dns_proxy_keyword,
+        (void *)&cmd_dns_proxy_onoff,
         NULL,
     },
 };
@@ -906,6 +971,7 @@ cmdline_parse_ctx_t ctx[] = {
         (cmdline_parse_inst_t *)&cmd_config_del_snat,
         (cmdline_parse_inst_t *)&cmd_config_del,
         (cmdline_parse_inst_t *)&cmd_config_set_subscriber,
+        (cmdline_parse_inst_t *)&cmd_config_set_dns_proxy,
         (cmdline_parse_inst_t *)&cmd_config_add_dns,
         (cmdline_parse_inst_t *)&cmd_config_del_dns,
         (cmdline_parse_inst_t *)&cmd_exec,

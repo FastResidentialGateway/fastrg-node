@@ -167,9 +167,13 @@ STATUS apply_hsi_config(FastRG_t *fastrg_ccb, int ccb_id, const hsi_config_t *co
     dhcp_pool_init_by_user(dhcp_ccb, dhcp_gateway, 
         dhcp_ip_start, dhcp_ip_end, dhcp_subnet_mask);
 
-    FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, 
-        "Applied HSI config for user %d: DHCP enabled with pool %s", 
-        ccb_id + 1, config->dhcp_addr_pool);
+    /* Per-subscriber DNS proxy enable is sourced from etcd HSI config */
+    dhcp_ccb->dns_state.dns_proxy_enabled = config->dns_proxy_enable;
+
+    FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+        "Applied HSI config for user %d: DHCP enabled with pool %s, dns_proxy_enable=%s",
+        ccb_id + 1, config->dhcp_addr_pool,
+        config->dns_proxy_enable ? "true" : "false");
 
     ret = SUCCESS;
     goto out;

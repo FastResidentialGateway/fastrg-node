@@ -31,6 +31,7 @@ void fastrg_grpc_remove_dns_record(U16 user_id, char *domain);
 void fastrg_grpc_get_dns_cache(U16 user_id);
 void fastrg_grpc_get_dns_static(U16 user_id);
 void fastrg_grpc_flush_dns_cache(U16 user_id);
+void fastrg_grpc_set_dns_proxy(U16 user_id, bool enable);
 
 #ifdef __cplusplus
 }

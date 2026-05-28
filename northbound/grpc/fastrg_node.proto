@@ -43,6 +43,7 @@ service FastrgService {
   rpc GetDnsCache(DnsCacheRequest) returns(DnsCacheReply) {}
   rpc GetDnsStaticRecords(DnsStaticRequest) returns(DnsStaticReply) {}
   rpc FlushDnsCache(DnsCacheFlushRequest) returns(DnsCacheFlushReply) {}
+  rpc SetDnsProxy(SetDnsProxyRequest) returns(SetDnsProxyReply) {}
 }
 
 message ConfigRequest {
@@ -284,4 +285,13 @@ message DnsCacheFlushRequest {
 message DnsCacheFlushReply {
   string status = 1;
   uint32 flushed_count = 2;
+}
+
+message SetDnsProxyRequest {
+  uint32 user_id = 1;
+  bool enable = 2;
+}
+
+message SetDnsProxyReply {
+  string status = 1;
 }
