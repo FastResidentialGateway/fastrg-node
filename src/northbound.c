@@ -170,10 +170,14 @@ STATUS apply_hsi_config(FastRG_t *fastrg_ccb, int ccb_id, const hsi_config_t *co
     /* Per-subscriber DNS proxy enable is sourced from etcd HSI config */
     dhcp_ccb->dns_state.dns_proxy_enabled = config->dns_proxy_enable;
 
+    /* Per-subscriber TCP conntrack (SPI) enable is sourced from etcd HSI config */
+    ppp_ccb->tcp_conntrack_enabled = config->tcp_conntrack_enable;
+
     FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
-        "Applied HSI config for user %d: DHCP enabled with pool %s, dns_proxy_enable=%s",
+        "Applied HSI config for user %d: DHCP enabled with pool %s, dns_proxy_enable=%s, tcp_conntrack_enable=%s",
         ccb_id + 1, config->dhcp_addr_pool,
-        config->dns_proxy_enable ? "true" : "false");
+        config->dns_proxy_enable ? "true" : "false",
+        config->tcp_conntrack_enable ? "true" : "false");
 
     ret = SUCCESS;
     goto out;

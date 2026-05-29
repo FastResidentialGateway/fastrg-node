@@ -541,6 +541,16 @@ BOOL hsi_config_matches_local(const char *user_id,
         return FALSE;
     }
 
+    BOOL local_tcp_conntrack_enable = ppp_ccb->tcp_conntrack_enabled;
+    BOOL etcd_tcp_conntrack_enable = etcd_config->tcp_conntrack_enable;
+    if (local_tcp_conntrack_enable != etcd_tcp_conntrack_enable) {
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "Sync match[%s]: tcp_conntrack_enable mismatch local=%s etcd=%s",
+            user_id, local_tcp_conntrack_enable ? "true" : "false",
+            etcd_tcp_conntrack_enable ? "true" : "false");
+        return FALSE;
+    }
+
     int local_active = 0;
     for(int i=0; i<PORT_FWD_TABLE_SIZE; i++) {
         if (rte_atomic16_read(&ppp_ccb->port_fwd_table[i].is_active) == 1)
@@ -895,6 +905,7 @@ void sync_request_callback(const char *node_id, void *user_data)
         snprintf(config.dhcp_gateway, sizeof(config.dhcp_gateway), "%s", gateway_addr_str);
 
         config.dns_proxy_enable = dhcp_ccb->dns_state.dns_proxy_enabled;
+        config.tcp_conntrack_enable = ppp_ccb->tcp_conntrack_enabled;
 
         /* Populate port-mapping from local port_fwd_table */
         /* First pass: count active entries to size the heap allocation */

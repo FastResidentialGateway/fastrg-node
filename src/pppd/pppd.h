@@ -111,6 +111,11 @@ typedef struct {
     rte_atomic64_t        pppoes_tx_bytes;
     rte_atomic64_t        pppoes_rx_packets;
     rte_atomic64_t        pppoes_tx_packets;
+    /* Per-subscriber TCP conntrack (SPI) enable. Written by control plane
+     * (apply_hsi_config / SetTcpConntrack), read on every inbound TCP packet
+     * by data-plane cores. 1-byte aligned store/load is atomic on x86 (TSO);
+     * volatile blocks the compiler from hoisting/caching the load. */
+    volatile BOOL         tcp_conntrack_enabled;
 }__rte_cache_aligned ppp_ccb_t;
 
 extern U32 ppp_interval;

@@ -5,10 +5,10 @@
 # ---------------------------------------------------------------------------
 phase5_dnat_test() {
     bold "═══════════════════════════════════════════════════════"
-    bold " Phase 5 — WAN→LAN DNAT (Step 15)"
+    bold " Phase 5 — WAN→LAN DNAT (Step 16)"
     bold "═══════════════════════════════════════════════════════"
 
-    info "Step 15: WAN→LAN DNAT — scapy from WAN, nc listen on LAN..."
+    info "Step 16: WAN→LAN DNAT — scapy from WAN, nc listen on LAN..."
 
     # Get port-mapping eport/dport from etcd (already fetched in phase1 as HSI_JSON)
     # Re-fetch in case phase1 was skipped or HSI_JSON is out of scope
@@ -16,7 +16,7 @@ phase5_dnat_test() {
     PM_COUNT=$(printf '%s' "$_HSI_ETCD" | jq -r '(.config["port-mapping"] // []) | length' 2>/dev/null || echo "0")
 
     if [[ "$PM_COUNT" -eq 0 ]]; then
-        skip "Step 15: WAN→LAN DNAT" "No port-mapping in etcd — cannot perform DNAT test"
+        skip "Step 16: WAN→LAN DNAT" "No port-mapping in etcd — cannot perform DNAT test"
         return
     fi
 
@@ -31,7 +31,7 @@ phase5_dnat_test() {
     DNAT_PPP_IP=$(printf '%s' "$_HSI_GRPC" | \
         jq -r ".hsi_infos[] | select(.user_id == ${USER_ID}) | .ip_addr" 2>/dev/null || true)
     if [[ -z "$DNAT_PPP_IP" ]]; then
-        fail "Step 15: WAN→LAN DNAT" "Cannot determine PPPoE client WAN IP for USER_ID=${USER_ID} from gRPC"
+        fail "Step 16: WAN→LAN DNAT" "Cannot determine PPPoE client WAN IP for USER_ID=${USER_ID} from gRPC"
         return
     fi
     info "  PPPoE WAN IP (gRPC ip_addr): ${DNAT_PPP_IP}"
@@ -60,8 +60,8 @@ phase5_dnat_test() {
     # Also check exit: nc -l exits after receiving one packet (timeout 10 will exit even without data)
     # We consider PASS if nc received data (payload "hello") or exited cleanly within timeout
     if printf '%s' "$NC_OUT" | grep -q "hello"; then
-        pass "Step 15: WAN→LAN DNAT" "UDP payload 'hello' received on LAN ${DNAT_DIP}:${DNAT_DPORT}"
+        pass "Step 16: WAN→LAN DNAT" "UDP payload 'hello' received on LAN ${DNAT_DIP}:${DNAT_DPORT}"
     else
-        fail "Step 15: WAN→LAN DNAT" "scapy failed to send or nc did not receive on LAN ${DNAT_DIP}:${DNAT_DPORT}"
+        fail "Step 16: WAN→LAN DNAT" "scapy failed to send or nc did not receive on LAN ${DNAT_DIP}:${DNAT_DPORT}"
     fi
 }

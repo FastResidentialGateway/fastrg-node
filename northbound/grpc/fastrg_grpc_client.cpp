@@ -583,6 +583,21 @@ void fastrg_grpc_set_dns_proxy(U16 user_id, bool enable) {
     }
 }
 
+void fastrg_grpc_set_tcp_conntrack(U16 user_id, bool enable) {
+    SetTcpConntrackRequest request;
+    SetTcpConntrackReply reply;
+    request.set_user_id(user_id);
+    request.set_enable(enable);
+    ClientContext context;
+    Status status = fastrg_client->stub_->SetTcpConntrack(&context, request, &reply);
+    if (status.ok()) {
+        std::cout << "tcp_conntrack " << (enable ? "enabled" : "disabled")
+                  << " for user " << user_id << std::endl;
+    } else {
+        std::cout << "Failed to set tcp_conntrack: " << status.error_message() << std::endl;
+    }
+}
+
 #ifdef __cplusplus
 }
 #endif

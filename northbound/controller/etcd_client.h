@@ -58,6 +58,7 @@ typedef struct {
     char dns_primary[32];       /* primary DNS server IP (e.g. "8.8.8.8") */
     char dns_secondary[32];     /* secondary DNS server IP (e.g. "1.1.1.1") */
     BOOL dns_proxy_enable;      /* per-subscriber DNS proxy enable; defaults to TRUE when absent in etcd */
+    BOOL tcp_conntrack_enable;  /* per-subscriber TCP SPI enable; defaults to TRUE when absent in etcd */
     port_mapping_t *port_mappings;  // heap-allocated; use hsi_config_free_port_mappings() to free
     int port_mapping_count;
 } hsi_config_t;

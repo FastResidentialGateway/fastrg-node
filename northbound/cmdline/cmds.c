@@ -202,6 +202,7 @@ static void cmd_help_parsed(__attribute__((unused)) void *parsed_result,
                       "configure SNAT port forwarding: config <add|del> user <id> snat eport <port> dip <ip> iport <port>\n"
                       "config set subscriber_count <count> to set subscriber pool size\n"
                       "config set subscriber <id> dns_proxy <on|off> to toggle per-subscriber DNS proxy\n"
+                      "config set subscriber <id> tcp_conntrack <on|off> to toggle per-subscriber TCP conntrack\n"
                       "show user <id> nat port-forwarding to show port forwarding entries\n"
                       "show user <id> arp-table [count] to show subscriber ARP table (default: 100 entries)\n"
                       "exec hsi <start|stop> <user id | all> to start/stop HSI (PPPoE + DHCP)\n"
@@ -578,6 +579,69 @@ cmdline_parse_inst_t cmd_config_set_dns_proxy = {
         (void *)&cmd_dns_proxy_user_id,
         (void *)&cmd_dns_proxy_keyword,
         (void *)&cmd_dns_proxy_onoff,
+        NULL,
+    },
+};
+
+/**********************************************************/
+/* config set subscriber <id> tcp_conntrack on|off        */
+/**********************************************************/
+
+struct cmd_config_tcp_conntrack_result {
+    cmdline_fixed_string_t  config;
+    cmdline_fixed_string_t  cmd_str;           /* set */
+    cmdline_fixed_string_t  subscriber_str;    /* subscriber */
+    uint16_t                user_id;
+    cmdline_fixed_string_t  tcp_conntrack_str; /* tcp_conntrack */
+    cmdline_fixed_string_t  onoff;             /* on/off */
+};
+
+static void cmd_config_parse_tcp_conntrack(void *parsed_result,
+                struct cmdline *cl,
+                __attribute__((unused)) void *data)
+{
+    struct cmd_config_tcp_conntrack_result *res = parsed_result;
+    bool enable;
+
+    if (strcmp(res->onoff, "on") == 0) {
+        enable = true;
+    } else if (strcmp(res->onoff, "off") == 0) {
+        enable = false;
+    } else {
+        cmdline_printf(cl, "Invalid value '%s' for tcp_conntrack (use on|off)\n", res->onoff);
+        return;
+    }
+
+    cmdline_printf(cl, "Setting tcp_conntrack=%s for subscriber %u\n",
+        enable ? "on" : "off", res->user_id);
+
+    fastrg_grpc_set_tcp_conntrack(res->user_id, enable);
+}
+
+cmdline_parse_token_string_t cmd_tcp_conntrack_config =
+    TOKEN_STRING_INITIALIZER(struct cmd_config_tcp_conntrack_result, config, "config");
+cmdline_parse_token_string_t cmd_tcp_conntrack_set =
+    TOKEN_STRING_INITIALIZER(struct cmd_config_tcp_conntrack_result, cmd_str, "set");
+cmdline_parse_token_string_t cmd_tcp_conntrack_subscriber =
+    TOKEN_STRING_INITIALIZER(struct cmd_config_tcp_conntrack_result, subscriber_str, "subscriber");
+cmdline_parse_token_num_t cmd_tcp_conntrack_user_id =
+    TOKEN_NUM_INITIALIZER(struct cmd_config_tcp_conntrack_result, user_id, RTE_UINT16);
+cmdline_parse_token_string_t cmd_tcp_conntrack_keyword =
+    TOKEN_STRING_INITIALIZER(struct cmd_config_tcp_conntrack_result, tcp_conntrack_str, "tcp_conntrack");
+cmdline_parse_token_string_t cmd_tcp_conntrack_onoff =
+    TOKEN_STRING_INITIALIZER(struct cmd_config_tcp_conntrack_result, onoff, "on#off");
+
+cmdline_parse_inst_t cmd_config_set_tcp_conntrack = {
+    .f = cmd_config_parse_tcp_conntrack,
+    .data = NULL,
+    .help_str = "toggle per-subscriber TCP conntrack: config set subscriber <id> tcp_conntrack on|off",
+    .tokens = {
+        (void *)&cmd_tcp_conntrack_config,
+        (void *)&cmd_tcp_conntrack_set,
+        (void *)&cmd_tcp_conntrack_subscriber,
+        (void *)&cmd_tcp_conntrack_user_id,
+        (void *)&cmd_tcp_conntrack_keyword,
+        (void *)&cmd_tcp_conntrack_onoff,
         NULL,
     },
 };
@@ -972,6 +1036,7 @@ cmdline_parse_ctx_t ctx[] = {
         (cmdline_parse_inst_t *)&cmd_config_del,
         (cmdline_parse_inst_t *)&cmd_config_set_subscriber,
         (cmdline_parse_inst_t *)&cmd_config_set_dns_proxy,
+        (cmdline_parse_inst_t *)&cmd_config_set_tcp_conntrack,
         (cmdline_parse_inst_t *)&cmd_config_add_dns,
         (cmdline_parse_inst_t *)&cmd_config_del_dns,
         (cmdline_parse_inst_t *)&cmd_exec,

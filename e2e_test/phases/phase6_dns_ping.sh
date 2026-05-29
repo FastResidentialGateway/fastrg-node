@@ -8,7 +8,7 @@ phase6_dns_ping() {
     bold " Phase 6 — DNS Static + Reverse Ping (Steps 16-17)"
     bold "═══════════════════════════════════════════════════════"
 
-    info "Step 16: Ping www.fastrg.org from LAN host; expecting reply from ${WAN_IP}..."
+    info "Step 17: Ping www.fastrg.org from LAN host; expecting reply from ${WAN_IP}..."
     PING_OUT=$(ssh_lan "ping -c 4 -W 5 www.fastrg.org 2>&1" || true)
 
     info "  ping output:"
@@ -17,32 +17,32 @@ phase6_dns_ping() {
     done
 
     if printf '%s' "$PING_OUT" | grep -q "from ${WAN_IP}"; then
-        pass "Step 16: DNS static + ping www.fastrg.org" "Received ICMP reply from ${WAN_IP}"
+        pass "Step 17: DNS static + ping www.fastrg.org" "Received ICMP reply from ${WAN_IP}"
     else
         # Check if it resolved but got a different IP (DNS not overridden)
         if printf '%s' "$PING_OUT" | grep -qE "PING|bytes from"; then
             REPLY_IP=$(printf '%s' "$PING_OUT" | grep -oE "from [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" | head -1 | awk '{print $2}')
-            fail "Step 16: DNS static + ping www.fastrg.org" "Got reply from ${REPLY_IP:-unknown}, expected ${WAN_IP} — DNS static record may not be configured"
+            fail "Step 17: DNS static + ping www.fastrg.org" "Got reply from ${REPLY_IP:-unknown}, expected ${WAN_IP} — DNS static record may not be configured"
         else
-            fail "Step 16: DNS static + ping www.fastrg.org" "No ICMP reply received"
+            fail "Step 17: DNS static + ping www.fastrg.org" "No ICMP reply received"
         fi
     fi
 
     # -----------------------------------------------------------------------
-    # Step 17 — DNS proxy on/off toggle via gRPC SetDnsProxy
+    # Step 18 — DNS proxy on/off toggle via gRPC SetDnsProxy
     #
     # DNS resolution is tested by querying the subscriber gateway IP directly
     # with dig (bypasses OS-level DNS cache entirely).  ping is used only for
     # the proxy-ON verification where OS caching is not a concern.
     # -----------------------------------------------------------------------
     bold "---"
-    info "Step 17: Toggle DNS proxy off → DNS query should fail; toggle back on → ping should succeed"
+    info "Step 18: Toggle DNS proxy off → DNS query should fail; toggle back on → ping should succeed"
 
     # Determine the subscriber gateway IP (= fastrg DNS proxy IP on the LAN).
     _P6_GW=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/${USER_ID}" 2>/dev/null | \
         jq -r '.config.dhcp_gateway // empty' 2>/dev/null || true)
     if [[ -z "$_P6_GW" ]]; then
-        warn "  Cannot determine subscriber gateway IP — skipping Step 17"
+        warn "  Cannot determine subscriber gateway IP — skipping Step 18"
         return
     fi
     info "  Subscriber gateway (DNS proxy IP): ${_P6_GW}"
@@ -52,7 +52,7 @@ phase6_dns_ping() {
     _DISABLE_OUT=$(fastrg_grpc set_dns_proxy "$USER_ID" false 2>&1 || true)
     _DISABLE_STATUS=$(printf '%s' "$_DISABLE_OUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('status',''))" 2>/dev/null || true)
     if [[ "$_DISABLE_STATUS" != "ok" ]]; then
-        fail "Step 17: DNS proxy toggle" "SetDnsProxy(false) failed: ${_DISABLE_OUT}"
+        fail "Step 18: DNS proxy toggle" "SetDnsProxy(false) failed: ${_DISABLE_OUT}"
         return
     fi
     info "  SetDnsProxy(false) → ok"
@@ -67,10 +67,10 @@ phase6_dns_ping() {
     info "  dig output (proxy OFF): '${_DIG_OFF}'"
 
     if printf '%s' "$_DIG_OFF" | grep -qF "${WAN_IP}"; then
-        fail "Step 17: DNS proxy toggle — proxy OFF" \
+        fail "Step 18: DNS proxy toggle — proxy OFF" \
             "fastrg DNS at ${_P6_GW} returned ${WAN_IP} even though DNS proxy is disabled"
     else
-        pass "Step 17: DNS proxy toggle — proxy OFF" \
+        pass "Step 18: DNS proxy toggle — proxy OFF" \
             "fastrg DNS returned no answer for www.fastrg.org (proxy off)"
     fi
 
@@ -79,7 +79,7 @@ phase6_dns_ping() {
     _ENABLE_OUT=$(fastrg_grpc set_dns_proxy "$USER_ID" true 2>&1 || true)
     _ENABLE_STATUS=$(printf '%s' "$_ENABLE_OUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('status',''))" 2>/dev/null || true)
     if [[ "$_ENABLE_STATUS" != "ok" ]]; then
-        fail "Step 17: DNS proxy toggle" "SetDnsProxy(true) failed: ${_ENABLE_OUT}"
+        fail "Step 18: DNS proxy toggle" "SetDnsProxy(true) failed: ${_ENABLE_OUT}"
         return
     fi
     info "  SetDnsProxy(true) → ok"
@@ -95,13 +95,13 @@ phase6_dns_ping() {
     done
 
     if printf '%s' "$_PING_ON" | grep -q "from ${WAN_IP}"; then
-        pass "Step 17: DNS proxy toggle — proxy ON" "Received ICMP reply from ${WAN_IP} after re-enabling DNS proxy"
+        pass "Step 18: DNS proxy toggle — proxy ON" "Received ICMP reply from ${WAN_IP} after re-enabling DNS proxy"
     else
         if printf '%s' "$_PING_ON" | grep -qE "PING|bytes from"; then
             _REPLY_IP=$(printf '%s' "$_PING_ON" | grep -oE "from [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" | head -1 | awk '{print $2}')
-            fail "Step 17: DNS proxy toggle — proxy ON" "Got reply from ${_REPLY_IP:-unknown}, expected ${WAN_IP}"
+            fail "Step 18: DNS proxy toggle — proxy ON" "Got reply from ${_REPLY_IP:-unknown}, expected ${WAN_IP}"
         else
-            fail "Step 17: DNS proxy toggle — proxy ON" "No ICMP reply received after re-enabling DNS proxy"
+            fail "Step 18: DNS proxy toggle — proxy ON" "No ICMP reply received after re-enabling DNS proxy"
         fi
     fi
 }

@@ -44,6 +44,7 @@ service FastrgService {
   rpc GetDnsStaticRecords(DnsStaticRequest) returns(DnsStaticReply) {}
   rpc FlushDnsCache(DnsCacheFlushRequest) returns(DnsCacheFlushReply) {}
   rpc SetDnsProxy(SetDnsProxyRequest) returns(SetDnsProxyReply) {}
+  rpc SetTcpConntrack(SetTcpConntrackRequest) returns(SetTcpConntrackReply) {}
 }
 
 message ConfigRequest {
@@ -293,5 +294,14 @@ message SetDnsProxyRequest {
 }
 
 message SetDnsProxyReply {
+  string status = 1;
+}
+
+message SetTcpConntrackRequest {
+  uint32 user_id = 1;
+  bool enable = 2;
+}
+
+message SetTcpConntrackReply {
   string status = 1;
 }
