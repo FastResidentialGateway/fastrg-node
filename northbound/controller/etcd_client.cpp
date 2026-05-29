@@ -940,6 +940,7 @@ public:
             cfg["dhcp_subnet"] = std::string(config->dhcp_subnet);
             cfg["dhcp_gateway"] = std::string(config->dhcp_gateway);
             cfg["dns_proxy_enable"] = (config->dns_proxy_enable == TRUE);
+            cfg["tcp_conntrack_enable"] = (config->tcp_conntrack_enable == TRUE);
 
             // Serialize port-mapping array
             if (config->port_mapping_count > 0 && config->port_mappings != NULL) {
@@ -1117,6 +1118,18 @@ public:
                     output->config.dns_proxy_enable = (v.asString() == "false") ? FALSE : TRUE;
                 else if (v.isIntegral())
                     output->config.dns_proxy_enable = v.asInt() != 0 ? TRUE : FALSE;
+            }
+
+            // tcp_conntrack_enable defaults to TRUE when absent in etcd
+            output->config.tcp_conntrack_enable = TRUE;
+            if (config_obj.isMember("tcp_conntrack_enable")) {
+                const Json::Value& v = config_obj["tcp_conntrack_enable"];
+                if (v.isBool())
+                    output->config.tcp_conntrack_enable = v.asBool() ? TRUE : FALSE;
+                else if (v.isString())
+                    output->config.tcp_conntrack_enable = (v.asString() == "false") ? FALSE : TRUE;
+                else if (v.isIntegral())
+                    output->config.tcp_conntrack_enable = v.asInt() != 0 ? TRUE : FALSE;
             }
 
             // Parse port-mapping array (dynamic allocation — caller must call hsi_config_free_port_mappings)
@@ -1962,6 +1975,18 @@ private:
                     config->dns_proxy_enable = (v.asString() == "false") ? FALSE : TRUE;
                 else if (v.isIntegral())
                     config->dns_proxy_enable = v.asInt() != 0 ? TRUE : FALSE;
+            }
+
+            // tcp_conntrack_enable defaults to TRUE when the field is absent in etcd
+            config->tcp_conntrack_enable = TRUE;
+            if (config_obj.isMember("tcp_conntrack_enable")) {
+                const Json::Value& v = config_obj["tcp_conntrack_enable"];
+                if (v.isBool())
+                    config->tcp_conntrack_enable = v.asBool() ? TRUE : FALSE;
+                else if (v.isString())
+                    config->tcp_conntrack_enable = (v.asString() == "false") ? FALSE : TRUE;
+                else if (v.isIntegral())
+                    config->tcp_conntrack_enable = v.asInt() != 0 ? TRUE : FALSE;
             }
 
             // Parse port-mapping array (dynamic allocation — caller must call hsi_config_free_port_mappings)

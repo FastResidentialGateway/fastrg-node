@@ -32,6 +32,7 @@ void fastrg_grpc_get_dns_cache(U16 user_id);
 void fastrg_grpc_get_dns_static(U16 user_id);
 void fastrg_grpc_flush_dns_cache(U16 user_id);
 void fastrg_grpc_set_dns_proxy(U16 user_id, bool enable);
+void fastrg_grpc_set_tcp_conntrack(U16 user_id, bool enable);
 
 #ifdef __cplusplus
 }
