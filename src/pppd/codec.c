@@ -825,6 +825,63 @@ STATUS build_code_reject(__attribute__((unused)) unsigned char *buffer, ppp_ccb_
     return SUCCESS;
 }
 
+void build_proto_reject(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb,
+    U16 rejected_proto, const U8 *rejected_info, U16 rejected_info_len)
+{
+    FastRG_t             *fastrg_ccb   = s_ppp_ccb->fastrg_ccb;
+    struct rte_ether_hdr *eth_hdr      = (struct rte_ether_hdr *)buffer;
+    vlan_header_t        *vlan_header  = (vlan_header_t *)(eth_hdr + 1);
+    pppoe_header_t       *pppoe_header = (pppoe_header_t *)(vlan_header + 1);
+    ppp_payload_t        *ppp_payload  = (ppp_payload_t *)(pppoe_header + 1);
+    ppp_header_t         *ppp_hdr      = (ppp_header_t *)(ppp_payload + 1);
+    U16                  *rej_proto    = (U16 *)(ppp_hdr + 1);
+    U8                   *rej_info     = (U8 *)(rej_proto + 1);
+
+    /* L2 / VLAN / PPPoE — mirror build_terminate_request so we can send
+     * without relying on stale LCP context. */
+    rte_ether_addr_copy(&fastrg_ccb->nic_info.hsi_wan_src_mac, &eth_hdr->src_addr);
+    rte_ether_addr_copy(&s_ppp_ccb->PPP_dst_mac, &eth_hdr->dst_addr);
+    eth_hdr->ether_type = rte_cpu_to_be_16(VLAN);
+
+    vlan_header->tci_union.tci_struct.priority = 0;
+    vlan_header->tci_union.tci_struct.DEI      = 0;
+    vlan_header->tci_union.tci_struct.vlan_id  = rte_atomic16_read(&s_ppp_ccb->vlan_id);
+    vlan_header->next_proto                    = rte_cpu_to_be_16(ETH_P_PPP_SES);
+    vlan_header->tci_union.tci_value           = rte_cpu_to_be_16(vlan_header->tci_union.tci_value);
+
+    pppoe_header->ver_type   = VER_TYPE;
+    pppoe_header->code       = 0;
+    pppoe_header->session_id = s_ppp_ccb->session_id;
+
+    /* Protocol-Reject itself rides on LCP. */
+    ppp_payload->ppp_protocol = rte_cpu_to_be_16(LCP_PROTOCOL);
+    ppp_hdr->code             = PROTO_REJECT;
+    ppp_hdr->identifier       = ((rand() % 254) + 1);
+
+    /* Rejected-Protocol (2B, network order). */
+    *rej_proto = rte_cpu_to_be_16(rejected_proto);
+
+    /* Truncate Rejected-Information so the whole frame fits ETH_MTU. */
+    U16 overhead = sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) +
+                   sizeof(pppoe_header_t)       + sizeof(ppp_payload_t) +
+                   sizeof(ppp_header_t)         + sizeof(U16);
+    U16 max_info = (overhead < ETH_MTU) ? (ETH_MTU - overhead) : 0;
+    U16 copy_len = RTE_MIN(rejected_info_len, max_info);
+    if (copy_len > 0 && rejected_info != NULL)
+        rte_memcpy(rej_info, rejected_info, copy_len);
+
+    U16 ppp_len   = sizeof(ppp_header_t) + sizeof(U16) + copy_len;
+    U16 pppoe_len = ppp_len + sizeof(ppp_payload_t);
+    ppp_hdr->length      = rte_cpu_to_be_16(ppp_len);
+    pppoe_header->length = rte_cpu_to_be_16(pppoe_len);
+    *mulen = pppoe_len + sizeof(struct rte_ether_hdr) +
+             sizeof(vlan_header_t) + sizeof(pppoe_header_t);
+
+    FastRG_LOG(DBG, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+        "User %" PRIu16 " Protocol-Reject built for 0x%04x (rej_info=%u).",
+        s_ppp_ccb->user_num, rejected_proto, copy_len);
+}
+
 void build_auth_request_pap(unsigned char *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb)
 {
     FastRG_t             *fastrg_ccb = s_ppp_ccb->fastrg_ccb;
@@ -1145,6 +1202,11 @@ STATUS decode_ppp(ppp_payload_t *ppp_payload, U16 *event, ppp_ccb_t *s_ppp_ccb)
         rte_memcpy(s_ppp_ccb->ppp_phase[0].ppp_options, ppp_hdr+1, ppp_hdr_len-sizeof(ppp_header_t));
         if (decode_lcp(ppp_hdr_len, event, tim, s_ppp_ccb) == ERROR)
             return ERROR;
+        /* Ensure the LCP FSM table is used to handle this event. Without this,
+         * LCP packets (e.g. ECHO_REQUEST) arriving during NCP negotiation would
+         * be dispatched to the NCP FSM, which has no handler for them and would
+         * silently discard the packet — leaving the peer waiting. */
+        s_ppp_ccb->cp = 0;
     } else if (ppp_payload->ppp_protocol == rte_cpu_to_be_16(PAP_PROTOCOL)) {
         /* in AUTH phase, if the packet is not what we want, then send nak packet 
             and just close process */
@@ -1225,6 +1287,25 @@ STATUS decode_ppp(ppp_payload_t *ppp_payload, U16 *event, ppp_ccb_t *s_ppp_ccb)
             FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " auth fail.", s_ppp_ccb->user_num);
             return SUCCESS;
         }
+    } else if (ppp_payload->ppp_protocol == rte_cpu_to_be_16(MPLSCP_PROTOCOL) ||
+               ppp_payload->ppp_protocol == rte_cpu_to_be_16(IPV6CP_PROTOCOL)) {
+        /* We don't implement MPLSCP/IPV6CP. Reply with an LCP Protocol-Reject
+         * (RFC 1661 §5.7) so the peer stops retransmitting; otherwise it would
+         * keep retrying these CPs and block the session from making progress
+         * — including blocking DisconnectHsi from completing cleanly. */
+        U8  reject_buf[PPP_MSG_BUF_LEN];
+        U16 reject_len = 0;
+        U16 rejected_proto = rte_be_to_cpu_16(ppp_payload->ppp_protocol);
+
+        build_proto_reject(reject_buf, &reject_len, s_ppp_ccb,
+            rejected_proto, (const U8 *)ppp_hdr, ppp_hdr_len);
+        wan_ctrl_tx(fastrg_ccb, s_ppp_ccb->user_num - 1, reject_buf, reject_len);
+        FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+            "User %" PRIu16 " sent Protocol-Reject for 0x%04x.",
+            s_ppp_ccb->user_num, rejected_proto);
+        /* Stateless response: return ERROR so ppp_process() short-circuits
+         * before PPP_FSM is invoked with an unset event. */
+        return ERROR;
     } else {
         FastRG_LOG(WARN, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " recv unknown PPP protocol.", s_ppp_ccb->user_num);
         return ERROR;

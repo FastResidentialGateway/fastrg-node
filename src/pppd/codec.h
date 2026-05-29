@@ -111,6 +111,33 @@ void build_terminate_ack(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb);
 STATUS build_code_reject(U8 *buffer, ppp_ccb_t *s_ppp_ccb, U16 *mulen);
 
 /**
+ * @fn build_proto_reject
+ *
+ * @brief Build an LCP Protocol-Reject (RFC 1661 §5.7). Sent in response to a
+ *        PPP packet whose Protocol field we don't support (e.g. MPLSCP,
+ *        IPV6CP) so the peer stops re-transmitting it. Protocol-Reject is
+ *        stateless — caller must not drive the FSM off the rejected packet.
+ *
+ * @param buffer
+ *      Frame buffer to fill (eth + vlan + pppoe + lcp + body).
+ * @param mulen
+ *      [out] Total bytes written into buffer.
+ * @param s_ppp_ccb
+ *      Subscriber control block — supplies MAC / VLAN / session.
+ * @param rejected_proto
+ *      PPP protocol number of the rejected packet (host order).
+ * @param rejected_info
+ *      Pointer to the rejected PPP information field
+ *      (starts at the inner ppp_header_t).
+ * @param rejected_info_len
+ *      Bytes available at rejected_info; truncated to MRU.
+ *
+ * @return void
+ */
+void build_proto_reject(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb,
+    U16 rejected_proto, const U8 *rejected_info, U16 rejected_info_len);
+
+/**
  * @fn build_terminate_request
  *
  * @brief For build PPP terminate request, either in NCP or LCP phase.

@@ -333,6 +333,12 @@ cleanup_fastrg() {
     _cleanup_new_subscriber_config 2>/dev/null || true
     _cleanup_phase9_user 2>/dev/null || true
 
+    if [[ "${_FASTRG_STARTED_BY_SCRIPT:-0}" -eq 1 ]]; then
+        info "Stopping fastrg (started by this script)..."
+        ssh_node "pkill -x fastrg 2>/dev/null || true" || true
+        info "fastrg stopped."
+    fi
+
     # Restore USER_ID subscriber to 'enabled' state so the next test run starts clean.
     # Phase9's DisconnectHsi may have left the subscriber in 'disabling'/'disabled'.
     if [[ -n "${USER_ID:-}" ]] && [[ -n "${NODE_UUID:-}" ]] && [[ -n "${ETCD_ENDPOINT:-}" ]]; then
@@ -341,15 +347,12 @@ cleanup_fastrg() {
             2>/dev/null | jq -r '.metadata.enableStatus // empty' 2>/dev/null || true)
         if [[ "$_cur_es" != "enabled" ]]; then
             info "Cleanup: restoring USER_ID=${USER_ID} enableStatus to 'enabled' (was '${_cur_es:-unknown}')..."
-            fastrg_grpc connect_hsi "${USER_ID}" >/dev/null 2>&1 || true
-            sleep 2
+            ssh_node "ETCDCTL_API=3 etcdctl --endpoints=${ETCD_ENDPOINT} \
+                get --print-value-only configs/${NODE_UUID}/hsi/${USER_ID} 2>/dev/null \
+                | jq -c '.metadata.enableStatus = \"enabled\"' \
+                | ETCDCTL_API=3 etcdctl --endpoints=${ETCD_ENDPOINT} \
+                    put configs/${NODE_UUID}/hsi/${USER_ID}" || true
         fi
-    fi
-
-    if [[ "${_FASTRG_STARTED_BY_SCRIPT:-0}" -eq 1 ]]; then
-        info "Stopping fastrg (started by this script)..."
-        ssh_node "pkill -x fastrg 2>/dev/null || true" || true
-        info "fastrg stopped."
     fi
 
     info "Cleanup complete."
