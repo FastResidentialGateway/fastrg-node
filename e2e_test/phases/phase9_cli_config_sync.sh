@@ -158,7 +158,9 @@ phase9_cli_config_sync() {
 
     # Expand subscriber count and apply baseline config for the new user
     info "Expanding subscriber count to ${_P9_USER_ID} and seeding baseline config..."
-    fastrg_grpc set_subscriber_count "${_P9_USER_ID}" >/dev/null 2>&1 || true
+    local _sc_result
+    _sc_result=$(fastrg_grpc set_subscriber_count "${_P9_USER_ID}" 2>&1 || true)
+    info "result: ${_sc_result:-<empty>}"
     sleep 2
     fastrg_grpc apply_config \
         "${_P9_USER_ID}" "${P9_VLAN}" "${P9_ACCOUNT}" "${P9_PASSWORD}" \

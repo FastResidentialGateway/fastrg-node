@@ -887,6 +887,99 @@ void test_build_auth_ack_pap(FastRG_t *fastrg_ccb)
         "build_auth_ack_pap packet content", "packet content mismatch");
 }
 
+void test_build_proto_reject(FastRG_t *fastrg_ccb)
+{
+    printf("\nTesting build_proto_reject function:\n");
+    printf("=========================================\n\n");
+
+    U8  buffer[1600] = {0};
+    U16 mulen         = 0;
+
+    ppp_ccb_t s_ppp_ccb = {
+        .user_num  = 1,
+        .vlan_id   = {.cnt = 2},
+        .PPP_dst_mac = (struct rte_ether_addr){
+            .addr_bytes = {0x74, 0x4d, 0x28, 0x8d, 0x00, 0x31},
+        },
+        .session_id  = htons(0x000a),
+        .fastrg_ccb  = fastrg_ccb,
+    };
+
+    /* Test 1: MPLSCP reject, no rejected_info */
+    printf("Test 1: \"%s\"\n", "build_proto_reject() MPLSCP, no info");
+    build_proto_reject(buffer, &mulen, &s_ppp_ccb, MPLSCP_PROTOCOL, NULL, 0);
+    /* overhead = eth(14) + vlan(4) + pppoe(6) + ppp_payload(2) + ppp_hdr(4) + rej_proto(2) = 32 */
+    TEST_ASSERT(mulen == 32, "build_proto_reject MPLSCP mulen",
+        "expected 32, got %u", mulen);
+    TEST_ASSERT(memcmp(buffer, s_ppp_ccb.PPP_dst_mac.addr_bytes, 6) == 0,
+        "build_proto_reject MPLSCP dst MAC", "dst MAC mismatch");
+    TEST_ASSERT(memcmp(buffer + 6, fastrg_ccb->nic_info.hsi_wan_src_mac.addr_bytes, 6) == 0,
+        "build_proto_reject MPLSCP src MAC", "src MAC mismatch");
+    TEST_ASSERT(*(U16 *)(buffer + 12) == htons(VLAN),
+        "build_proto_reject MPLSCP ether_type", "expected 0x8100, got 0x%04x", ntohs(*(U16 *)(buffer + 12)));
+    TEST_ASSERT(*(U16 *)(buffer + 14) == htons(0x0002),
+        "build_proto_reject MPLSCP vlan TCI", "expected 0x0002, got 0x%04x", ntohs(*(U16 *)(buffer + 14)));
+    TEST_ASSERT(*(U16 *)(buffer + 16) == htons(ETH_P_PPP_SES),
+        "build_proto_reject MPLSCP next_proto", "expected 0x8864, got 0x%04x", ntohs(*(U16 *)(buffer + 16)));
+    TEST_ASSERT(buffer[18] == 0x11 && buffer[19] == 0x00,
+        "build_proto_reject MPLSCP pppoe ver/code", "expected ver=0x11 code=0x00");
+    TEST_ASSERT(*(U16 *)(buffer + 20) == htons(0x000a),
+        "build_proto_reject MPLSCP session_id", "expected 0x000a, got 0x%04x", ntohs(*(U16 *)(buffer + 20)));
+    /* pppoe_len = ppp_payload(2) + ppp_hdr(4) + rej_proto(2) + info(0) = 8 */
+    TEST_ASSERT(*(U16 *)(buffer + 22) == htons(8),
+        "build_proto_reject MPLSCP pppoe length", "expected 8, got %u", ntohs(*(U16 *)(buffer + 22)));
+    TEST_ASSERT(*(U16 *)(buffer + 24) == htons(LCP_PROTOCOL),
+        "build_proto_reject MPLSCP ppp protocol", "expected LCP 0xc021, got 0x%04x", ntohs(*(U16 *)(buffer + 24)));
+    TEST_ASSERT(buffer[26] == PROTO_REJECT,
+        "build_proto_reject MPLSCP ppp code", "expected PROTO_REJECT 0x08, got 0x%02x", buffer[26]);
+    /* ppp_len = ppp_hdr(4) + rej_proto(2) + info(0) = 6 */
+    TEST_ASSERT(*(U16 *)(buffer + 28) == htons(6),
+        "build_proto_reject MPLSCP ppp length", "expected 6, got %u", ntohs(*(U16 *)(buffer + 28)));
+    TEST_ASSERT(*(U16 *)(buffer + 30) == htons(MPLSCP_PROTOCOL),
+        "build_proto_reject MPLSCP rejected_proto", "expected 0x8281, got 0x%04x", ntohs(*(U16 *)(buffer + 30)));
+
+    /* Test 2: IPV6CP reject with 4-byte info */
+    printf("Test 2: \"%s\"\n", "build_proto_reject() IPV6CP, 4-byte info");
+    U8 rej_info[] = {0xAA, 0xBB, 0xCC, 0xDD};
+    memset(buffer, 0, sizeof(buffer));
+    mulen = 0;
+    build_proto_reject(buffer, &mulen, &s_ppp_ccb, IPV6CP_PROTOCOL, rej_info, sizeof(rej_info));
+    /* mulen = 32 (overhead) + 4 (info) = 36 */
+    TEST_ASSERT(mulen == 36, "build_proto_reject IPV6CP mulen",
+        "expected 36, got %u", mulen);
+    /* pppoe_len = 2 + 4 + 2 + 4 = 12 */
+    TEST_ASSERT(*(U16 *)(buffer + 22) == htons(12),
+        "build_proto_reject IPV6CP pppoe length", "expected 12, got %u", ntohs(*(U16 *)(buffer + 22)));
+    TEST_ASSERT(buffer[26] == PROTO_REJECT,
+        "build_proto_reject IPV6CP ppp code", "expected PROTO_REJECT 0x08, got 0x%02x", buffer[26]);
+    /* ppp_len = 4 + 2 + 4 = 10 */
+    TEST_ASSERT(*(U16 *)(buffer + 28) == htons(10),
+        "build_proto_reject IPV6CP ppp length", "expected 10, got %u", ntohs(*(U16 *)(buffer + 28)));
+    TEST_ASSERT(*(U16 *)(buffer + 30) == htons(IPV6CP_PROTOCOL),
+        "build_proto_reject IPV6CP rejected_proto", "expected 0x8057, got 0x%04x", ntohs(*(U16 *)(buffer + 30)));
+    TEST_ASSERT(memcmp(buffer + 32, rej_info, sizeof(rej_info)) == 0,
+        "build_proto_reject IPV6CP info copied", "rejected_info bytes mismatch");
+
+    /* Test 3: MTU truncation — rejected_info_len > max_info should be clamped */
+    printf("Test 3: \"%s\"\n", "build_proto_reject() MTU truncation");
+    U8 big_info[2000];
+    memset(big_info, 0xAB, sizeof(big_info));
+    memset(buffer, 0, sizeof(buffer));
+    mulen = 0;
+    build_proto_reject(buffer, &mulen, &s_ppp_ccb, MPLSCP_PROTOCOL, big_info, sizeof(big_info));
+    /* max_info = ETH_MTU - 32 = 1468; mulen capped at ETH_MTU = 1500 */
+    TEST_ASSERT(mulen == ETH_MTU, "build_proto_reject MTU truncated mulen",
+        "expected %u (ETH_MTU), got %u", ETH_MTU, mulen);
+    /* pppoe_len = 2 + 4 + 2 + 1468 = 1476 */
+    TEST_ASSERT(*(U16 *)(buffer + 22) == htons(1476),
+        "build_proto_reject MTU truncated pppoe length", "expected 1476, got %u", ntohs(*(U16 *)(buffer + 22)));
+    /* ppp_len = 4 + 2 + 1468 = 1474 */
+    TEST_ASSERT(*(U16 *)(buffer + 28) == htons(1474),
+        "build_proto_reject MTU truncated ppp length", "expected 1474, got %u", ntohs(*(U16 *)(buffer + 28)));
+    TEST_ASSERT(buffer[32] == 0xAB,
+        "build_proto_reject MTU truncated info first byte", "expected 0xAB, got 0x%02x", buffer[32]);
+}
+
 void test_ppp_codec(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 {
     printf("\n");
@@ -908,6 +1001,7 @@ void test_ppp_codec(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_build_echo_reply(fastrg_ccb);
     test_build_auth_request_pap(fastrg_ccb);
     test_build_auth_ack_pap(fastrg_ccb);
+    test_build_proto_reject(fastrg_ccb);
 
     printf("\n");
     printf("╔════════════════════════════════════════════════════════════╗\n");
