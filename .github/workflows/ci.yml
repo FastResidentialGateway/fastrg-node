@@ -1,27 +1,113 @@
-name: FastRG Node ci
+name: FastRG Node CI
+
 on:
-  push: 
-    branches: 
-      - master
-      - ci-dev
+  push:
+    branches: [master, ci-dev]
   pull_request:
-    branches: [ "master" ]
+    branches: [master]
 
 jobs:
+  prepare-deps:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set lowercase owner
+        run: echo "OWNER=$(echo ${{ github.repository_owner }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+
+      - name: Compute builder hash
+        run: |
+          echo "BUILDER_HASH=$( (cat Dockerfile-deps essentials.sh boot.sh; git submodule status) | sha256sum | cut -c1-16)" >> $GITHUB_ENV
+
+      - name: Set image output
+        id: meta
+        run: echo "image=ghcr.io/${{ env.OWNER }}/fastrg-builder:${{ env.BUILDER_HASH }}" >> $GITHUB_OUTPUT
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check if builder image exists
+        id: check
+        run: |
+          docker manifest inspect ${{ steps.meta.outputs.image }} \
+            && echo "exists=true" >> $GITHUB_OUTPUT \
+            || echo "exists=false" >> $GITHUB_OUTPUT
+
+      - name: Build and push builder image
+        if: steps.check.outputs.exists == 'false'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile-deps
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image }}
+            ghcr.io/${{ env.OWNER }}/fastrg-builder:latest
+          build-args: |
+            FASTRG_REF=${{ github.ref_name }}
   build:
+    needs: prepare-deps
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    container:
+      image: ${{ needs.prepare-deps.outputs.image }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
-    - uses: actions/checkout@v6
-    - name: Setup build environment
-      uses: ./.github/actions/setup-build-env
-    - run: sudo ${{ github.workspace }}/boot.sh
-    - run: sudo docker build --no-cache -t fastrg:latest .
+      - name: Fix git ownership
+        run: git config --global --add safe.directory $GITHUB_WORKSPACE
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build fastrg
+        run: $GITHUB_WORKSPACE/boot.sh --skip-env
+
+  docker-build:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build --no-cache -t fastrg:latest .
+
   test:
+    needs: prepare-deps
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    container:
+      image: ${{ needs.prepare-deps.outputs.image }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
-    - uses: actions/checkout@v6
-    - name: Setup build environment
-      uses: ./.github/actions/setup-build-env
-    - run: sudo ${{ github.workspace }}/boot.sh
-    - run: cd ${{ github.workspace }} && sudo make test
-    - run: sudo ${{ github.workspace }}/northbound/controller/run_tests.sh
+      - name: Fix git ownership
+        run: git config --global --add safe.directory $GITHUB_WORKSPACE
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build & test
+        run: cd $GITHUB_WORKSPACE && ./boot.sh --skip-env && make test
+
+      - name: Controller tests
+        run: $GITHUB_WORKSPACE/northbound/controller/run_tests.sh

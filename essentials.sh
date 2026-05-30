@@ -37,7 +37,6 @@ elif [[ "$OS_ID" == "ubuntu" ]]; then
     apt-get update -y
     apt-get install -y \
         libnuma-dev \
-        linux-headers-$(uname -r) \
         git gcc make libtool-bin pkg-config pciutils iproute2 \
         kmod vim net-tools libconfig-dev libjsoncpp-dev \
         cmake libcurl4-openssl-dev libssl-dev \
