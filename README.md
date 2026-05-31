@@ -61,12 +61,21 @@ Then
 e.g.
 
 	# fastrg -l 0-3 -n 4 -a 0000:04:00.0 -a 0000:08:00.0
+
 For 4 more CPU cores and PPPoE RSS support with Intel E800 and X700 series NICs
+
 	# fastrg -l 0-11 -n 4 -a 0000:04:00.0 -a 0000:08:00.0 
 
 For using FastRG system data plane in Docker,
 
 	# docker build --no-cache -t fastrg:latest .
+
+Or
+
+    # docker pull ghcr.io/fastresidentialgateway/fastrg-node:latest
+
+Then
+
 	# mount -t hugetlbfs -o pagesize=1G none /dev/hugepages1G
 	# docker run -d --net=host --privileged -v /sys/bus/pci/devices:/sys/bus/pci/devices \
 	-v /sys/kernel/mm/hugepages:/sys/kernel/mm/hugepages -v /sys/devices/system/node:/sys/devices/system/node -v /dev:/dev -v /etc/fastrg:/etc/fastrg fastrg:latest fastrg -l 0-5 -n 4 -a 0000:04:00.0 -a 0000:08:00.0
