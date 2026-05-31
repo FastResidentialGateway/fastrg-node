@@ -570,7 +570,15 @@ void fastrg_stop()
     #endif
     //rte_trace_save();
     FastRG_LOG(INFO, fastrg_ccb.fp, NULL, NULL, "bye!");
-    fclose(fastrg_ccb.fp);
+    /* DPDK still holds fastrg_ccb.fp as its log stream (set via
+     * rte_openlog_stream() during init). rte_eal_cleanup() runs after
+     * fastrg_stop() returns and may emit logs (e.g. i40e "Invalid memory"
+     * during PCI device uninit). Detach the stream back to stderr before
+     * closing the file, otherwise DPDK writes to a closed FILE* and crashes
+     * with "free(): invalid pointer" in _IO_free_backup_area. */
+    //rte_openlog_stream(stderr);
+    if (fastrg_ccb.fp != stdout)
+        fclose(fastrg_ccb.fp);
     grpc_shutdown();
     // Free allocated strings
     if (fastrg_ccb.eal_args) free(fastrg_ccb.eal_args);
@@ -815,8 +823,12 @@ int fastrg_start(int argc, char **argv)
 
 err:
     close(sfd);
-    if (fastrg_ccb.fp && fastrg_ccb.fp != stdout)
+    if (fastrg_ccb.fp && fastrg_ccb.fp != stdout) {
+        /* Detach DPDK log stream before closing fp; rte_eal_cleanup() below
+         * may still log and would otherwise write to a closed FILE*. */
+        rte_openlog_stream(stderr);
         fclose(fastrg_ccb.fp);
+    }
     if (fastrg_ccb.eal_args) free(fastrg_ccb.eal_args);
     if (fastrg_ccb.unix_sock_path) free(fastrg_ccb.unix_sock_path);
     if (fastrg_ccb.node_grpc_ip_port) free(fastrg_ccb.node_grpc_ip_port);
