@@ -657,7 +657,7 @@ int fastrg_start(int argc, char **argv)
     /* init users and ports info */
     /* vlan 1 is mapped to index 0. However, vlan 1 is not assigned to any user by default, 
     so index 0 is not used */
-    fastrg_ccb.vlan_userid_map = fastrg_malloc(rte_atomic16_t, MAX_VLAN_ID, 0);
+    fastrg_ccb.vlan_userid_map = fastrg_malloc(rte_atomic16_t, MAX_VLAN_ID * sizeof(rte_atomic16_t), 0);
     for(int i=0; i<MAX_VLAN_ID; i++)
         rte_atomic16_set(&fastrg_ccb.vlan_userid_map[i], INVALID_CCB_ID);
 
