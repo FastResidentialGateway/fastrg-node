@@ -127,5 +127,3 @@ jobs:
           file: Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
-          build-args: |
-            FASTRG_REF=${{ github.ref_name }}
