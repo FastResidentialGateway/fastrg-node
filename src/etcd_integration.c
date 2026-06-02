@@ -368,6 +368,10 @@ STATUS etcd_integration_start(FastRG_t *fastrg_ccb)
      * by the CLI/controller. The node only reads (watch) and, when offline, queues
      * CLI-originated writes for flush (slice 10). */
 
+    /* Load any offline config-write queue persisted from a previous session; the
+     * watchdog flushes it to etcd once etcd is reachable. */
+    etcd_client_queue_load();
+
     // Start etcd watching. Watch/reconcile events are delivered to fastrg_loop
     // via FastRG_t.etcd_event_q; only sync_request_callback is passed through.
     etcd_status_t status = etcd_client_start_watch(

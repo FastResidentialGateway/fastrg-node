@@ -78,28 +78,36 @@ grpc::Status FastRGNodeServiceImpl::ApplyConfig(::grpc::ServerContext* context, 
     // to preserve the existing desire_status instead of resetting it here.
     strncpy(hsi_config.desire_status, DESIRE_STATUS_DISCONNECT, sizeof(hsi_config.desire_status) - 1);
 
-    // Write the config to etcd to trigger etcd watcher (only if etcd is initialized)
-    if (etcd_client_is_initialized() && fastrg_ccb && fastrg_ccb->node_uuid) {
-        std::string user_id_str = std::to_string(user_id);
-        etcd_status_t s = etcd_client_put_hsi_config(fastrg_ccb->node_uuid,
-            user_id_str.c_str(), &hsi_config, "fastrg-node-grpc", NULL);
-        if (s != ETCD_SUCCESS) {
-            std::string err = "Failed to write configuration to etcd for user " + user_id_str;
-            cout << err << endl;
-            return grpc::Status(grpc::StatusCode::INTERNAL, err);
-        }
-        cout << "Configuration synced to etcd for user " << user_id_str << endl;
-    } else if (!etcd_client_is_initialized()) {
-        cout << "Etcd not initialized, directly applying config for user " << user_id << endl;
-        if (apply_hsi_config(fastrg_ccb, ccb_id, &hsi_config, FALSE) == ERROR) {
-            std::string err = "Error! Failed to apply configuration for user " + std::to_string(user_id);
-            cout << err << endl;
-            return grpc::Status(grpc::StatusCode::INTERNAL, err);
-        }
-    } else {
+    if (!fastrg_ccb || !fastrg_ccb->node_uuid) {
         std::string err = "Error! fastrg_ccb or node_uuid is NULL";
         cout << err << endl;
         return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+
+    // In SDN mode with etcd reachable, the node does NOT accept config via gRPC:
+    // the CLI must write through the controller or directly to etcd (point 1).
+    if (etcd_client_is_initialized() && etcd_client_is_connected()) {
+        std::string err = "etcd reachable (SDN mode); apply config via controller/etcd, not the node";
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, err);
+    }
+
+    // etcd unreachable (pure standalone, or SDN with etcd down): apply locally now.
+    std::string user_id_str = std::to_string(user_id);
+    if (apply_hsi_config(fastrg_ccb, ccb_id, &hsi_config, FALSE) == ERROR) {
+        std::string err = "Error! Failed to apply configuration for user " + user_id_str;
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+    // SDN mode but etcd is down: queue the write to flush to etcd on reconnect.
+    if (etcd_client_is_initialized()) {
+        if (etcd_client_queue_hsi_put(fastrg_ccb->node_uuid, user_id_str.c_str(),
+                &hsi_config, "fastrg-node-grpc") != ETCD_SUCCESS) {
+            std::string err = "Applied locally but failed to queue config for user " + user_id_str;
+            cout << err << endl;
+            return grpc::Status(grpc::StatusCode::INTERNAL, err);
+        }
+        cout << "Config applied locally and queued for etcd flush, user " << user_id_str << endl;
     }
 
     response->set_status("Configuration successful");
@@ -119,27 +127,34 @@ grpc::Status FastRGNodeServiceImpl::RemoveConfig(::grpc::ServerContext* context,
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, err);
     }
 
-    // After removing local HSI config, delete the config from etcd (only if etcd is initialized)
-    if (etcd_client_is_initialized() && fastrg_ccb && fastrg_ccb->node_uuid) {
-        std::string user_id_str = std::to_string(user_id);
-        etcd_status_t s = etcd_client_delete_hsi_config(fastrg_ccb->node_uuid, user_id_str.c_str(), NULL);
-        if (s != ETCD_SUCCESS) {
-            std::string err = "Failed to delete config from etcd for user " + user_id_str;
-            cout << err << endl;
-            return grpc::Status(grpc::StatusCode::INTERNAL, err);
-        }
-        cout << "Configuration removed from etcd for user " << user_id_str << endl;
-    } else if (!etcd_client_is_initialized()) {
-        cout << "Etcd not initialized, directly calling deletion for user " << user_id << endl;
-        if (remove_hsi_config(fastrg_ccb, ccb_id) == ERROR) {
-            std::string err = "Error! Failed to remove configuration for user " + std::to_string(user_id);
-            cout << err << endl;
-            return grpc::Status(grpc::StatusCode::INTERNAL, err);
-        }
-    } else {
+    if (!fastrg_ccb || !fastrg_ccb->node_uuid) {
         std::string err = "Error! fastrg_ccb or node_uuid is NULL";
         cout << err << endl;
         return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+
+    // SDN mode with etcd reachable: reject — CLI must go via controller/etcd.
+    if (etcd_client_is_initialized() && etcd_client_is_connected()) {
+        std::string err = "etcd reachable (SDN mode); remove config via controller/etcd, not the node";
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, err);
+    }
+
+    // etcd unreachable: remove locally now.
+    std::string user_id_str = std::to_string(user_id);
+    if (remove_hsi_config(fastrg_ccb, ccb_id) == ERROR) {
+        std::string err = "Error! Failed to remove configuration for user " + user_id_str;
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+    // SDN mode but etcd down: queue the delete to flush on reconnect.
+    if (etcd_client_is_initialized()) {
+        if (etcd_client_queue_hsi_delete(fastrg_ccb->node_uuid, user_id_str.c_str()) != ETCD_SUCCESS) {
+            std::string err = "Removed locally but failed to queue delete for user " + user_id_str;
+            cout << err << endl;
+            return grpc::Status(grpc::StatusCode::INTERNAL, err);
+        }
+        cout << "Config removed locally and queued for etcd flush, user " << user_id_str << endl;
     }
 
     response->set_status("Configuration removal successful");
@@ -159,30 +174,37 @@ grpc::Status FastRGNodeServiceImpl::SetSubscriberCount(::grpc::ServerContext* co
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, err);
     }
 
-    if (etcd_client_is_initialized() && fastrg_ccb && fastrg_ccb->node_uuid) {
-        std::string subscriber_count_str = std::to_string(subscriber_count);
-        etcd_status_t s = etcd_client_put_subscriber_count(fastrg_ccb->node_uuid, subscriber_count_str.c_str(), "fastrg-node-grpc");
-        if (s != ETCD_SUCCESS) {
-            std::string err = "Failed to write subscriber count to etcd: " + subscriber_count_str;
-            cout << err << endl;
-            return grpc::Status(grpc::StatusCode::INTERNAL, err);
-        }
-        cout << "Subscriber count synced to etcd: " << subscriber_count << endl;
-    } else if (!etcd_client_is_initialized()) {
-        cout << "Etcd not initialized, directly setting subscriber count to " << subscriber_count << endl;
-        // mock a listend etcd event
-        user_count_config_t config = {
-            .user_count = subscriber_count
-        };
-        if (user_count_changed_callback("", &config, HSI_ACTION_UPDATE, 0, fastrg_ccb) == ERROR) {
-            std::string err = "Error! Failed to set subscriber count to " + std::to_string(subscriber_count);
-            cout << err << endl;
-            return grpc::Status(grpc::StatusCode::INTERNAL, err);
-        }
-    } else {
+    if (!fastrg_ccb || !fastrg_ccb->node_uuid) {
         std::string err = "Error! fastrg_ccb or node_uuid is NULL";
         cout << err << endl;
         return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+
+    // SDN mode with etcd reachable: reject — CLI must go via controller/etcd.
+    if (etcd_client_is_initialized() && etcd_client_is_connected()) {
+        std::string err = "etcd reachable (SDN mode); set subscriber count via controller/etcd, not the node";
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, err);
+    }
+
+    // etcd unreachable: apply locally now.
+    std::string subscriber_count_str = std::to_string(subscriber_count);
+    user_count_config_t config = {
+        .user_count = subscriber_count
+    };
+    if (user_count_changed_callback("", &config, HSI_ACTION_UPDATE, 0, fastrg_ccb) == ERROR) {
+        std::string err = "Error! Failed to set subscriber count to " + subscriber_count_str;
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+    // SDN mode but etcd down: queue for flush on reconnect.
+    if (etcd_client_is_initialized()) {
+        if (etcd_client_queue_subscriber_count(fastrg_ccb->node_uuid,
+                subscriber_count_str.c_str(), "fastrg-node-grpc") != ETCD_SUCCESS) {
+            std::string err = "Applied locally but failed to queue subscriber count " + subscriber_count_str;
+            cout << err << endl;
+            return grpc::Status(grpc::StatusCode::INTERNAL, err);
+        }
     }
     cout << "Subscriber count set to " << subscriber_count << endl;
 

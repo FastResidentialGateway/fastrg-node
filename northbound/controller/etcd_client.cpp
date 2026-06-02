@@ -21,6 +21,10 @@
 #include <chrono>
 #include <vector>
 #include <mutex>
+#include <fstream>
+
+/* Persisted offline config-write queue (point 7). Path mirrors CONFIG_DIR_PATH. */
+#define CONFIG_QUEUE_PATH "/etc/fastrg/config_queue.json"
 
 class EtcdClientImpl {
 private:
@@ -30,8 +34,21 @@ private:
     std::unique_ptr<etcd::Watcher> dns_record_watcher_;
     std::atomic<bool> watch_running_;
     std::atomic<bool> shutting_down_{false};   // set once during teardown; blocks new reconnect attempts
+    std::atomic<bool> etcd_reachable_{false};  // last-known etcd reachability (watchdog/init)
     std::string node_uuid_;
     std::string etcd_endpoints_;
+
+    // Offline config-write queue (point 7). Entries are CLI config writes received
+    // via node gRPC while etcd is unreachable; flushed to etcd on reconnect.
+    struct QueueEntry {
+        std::string op;        // "put" | "delete"
+        std::string key;       // full etcd key
+        std::string value;     // JSON value (put only)
+        int64_t     ts_ms;     // enqueue time (ms since epoch), for timestamp merge
+        bool        preserve_desire;  // on flush, keep etcd's existing desire_status
+    };
+    std::vector<QueueEntry> config_queue_;
+    std::mutex config_queue_mutex_;
     
     // Watch/reconcile events are delivered to the control-plane loop via
     // FastRG_t.etcd_event_q; the apply-side callbacks are no longer stored
@@ -174,10 +191,16 @@ public:
                 // Test etcd reachability every tick. When reachable, reconcile local state
                 // with etcd so we don't have to wait for a reconnect to recover from missed events.
                 if (test_etcd_connection()) {
+                    etcd_reachable_ = true;
+                    // Flush any CLI writes that were queued while etcd was down,
+                    // BEFORE reconciling, so local (CLI-originated) intent is pushed
+                    // to etcd first and then reconciled back.
+                    flush_config_queue();
                     FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "Watchdog: etcd reachable, syncing state with etcd...");
                     sync_state_with_etcd();
                     update_watch_activity();
                 } else {
+                    etcd_reachable_ = false;
                     // Not reachable — preserve existing tolerance: only trigger reconnect when
                     // watchers have also been inactive longer than WATCH_TIMEOUT_SEC.
                     auto now = std::chrono::steady_clock::now();
@@ -216,10 +239,12 @@ public:
                 // Connection failed, but this might be expected if key doesn't exist
                 // For connection test, we just need to ensure we can communicate
                 if (response.error_code() == 100) { // Key not found is OK for connection test
+                    etcd_reachable_ = true;
                     return ETCD_SUCCESS;
                 }
                 return ETCD_ERROR;
             }
+            etcd_reachable_ = true;
             return ETCD_SUCCESS;
         } catch (const std::exception& e) {
             FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, 
@@ -954,6 +979,59 @@ public:
         return ETCD_CAS_CONFLICT;
     }
 
+    // Build the HSIConfigWithMetadata JSON string for an hsi_config_t. Shared by
+    // put_hsi_config and the offline queue so both serialize identically.
+    std::string build_hsi_config_json(const char* node_id, const hsi_config_t* config,
+        const char* updated_by) {
+        Json::Value root;
+        Json::Value cfg;
+        cfg["user_id"] = std::string(config->user_id);
+        cfg["vlan_id"] = std::string(config->vlan_id);
+        cfg["account_name"] = std::string(config->account_name);
+        cfg["password"] = std::string(config->password);
+        cfg["dhcp_addr_pool"] = std::string(config->dhcp_addr_pool);
+        cfg["dhcp_subnet"] = std::string(config->dhcp_subnet);
+        cfg["dhcp_gateway"] = std::string(config->dhcp_gateway);
+        cfg["dns_proxy_enable"] = (config->dns_proxy_enable == TRUE);
+        cfg["tcp_conntrack_enable"] = (config->tcp_conntrack_enable == TRUE);
+        // PPPoE desired state; default to disconnect when unset.
+        cfg["desire_status"] = (config->desire_status[0] != '\0')
+            ? std::string(config->desire_status) : std::string(DESIRE_STATUS_DISCONNECT);
+
+        if (config->port_mapping_count > 0 && config->port_mappings != NULL) {
+            Json::Value pm_array(Json::arrayValue);
+            for (int i = 0; i < config->port_mapping_count; i++) {
+                Json::Value entry;
+                entry["index"] = std::to_string(i);
+                entry["eport"] = std::to_string(config->port_mappings[i].eport);
+                entry["dip"] = std::string(config->port_mappings[i].dip);
+                entry["dport"] = std::to_string(config->port_mappings[i].dport);
+                pm_array.append(entry);
+            }
+            cfg["port-mapping"] = pm_array;
+        }
+
+        root["config"] = cfg;
+        Json::Value meta;
+        meta["node"] = std::string(node_id);
+        meta["resourceVersion"] = "";
+        meta["updatedBy"] = updated_by ? std::string(updated_by) : std::string("");
+        // enableStatus removed: observed PPPoE status is reported via Kafka, not etcd.
+
+        std::time_t now = std::time(nullptr);
+        std::tm tm{};
+        gmtime_r(&now, &tm);
+        std::ostringstream out;
+        out << std::put_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
+        meta["updatedAt"] = out.str();
+
+        root["metadata"] = meta;
+
+        Json::StreamWriterBuilder writer;
+        writer["indentation"] = "";
+        return Json::writeString(writer, root);
+    }
+
     // Put HSI config into etcd under configs/{nodeId}/hsi/{userId}
     etcd_status_t put_hsi_config(const char* node_id, const char* user_id,
         const hsi_config_t* config, const char* updated_by,
@@ -965,55 +1043,7 @@ public:
             ss << "configs/" << node_id << "/hsi/" << user_id;
             std::string key = ss.str();
 
-            Json::Value root;
-            Json::Value cfg;
-            cfg["user_id"] = std::string(config->user_id);
-            cfg["vlan_id"] = std::string(config->vlan_id);
-            cfg["account_name"] = std::string(config->account_name);
-            cfg["password"] = std::string(config->password);
-            cfg["dhcp_addr_pool"] = std::string(config->dhcp_addr_pool);
-            cfg["dhcp_subnet"] = std::string(config->dhcp_subnet);
-            cfg["dhcp_gateway"] = std::string(config->dhcp_gateway);
-            cfg["dns_proxy_enable"] = (config->dns_proxy_enable == TRUE);
-            cfg["tcp_conntrack_enable"] = (config->tcp_conntrack_enable == TRUE);
-            // PPPoE desired state; default to disconnect when unset.
-            cfg["desire_status"] = (config->desire_status[0] != '\0')
-                ? std::string(config->desire_status) : std::string(DESIRE_STATUS_DISCONNECT);
-
-            // Serialize port-mapping array
-            if (config->port_mapping_count > 0 && config->port_mappings != NULL) {
-                Json::Value pm_array(Json::arrayValue);
-                for (int i = 0; i < config->port_mapping_count; i++) {
-                    Json::Value entry;
-                    entry["index"] = std::to_string(i);
-                    entry["eport"] = std::to_string(config->port_mappings[i].eport);
-                    entry["dip"] = std::string(config->port_mappings[i].dip);
-                    entry["dport"] = std::to_string(config->port_mappings[i].dport);
-                    pm_array.append(entry);
-                }
-                cfg["port-mapping"] = pm_array;
-            }
-
-            root["config"] = cfg;
-            Json::Value meta;
-            meta["node"] = std::string(node_id);
-            meta["resourceVersion"] = "";
-            meta["updatedBy"] = updated_by ? std::string(updated_by) : std::string("");
-            // enableStatus removed: observed PPPoE status is reported via Kafka, not etcd.
-
-            // ISO8601-ish timestamp
-            std::time_t now = std::time(nullptr);
-            std::tm tm{};
-            gmtime_r(&now, &tm);
-            std::ostringstream out;
-            out << std::put_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
-            meta["updatedAt"] = out.str();
-
-            root["metadata"] = meta;
-
-            Json::StreamWriterBuilder writer;
-            writer["indentation"] = "";
-            std::string payload = Json::writeString(writer, root);
+            std::string payload = build_hsi_config_json(node_id, config, updated_by);
 
             auto response_task = client_->set(key, payload);
             auto response = response_task.get();
@@ -1062,7 +1092,265 @@ public:
         }
     }
 
-    etcd_status_t get_hsi_config(const std::string& node_id, 
+    // ---- Offline config write queue (point 7) ----------------------------
+
+    bool is_connected() const { return etcd_reachable_.load(); }
+
+    static int64_t now_ms() {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+    }
+
+    // Parse an ISO8601 "YYYY-MM-DDTHH:MM:SSZ" timestamp to ms since epoch (0 on failure).
+    static int64_t iso8601_to_ms(const std::string& s) {
+        int y, mo, d, h, mi, sec;
+        if (sscanf(s.c_str(), "%d-%d-%dT%d:%d:%dZ", &y, &mo, &d, &h, &mi, &sec) != 6)
+            return 0;
+        std::tm tm{};
+        tm.tm_year = y - 1900; tm.tm_mon = mo - 1; tm.tm_mday = d;
+        tm.tm_hour = h; tm.tm_min = mi; tm.tm_sec = sec;
+        return (int64_t)timegm(&tm) * 1000;
+    }
+
+    // Merge context + callback for flushing a queued PUT via cas_put().
+    struct FlushCtx {
+        const std::string* value;   // queued JSON value to write
+        int64_t ts_ms;              // queued enqueue time
+        bool preserve_desire;       // keep etcd's existing config.desire_status
+        bool skipped;               // set when etcd is newer → drop queued entry
+    };
+
+    // Object-level timestamp merge: queued value wins unless etcd holds a newer
+    // write (made by the controller/another CLI while the node was offline). For
+    // config edits (preserve_desire), etcd's desire_status is always kept so a
+    // config edit never clobbers PPPoE intent.
+    static STATUS flush_merge_fn(const char* current_json, char** out_value, void* user_data) {
+        FlushCtx* ctx = (FlushCtx*)user_data;
+        if (current_json == NULL) {
+            *out_value = strdup(ctx->value->c_str());
+            return *out_value ? SUCCESS : ERROR;
+        }
+        Json::Value cur; Json::Reader reader;
+        if (!reader.parse(current_json, cur)) {
+            *out_value = strdup(ctx->value->c_str());   // unparseable → overwrite
+            return *out_value ? SUCCESS : ERROR;
+        }
+        int64_t etcd_ts = 0;
+        if (cur.isMember("metadata") && cur["metadata"].isMember("updatedAt"))
+            etcd_ts = iso8601_to_ms(cur["metadata"]["updatedAt"].asString());
+        if (etcd_ts > ctx->ts_ms) {
+            ctx->skipped = true;   // etcd newer → it wins; abort the CAS
+            return ERROR;
+        }
+        Json::Value newv; Json::Reader r2;
+        if (!r2.parse(*ctx->value, newv)) { ctx->skipped = true; return ERROR; }
+        if (ctx->preserve_desire && cur.isMember("config") &&
+                cur["config"].isMember("desire_status") && newv.isMember("config")) {
+            newv["config"]["desire_status"] = cur["config"]["desire_status"];
+        }
+        Json::StreamWriterBuilder w; w["indentation"] = "";
+        std::string s = Json::writeString(w, newv);
+        *out_value = strdup(s.c_str());
+        return *out_value ? SUCCESS : ERROR;
+    }
+
+    void persist_queue_locked() {
+        Json::Value arr(Json::arrayValue);
+        for (const auto& e : config_queue_) {
+            Json::Value j;
+            j["op"] = e.op;
+            j["key"] = e.key;
+            j["value"] = e.value;
+            j["ts_ms"] = (Json::Int64)e.ts_ms;
+            j["preserve_desire"] = e.preserve_desire;
+            arr.append(j);
+        }
+        Json::StreamWriterBuilder w; w["indentation"] = "";
+        std::string data = Json::writeString(w, arr);
+        std::string tmp = std::string(CONFIG_QUEUE_PATH) + ".tmp";
+        std::ofstream ofs(tmp, std::ios::trunc);
+        if (!ofs) {
+            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Failed to open queue temp file %s", tmp.c_str());
+            return;
+        }
+        ofs << data;
+        ofs.flush();
+        ofs.close();
+        if (std::rename(tmp.c_str(), CONFIG_QUEUE_PATH) != 0)
+            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Failed to rename queue file to %s", CONFIG_QUEUE_PATH);
+    }
+
+    etcd_status_t load_config_queue() {
+        std::lock_guard<std::mutex> lk(config_queue_mutex_);
+        config_queue_.clear();
+        std::ifstream ifs(CONFIG_QUEUE_PATH);
+        if (!ifs) return ETCD_SUCCESS;   // no file = empty queue
+        std::stringstream buf; buf << ifs.rdbuf();
+        std::string data = buf.str();
+        if (data.empty()) return ETCD_SUCCESS;
+        Json::Value arr; Json::Reader reader;
+        if (!reader.parse(data, arr) || !arr.isArray()) {
+            FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL, "Corrupt config queue file, ignoring");
+            return ETCD_ERROR;
+        }
+        for (const auto& j : arr) {
+            QueueEntry e;
+            e.op = j.get("op", "").asString();
+            e.key = j.get("key", "").asString();
+            e.value = j.get("value", "").asString();
+            e.ts_ms = j.get("ts_ms", (Json::Int64)0).asInt64();
+            e.preserve_desire = j.get("preserve_desire", false).asBool();
+            if (!e.op.empty() && !e.key.empty())
+                config_queue_.push_back(e);
+        }
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "Loaded %zu queued config write(s) from disk", config_queue_.size());
+        return ETCD_SUCCESS;
+    }
+
+    void enqueue_locked(const QueueEntry& e) {
+        config_queue_.push_back(e);
+        persist_queue_locked();
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "Queued offline config write: op=%s key=%s (pending=%zu)",
+            e.op.c_str(), e.key.c_str(), config_queue_.size());
+    }
+
+    etcd_status_t queue_hsi_put(const char* node_id, const char* user_id,
+        const hsi_config_t* config, const char* updated_by) {
+        if (!node_id || !user_id || !config) return ETCD_ERROR;
+        QueueEntry e;
+        e.op = "put";
+        e.key = "configs/" + std::string(node_id) + "/hsi/" + std::string(user_id);
+        e.value = build_hsi_config_json(node_id, config, updated_by);
+        e.ts_ms = now_ms();
+        e.preserve_desire = true;   // config edit must not clobber etcd desire_status
+        std::lock_guard<std::mutex> lk(config_queue_mutex_);
+        enqueue_locked(e);
+        return ETCD_SUCCESS;
+    }
+
+    etcd_status_t queue_hsi_delete(const char* node_id, const char* user_id) {
+        if (!node_id || !user_id) return ETCD_ERROR;
+        QueueEntry e;
+        e.op = "delete";
+        e.key = "configs/" + std::string(node_id) + "/hsi/" + std::string(user_id);
+        e.ts_ms = now_ms();
+        e.preserve_desire = false;
+        std::lock_guard<std::mutex> lk(config_queue_mutex_);
+        enqueue_locked(e);
+        return ETCD_SUCCESS;
+    }
+
+    etcd_status_t queue_subscriber_count(const char* node_id,
+        const char* count_str, const char* updated_by) {
+        if (!node_id || !count_str) return ETCD_ERROR;
+        Json::Value root;
+        root["subscriber_count"] = std::string(count_str);
+        Json::Value meta;
+        meta["node"] = std::string(node_id);
+        meta["resourceVersion"] = "";
+        meta["updatedBy"] = updated_by ? std::string(updated_by) : std::string("");
+        std::time_t now = std::time(nullptr); std::tm tm{}; gmtime_r(&now, &tm);
+        std::ostringstream out; out << std::put_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
+        meta["updatedAt"] = out.str();
+        root["metadata"] = meta;
+        Json::StreamWriterBuilder w; w["indentation"] = "";
+
+        QueueEntry e;
+        e.op = "put";
+        e.key = "user_counts/" + std::string(node_id) + "/";
+        e.value = Json::writeString(w, root);
+        e.ts_ms = now_ms();
+        e.preserve_desire = false;
+        std::lock_guard<std::mutex> lk(config_queue_mutex_);
+        enqueue_locked(e);
+        return ETCD_SUCCESS;
+    }
+
+    int queue_pending() {
+        std::lock_guard<std::mutex> lk(config_queue_mutex_);
+        return (int)config_queue_.size();
+    }
+
+    // Flush queued writes to etcd. Called by the watchdog when etcd is reachable.
+    // etcd_reachable_ is already true here, so the gRPC server rejects (does not
+    // enqueue) concurrent writes — holding the queue lock for the flush is safe.
+    void flush_config_queue() {
+        std::lock_guard<std::mutex> lk(config_queue_mutex_);
+        if (config_queue_.empty()) return;
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "Flushing %zu queued config write(s) to etcd", config_queue_.size());
+
+        std::vector<QueueEntry> remaining;
+        for (auto& e : config_queue_) {
+            bool resolved = false;
+
+            // For HSI keys, recover ccb_id to drive self-event filtering so the
+            // node's own watcher does not re-process this flush write.
+            int ccb_id = -1;
+            std::smatch m;
+            std::regex re("configs/[^/]+/hsi/(.+)");
+            if (std::regex_match(e.key, m, re) && m.size() == 2)
+                ccb_id = parse_user_id(m[1].str().c_str(), 0);
+
+            if (e.op == "put") {
+                FlushCtx ctx{ &e.value, e.ts_ms, e.preserve_desire, false };
+                if (ccb_id >= 0) etcd_mark_pending_event(HSI_ACTION_UPDATE, (U16)ccb_id);
+                int64_t rev = 0;
+                etcd_status_t s = cas_put(e.key, &EtcdClientImpl::flush_merge_fn, &ctx, &rev);
+                if (s == ETCD_SUCCESS) {
+                    if (ccb_id >= 0) etcd_confirm_pending_event(HSI_ACTION_UPDATE, (U16)ccb_id, rev);
+                    resolved = true;
+                } else if (ctx.skipped) {
+                    if (ccb_id >= 0) etcd_remove_event(HSI_ACTION_UPDATE, (U16)ccb_id);
+                    resolved = true;   // etcd newer → drop queued write
+                    FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                        "Queued write for %s superseded by newer etcd value, dropping", e.key.c_str());
+                } else {
+                    if (ccb_id >= 0) etcd_remove_event(HSI_ACTION_UPDATE, (U16)ccb_id);
+                    FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
+                        "Failed to flush queued write for %s, will retry", e.key.c_str());
+                }
+            } else if (e.op == "delete") {
+                try {
+                    auto resp = client_->get(e.key).get();
+                    if (resp.error_code() == etcdv3::ERROR_KEY_NOT_FOUND) {
+                        resolved = true;   // already gone
+                    } else if (resp.error_code() == 0) {
+                        int64_t etcd_ts = 0;
+                        Json::Value cur; Json::Reader r;
+                        if (r.parse(resp.value().as_string(), cur) &&
+                                cur.isMember("metadata") && cur["metadata"].isMember("updatedAt"))
+                            etcd_ts = iso8601_to_ms(cur["metadata"]["updatedAt"].asString());
+                        if (etcd_ts > e.ts_ms) {
+                            resolved = true;  // re-created/updated after our delete → keep etcd
+                        } else {
+                            if (ccb_id >= 0) etcd_mark_pending_event(HSI_ACTION_DELETE, (U16)ccb_id);
+                            auto del = client_->rm(e.key).get();
+                            if (del.error_code() == 0) {
+                                if (ccb_id >= 0) etcd_confirm_pending_event(HSI_ACTION_DELETE, (U16)ccb_id, del.index());
+                                resolved = true;
+                            } else if (ccb_id >= 0) {
+                                etcd_remove_event(HSI_ACTION_DELETE, (U16)ccb_id);
+                            }
+                        }
+                    }
+                } catch (const std::exception& ex) {
+                    FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
+                        "Exception flushing delete %s: %s", e.key.c_str(), ex.what());
+                }
+            }
+
+            if (!resolved) remaining.push_back(e);
+        }
+        config_queue_.swap(remaining);
+        persist_queue_locked();
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "Config queue flush complete, %zu entr(ies) still pending", config_queue_.size());
+    }
+
+    etcd_status_t get_hsi_config(const std::string& node_id,
         const std::string& user_id, hsi_config_full_t* output)
     {
         if (!client_ || !output) {
@@ -2150,6 +2438,37 @@ etcd_status_t etcd_client_cas_put(const char* key, etcd_mutate_fn_t mutate_fn,
     void* user_data, int64_t* out_revision) {
     if (!g_etcd_client) return ETCD_ERROR;
     return g_etcd_client->cas_put(std::string(key), mutate_fn, user_data, out_revision);
+}
+
+int etcd_client_is_connected(void) {
+    return (g_etcd_client && g_etcd_client->is_connected()) ? 1 : 0;
+}
+
+etcd_status_t etcd_client_queue_load(void) {
+    if (!g_etcd_client) return ETCD_ERROR;
+    return g_etcd_client->load_config_queue();
+}
+
+etcd_status_t etcd_client_queue_hsi_put(const char* node_id, const char* user_id,
+    const hsi_config_t* config, const char* updated_by) {
+    if (!g_etcd_client) return ETCD_ERROR;
+    return g_etcd_client->queue_hsi_put(node_id, user_id, config, updated_by);
+}
+
+etcd_status_t etcd_client_queue_hsi_delete(const char* node_id, const char* user_id) {
+    if (!g_etcd_client) return ETCD_ERROR;
+    return g_etcd_client->queue_hsi_delete(node_id, user_id);
+}
+
+etcd_status_t etcd_client_queue_subscriber_count(const char* node_id,
+    const char* subscriber_count_str, const char* updated_by) {
+    if (!g_etcd_client) return ETCD_ERROR;
+    return g_etcd_client->queue_subscriber_count(node_id, subscriber_count_str, updated_by);
+}
+
+int etcd_client_queue_pending(void) {
+    if (!g_etcd_client) return 0;
+    return g_etcd_client->queue_pending();
 }
 
 etcd_status_t etcd_client_put_hsi_config(const char* node_id, const char* user_id,

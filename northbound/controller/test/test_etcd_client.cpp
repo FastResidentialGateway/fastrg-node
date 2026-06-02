@@ -23,6 +23,15 @@ BOOL etcd_is_self_event(etcd_action_type_t action, U16 ccb_id, int64_t revision)
     (void)action; (void)ccb_id; (void)revision;
     return FALSE;  // no pending-events tracking in the standalone test
 }
+void etcd_mark_pending_event(etcd_action_type_t action, U16 ccb_id) {
+    (void)action; (void)ccb_id;  // no-op stub for the offline-queue flush path
+}
+void etcd_confirm_pending_event(etcd_action_type_t action, U16 ccb_id, int64_t revision) {
+    (void)action; (void)ccb_id; (void)revision;
+}
+void etcd_remove_event(etcd_action_type_t action, U16 ccb_id) {
+    (void)action; (void)ccb_id;
+}
 }
 
 // Global flag to control callback failure for testing

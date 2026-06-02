@@ -193,6 +193,41 @@ void etcd_client_write_fallback_error(const char *event_type, const char *key,
 /* Check if etcd client is initialized */
 int etcd_client_is_initialized(void);
 
+/* Last-known etcd reachability, updated by the watchdog each tick (and set on a
+ * successful init). Non-blocking. Returns 1 if etcd is currently reachable.
+ * Used by the node gRPC server to decide whether to accept CLI config writes:
+ * reject when SDN + reachable (CLI must go via controller/etcd), accept+queue
+ * when etcd is unreachable. */
+int etcd_client_is_connected(void);
+
+/* ---- Offline config write queue (point 7) -------------------------------
+ * When the node is in SDN mode but etcd is unreachable, CLI config writes that
+ * arrive via the node gRPC server are applied locally AND queued here. The queue
+ * is persisted to disk (survives a node restart while etcd is still down) and
+ * flushed to etcd (with timestamp-based merge + CAS) once etcd is reachable again.
+ * This is the ONLY path by which the node writes config to etcd.
+ */
+
+/* Load any persisted queue from disk. Call once after etcd_client_init(). */
+etcd_status_t etcd_client_queue_load(void);
+
+/* Enqueue a CLI-originated HSI config PUT for later flush to etcd. Builds the
+ * etcd JSON internally and stamps it with the current time. On flush, the
+ * subscriber's existing desire_status in etcd is preserved (a config edit must
+ * not clobber PPPoE intent). */
+etcd_status_t etcd_client_queue_hsi_put(const char *node_id, const char *user_id,
+    const hsi_config_t *config, const char *updated_by);
+
+/* Enqueue a CLI-originated HSI config DELETE for later flush to etcd. */
+etcd_status_t etcd_client_queue_hsi_delete(const char *node_id, const char *user_id);
+
+/* Enqueue a CLI-originated subscriber-count change for later flush to etcd. */
+etcd_status_t etcd_client_queue_subscriber_count(const char *node_id,
+    const char *subscriber_count_str, const char *updated_by);
+
+/* Number of entries currently pending in the offline queue. */
+int etcd_client_queue_pending(void);
+
 /* ---- Compare-And-Swap primitive -----------------------------------------
  * Generic CAS put built on etcd ModRevision. See docs/contracts/cas-convention.md.
  * Later slices (config writes, desire_status, offline-queue flush) build on this.
