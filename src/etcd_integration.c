@@ -612,7 +612,7 @@ BOOL dns_record_matches_local(const char *user_id,
  * source of PPPoE intent, set exclusively by the CLI/controller. Idempotent:
  * execute_pppoe_dial/hangup skip when the session is already in the target state.
  *
- * TODO(slice 10): add dial-rate limiting (stagger) so a node restart that loads
+ * TODO(slice 13): add dial-rate limiting (stagger) so a node restart that loads
  * many desire_status=connect subscribers does not issue all PADIs at once.
  */
 static void reconcile_pppoe_desire(FastRG_t *fastrg_ccb, int ccb_id, const char *desire_status)
