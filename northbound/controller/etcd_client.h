@@ -15,7 +15,8 @@ typedef enum {
     ETCD_CONNECTION_FAILED = -2,
     ETCD_WATCH_FAILED = -3,
     ETCD_CONFIG_PARSE_FAILED = -4,
-    ETCD_KEY_NOT_FOUND = -5
+    ETCD_KEY_NOT_FOUND = -5,
+    ETCD_CAS_CONFLICT = -6      // Compare-And-Swap exhausted retries (concurrent writer won)
 } etcd_status_t;
 
 typedef enum {
@@ -207,6 +208,40 @@ void etcd_client_write_fallback_error(const char *event_type, const char *key,
 
 /* Check if etcd client is initialized */
 int etcd_client_is_initialized(void);
+
+/* ---- Compare-And-Swap primitive -----------------------------------------
+ * Generic CAS put built on etcd ModRevision. See docs/contracts/cas-convention.md.
+ * Later slices (config writes, desire_status, offline-queue flush) build on this.
+ */
+
+/**
+ * @brief Mutate callback for etcd_client_cas_put().
+ * @param current_json  Current value as a NUL-terminated JSON string, or NULL if
+ *                      the key does not exist.
+ * @param out_value     On SUCCESS, set to a malloc'd NUL-terminated JSON string to
+ *                      write; etcd_client_cas_put() takes ownership and frees it.
+ * @param user_data     Opaque pointer forwarded from etcd_client_cas_put().
+ * @return SUCCESS to proceed with the write, ERROR to abort the CAS (no write).
+ */
+typedef STATUS (*etcd_mutate_fn_t)(const char *current_json, char **out_value,
+    void *user_data);
+
+/**
+ * @fn etcd_client_cas_put
+ * @brief Compare-And-Swap put on an etcd key, keyed on ModRevision.
+ *
+ * Reads the key, invokes @p mutate_fn to produce the new value, then writes it
+ * back only if the key's revision is unchanged. On a concurrent write (CAS
+ * conflict) it retries with exponential backoff (5 attempts, 50ms..800ms).
+ *
+ * @param key           Full etcd key (e.g. "configs/{node}/hsi/{user}").
+ * @param mutate_fn     Callback that produces the new value from the current one.
+ * @param user_data     Opaque pointer forwarded to @p mutate_fn.
+ * @param out_revision  Optional (may be NULL); receives the new etcd revision on success.
+ * @return ETCD_SUCCESS, ETCD_CAS_CONFLICT (retries exhausted), or ETCD_ERROR.
+ */
+etcd_status_t etcd_client_cas_put(const char *key, etcd_mutate_fn_t mutate_fn,
+    void *user_data, int64_t *out_revision);
 
 /* Put or delete HSI config for a node/user
  * key: configs/{nodeId}/hsi/{userId}

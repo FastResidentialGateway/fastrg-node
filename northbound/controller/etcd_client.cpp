@@ -6,6 +6,7 @@
 #include <etcd/Client.hpp>
 #include <etcd/Watcher.hpp>
 #include <etcd/Response.hpp>
+#include <etcd/v3/action_constants.hpp>
 #include <json/json.h>
 #include <memory>
 #include <string>
@@ -919,8 +920,88 @@ public:
         }
     }
 
+    // Generic Compare-And-Swap put keyed on ModRevision.
+    // See docs/contracts/cas-convention.md. Later slices (config writes,
+    // desire_status updates, offline-queue flush) build on this primitive.
+    etcd_status_t cas_put(const std::string& key, etcd_mutate_fn_t mutate_fn,
+        void* user_data, int64_t* out_revision) {
+        if (!client_ || key.empty() || !mutate_fn) return ETCD_ERROR;
+
+        constexpr int CAS_MAX_RETRIES = 5;
+        constexpr int CAS_BACKOFF_INIT_MS = 50;
+        constexpr int CAS_BACKOFF_MULT = 2;
+        int backoff_ms = CAS_BACKOFF_INIT_MS;
+
+        for (int attempt = 0; attempt < CAS_MAX_RETRIES; attempt++) {
+            try {
+                // 1. Read current value + revision
+                std::string current;
+                int64_t mod_revision = 0;
+                bool exists = false;
+
+                auto get_resp = client_->get(key).get();
+                if (get_resp.error_code() == 0) {
+                    current = get_resp.value().as_string();
+                    mod_revision = get_resp.value().modified_index();
+                    exists = true;
+                } else if (get_resp.error_code() == etcdv3::ERROR_KEY_NOT_FOUND) {
+                    exists = false;   // key absent → create-if-absent below
+                } else {
+                    FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+                        "cas_put: get failed for %s: %s", key.c_str(),
+                        get_resp.error_message().c_str());
+                    return ETCD_ERROR;
+                }
+
+                // 2. Produce new value via caller's mutate function
+                char* out_value = NULL;
+                if (mutate_fn(exists ? current.c_str() : NULL, &out_value, user_data) != SUCCESS
+                        || out_value == NULL) {
+                    free(out_value);
+                    return ETCD_ERROR;
+                }
+                std::string new_value(out_value);
+                free(out_value);
+
+                // 3. Conditional write: CAS on revision, or create-if-absent
+                etcd::Response write_resp = exists
+                    ? client_->modify_if(key, new_value, mod_revision).get()
+                    : client_->add(key, new_value).get();
+
+                if (write_resp.error_code() == 0) {
+                    if (out_revision) *out_revision = write_resp.index();
+                    return ETCD_SUCCESS;
+                }
+
+                // 4. Conflict (compare failed / key already exists) → backoff + retry
+                if (write_resp.error_code() == etcdv3::ERROR_COMPARE_FAILED ||
+                    write_resp.error_code() == etcdv3::ERROR_KEY_ALREADY_EXISTS) {
+                    FastRG_LOG(DBG, fastrg_ccb->fp, NULL, NULL,
+                        "cas_put: conflict on %s (attempt %d/%d), retrying",
+                        key.c_str(), attempt + 1, CAS_MAX_RETRIES);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(backoff_ms));
+                    backoff_ms *= CAS_BACKOFF_MULT;
+                    continue;
+                }
+
+                FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+                    "cas_put: write failed for %s: %s", key.c_str(),
+                    write_resp.error_message().c_str());
+                return ETCD_ERROR;
+            } catch (const std::exception& e) {
+                FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+                    "cas_put: exception for %s: %s", key.c_str(), e.what());
+                return ETCD_ERROR;
+            }
+        }
+
+        FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
+            "cas_put: exhausted %d retries for %s", CAS_MAX_RETRIES, key.c_str());
+        return ETCD_CAS_CONFLICT;
+    }
+
     // Put HSI config into etcd under configs/{nodeId}/hsi/{userId}
-    etcd_status_t put_hsi_config(const char* node_id, const char* user_id, 
+    etcd_status_t put_hsi_config(const char* node_id, const char* user_id,
         const hsi_config_t* config, hsi_enable_status_t enable_status, const char* updated_by,
         int64_t* revision) {
         if (!client_ || !node_id || !user_id || !config) return ETCD_ERROR;
@@ -2409,6 +2490,12 @@ void etcd_client_write_fallback_error(const char *event_type, const char *key,
 
 int etcd_client_is_initialized(void) {
     return (g_etcd_client != nullptr) ? 1 : 0;
+}
+
+etcd_status_t etcd_client_cas_put(const char* key, etcd_mutate_fn_t mutate_fn,
+    void* user_data, int64_t* out_revision) {
+    if (!g_etcd_client) return ETCD_ERROR;
+    return g_etcd_client->cas_put(std::string(key), mutate_fn, user_data, out_revision);
 }
 
 etcd_status_t etcd_client_put_hsi_config(const char* node_id, const char* user_id, 
