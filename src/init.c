@@ -240,6 +240,16 @@ STATUS init_port(FastRG_t *fastrg_ccb, struct fastrg_config *fastrg_cfg)
             }
         }
 
+        /* Select data-plane mode: hardware PPPoE-aware RSS (ICE/E810 or
+         * i40e/X710 with DDP), otherwise the software rte_distributor path.
+         * Decided per port but identical for both ports of the same NIC. */
+        if (fastrg_ccb->nic_info.vendor_id == NIC_VENDOR_ICE ||
+                (fastrg_ccb->nic_info.vendor_id == NIC_VENDOR_I40E &&
+                 fastrg_ccb->i40e_ddp_enabled == TRUE))
+            fastrg_ccb->datapath_mode = DP_MODE_RSS;
+        else
+            fastrg_ccb->datapath_mode = DP_MODE_DISTRIBUTOR;
+
         if (PORT_INIT(fastrg_ccb, portid) == ERROR) {
             FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Cannot init port %"PRIu8 "", portid);
             return ERROR;

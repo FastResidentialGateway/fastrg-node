@@ -17,6 +17,8 @@
 #include <rte_atomic.h>
 #include <rte_pdump.h>
 #include <rte_trace.h>
+#include <rte_distributor.h>
+#include <rte_errno.h>
 
 #include "pppd/fsm.h"
 #include "dp.h"
@@ -684,30 +686,32 @@ int fastrg_start(int argc, char **argv)
     rte_pdump_init();
     #endif
 
-    /* Install PPPoE-aware RSS flow rules on both ports (ICE PMD, or i40e with
-     * DDP loaded).
-     * Queue layout per port:
-     *   queue 0          : PPPoE control (Discovery + Session w/o 5-tuple)
-     *   queues 1 .. N-1  : RSS worker queues (5-tuple, PPPoE inner-header aware)
-     * Queue count: 1 + max(1, 1 + (lcore_count - 5) / 2)
-     *
-     * Other PMDs use a single queue; rte_flow rules are not installed.
+    /* Set up the per-port data plane according to the selected mode:
+     *   DP_MODE_RSS         : install PPPoE-aware rte_flow rules (ICE/E810, or
+     *                         i40e/X710 with DDP). Queue 0 = PPPoE control
+     *                         (Discovery + Session w/o 5-tuple); queues 1..N =
+     *                         RSS worker queues (5-tuple, inner-header aware).
+     *   DP_MODE_DISTRIBUTOR : no rte_flow rules; a single RX queue 0 is polled
+     *                         by a distributor RX lcore that fans PPPoE session
+     *                         TCP/UDP out to N worker lcores in software.
+     * Queue/worker count: N = max(1, (lcore_count - 4) / 2).
      */
-    BOOL is_ice_pmd = (fastrg_ccb.nic_info.vendor_id == NIC_VENDOR_ICE);
-    BOOL is_i40e_ddp = (fastrg_ccb.nic_info.vendor_id == NIC_VENDOR_I40E &&
-                        fastrg_ccb.i40e_ddp_enabled == TRUE);
-    printf("NIC Vendor ID: 0x%04x, ICE PMD: %s, i40e DDP: %s, DDP enabled: %s\n",
+    FastRG_LOG(INFO, fastrg_ccb.fp, NULL, NULL,
+        "NIC Vendor ID: 0x%04x, vendor: %s, datapath: %s, i40e DDP enabled: %s\n",
         fastrg_ccb.nic_info.vendor_id,
-        is_ice_pmd ? "yes" : "no",
-        is_i40e_ddp ? "yes" : "no",
+        fastrg_ccb.nic_info.vendor_name ? fastrg_ccb.nic_info.vendor_name : "unknown",
+        fastrg_ccb.datapath_mode == DP_MODE_RSS ? "RSS multi-queue" : "software distributor",
         fastrg_ccb.i40e_ddp_enabled ? "yes" : "no");
-    BOOL use_multiqueue = (is_ice_pmd || is_i40e_ddp);
-    if (use_multiqueue) {
-        if (rte_lcore_count() < 6 || rte_lcore_count() % 2 != 0) {
-            FastRG_LOG(ERR, fastrg_ccb.fp, NULL, NULL, 
-                "We need at least 6 cores and the lcore count must be even.\n");
-            goto err;
-        }
+
+    /* Both data-plane modes share the same lcore budget: main + ctrl + 2 RX +
+     * 2N workers, so both require at least 6 even cores. */
+    if (rte_lcore_count() < 6 || rte_lcore_count() % 2 != 0) {
+        FastRG_LOG(ERR, fastrg_ccb.fp, NULL, NULL,
+            "We need at least 6 cores and the lcore count must be even.\n");
+        goto err;
+    }
+
+    if (fastrg_ccb.datapath_mode == DP_MODE_RSS) {
         struct rte_flow_error flow_error;
         U16 total_q = fastrg_calc_queue_count(rte_lcore_count());
         FastRG_LOG(INFO, fastrg_ccb.fp, NULL, NULL,
@@ -723,21 +727,17 @@ int fastrg_start(int argc, char **argv)
             }
         }
     } else {
-        if (rte_lcore_count() < 4 || rte_lcore_count() % 2 != 0) {
-            FastRG_LOG(ERR, fastrg_ccb.fp, NULL, NULL, 
-                "We need at least 4 cores and the lcore count must be even.\n");
-            goto err;
-        }
         FastRG_LOG(INFO, fastrg_ccb.fp, NULL, NULL,
-            "Non-ICE/i40e PMD (%s) detected, using single queue per port, "
-            "rte_flow rules skipped",
-            fastrg_ccb.nic_info.vendor_name ? fastrg_ccb.nic_info.vendor_name : "unknown");
+            "PMD (%s) without PPPoE-aware RSS: using rte_distributor datapath "
+            "(single RX queue 0, %u worker(s) per direction)",
+            fastrg_ccb.nic_info.vendor_name ? fastrg_ccb.nic_info.vendor_name : "unknown",
+            fastrg_ccb.lcore.num_data_queues);
     }
 
     /* --- Launch fixed threads --- */
     rte_eal_remote_launch((lcore_function_t *)control_plane, (void *)&fastrg_ccb, fastrg_ccb.lcore.ctrl_thread);
 
-    if (use_multiqueue) {
+    if (fastrg_ccb.datapath_mode == DP_MODE_RSS) {
         /* ICE PMD or i40e+DDP: separate ctrl + data threads with multi-queue RSS */
         rte_eal_remote_launch((lcore_function_t *)wan_ctrl_rx, (void *)&fastrg_ccb, fastrg_ccb.lcore.wan_ctrl_thread);
         rte_eal_remote_launch((lcore_function_t *)lan_ctrl_rx, (void *)&fastrg_ccb, fastrg_ccb.lcore.lan_ctrl_thread);
@@ -764,11 +764,41 @@ int fastrg_start(int argc, char **argv)
                 (void *)&lan_data_args[i], fastrg_ccb.lcore.lan_data_threads[i]);
         }
     } else {
-        /* Single-queue PMD: combined ctrl+data function per port */
+        /* Software distributor: one RX/ctrl lcore per port classifies traffic
+         * and fans PPPoE session TCP/UDP out to N worker lcores; queue 0 keeps
+         * control plane + inline (IPTV/ARP/ICMP/DHCP/DNS) handling. */
+        U16 num_dq = fastrg_ccb.lcore.num_data_queues;
+        fastrg_ccb.wan_dist = rte_distributor_create("fastrg_wan_dist",
+            rte_socket_id(), num_dq, RTE_DIST_ALG_BURST);
+        fastrg_ccb.lan_dist = rte_distributor_create("fastrg_lan_dist",
+            rte_socket_id(), num_dq, RTE_DIST_ALG_BURST);
+        if (fastrg_ccb.wan_dist == NULL || fastrg_ccb.lan_dist == NULL) {
+            FastRG_LOG(ERR, fastrg_ccb.fp, NULL, NULL,
+                "Cannot create rte_distributor instances: %s", rte_strerror(rte_errno));
+            goto err;
+        }
+        rte_eal_remote_launch((lcore_function_t *)wan_dist_rx, (void *)&fastrg_ccb, fastrg_ccb.lcore.wan_ctrl_thread);
+        rte_eal_remote_launch((lcore_function_t *)lan_dist_rx, (void *)&fastrg_ccb, fastrg_ccb.lcore.lan_ctrl_thread);
+
+        static dist_worker_arg_t wan_worker_args[MAX_DATA_QUEUES];
+        static dist_worker_arg_t lan_worker_args[MAX_DATA_QUEUES];
         FastRG_LOG(INFO, fastrg_ccb.fp, NULL, NULL,
-            "Launching combined wan_combined_rx + lan_combined_rx threads (single queue 0)");
-        rte_eal_remote_launch((lcore_function_t *)wan_combined_rx, (void *)&fastrg_ccb, fastrg_ccb.lcore.wan_ctrl_thread);
-        rte_eal_remote_launch((lcore_function_t *)lan_combined_rx, (void *)&fastrg_ccb, fastrg_ccb.lcore.lan_ctrl_thread);
+            "Launching %u wan_dist_worker + %u lan_dist_worker threads", num_dq, num_dq);
+        for(U16 i=0; i<num_dq; i++) {
+            wan_worker_args[i].fastrg_ccb = &fastrg_ccb;
+            wan_worker_args[i].dist = fastrg_ccb.wan_dist;
+            wan_worker_args[i].worker_id = i;
+            wan_worker_args[i].tx_queue_id = i + 1;
+            rte_eal_remote_launch((lcore_function_t *)wan_dist_worker,
+                (void *)&wan_worker_args[i], fastrg_ccb.lcore.wan_data_threads[i]);
+
+            lan_worker_args[i].fastrg_ccb = &fastrg_ccb;
+            lan_worker_args[i].dist = fastrg_ccb.lan_dist;
+            lan_worker_args[i].worker_id = i;
+            lan_worker_args[i].tx_queue_id = i + 1;
+            rte_eal_remote_launch((lcore_function_t *)lan_dist_worker,
+                (void *)&lan_worker_args[i], fastrg_ccb.lcore.lan_data_threads[i]);
+        }
     }
 
     if (northbound(&fastrg_ccb) == ERROR) {
