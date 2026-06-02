@@ -733,14 +733,9 @@ STATUS A_this_layer_up(__attribute__((unused)) struct rte_timer *ppp_timer, ppp_
         if (fastrg_ccb->is_standalone == FALSE) {
             char user_id_str[6];
             snprintf(user_id_str, sizeof(user_id_str), "%u", s_ppp_ccb->user_num);
-            int64_t revision = 0;
-            etcd_mark_pending_event(HSI_ACTION_UPDATE, s_ppp_ccb->user_num - 1);
-            if (etcd_client_modify_hsi_config_status(fastrg_ccb->node_uuid, user_id_str, 
-                    ENABLE_STATUS_ENABLED, &revision) == ETCD_SUCCESS) {
-                etcd_confirm_pending_event(HSI_ACTION_UPDATE, s_ppp_ccb->user_num - 1, revision);
-            } else {
-                etcd_remove_event(HSI_ACTION_UPDATE, s_ppp_ccb->user_num - 1);
-            }
+            /* PPPoE "connected" transition: reported to the controller via Kafka
+             * (slice 11), no longer written to etcd. Static DNS records are still
+             * loaded from etcd (read-only) now that the session is up. */
             etcd_client_load_dns_records(fastrg_ccb->node_uuid, user_id_str,
                 dns_record_changed_callback, fastrg_ccb);
         }

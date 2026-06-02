@@ -143,26 +143,9 @@ void etcd_integration_cleanup(FastRG_t *fastrg_ccb);
  * @return 
  *      SUCCESS on success, ERROR on failure
  */
-STATUS hsi_config_changed_callback(const char *node_id, const char *user_id, 
-    const hsi_config_t *config, etcd_action_type_t action, 
+STATUS hsi_config_changed_callback(const char *node_id, const char *user_id,
+    const hsi_config_t *config, etcd_action_type_t action,
     int64_t revision, void *user_data);
-
-/**
- * @fn pppoe_command_received_callback
- * 
- * @brief 
- *      Callback for PPPoE command received from etcd
- * @param node_id
- *      Node UUID
- * @param command
- *      Pointer to PPPoE command structure
- * @param user_data
- *      User data pointer (FastRG context)
- * @return 
- *      SUCCESS on success, ERROR on failure
- */
-STATUS pppoe_command_received_callback(const char *node_id, 
-    const pppoe_command_t *command, void *user_data);
 
 /**
  * @fn user_count_changed_callback

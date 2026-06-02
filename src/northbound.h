@@ -54,13 +54,11 @@ STATUS remove_hsi_config(FastRG_t *fastrg_ccb, int ccb_id);
  *      Pointer to FastRG control block
  * @param ccb_id
  *      User ID (0-based index)
- * @param command
- *      PPPoE command details
  *
  * @return
  *      SUCCESS on success, ERROR on failure
  */
-STATUS execute_pppoe_dial(FastRG_t *fastrg_ccb, int ccb_id, const pppoe_command_t *command);
+STATUS execute_pppoe_dial(FastRG_t *fastrg_ccb, int ccb_id);
 
 /**
  * @fn execute_pppoe_hangup

@@ -353,9 +353,8 @@ STATUS etcd_integration_start(FastRG_t *fastrg_ccb)
     // Load existing HSI configs from etcd before starting the watcher
     FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "Loading existing HSI configs for node: %s", fastrg_ccb->node_uuid);
     etcd_status_t load_status = etcd_client_load_existing_configs(
-        fastrg_ccb->node_uuid, 
-        hsi_config_changed_callback, 
-        pppoe_command_received_callback,
+        fastrg_ccb->node_uuid,
+        hsi_config_changed_callback,
         user_count_changed_callback,
         NULL, // No need to load DNS records here since they are loaded while PPPoE connections are established
         fastrg_ccb);
@@ -604,8 +603,37 @@ BOOL dns_record_matches_local(const char *user_id,
     return TRUE;
 }
 
-STATUS hsi_config_changed_callback(const char *node_id, const char *user_id, 
-    const hsi_config_t *config, etcd_action_type_t action, 
+/* Reconcile the live PPPoE session of a subscriber toward its desired state.
+ * desire_status ("connect"/"disconnect"; empty treated as disconnect) is the only
+ * source of PPPoE intent, set exclusively by the CLI/controller. Idempotent:
+ * execute_pppoe_dial/hangup skip when the session is already in the target state.
+ *
+ * TODO(slice 10): add dial-rate limiting (stagger) so a node restart that loads
+ * many desire_status=connect subscribers does not issue all PADIs at once.
+ */
+static void reconcile_pppoe_desire(FastRG_t *fastrg_ccb, int ccb_id, const char *desire_status)
+{
+    ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
+    if (ppp_ccb == NULL)
+        return;
+
+    BOOL want_connect = (desire_status != NULL &&
+        strcmp(desire_status, DESIRE_STATUS_CONNECT) == 0);
+    BOOL is_connected = (rte_atomic16_read(&ppp_ccb->ppp_bool) == 1);
+
+    if (want_connect && !is_connected) {
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "desire_status=connect for user %d, dialing PPPoE", ccb_id + 1);
+        execute_pppoe_dial(fastrg_ccb, ccb_id);
+    } else if (!want_connect && is_connected) {
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "desire_status=disconnect for user %d, hanging up PPPoE", ccb_id + 1);
+        execute_pppoe_hangup(fastrg_ccb, ccb_id);
+    }
+}
+
+STATUS hsi_config_changed_callback(const char *node_id, const char *user_id,
+    const hsi_config_t *config, etcd_action_type_t action,
     int64_t revision, void *user_data)
 {
     FastRG_t *fastrg_ccb = (FastRG_t *)user_data;
@@ -661,6 +689,15 @@ STATUS hsi_config_changed_callback(const char *node_id, const char *user_id,
                         ret = ERROR; // Signal failure so caller writes fallback error
                     }
                 }
+
+                /* Reconcile the live PPPoE session toward the desired state.
+                 * desire_status is the single source of truth for PPPoE intent
+                 * (set only by CLI/controller). This runs for live updates,
+                 * periodic reconcile, and startup load alike, so the node
+                 * re-establishes/tears down sessions from desire_status alone.
+                 * execute_pppoe_dial/hangup are idempotent (skip when already
+                 * in the target state). */
+                reconcile_pppoe_desire(fastrg_ccb, ccb_id, config->desire_status);
             }
             break;
 
@@ -809,60 +846,6 @@ void sync_request_callback(const char *node_id, void *user_data)
         "not seeding config back", node_id);
 }
 
-#define PPPOE_ACTION_DIAL   "dial"
-#define PPPOE_ACTION_HANGUP "hangup"
-STATUS pppoe_command_received_callback(const char *node_id, const pppoe_command_t *command, void *user_data)
-{
-    FastRG_t *fastrg_ccb = (FastRG_t *)user_data;
-    STATUS ret = SUCCESS;
-    int64_t revision = 0;
-
-    if (!fastrg_ccb || !node_id || !command)
-        return ERROR;
-
-    int ccb_id = parse_user_id(command->user_id, fastrg_ccb->user_count);
-    if (ccb_id < 0) {
-        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Invalid user_id in command: %s (valid range: 1-%d)", 
-            command->user_id, fastrg_ccb->user_count);
-        return ERROR;
-    }
-
-    FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, 
-        "PPPoE command received: action=%s, user=%s, vlan=%s, account=%s", 
-        command->action, command->user_id, command->vlan, command->account);
-
-    if (strcmp(command->action, PPPOE_ACTION_DIAL) == 0) {
-        // Execute PPPoE dial
-        ret = execute_pppoe_dial(fastrg_ccb, ccb_id, command);
-        if (ret == SUCCESS) {
-            etcd_mark_pending_event(HSI_ACTION_UPDATE, ccb_id);
-            if (etcd_client_modify_hsi_config_status(fastrg_ccb->node_uuid, command->user_id, 
-                    ENABLE_STATUS_ENABLING, &revision) == ETCD_SUCCESS) {
-                etcd_confirm_pending_event(HSI_ACTION_UPDATE, ccb_id, revision);
-            } else {
-                etcd_remove_event(HSI_ACTION_UPDATE, ccb_id);
-            }
-        }
-    } else if (strcmp(command->action, PPPOE_ACTION_HANGUP) == 0) {
-        // Execute PPPoE hangup
-        ret = execute_pppoe_hangup(fastrg_ccb, ccb_id);
-        if (ret == SUCCESS) {
-            etcd_mark_pending_event(HSI_ACTION_UPDATE, ccb_id);
-            if (etcd_client_modify_hsi_config_status(fastrg_ccb->node_uuid, command->user_id, 
-                    ENABLE_STATUS_DISABLING, &revision) == ETCD_SUCCESS) {
-                etcd_confirm_pending_event(HSI_ACTION_UPDATE, ccb_id, revision);
-            } else {
-                etcd_remove_event(HSI_ACTION_UPDATE, ccb_id);
-            }
-        }
-    } else {
-        FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL, "Unknown PPPoE action: %s", command->action);
-        ret = ERROR;
-    }
-
-    return ret;
-}
-
 STATUS dns_record_changed_callback(const char *node_id, const char *user_id,
     const dns_record_config_t *record, etcd_action_type_t action,
     int64_t revision, void *user_data)
@@ -931,31 +914,22 @@ void etcd_event_dispatch(FastRG_t *fastrg_ccb, etcd_event_t *ev)
             const hsi_config_t *cfg =
                 (ev->action == HSI_ACTION_DELETE) ? NULL : &ev->event_data.hsi.config;
 
-            /* Reconcile events skip configs whose local state already matches. */
+            /* Reconcile events skip re-applying configs whose local state already
+             * matches, but still reconcile the PPPoE session toward desire_status
+             * so a dropped session is re-dialed (or a stale one torn down). */
             if (ev->from_reconcile && cfg != NULL &&
                     hsi_config_matches_local(ev->user_id, cfg, fastrg_ccb)) {
                 FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
-                    "Reconcile: HSI user %s already matches local state, skipping",
+                    "Reconcile: HSI user %s already matches local state, reconciling PPPoE only",
                     ev->user_id);
+                int rc_ccb_id = parse_user_id(ev->user_id, fastrg_ccb->user_count);
+                if (rc_ccb_id >= 0)
+                    reconcile_pppoe_desire(fastrg_ccb, rc_ccb_id, cfg->desire_status);
                 break;
             }
 
             STATUS ret = hsi_config_changed_callback(ev->node_id, ev->user_id, cfg,
                 ev->action, ev->revision, fastrg_ccb);
-
-            /* Reconcile: re-dial subscribers that etcd says should be enabled. */
-            if (ret == SUCCESS && ev->from_reconcile && ev->event_data.hsi.is_enabled &&
-                    ev->action != HSI_ACTION_DELETE) {
-                pppoe_command_t cmd;
-                memset(&cmd, 0, sizeof(cmd));
-                snprintf(cmd.action, sizeof(cmd.action), "dial");
-                snprintf(cmd.user_id, sizeof(cmd.user_id), "%s", ev->event_data.hsi.config.user_id);
-                snprintf(cmd.vlan, sizeof(cmd.vlan), "%s", ev->event_data.hsi.config.vlan_id);
-                snprintf(cmd.account, sizeof(cmd.account), "%s", ev->event_data.hsi.config.account_name);
-                snprintf(cmd.password, sizeof(cmd.password), "%s", ev->event_data.hsi.config.password);
-                cmd.timestamp = time(NULL);
-                pppoe_command_received_callback(ev->node_id, &cmd, fastrg_ccb);
-            }
 
             /* A failed apply is reported to the controller via Kafka (slice 11);
              * the etcd failed_events/ namespace is removed. For now, just log. */
@@ -981,10 +955,6 @@ void etcd_event_dispatch(FastRG_t *fastrg_ccb, etcd_event_t *ev)
             }
             dns_record_changed_callback(ev->node_id, ev->user_id, &ev->event_data.dns_record,
                 ev->action, ev->revision, fastrg_ccb);
-            break;
-
-        case ETCD_EVENT_PPPOE_COMMAND:
-            pppoe_command_received_callback(ev->node_id, &ev->event_data.command, fastrg_ccb);
             break;
 
         case ETCD_EVENT_HSI_SWEEP:

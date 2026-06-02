@@ -22,10 +22,14 @@ typedef enum {
 typedef enum {
     HSI_ACTION_CREATE = 1,
     HSI_ACTION_UPDATE = 2,
-    HSI_ACTION_DELETE = 3,
-    COMMAND_ACTION_DIAL = 4,
-    COMMAND_ACTION_HANGUP = 5
+    HSI_ACTION_DELETE = 3
 } etcd_action_type_t;
+
+/* PPPoE desired connection state, stored in the HSI config object as
+ * config.desire_status. Only the CLI/controller change it (connect/disconnect).
+ * The node reconciles the live PPPoE session toward this value. */
+#define DESIRE_STATUS_CONNECT    "connect"
+#define DESIRE_STATUS_DISCONNECT "disconnect"
 
 #define ETCD_RETRY_BASE_TIME 1 // in second
 
@@ -60,6 +64,7 @@ typedef struct {
     char dns_secondary[32];     /* secondary DNS server IP (e.g. "1.1.1.1") */
     BOOL dns_proxy_enable;      /* per-subscriber DNS proxy enable; defaults to TRUE when absent in etcd */
     BOOL tcp_conntrack_enable;  /* per-subscriber TCP SPI enable; defaults to TRUE when absent in etcd */
+    char desire_status[16];     /* "connect"/"disconnect"; empty = disconnect. Only CLI/controller set it. */
     port_mapping_t *port_mappings;  // heap-allocated; use hsi_config_free_port_mappings() to free
     int port_mapping_count;
 } hsi_config_t;
@@ -73,32 +78,16 @@ static inline void hsi_config_free_port_mappings(hsi_config_t *cfg) {
     }
 }
 
-// PPPoE command structure
-typedef struct {
-    char action[16];        // "dial" or "hangup"
-    char user_id[64];
-    char vlan[16];
-    char account[256];
-    char password[256];
-    long timestamp;
-} pppoe_command_t;
-
 // User count config structure for dynamic scaling
 typedef struct {
     int user_count;         // New user count to scale to
 } user_count_config_t;
 
-typedef enum {
-    ENABLE_STATUS_ENABLED = 1,
-    ENABLE_STATUS_ENABLING = 2,
-    ENABLE_STATUS_DISABLING = 3,
-    ENABLE_STATUS_DISABLED = 4
-} hsi_enable_status_t;
-
-// Full HSI config structure including metadata
+// Full HSI config structure including metadata.
+// PPPoE desired state lives in config.desire_status; observed/actual status is
+// reported to the controller via Kafka (no longer stored in etcd metadata).
 typedef struct {
     hsi_config_t config;
-    hsi_enable_status_t enable_status;
     char updated_by[64];
     char updated_at[32];
     char resource_version[64];
@@ -108,9 +97,6 @@ typedef struct {
 typedef STATUS (*hsi_config_callback_t)(const char *node_id, const char *user_id, 
     const hsi_config_t *config, etcd_action_type_t action, 
     int64_t revision, void *user_data);
-
-typedef STATUS (*pppoe_command_callback_t)(const char *node_id, 
-    const pppoe_command_t *command, void *user_data);
 
 typedef STATUS (*user_count_changed_callback_t)(const char *node_id,
     const user_count_config_t *config, etcd_action_type_t action,
@@ -144,13 +130,12 @@ typedef enum {
     ETCD_EVENT_HSI = 1,        /* HSI config create/update/delete         */
     ETCD_EVENT_USER_COUNT,     /* subscriber-count change                 */
     ETCD_EVENT_DNS_RECORD,     /* DNS static record create/update/delete  */
-    ETCD_EVENT_PPPOE_COMMAND,  /* PPPoE dial/hangup command               */
     ETCD_EVENT_HSI_SWEEP       /* reconcile: keep ccb_ids present in etcd       */
 } etcd_event_kind_t;
 
 typedef struct etcd_event {
     etcd_event_kind_t  kind;
-    etcd_action_type_t action;          /* CREATE/UPDATE/DELETE; unused for command/sweep */
+    etcd_action_type_t action;          /* CREATE/UPDATE/DELETE; unused for sweep */
     int64_t            revision;
     BOOL               from_reconcile;  /* TRUE: periodic reconcile; FALSE: live watch event */
     char               node_id[64];
@@ -158,13 +143,12 @@ typedef struct etcd_event {
     union {
         struct {
             hsi_config_t config;        /* config.port_mappings is heap-owned by this event */
-            BOOL         is_enabled;    /* reconcile: also issue a dial when TRUE */
+            BOOL         desire_connect;/* derived from config.desire_status == "connect" */
             char        *raw_value;     /* heap-owned raw JSON: new value (PUT) or deleted
-                                           value (DELETE); for failed_events/ records */
+                                           value (DELETE) */
         } hsi;
         user_count_config_t user_count;
         dns_record_config_t dns_record;
-        pppoe_command_t     command;
         struct {
             int *present_ccb_ids;       /* heap-owned: ccb_ids that exist in etcd */
             int  count;
@@ -243,13 +227,13 @@ typedef STATUS (*etcd_mutate_fn_t)(const char *current_json, char **out_value,
 etcd_status_t etcd_client_cas_put(const char *key, etcd_mutate_fn_t mutate_fn,
     void *user_data, int64_t *out_revision);
 
-/* Put or delete HSI config for a node/user
+/* Put HSI config for a node/user.
  * key: configs/{nodeId}/hsi/{userId}
- * value: JSON matching HSIConfigWithMetadata
+ * value: JSON matching HSIConfigWithMetadata. PPPoE desired state is carried in
+ *        config->desire_status ("connect"/"disconnect").
  */
 etcd_status_t etcd_client_put_hsi_config(const char *node_id, const char *user_id,
-    const hsi_config_t *config, hsi_enable_status_t enable_status, const char *updated_by,
-    int64_t *revision);
+    const hsi_config_t *config, const char *updated_by, int64_t *revision);
 /**
  * @fn etcd_client_delete_hsi_config
  * 
@@ -280,43 +264,8 @@ etcd_status_t etcd_client_delete_hsi_config(const char *node_id,
  * @return
  *        ETCD_SUCCESS or error code
  */
-etcd_status_t etcd_client_get_hsi_config(const char *node_id, 
+etcd_status_t etcd_client_get_hsi_config(const char *node_id,
     const char *user_id, hsi_config_full_t *output);
-
-/**
- * @fn etcd_client_modify_hsi_config_status
- * 
- * @brief Modify HSI config status (enable/disable)
- * This function updates only the metadata.enableStatus field in etcd
- * and marks the change to prevent the watcher from processing it
- * @param node_id
- *      Node UUID
- * @param user_id
- *      User identifier
- * @param enable_status
- *      HSI command status
- * @return
- *      ETCD_SUCCESS or error code
- */
-etcd_status_t etcd_client_modify_hsi_config_status(const char *node_id, 
-    const char *user_id, hsi_enable_status_t enable_status, int64_t *revision);
-
-/**
- * @fn etcd_client_get_hsi_config_status
- * 
- * @brief Get HSI config status from etcd
- *        This function reads the current HSI config status
- * @param node_id
- *        Node UUID
- * @param user_id
- *        User identifier
- * @param output_status
- *        Current HSI config status
- * @return
- *        ETCD_SUCCESS or error code
- */
-etcd_status_t etcd_client_get_hsi_config_status(const char *node_id, 
-    const char *user_id, hsi_enable_status_t *output_status);
 
 /**
  * @fn etcd_client_put_subscriber_count
@@ -358,8 +307,6 @@ etcd_status_t etcd_client_get_subscriber_count(const char* node_id,
  *      Node UUID
  * @param hsi_callback
  *      Callback to invoke for each config
- * @param command_callback
- *      Callback to invoke for each command
  * @param user_count_callback
  *      Callback to invoke for user count config
  * @param user_data
@@ -368,8 +315,7 @@ etcd_status_t etcd_client_get_subscriber_count(const char* node_id,
  *      ETCD_SUCCESS or error code
  */
 etcd_status_t etcd_client_load_existing_configs(const char *node_uuid,
-    hsi_config_callback_t hsi_callback, 
-    pppoe_command_callback_t command_callback,
+    hsi_config_callback_t hsi_callback,
     user_count_changed_callback_t user_count_callback,
     dns_record_callback_t dns_record_callback,
     void *user_data);

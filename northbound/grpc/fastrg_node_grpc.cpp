@@ -74,12 +74,15 @@ grpc::Status FastRGNodeServiceImpl::ApplyConfig(::grpc::ServerContext* context, 
     strncpy(hsi_config.dhcp_gateway, dhcp_gateway.c_str(), sizeof(hsi_config.dhcp_gateway) - 1);
     hsi_config.dns_proxy_enable = TRUE;
     hsi_config.tcp_conntrack_enable = TRUE;
+    // New config defaults to disconnect. TODO(slice 10): for updates, read-modify-write
+    // to preserve the existing desire_status instead of resetting it here.
+    strncpy(hsi_config.desire_status, DESIRE_STATUS_DISCONNECT, sizeof(hsi_config.desire_status) - 1);
 
     // Write the config to etcd to trigger etcd watcher (only if etcd is initialized)
     if (etcd_client_is_initialized() && fastrg_ccb && fastrg_ccb->node_uuid) {
         std::string user_id_str = std::to_string(user_id);
-        etcd_status_t s = etcd_client_put_hsi_config(fastrg_ccb->node_uuid, 
-            user_id_str.c_str(), &hsi_config, ENABLE_STATUS_DISABLED, "fastrg-node-grpc", NULL);
+        etcd_status_t s = etcd_client_put_hsi_config(fastrg_ccb->node_uuid,
+            user_id_str.c_str(), &hsi_config, "fastrg-node-grpc", NULL);
         if (s != ETCD_SUCCESS) {
             std::string err = "Failed to write configuration to etcd for user " + user_id_str;
             cout << err << endl;
@@ -467,7 +470,7 @@ grpc::Status FastRGNodeServiceImpl::SetSnatConfig(::grpc::ServerContext* context
         }
 
         etcd_status_t put_s = etcd_client_put_hsi_config(fastrg_ccb->node_uuid,
-            user_id_str.c_str(), cfg, full_config.enable_status, "fastrg-node-grpc", NULL);
+            user_id_str.c_str(), cfg, "fastrg-node-grpc", NULL);
         hsi_config_free_port_mappings(cfg);
 
         if (put_s != ETCD_SUCCESS) {
@@ -538,7 +541,7 @@ grpc::Status FastRGNodeServiceImpl::RemoveSnatConfig(::grpc::ServerContext* cont
         }
 
         etcd_status_t put_s = etcd_client_put_hsi_config(fastrg_ccb->node_uuid,
-            user_id_str.c_str(), cfg, full_config.enable_status, "fastrg-node-grpc", NULL);
+            user_id_str.c_str(), cfg, "fastrg-node-grpc", NULL);
         hsi_config_free_port_mappings(cfg);
 
         if (put_s != ETCD_SUCCESS) {
@@ -1297,7 +1300,7 @@ grpc::Status FastRGNodeServiceImpl::SetDnsProxy(::grpc::ServerContext* context,
         int64_t revision = 0;
         etcd_mark_pending_event(HSI_ACTION_UPDATE, ccb_id);
         etcd_status_t put_s = etcd_client_put_hsi_config(fastrg_ccb->node_uuid,
-            user_id_str.c_str(), &full_config.config, full_config.enable_status,
+            user_id_str.c_str(), &full_config.config,
             "fastrg-node-grpc", &revision);
         hsi_config_free_port_mappings(&full_config.config);
 
@@ -1360,7 +1363,7 @@ grpc::Status FastRGNodeServiceImpl::SetTcpConntrack(::grpc::ServerContext* conte
         int64_t revision = 0;
         etcd_mark_pending_event(HSI_ACTION_UPDATE, ccb_id);
         etcd_status_t put_s = etcd_client_put_hsi_config(fastrg_ccb->node_uuid,
-            user_id_str.c_str(), &full_config.config, full_config.enable_status,
+            user_id_str.c_str(), &full_config.config,
             "fastrg-node-grpc", &revision);
         hsi_config_free_port_mappings(&full_config.config);
 

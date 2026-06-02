@@ -225,17 +225,13 @@ STATUS remove_hsi_config(FastRG_t *fastrg_ccb, int ccb_id)
 }
 
 // Helper function to execute PPPoE dial
-STATUS execute_pppoe_dial(FastRG_t *fastrg_ccb, int ccb_id, const pppoe_command_t *command)
+STATUS execute_pppoe_dial(FastRG_t *fastrg_ccb, int ccb_id)
 {
-    if (!is_valid_ccb_id(fastrg_ccb, ccb_id) || !command)
+    if (!is_valid_ccb_id(fastrg_ccb, ccb_id))
         return ERROR;
 
-    // Set up PPPoE session parameters
-    // This would typically involve calling into the PPPoE subsystem
-    // For now, just log the action
-    FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, 
-        "Executing PPPoE dial for user %d: VLAN %s, Account %s", 
-        ccb_id + 1, command->vlan, command->account);
+    FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+        "Executing PPPoE dial for user %d", ccb_id + 1);
 
     ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
     dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
