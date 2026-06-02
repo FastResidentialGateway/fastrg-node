@@ -20,14 +20,27 @@ typedef struct dp_rx_arg {
     U16 tx_queue_id;    /**< TX queue on opposite port (= rx_queue) */
 } dp_rx_arg_t;
 
+/**
+ * Thread argument for a software-distributor worker lcore (DP_MODE_DISTRIBUTOR).
+ * Each wan_dist_worker / lan_dist_worker thread gets its own instance.
+ */
+typedef struct dist_worker_arg {
+    FastRG_t *fastrg_ccb;
+    struct rte_distributor *dist;   /**< distributor instance to pull from   */
+    U16 worker_id;                  /**< worker index 0..N-1                 */
+    U16 tx_queue_id;                /**< dedicated TX queue (= worker_id + 1) */
+} dist_worker_arg_t;
+
 void wan_ctrl_tx(FastRG_t *fastrg_ccb, U16 ccb_id, U8 *mu, U16 mulen);
 void lan_ctrl_tx(FastRG_t *fastrg_ccb, U16 ccb_id, U8 *mu, U16 mulen);
 int wan_ctrl_rx(void *arg);
 int wan_data_rx(void *arg);
 int lan_ctrl_rx(void *arg);
 int lan_data_rx(void *arg);
-int wan_combined_rx(void *arg);
-int lan_combined_rx(void *arg);
+int wan_dist_rx(void *arg);
+int lan_dist_rx(void *arg);
+int wan_dist_worker(void *arg);
+int lan_dist_worker(void *arg);
 STATUS PORT_INIT(FastRG_t *fastrg_ccb, U16 port);
 
 typedef struct mbuf_priv {

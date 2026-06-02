@@ -156,6 +156,20 @@ static inline int fastrg_ring_dequeue(struct rte_ring *ring, void **mail)
 
 #define MAX_DATA_QUEUES 16
 
+/**
+ * Data-plane mode, selected once at init based on NIC capability + core count.
+ *   DP_MODE_RSS         : hardware PPPoE-aware RSS multi-queue (ICE/E810,
+ *                         i40e/X710 + DDP). Queue 0 = ctrl, queues 1..N = data.
+ *   DP_MODE_DISTRIBUTOR : software rte_distributor (mlx5, ixgbe, vmxnet3,
+ *                         i40e w/o DDP). Single RX queue 0 polled by a
+ *                         distributor RX lcore; PPPoE session TCP/UDP fanned
+ *                         out to N worker lcores by a per-direction flow tag.
+ */
+typedef enum {
+    DP_MODE_RSS,
+    DP_MODE_DISTRIBUTOR,
+} datapath_mode_t;
+
 struct lcore_map {
     U8 ctrl_thread;
     U8 wan_ctrl_thread;     /* WAN queue 0: PPPoE control + ICMP decap */

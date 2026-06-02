@@ -98,6 +98,9 @@ typedef struct FastRG {
     struct rte_timer        link;           /* for physical link checking timer */
     struct rte_timer        heartbeat_timer;/* for controller heartbeat timer */
     BOOL                    i40e_ddp_enabled; /* TRUE if i40e DDP package loaded */
+    datapath_mode_t         datapath_mode;    /* RSS multi-queue vs software distributor */
+    struct rte_distributor  *wan_dist;        /* WAN ingress software distributor (DP_MODE_DISTRIBUTOR) */
+    struct rte_distributor  *lan_dist;        /* LAN ingress software distributor (DP_MODE_DISTRIBUTOR) */
     struct rte_ring         *cp_q;            /* data/ctrl plane -> control loop event ring */
     struct rte_ring         *free_mail_ring;  /* pre-allocated tFastRG_MBX slot pool */
     struct rte_ring         *etcd_event_q;    /* etcd watcher threads -> control loop event ring */

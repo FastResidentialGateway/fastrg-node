@@ -20,6 +20,8 @@
 #include <rte_memcpy.h>
 #include <rte_atomic.h>
 #include <rte_ip_frag.h>
+#include <rte_distributor.h>
+#include <rte_hash_crc.h>
 
 #include "fastrg.h"
 #include "protocol.h"
@@ -68,14 +70,7 @@ STATUS PORT_INIT(FastRG_t *fastrg_ccb, U16 port)
     struct rte_eth_dev_info dev_info;
     struct rte_eth_rxconf rxq_conf;
     struct rte_eth_txconf *txconf;
-    /* Non-ICE PMDs do not support rte_flow RSS; use a single queue.
-     * Exception: i40e with a DDP package loaded also supports multi-queue
-     * PPPoE-aware RSS via rte_flow, same as ICE. */
-    const U16 rx_rings = (fastrg_ccb->nic_info.vendor_id == NIC_VENDOR_ICE ||
-                          (fastrg_ccb->nic_info.vendor_id == NIC_VENDOR_I40E &&
-                           fastrg_ccb->i40e_ddp_enabled == TRUE)) ?
-        fastrg_calc_queue_count(rte_lcore_count()) : 1;
-    const U16 tx_rings = rx_rings;   /* symmetric TX queues */
+    U16 rx_rings, tx_rings;   /* set after device info is known (see below) */
     int retval;
     U16 q;
 
@@ -90,6 +85,37 @@ STATUS PORT_INIT(FastRG_t *fastrg_ccb, U16 port)
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Error during getting device (port %u) info: %s\n", port, strerror(-ret));
         return ERROR;
     }
+
+    /* Queue layout per data-plane mode:
+     *   DP_MODE_RSS         : N+1 RX + N+1 TX (queue 0 = ctrl, 1..N = RSS data).
+     *   DP_MODE_DISTRIBUTOR : single RX queue 0 (polled by the distributor RX
+     *                         lcore) + N+1 TX (queue 0 for the RX/ctrl lcore,
+     *                         queues 1..N one per worker for contention-free TX).
+     * In distributor mode, clamp the worker count to the NIC's TX queue
+     * capability so each worker keeps a dedicated TX queue. */
+    if (fastrg_ccb->datapath_mode == DP_MODE_RSS) {
+        rx_rings = fastrg_calc_queue_count(rte_lcore_count());
+        tx_rings = rx_rings;
+    } else {
+        rx_rings = 1;
+        U16 want_tx = fastrg_ccb->lcore.num_data_queues + 1;
+        if (want_tx > dev_info.max_tx_queues) {
+            if (dev_info.max_tx_queues < 2) {
+                FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+                    "Port %u supports only %u TX queue(s); distributor mode needs >= 2",
+                    port, dev_info.max_tx_queues);
+                return ERROR;
+            }
+            U16 new_n = dev_info.max_tx_queues - 1;
+            FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
+                "Port %u max_tx_queues=%u: reducing distributor workers from %u to %u",
+                port, dev_info.max_tx_queues, fastrg_ccb->lcore.num_data_queues, new_n);
+            fastrg_ccb->lcore.num_data_queues = new_n;
+            want_tx = new_n + 1;
+        }
+        tx_rings = want_tx;
+    }
+
     if (dev_info.tx_offload_capa & RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE)
         port_conf.txmode.offloads |= RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE;
 
@@ -228,6 +254,25 @@ static inline BOOL is_iptv_pkt_need_drop(FastRG_t *fastrg_ccb, vlan_header_t *vl
             return FALSE;
     }
     return TRUE;
+}
+
+/**
+ * compute_flow_tag - per-direction 5-tuple hash used as the rte_distributor tag.
+ *
+ * The distributor keeps every packet sharing a tag on a single worker and in
+ * order, so deriving the tag from the direction's stable 5-tuple reproduces the
+ * same per-flow single-owner affinity that hardware RSS provides in
+ * DP_MODE_RSS. Only the low 16 bits matter (the burst distributor masks the tag
+ * to a 15-bit flow id and forces it odd), and CRC32 spreads entropy there.
+ */
+static inline U32 compute_flow_tag(U32 src_ip, U32 dst_ip, U16 src_port,
+    U16 dst_port, U8 proto)
+{
+    U32 h = rte_hash_crc_4byte(src_ip, 0);
+    h = rte_hash_crc_4byte(dst_ip, h);
+    h = rte_hash_crc_4byte(((U32)src_port << 16) | dst_port, h);
+    h = rte_hash_crc_1byte(proto, h);
+    return h;
 }
 
 /**
@@ -892,36 +937,42 @@ int lan_data_rx(void *arg)
 }
 
 /**
- * wan_combined_rx - WAN port single-queue handler for non-ICE PMDs.
+ * wan_dist_rx - WAN port queue-0 distributor RX lcore (DP_MODE_DISTRIBUTOR).
  *
- * Merges wan_ctrl_rx (PPPoE control, IPTV, ICMP) and wan_data_rx
- * (PPPoE session TCP/UDP decap) into one thread polling queue 0.
+ * Same classification as the former wan_combined_rx: PPPoE discovery/control
+ * → control plane, IPTV → LAN, ICMP session → inline NAT reverse. The heavy
+ * per-flow work (TCP/UDP NAT reverse) is offloaded: each session packet gets a
+ * flow tag from its inner 5-tuple and is handed to wan_dist for a worker lcore.
  */
-int wan_combined_rx(void *arg)
+int wan_dist_rx(void *arg)
 {
-    FastRG_t             *fastrg_ccb = (FastRG_t *)arg;
-    const U16            rx_q = 0;
-    const U16            tx_q = 0;
-    struct rte_mbuf      *single_pkt;
-    uint64_t             total_tx = 0;
-    struct rte_ether_hdr *eth_hdr, tmp_eth_hdr;
-    vlan_header_t        *vlan_header, tmp_vlan_header;
-    struct rte_ipv4_hdr  *ip_hdr;
-    struct rte_mbuf      *pkt[BURST_SIZE];
-    U16                  nb_rx;
-    ppp_payload_t        *ppp_payload;
-    U16                  ccb_id;
-    U16                  pppoe_len = sizeof(pppoe_header_t) + sizeof(ppp_payload_t);
-    int                  pkt_num;
+    FastRG_t               *fastrg_ccb = (FastRG_t *)arg;
+    struct rte_distributor *dist = fastrg_ccb->wan_dist;
+    const U16              rx_q = 0;
+    const U16              tx_q = 0;   /* inline (IPTV / ICMP) TX on LAN queue 0 */
+    struct rte_mbuf        *single_pkt;
+    uint64_t               total_tx = 0;
+    struct rte_ether_hdr   *eth_hdr, tmp_eth_hdr;
+    vlan_header_t          *vlan_header, tmp_vlan_header;
+    struct rte_ipv4_hdr    *ip_hdr;
+    struct rte_mbuf        *pkt[BURST_SIZE];
+    struct rte_mbuf        *dist_pkt[BURST_SIZE];
+    struct rte_mbuf        *ret_pkt[BURST_SIZE];
+    U16                    dist_n;
+    U16                    nb_rx;
+    ppp_payload_t          *ppp_payload;
+    U16                    ccb_id;
+    U16                    pppoe_len = sizeof(pppoe_header_t) + sizeof(ppp_payload_t);
 
     rte_thread_t thread_id = rte_thread_self();
-    rte_thread_set_name(thread_id, "fastrg_wan_comb");
+    rte_thread_set_name(thread_id, "fastrg_wan_dist");
 
     while(rte_atomic16_read(&start_flag) == 0)
         rte_pause();
 
     while(likely(rte_atomic16_read(&stop_flag) == 0)) {
         nb_rx = rte_eth_rx_burst(WAN_PORT, rx_q, pkt, BURST_SIZE);
+        dist_n = 0;
         for(int i=0; i<nb_rx; i++) {
             single_pkt = pkt[i];
             rte_prefetch0(rte_pktmbuf_mtod(single_pkt, void *));
@@ -934,7 +985,7 @@ int wan_combined_rx(void *arg)
             eth_hdr = mbuf_priv->eth_hdr;
             ccb_id = mbuf_priv->ccb_id;
 
-            /* Non-PPPoE → IPTV / multicast handling */
+            /* Non-PPPoE → IPTV / multicast handling (inline, TX LAN queue 0) */
             if (unlikely(vlan_header->next_proto != rte_cpu_to_be_16(ETH_P_PPP_SES) &&
                     vlan_header->next_proto != rte_cpu_to_be_16(ETH_P_PPP_DIS))) {
                 if (is_iptv_pkt_need_drop(fastrg_ccb, vlan_header) == TRUE) {
@@ -951,7 +1002,7 @@ int wan_combined_rx(void *arg)
             ppp_payload = ((ppp_payload_t *)((char *)eth_hdr + sizeof(struct rte_ether_hdr) +
                 sizeof(vlan_header_t) + sizeof(pppoe_header_t)));
 
-            /* PPPoE Discovery or control protocols → send to CP */
+            /* PPPoE Discovery or control protocols → control plane */
             if (unlikely(vlan_header->next_proto == rte_cpu_to_be_16(ETH_P_PPP_DIS) ||
                     (ppp_payload->ppp_protocol == rte_cpu_to_be_16(LCP_PROTOCOL) ||
                     ppp_payload->ppp_protocol == rte_cpu_to_be_16(PAP_PROTOCOL) ||
@@ -992,81 +1043,169 @@ int wan_combined_rx(void *arg)
             single_pkt->l3_len = sizeof(struct rte_ipv4_hdr);
 
             if (ip_hdr->next_proto_id == PROTO_TYPE_ICMP) {
+                /* ICMP session data (low volume) handled inline */
                 if (decaps_icmp(fastrg_ccb, single_pkt, eth_hdr, ip_hdr, ccb_id) == 1)
                     pkt[total_tx++] = single_pkt;
             } else if (ip_hdr->next_proto_id == PROTO_TYPE_UDP) {
-                /* UDP → check DNS proxy first, then NAT reverse decap + TX to LAN */
-                struct rte_udp_hdr *udp_hdr_wan = (struct rte_udp_hdr *)(ip_hdr + 1);
-                if (udp_hdr_wan->src_port == rte_cpu_to_be_16(DNS_PORT)) {
-                    /* Forward DNS response to control plane for proxy handling */
+                struct rte_udp_hdr *udp_hdr = (struct rte_udp_hdr *)(ip_hdr + 1);
+                if (udp_hdr->src_port == rte_cpu_to_be_16(DNS_PORT)) {
+                    /* DNS response → control plane for proxy handling */
                     dhcp_ccb_t *dns_dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
                     if (dns_dhcp_ccb != NULL && dns_dhcp_ccb->dns_state.dns_proxy_enabled) {
                         send2cp(fastrg_ccb, single_pkt, EV_DP_DNS, WAN_PORT);
                         continue;
                     }
                 }
-                ip_hdr->hdr_checksum = 0;
-                pkt_num = decaps_udp(fastrg_ccb, single_pkt, eth_hdr,
-                    vlan_header, ip_hdr, ccb_id, tx_q);
-                for(int j=0; j<pkt_num; j++) {
-                    pkt[total_tx++] = single_pkt;
-                    single_pkt = single_pkt->next;
-                }
+                /* Fan out to a worker for NAT reverse decap */
+                single_pkt->hash.usr = compute_flow_tag(ip_hdr->src_addr, ip_hdr->dst_addr,
+                    udp_hdr->src_port, udp_hdr->dst_port, PROTO_TYPE_UDP);
+                dist_pkt[dist_n++] = single_pkt;
             } else if (ip_hdr->next_proto_id == PROTO_TYPE_TCP) {
-                /* TCP → NAT reverse decap + TX to LAN */
-                ip_hdr->hdr_checksum = 0;
-                pkt_num = decaps_tcp(fastrg_ccb, single_pkt, eth_hdr,
-                    vlan_header, ip_hdr, ccb_id, tx_q);
-                for(int j=0; j<pkt_num; j++) {
-                    pkt[total_tx++] = single_pkt;
-                    single_pkt = single_pkt->next;
-                }
+                struct rte_tcp_hdr *tcp_hdr = (struct rte_tcp_hdr *)(ip_hdr + 1);
+                single_pkt->hash.usr = compute_flow_tag(ip_hdr->src_addr, ip_hdr->dst_addr,
+                    tcp_hdr->src_port, tcp_hdr->dst_port, PROTO_TYPE_TCP);
+                dist_pkt[dist_n++] = single_pkt;
             } else {
                 drop_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
             }
         }
+        /* Hand PPPoE session TCP/UDP packets to worker lcores; free any the
+         * distributor could not place (e.g. no active worker yet at startup). */
+        if (dist_n > 0) {
+            int nb_dist = rte_distributor_process(dist, dist_pkt, dist_n);
+            for(int k=nb_dist; k<dist_n; k++) {
+                mbuf_priv_t *mbuf_priv = rte_mbuf_to_priv(dist_pkt[k]);
+                drop_packet(fastrg_ccb, dist_pkt[k], WAN_PORT, mbuf_priv->ccb_id);
+            }
+        }
+        /* Inline (IPTV + ICMP) TX to LAN queue 0 */
         if (likely(total_tx > 0)) {
             U16 nb_tx = rte_eth_tx_burst(LAN_PORT, tx_q, pkt, total_tx);
             if (unlikely(nb_tx < total_tx)) {
                 for(U16 buf=nb_tx; buf<total_tx; buf++) {
                     mbuf_priv_t *mbuf_priv = rte_mbuf_to_priv(pkt[buf]);
-                    U16 ccb_id = mbuf_priv->ccb_id;
-                    drop_packet(fastrg_ccb, pkt[buf], LAN_PORT, ccb_id);
+                    drop_packet(fastrg_ccb, pkt[buf], LAN_PORT, mbuf_priv->ccb_id);
                 }
             }
             total_tx = 0;
         }
+        /* Reclaim worker-returned mbufs (already TX'd/freed by workers) */
+        rte_distributor_returned_pkts(dist, ret_pkt, BURST_SIZE);
     }
+    rte_distributor_flush(dist);
+    rte_distributor_clear_returns(dist);
     return 0;
 }
 
 /**
- * lan_combined_rx - LAN port single-queue handler for non-ICE PMDs.
+ * wan_dist_worker - WAN decap worker lcore (DP_MODE_DISTRIBUTOR).
  *
- * Merges lan_ctrl_rx (ARP, PPPoE passthrough, ICMP, IGMP) and
- * lan_data_rx (TCP/UDP NAT + PPPoE encap, DHCP) into one thread
- * polling queue 0.
+ * Pulls PPPoE-stripped session packets from wan_dist (the distributor keeps a
+ * flow on one worker and in order), performs NAT reverse decap, and TX to LAN
+ * on its own dedicated queue. Mirrors the data half of the former
+ * wan_combined_rx. Every received mbuf is handed back to the distributor for
+ * in-flight accounting; the pointers are already TX'd/freed so the RX lcore
+ * just discards the returned set.
  */
-int lan_combined_rx(void *arg)
+int wan_dist_worker(void *arg)
 {
-    FastRG_t             *fastrg_ccb = (FastRG_t *)arg;
-    const U16            rx_q = 0;
-    const U16            tx_q = 0;
-    struct rte_mbuf      *single_pkt;
-    uint64_t             total_wan_tx = 0;
-    struct rte_ether_hdr *eth_hdr;
-    vlan_header_t        *vlan_header;
-    struct rte_ipv4_hdr  *ip_hdr;
-    struct rte_icmp_hdr  *icmphdr;
-    struct rte_mbuf      *wan_pkt[BURST_SIZE];
-    char                 *cur;
-    pppoe_header_t       *pppoe_header;
-    U16                  nb_rx, ccb_id;
-    U16                  pppoe_len = sizeof(pppoe_header_t) + sizeof(ppp_payload_t);
-    int                  pkt_num;
+    dist_worker_arg_t      *wk = (dist_worker_arg_t *)arg;
+    FastRG_t               *fastrg_ccb = wk->fastrg_ccb;
+    struct rte_distributor *dist = wk->dist;
+    const unsigned int     worker_id = wk->worker_id;
+    const U16              tx_q = wk->tx_queue_id;
+    struct rte_mbuf        *single_pkt;
+    struct rte_ether_hdr   *eth_hdr;
+    vlan_header_t          *vlan_header;
+    struct rte_ipv4_hdr    *ip_hdr;
+    struct rte_mbuf        *bufs[BURST_SIZE];
+    struct rte_mbuf        *tx_pkt[BURST_SIZE];
+    U16                    ccb_id;
+    int                    pkt_num;
+    int                    n;
+    char                   thread_name[32];
+
+    snprintf(thread_name, sizeof(thread_name), "fastrg_wan_wkr_%u", worker_id);
+    rte_thread_t thread_id = rte_thread_self();
+    rte_thread_set_name(thread_id, thread_name);
+
+    while(rte_atomic16_read(&start_flag) == 0)
+        rte_pause();
+
+    n = rte_distributor_get_pkt(dist, worker_id, bufs, NULL, 0);
+    while(likely(rte_atomic16_read(&stop_flag) == 0)) {
+        U16 total_tx = 0;
+        for(int i=0; i<n; i++) {
+            single_pkt = bufs[i];
+            mbuf_priv_t *mbuf_priv = rte_mbuf_to_priv(single_pkt);
+            eth_hdr = mbuf_priv->eth_hdr;
+            vlan_header = mbuf_priv->vlan_hdr;
+            ccb_id = mbuf_priv->ccb_id;
+            ip_hdr = (struct rte_ipv4_hdr *)((char *)eth_hdr +
+                sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t));
+            ip_hdr->hdr_checksum = 0;
+            if (ip_hdr->next_proto_id == PROTO_TYPE_UDP) {
+                pkt_num = decaps_udp(fastrg_ccb, single_pkt, eth_hdr,
+                    vlan_header, ip_hdr, ccb_id, tx_q);
+            } else if (ip_hdr->next_proto_id == PROTO_TYPE_TCP) {
+                pkt_num = decaps_tcp(fastrg_ccb, single_pkt, eth_hdr,
+                    vlan_header, ip_hdr, ccb_id, tx_q);
+            } else {
+                drop_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
+                continue;
+            }
+            for(int j=0; j<pkt_num; j++) {
+                tx_pkt[total_tx++] = single_pkt;
+                single_pkt = single_pkt->next;
+            }
+        }
+        if (likely(total_tx > 0)) {
+            U16 nb_tx = rte_eth_tx_burst(LAN_PORT, tx_q, tx_pkt, total_tx);
+            if (unlikely(nb_tx < total_tx)) {
+                for(U16 buf=nb_tx; buf<total_tx; buf++) {
+                    mbuf_priv_t *mbuf_priv = rte_mbuf_to_priv(tx_pkt[buf]);
+                    drop_packet(fastrg_ccb, tx_pkt[buf], LAN_PORT, mbuf_priv->ccb_id);
+                }
+            }
+        }
+        n = rte_distributor_get_pkt(dist, worker_id, bufs, bufs, n);
+    }
+    if (n > 0)
+        rte_distributor_return_pkt(dist, worker_id, bufs, n);
+    return 0;
+}
+
+/**
+ * lan_dist_rx - LAN port queue-0 distributor RX lcore (DP_MODE_DISTRIBUTOR).
+ *
+ * Same handling as the former lan_combined_rx for ARP, PPPoE pass-through,
+ * gateway-subnet ICMP/DHCP/DNS, WAN-bound ICMP and IGMP (all inline). WAN-bound
+ * TCP/UDP destined to our LAN MAC is tagged by its LAN 5-tuple and fanned out
+ * to lan_dist workers for NAT + PPPoE encap.
+ */
+int lan_dist_rx(void *arg)
+{
+    FastRG_t               *fastrg_ccb = (FastRG_t *)arg;
+    struct rte_distributor *dist = fastrg_ccb->lan_dist;
+    const U16              rx_q = 0;
+    const U16              tx_q = 0;   /* inline TX on queue 0 */
+    struct rte_mbuf        *single_pkt;
+    uint64_t               total_wan_tx = 0;
+    struct rte_ether_hdr   *eth_hdr;
+    vlan_header_t          *vlan_header;
+    struct rte_ipv4_hdr    *ip_hdr;
+    struct rte_icmp_hdr    *icmphdr;
+    struct rte_mbuf        *wan_pkt[BURST_SIZE];
+    struct rte_mbuf        *dist_pkt[BURST_SIZE];
+    struct rte_mbuf        *ret_pkt[BURST_SIZE];
+    U16                    dist_n;
+    char                   *cur;
+    pppoe_header_t         *pppoe_header;
+    U16                    nb_rx, ccb_id;
+    U16                    pppoe_len = sizeof(pppoe_header_t) + sizeof(ppp_payload_t);
 
     rte_thread_t thread_id = rte_thread_self();
-    rte_thread_set_name(thread_id, "fastrg_lan_comb");
+    rte_thread_set_name(thread_id, "fastrg_lan_dist");
 
     while(rte_atomic16_read(&start_flag) == 0)
         rte_pause();
@@ -1074,6 +1213,7 @@ int lan_combined_rx(void *arg)
     struct rte_mbuf *rx_pkt[BURST_SIZE];
     while(likely(rte_atomic16_read(&stop_flag) == 0)) {
         nb_rx = rte_eth_rx_burst(LAN_PORT, rx_q, rx_pkt, BURST_SIZE);
+        dist_n = 0;
         for(int i=0; i<nb_rx; i++) {
             single_pkt = rx_pkt[i];
             rte_prefetch0(rte_pktmbuf_mtod(single_pkt, void *));
@@ -1232,7 +1372,7 @@ int lan_combined_rx(void *arg)
                 single_pkt->l3_len = sizeof(struct rte_ipv4_hdr);
 
                 if (ip_hdr->next_proto_id == PROTO_TYPE_ICMP) {
-                    /* ICMP to WAN → NAT + PPPoE encap */
+                    /* ICMP to WAN → NAT + PPPoE encap (inline, low volume) */
                     if (unlikely(!rte_is_same_ether_addr(&eth_hdr->dst_addr, &fastrg_ccb->nic_info.hsi_lan_mac))) {
                         count_rx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                         count_tx_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
@@ -1288,7 +1428,7 @@ int lan_combined_rx(void *arg)
                     increase_pppoes_tx_count(ppp_ccb, single_pkt->pkt_len);
                     wan_pkt[total_wan_tx++] = single_pkt;
                 } else if (ip_hdr->next_proto_id == PROTO_TYPE_TCP) {
-                    /* TCP → NAT + PPPoE encap */
+                    /* TCP → NAT + PPPoE encap (offloaded to worker) */
                     if (unlikely(!rte_is_same_ether_addr(&eth_hdr->dst_addr, &fastrg_ccb->nic_info.hsi_lan_mac))) {
                         count_rx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                         count_tx_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
@@ -1299,16 +1439,12 @@ int lan_combined_rx(void *arg)
                         drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                         continue;
                     }
-                    ip_hdr = (struct rte_ipv4_hdr *)rte_pktmbuf_adj(single_pkt,
-                        (U16)(sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t)));
-                    pkt_num = encaps_tcp(fastrg_ccb, &single_pkt, eth_hdr,
-                        vlan_header, ip_hdr, ccb_id, tx_q);
-                    for(int j=0; j<pkt_num; j++) {
-                        wan_pkt[total_wan_tx++] = single_pkt;
-                        single_pkt = single_pkt->next;
-                    }
+                    struct rte_tcp_hdr *tcp_hdr = (struct rte_tcp_hdr *)(ip_hdr + 1);
+                    single_pkt->hash.usr = compute_flow_tag(ip_hdr->src_addr, ip_hdr->dst_addr,
+                        tcp_hdr->src_port, tcp_hdr->dst_port, PROTO_TYPE_TCP);
+                    dist_pkt[dist_n++] = single_pkt;
                 } else if (ip_hdr->next_proto_id == PROTO_TYPE_UDP) {
-                    /* UDP → DHCP or NAT + PPPoE encap */
+                    /* UDP → DHCP (to CP) or NAT + PPPoE encap (offloaded to worker) */
                     if (unlikely(RTE_IS_IPV4_MCAST(rte_be_to_cpu_32(ip_hdr->dst_addr)))) {
                         drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                         continue;
@@ -1334,14 +1470,9 @@ int lan_combined_rx(void *arg)
                         drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                         continue;
                     }
-                    ip_hdr = (struct rte_ipv4_hdr *)rte_pktmbuf_adj(single_pkt,
-                        (U16)(sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t)));
-                    pkt_num = encaps_udp(fastrg_ccb, &single_pkt, eth_hdr,
-                        vlan_header, ip_hdr, ccb_id, tx_q);
-                    for(int j=0; j<pkt_num; j++) {
-                        wan_pkt[total_wan_tx++] = single_pkt;
-                        single_pkt = single_pkt->next;
-                    }
+                    single_pkt->hash.usr = compute_flow_tag(ip_hdr->src_addr, ip_hdr->dst_addr,
+                        udp_hdr->src_port, udp_hdr->dst_port, PROTO_TYPE_UDP);
+                    dist_pkt[dist_n++] = single_pkt;
                 } else if (ip_hdr->next_proto_id == IPPROTO_IGMP) {
                     #ifdef TEST_MODE
                     drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
@@ -1353,16 +1484,102 @@ int lan_combined_rx(void *arg)
                     #endif
                 } else {
                     FastRG_LOG(DBG, fastrg_ccb->fp, NULL, NULL,
-                        "unknown L4 packet with protocol id %x recv on LAN combined queue",
+                        "unknown L4 packet with protocol id %x recv on LAN distributor queue",
                         ip_hdr->next_proto_id);
                     drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                 }
             } else {
                 FastRG_LOG(DBG, fastrg_ccb->fp, NULL, NULL,
-                    "unknown ether type %x recv on LAN combined queue",
+                    "unknown ether type %x recv on LAN distributor queue",
                     rte_be_to_cpu_16(vlan_header->next_proto));
                 drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                 continue;
+            }
+        }
+        /* Hand WAN-bound TCP/UDP packets to worker lcores; free any the
+         * distributor could not place (e.g. no active worker yet at startup). */
+        if (dist_n > 0) {
+            int nb_dist = rte_distributor_process(dist, dist_pkt, dist_n);
+            for(int k=nb_dist; k<dist_n; k++) {
+                mbuf_priv_t *mbuf_priv = rte_mbuf_to_priv(dist_pkt[k]);
+                drop_packet(fastrg_ccb, dist_pkt[k], LAN_PORT, mbuf_priv->ccb_id);
+            }
+        }
+        /* Inline (ARP/ICMP/IGMP/passthrough) TX to WAN queue 0 */
+        if (likely(total_wan_tx > 0)) {
+            U16 nb_tx = rte_eth_tx_burst(WAN_PORT, tx_q, wan_pkt, total_wan_tx);
+            if (unlikely(nb_tx < total_wan_tx)) {
+                for(U16 buf=nb_tx; buf<total_wan_tx; buf++) {
+                    mbuf_priv_t *mbuf_priv = rte_mbuf_to_priv(wan_pkt[buf]);
+                    drop_packet(fastrg_ccb, wan_pkt[buf], WAN_PORT, mbuf_priv->ccb_id);
+                }
+            }
+            total_wan_tx = 0;
+        }
+        /* Reclaim worker-returned mbufs (already TX'd/freed by workers) */
+        rte_distributor_returned_pkts(dist, ret_pkt, BURST_SIZE);
+    }
+    rte_distributor_flush(dist);
+    rte_distributor_clear_returns(dist);
+    return 0;
+}
+
+/**
+ * lan_dist_worker - LAN encap worker lcore (DP_MODE_DISTRIBUTOR).
+ *
+ * Pulls WAN-bound session packets from lan_dist, performs NAT + PPPoE encap,
+ * and TX to WAN on its own dedicated queue. Mirrors the data half of the former
+ * lan_combined_rx.
+ */
+int lan_dist_worker(void *arg)
+{
+    dist_worker_arg_t      *wk = (dist_worker_arg_t *)arg;
+    FastRG_t               *fastrg_ccb = wk->fastrg_ccb;
+    struct rte_distributor *dist = wk->dist;
+    const unsigned int     worker_id = wk->worker_id;
+    const U16              tx_q = wk->tx_queue_id;
+    struct rte_mbuf        *single_pkt;
+    struct rte_ether_hdr   *eth_hdr;
+    vlan_header_t          *vlan_header;
+    struct rte_ipv4_hdr    *ip_hdr;
+    struct rte_mbuf        *bufs[BURST_SIZE];
+    struct rte_mbuf        *wan_pkt[BURST_SIZE];
+    U16                    ccb_id;
+    int                    pkt_num;
+    int                    n;
+    char                   thread_name[32];
+
+    snprintf(thread_name, sizeof(thread_name), "fastrg_lan_wkr_%u", worker_id);
+    rte_thread_t thread_id = rte_thread_self();
+    rte_thread_set_name(thread_id, thread_name);
+
+    while(rte_atomic16_read(&start_flag) == 0)
+        rte_pause();
+
+    n = rte_distributor_get_pkt(dist, worker_id, bufs, NULL, 0);
+    while(likely(rte_atomic16_read(&stop_flag) == 0)) {
+        U16 total_wan_tx = 0;
+        for(int i=0; i<n; i++) {
+            single_pkt = bufs[i];
+            mbuf_priv_t *mbuf_priv = rte_mbuf_to_priv(single_pkt);
+            eth_hdr = mbuf_priv->eth_hdr;
+            vlan_header = mbuf_priv->vlan_hdr;
+            ccb_id = mbuf_priv->ccb_id;
+            ip_hdr = (struct rte_ipv4_hdr *)rte_pktmbuf_adj(single_pkt,
+                (U16)(sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t)));
+            if (ip_hdr->next_proto_id == PROTO_TYPE_TCP) {
+                pkt_num = encaps_tcp(fastrg_ccb, &single_pkt, eth_hdr,
+                    vlan_header, ip_hdr, ccb_id, tx_q);
+            } else if (ip_hdr->next_proto_id == PROTO_TYPE_UDP) {
+                pkt_num = encaps_udp(fastrg_ccb, &single_pkt, eth_hdr,
+                    vlan_header, ip_hdr, ccb_id, tx_q);
+            } else {
+                drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
+                continue;
+            }
+            for(int j=0; j<pkt_num; j++) {
+                wan_pkt[total_wan_tx++] = single_pkt;
+                single_pkt = single_pkt->next;
             }
         }
         if (likely(total_wan_tx > 0)) {
@@ -1370,13 +1587,14 @@ int lan_combined_rx(void *arg)
             if (unlikely(nb_tx < total_wan_tx)) {
                 for(U16 buf=nb_tx; buf<total_wan_tx; buf++) {
                     mbuf_priv_t *mbuf_priv = rte_mbuf_to_priv(wan_pkt[buf]);
-                    U16 ccb_id = mbuf_priv->ccb_id;
-                    drop_packet(fastrg_ccb, wan_pkt[buf], WAN_PORT, ccb_id);
+                    drop_packet(fastrg_ccb, wan_pkt[buf], WAN_PORT, mbuf_priv->ccb_id);
                 }
             }
-            total_wan_tx = 0;
         }
+        n = rte_distributor_get_pkt(dist, worker_id, bufs, bufs, n);
     }
+    if (n > 0)
+        rte_distributor_return_pkt(dist, worker_id, bufs, n);
     return 0;
 }
 
