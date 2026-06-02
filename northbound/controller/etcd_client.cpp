@@ -1785,10 +1785,9 @@ private:
         std::regex hsi_regex("configs/([^/]+)/hsi/(.+)");
         std::smatch matches;
         if (!std::regex_match(key, matches, hsi_regex) || matches.size() != 3) {
+            // Errors are reported to the controller via Kafka (slice 11); the etcd
+            // failed_events/ namespace is removed.
             std::cerr << "Invalid HSI config key format: " << key << std::endl;
-            write_fallback_error("hsi_config", key, node_uuid_, "",
-                ERROR_REASON_INVALID_FORMAT, 
-                "Key does not match expected format: configs/{nodeId}/hsi/{userId}", value);
             return ERROR;
         }
         std::string node_id = matches[1].str();
@@ -1836,10 +1835,8 @@ private:
         if (action != HSI_ACTION_DELETE) {
             bool is_enabled = false;
             if (!parse_hsi_config(value, &ev->event_data.hsi.config, &is_enabled)) {
+                // Parse errors are reported via Kafka (slice 11).
                 std::cerr << "Failed to parse HSI config: " << value << std::endl;
-                write_fallback_error("hsi_config", key, node_id, user_id,
-                    ERROR_REASON_PARSE_FAILED,
-                    "JSON parsing failed or missing required fields", value);
                 etcd_event_free(ev);
                 return ERROR;
             }
@@ -1924,10 +1921,8 @@ private:
         std::regex user_count_regex("user_counts/([^/]+)/");
         std::smatch matches;
         if (!std::regex_match(key, matches, user_count_regex) || matches.size() != 2) {
+            // Errors are reported via Kafka (slice 11); failed_events/ is removed.
             std::cerr << "Invalid user count config key format: " << key << std::endl;
-            write_fallback_error("user_count_config", key, node_uuid_, "",
-                ERROR_REASON_INVALID_FORMAT,
-                "Key does not match expected format: user_counts/{nodeId}/", value);
             return ERROR;
         }
         std::string node_id = matches[1].str();
@@ -1958,10 +1953,8 @@ private:
 
         if (action != HSI_ACTION_DELETE) {
             if (!parse_user_count_config(value, &ev->event_data.user_count)) {
+                // Parse errors are reported via Kafka (slice 11).
                 std::cerr << "Failed to parse user count config: " << value << std::endl;
-                write_fallback_error("user_count_config", key, node_id, "",
-                    ERROR_REASON_PARSE_FAILED,
-                    "JSON parsing failed or missing required fields", value);
                 etcd_event_free(ev);
                 return ERROR;
             }

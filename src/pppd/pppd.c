@@ -136,7 +136,6 @@ STATUS ppp_init_config_by_user(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb, U16 ccb
     rte_timer_init(&(ppp_ccb->pppoe));
     rte_timer_init(&(ppp_ccb->ppp));
     rte_timer_init(&(ppp_ccb->ppp_alive));
-    rte_timer_init(&(ppp_ccb->etcd_pppoe_status_timer));
     rte_atomic16_init(&ppp_ccb->dp_start_bool);
     rte_atomic16_init(&ppp_ccb->ppp_bool);
     rte_atomic64_init(&ppp_ccb->pppoes_rx_bytes);
@@ -371,7 +370,6 @@ STATUS pppd_disable_ccb(FastRG_t *fastrg_ccb, U16 remove_ccb_count, U16 old_ccb_
         U16 ccb_id = old_ccb_count - 1 - i;
         ppp_ccb_t *ppp_ccb = old_array[ccb_id];
         exit_ppp(ppp_ccb);
-        rte_timer_stop(&ppp_ccb->etcd_pppoe_status_timer);
         reset_vlan_map_ccb_id(fastrg_ccb, rte_atomic16_read(&ppp_ccb->vlan_id));
         ppp_cleanup_config_by_user(ppp_ccb, ccb_id);
     }
@@ -409,7 +407,6 @@ STATUS pppd_remove_ccb(FastRG_t *fastrg_ccb, U16 remove_ccb_count, U16 old_ccb_c
         U16 ccb_id = old_ccb_count - 1 - i;
         ppp_ccb_t *ppp_ccb = old_array[ccb_id];
         exit_ppp(ppp_ccb);
-        rte_timer_stop(&ppp_ccb->etcd_pppoe_status_timer);
         if (ppp_ccb->ppp_user_acc != NULL)
             fastrg_mfree(ppp_ccb->ppp_user_acc);
         if (ppp_ccb->ppp_passwd != NULL)
@@ -578,48 +575,6 @@ STATUS ppp_disconnect(ppp_ccb_t *ppp_ccb)
     return SUCCESS;
 }
 
-void check_etcd_pppoe_status(struct rte_timer *tim, ppp_ccb_t *ppp_ccb)
-{
-    FastRG_t *fastrg_ccb = ppp_ccb->fastrg_ccb;
-    char *node_id = fastrg_ccb->node_uuid;
-    char user_id_str[8] = { 0 };
-    hsi_enable_status_t hsi_enable_status;
-    int64_t revision = 0;
-
-    snprintf(user_id_str, sizeof(user_id_str), "%u", ppp_ccb->user_num);
-    etcd_status_t status = etcd_client_get_hsi_config_status(node_id, user_id_str, &hsi_enable_status);
-    if (status != ETCD_SUCCESS && status != ETCD_KEY_NOT_FOUND) {
-        if (tim->expire >= (ETCD_RETRY_BASE_TIME << 5)) { // try for 5 times
-            FastRG_LOG(ERR, fastrg_ccb->fp, ppp_ccb, PPPLOGMSG, 
-                "User %" PRIu16 " failed to get HSI config status from etcd after multiple attempts.\n", 
-                ppp_ccb->user_num);
-            return;
-        }
-        tim->expire <<= 1;
-        rte_timer_reset(tim, tim->expire, SINGLE, fastrg_ccb->lcore.ctrl_thread, 
-            (rte_timer_cb_t)check_etcd_pppoe_status, ppp_ccb);
-        return;
-    }
-    if (rte_atomic16_read(&ppp_ccb->ppp_bool) == 0 && hsi_enable_status != ENABLE_STATUS_DISABLED) {
-        etcd_mark_pending_event(HSI_ACTION_UPDATE, ppp_ccb->user_num - 1);
-        if (etcd_client_modify_hsi_config_status(fastrg_ccb->node_uuid, user_id_str, 
-                ENABLE_STATUS_DISABLED, &revision) == ETCD_SUCCESS) {
-            etcd_confirm_pending_event(HSI_ACTION_UPDATE, ppp_ccb->user_num - 1, revision);
-        } else {
-            etcd_remove_event(HSI_ACTION_UPDATE, ppp_ccb->user_num - 1);
-        }
-    } else if (rte_atomic16_read(&ppp_ccb->ppp_bool) == 1 && 
-            hsi_enable_status != ENABLE_STATUS_ENABLED) {
-        etcd_mark_pending_event(HSI_ACTION_UPDATE, ppp_ccb->user_num - 1);
-        if (etcd_client_modify_hsi_config_status(fastrg_ccb->node_uuid, user_id_str, 
-                ENABLE_STATUS_ENABLED, &revision) == ETCD_SUCCESS) {
-            etcd_confirm_pending_event(HSI_ACTION_UPDATE, ppp_ccb->user_num - 1, revision);
-        } else {
-            etcd_remove_event(HSI_ACTION_UPDATE, ppp_ccb->user_num - 1);
-        }
-    }
-}
-
 void exit_ppp(ppp_ccb_t *ppp_ccb)
 {
     FastRG_t *fastrg_ccb = ppp_ccb->fastrg_ccb;
@@ -640,23 +595,11 @@ void exit_ppp(ppp_ccb_t *ppp_ccb)
     ppp_ccb->hsi_primary_dns = 0xffffffff; /* 0xffffffff means no dns assigned by server */
     ppp_ccb->hsi_secondary_dns = 0xffffffff; /* 0xffffffff means no dns assigned by server */
     dns_proxy_cleanup(&dhcp_ccb->dns_state);
-    FastRG_LOG(INFO, fastrg_ccb->fp, ppp_ccb, PPPLOGMSG, "User %" PRIu16 
+    FastRG_LOG(INFO, fastrg_ccb->fp, ppp_ccb, PPPLOGMSG, "User %" PRIu16
         " HSI module is terminated.\n", ppp_ccb->user_num);
 
-    if (fastrg_ccb->is_standalone == FALSE) {
-        char user_id_str[6];
-        snprintf(user_id_str, sizeof(user_id_str), "%u", ppp_ccb->user_num);
-        int64_t revision = 0;
-        etcd_mark_pending_event(HSI_ACTION_UPDATE, ppp_ccb->user_num - 1);
-        if (etcd_client_modify_hsi_config_status(fastrg_ccb->node_uuid, user_id_str, 
-                ENABLE_STATUS_DISABLED, &revision) == ETCD_SUCCESS) {
-            etcd_confirm_pending_event(HSI_ACTION_UPDATE, ppp_ccb->user_num - 1, revision);
-        } else {
-            etcd_remove_event(HSI_ACTION_UPDATE, ppp_ccb->user_num - 1);
-        }
-        rte_timer_reset(&ppp_ccb->etcd_pppoe_status_timer, ETCD_RETRY_BASE_TIME, 
-            SINGLE, fastrg_ccb->lcore.ctrl_thread, (rte_timer_cb_t)check_etcd_pppoe_status, ppp_ccb);
-    }
+    /* PPPoE state transitions are reported to the controller via Kafka (slice 11);
+     * the node no longer writes connection status back to etcd. */
 }
 
 STATUS ppp_process(FastRG_t *fastrg_ccb, U8 *pkt_data, U16 len)
