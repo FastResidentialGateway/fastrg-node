@@ -64,6 +64,37 @@ download_controller_grpc() {
         exit 1
     fi
 
+    # Get Kafka events schema (node->controller telemetry payloads). Controller
+    # repo is the single source of truth; keep field numbers/types compatible.
+    KAFKA_PROTO_FILE="$PROTO_DIR/kafka-events.proto"
+    KAFKA_PROTO_URLS=(
+        "https://raw.githubusercontent.com/FastResidentialGateway/fastrg-controller/$CURRENT_TAG/proto/kafka-events.proto"
+        "https://raw.githubusercontent.com/FastResidentialGateway/fastrg-controller/master/proto/kafka-events.proto"
+    )
+
+    KAFKA_DOWNLOAD_SUCCESS=0
+    for KAFKA_PROTO_URL in "${KAFKA_PROTO_URLS[@]}"; do
+        echo "  Trying: $KAFKA_PROTO_URL"
+
+        if curl -fsSL "$KAFKA_PROTO_URL" -o $KAFKA_PROTO_FILE.tmp 2>/dev/null; then
+            if [ -s $KAFKA_PROTO_FILE.tmp ]; then
+                mv $KAFKA_PROTO_FILE.tmp $KAFKA_PROTO_FILE
+                echo "Downloaded kafka-events.proto successfully from: $KAFKA_PROTO_URL"
+                KAFKA_DOWNLOAD_SUCCESS=1
+                break
+            fi
+        fi
+
+        rm -f $KAFKA_PROTO_FILE.tmp
+    done
+
+    if [ $KAFKA_DOWNLOAD_SUCCESS -eq 0 ]; then
+        echo "Failed to download kafka-events.proto"
+        echo "   Tried tag: $CURRENT_TAG and master branch"
+        popd
+        exit 1
+    fi
+
     popd
 }
 
