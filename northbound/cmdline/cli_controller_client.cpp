@@ -263,6 +263,86 @@ cli_ctrl_status_t cli_controller_del_dns(unsigned int user_id, const char* domai
     return map_status(g_stub->DeleteDNSRecord(&ctx, req, &reply));
 }
 
+// Fetch the current HSI config for read-modify-write toggles.
+static cli_ctrl_status_t fetch_config(unsigned int user_id, controller::HSIConfig* out) {
+    grpc::ClientContext ctx; set_ctx(ctx);
+    controller::GetHSIConfigRequest req;
+    req.set_node_id(g_node_uuid);
+    req.set_user_id(std::to_string(user_id));
+    controller::HSIConfigResponse reply;
+    grpc::Status s = g_stub->GetHSIConfig(&ctx, req, &reply);
+    if (s.ok()) *out = reply.config();
+    return map_status(s);
+}
+
+// Update an HSI config after a local modification.
+static cli_ctrl_status_t update_config(unsigned int user_id, const controller::HSIConfig& cfg) {
+    grpc::ClientContext ctx; set_ctx(ctx);
+    controller::UpdateHSIConfigRequest req;
+    req.set_node_id(g_node_uuid);
+    req.set_user_id(std::to_string(user_id));
+    *req.mutable_config() = cfg;
+    controller::HSIConfigResponse reply;
+    return map_status(g_stub->UpdateHSIConfig(&ctx, req, &reply));
+}
+
+cli_ctrl_status_t cli_controller_set_dns_proxy(unsigned int user_id, int enable) {
+    ensure_stub();
+    if (!g_stub) return CLI_CTRL_UNAVAIL;
+    controller::HSIConfig cfg;
+    cli_ctrl_status_t rc = fetch_config(user_id, &cfg);
+    if (rc != CLI_CTRL_OK) return rc;
+    cfg.set_dns_proxy_enable(enable != 0);
+    return update_config(user_id, cfg);
+}
+
+cli_ctrl_status_t cli_controller_set_tcp_conntrack(unsigned int user_id, int enable) {
+    ensure_stub();
+    if (!g_stub) return CLI_CTRL_UNAVAIL;
+    controller::HSIConfig cfg;
+    cli_ctrl_status_t rc = fetch_config(user_id, &cfg);
+    if (rc != CLI_CTRL_OK) return rc;
+    cfg.set_tcp_conntrack_enable(enable != 0);
+    return update_config(user_id, cfg);
+}
+
+cli_ctrl_status_t cli_controller_snat_set(unsigned int user_id, unsigned int eport,
+    const char* dip, unsigned int iport) {
+    ensure_stub();
+    if (!g_stub) return CLI_CTRL_UNAVAIL;
+    controller::HSIConfig cfg;
+    cli_ctrl_status_t rc = fetch_config(user_id, &cfg);
+    if (rc != CLI_CTRL_OK) return rc;
+    // Replace an existing mapping for this eport, else append.
+    controller::PortMapping* pm = nullptr;
+    for (int i = 0; i < cfg.port_mappings_size(); i++) {
+        if (cfg.port_mappings(i).eport() == std::to_string(eport)) {
+            pm = cfg.mutable_port_mappings(i);
+            break;
+        }
+    }
+    if (!pm) pm = cfg.add_port_mappings();
+    pm->set_eport(std::to_string(eport));
+    pm->set_dip(dip ? dip : "");
+    pm->set_dport(std::to_string(iport));
+    return update_config(user_id, cfg);
+}
+
+cli_ctrl_status_t cli_controller_snat_unset(unsigned int user_id, unsigned int eport) {
+    ensure_stub();
+    if (!g_stub) return CLI_CTRL_UNAVAIL;
+    controller::HSIConfig cfg;
+    cli_ctrl_status_t rc = fetch_config(user_id, &cfg);
+    if (rc != CLI_CTRL_OK) return rc;
+    controller::HSIConfig out = cfg;
+    out.clear_port_mappings();
+    for (int i = 0; i < cfg.port_mappings_size(); i++) {
+        if (cfg.port_mappings(i).eport() != std::to_string(eport))
+            *out.add_port_mappings() = cfg.port_mappings(i);
+    }
+    return update_config(user_id, out);
+}
+
 cli_ctrl_status_t cli_controller_get_hsi(unsigned int user_id, char* out_buf, size_t out_len) {
     ensure_stub();
     if (!g_stub) return CLI_CTRL_UNAVAIL;

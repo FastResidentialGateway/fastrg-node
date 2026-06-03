@@ -60,6 +60,14 @@ cli_ctrl_status_t cli_controller_add_dns(unsigned int user_id, const char *domai
     const char *ip, unsigned int ttl);
 cli_ctrl_status_t cli_controller_del_dns(unsigned int user_id, const char *domain);
 
+/* Read-modify-write helpers: fetch the HSI config, change one aspect, update.
+ * (These toggles are HSI config fields, so they go through Update HSI config.) */
+cli_ctrl_status_t cli_controller_set_dns_proxy(unsigned int user_id, int enable);
+cli_ctrl_status_t cli_controller_set_tcp_conntrack(unsigned int user_id, int enable);
+cli_ctrl_status_t cli_controller_snat_set(unsigned int user_id, unsigned int eport,
+    const char *dip, unsigned int iport);
+cli_ctrl_status_t cli_controller_snat_unset(unsigned int user_id, unsigned int eport);
+
 /* Fetch the desired HSI config for a user as a human-readable JSON string into
  * out_buf (for the desire query / diff). */
 cli_ctrl_status_t cli_controller_get_hsi(unsigned int user_id, char *out_buf, size_t out_len);

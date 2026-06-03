@@ -9,17 +9,17 @@ CC = gcc
 CXX = g++
 INCLUDE = -I../../src -I../grpc -I../controller/proto
 CFLAGS = $(INCLUDE) -Wall -g $(shell pkg-config --cflags libdpdk) -O3 -DALLOW_EXPERIMENTAL_API -DTEST_MODE #-Wextra -fsanitize=address
-# C++ flags for the controller client (gRPC ConfigService + REST login via curl).
-CXXFLAGS = -I../controller/proto $(shell pkg-config --cflags jsoncpp libcurl) -Wall -g -O3
+# C++ flags for the CLI's C++ sources (controller gRPC client, direct etcd client).
+CXXFLAGS = -I../controller/proto -I/usr/local/include $(shell pkg-config --cflags jsoncpp libcurl) -Wall -g -O3
 
-LDFLAGS = $(shell pkg-config --static --libs libdpdk) -lutils -lconfig -Wl,--start-group -lstdc++ $(shell pkg-config --libs grpc++ protobuf jsoncpp libcurl) -laddress_sorting -lpthread -Wl,--end-group
+LDFLAGS = $(shell pkg-config --static --libs libdpdk) -lutils -lconfig -Wl,--start-group -lstdc++ $(shell pkg-config --libs grpc++ protobuf jsoncpp libcurl) -letcd-cpp-api -laddress_sorting -lpthread -Wl,--end-group
 
 TARGET = fastrg_cli
 SRC = $(wildcard *.c)
 OBJ = $(SRC:.c=.o)
 
-# CLI-local C++ source: controller gRPC client.
-CLI_CPP_OBJ = cli_controller_client.o
+# CLI-local C++ sources: controller gRPC client + direct etcd writer.
+CLI_CPP_OBJ = cli_controller_client.o cli_etcd.o
 
 GRPCDIR = ../grpc
 GRPC_SRC = $(GRPCDIR)/fastrg_grpc_client.cpp
@@ -42,6 +42,9 @@ all: $(TARGET)
 ######################################
 cli_controller_client.o: cli_controller_client.cpp cli_controller_client.h
 	$(CXX) $(CXXFLAGS) -c cli_controller_client.cpp -o cli_controller_client.o
+
+cli_etcd.o: cli_etcd.cpp cli_etcd.h
+	$(CXX) $(CXXFLAGS) -c cli_etcd.cpp -o cli_etcd.o
 
 $(TARGET): $(OBJ) $(CLI_CPP_OBJ) $(GRPC_OBJ) $(PB_OBJ)
 	$(CC) $(CFLAGS) $(OBJ) $(CLI_CPP_OBJ) $(GRPC_OBJ) $(PB_OBJ) $(CTRL_PB_OBJ) -o $(TARGET) $(LDFLAGS)

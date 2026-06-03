@@ -42,6 +42,8 @@
 
 #include "../grpc/fastrg_grpc_client.h"
 #include "cli_controller_client.h"
+#include "cli_etcd.h"
+#include "cli_dispatch.h"
 
 #include "cmds.h"
 
@@ -267,7 +269,7 @@ static void cmd_config_pppoe_dhcp_parsed(void *parsed_result,
 
     if (strncmp(res->cmd_str, "del", 3) == 0) {
         /* Call gRPC function to remove the configuration */
-        fastrg_grpc_remove_config(res->user_id);
+        cli_dispatch_remove_hsi(res->user_id);
         return;
     }
 
@@ -313,8 +315,8 @@ static void cmd_config_pppoe_dhcp_parsed(void *parsed_result,
     cmdline_printf(cl, "  Subnet Mask: %s\n", subnet_str);
     cmdline_printf(cl, "  Gateway IP: %s\n", gateway_str);
 
-    fastrg_grpc_apply_config(res->user_id, res->vlan_id, 
-        res->pppoe_account, res->pppoe_password, pool_start, 
+    cli_dispatch_apply_hsi(res->user_id, res->vlan_id,
+        res->pppoe_account, res->pppoe_password, pool_start,
         pool_end, subnet_str, gateway_str);
 }
 
@@ -327,7 +329,7 @@ static void cmd_config_snat_parsed(void *parsed_result,
 
     if (strncmp(res->cmd_str, "del", 3) == 0) {
         /* Call gRPC function to remove the SNAT configuration */
-        fastrg_grpc_hsi_snat_unset(res->user_id, res->eport);
+        cli_dispatch_snat_unset(res->user_id, res->eport);
         return;
     }
 
@@ -346,7 +348,7 @@ static void cmd_config_snat_parsed(void *parsed_result,
     cmdline_printf(cl, "  Internal Port: %u\n", res->iport);
 
     /* Call gRPC function to apply SNAT configuration */
-    fastrg_grpc_hsi_snat_set(res->user_id, res->eport, dip_str, res->iport);
+    cli_dispatch_snat_set(res->user_id, res->eport, dip_str, res->iport);
 }
 
 cmdline_parse_token_string_t cmd_config_config =
@@ -496,7 +498,7 @@ static void cmd_config_parse_subscriber_count(void *parsed_result,
 
     cmdline_printf(cl, "Configuration subscriber count to %u\n", res->subscriber_count);
 
-    fastrg_grpc_set_subscriber(res->subscriber_count);
+    cli_dispatch_set_subscriber_count(res->subscriber_count);
 }
 
 cmdline_parse_token_string_t cmd_config_subscriber_config =
@@ -553,7 +555,7 @@ static void cmd_config_parse_dns_proxy(void *parsed_result,
     cmdline_printf(cl, "Setting dns_proxy=%s for subscriber %u\n",
         enable ? "on" : "off", res->user_id);
 
-    fastrg_grpc_set_dns_proxy(res->user_id, enable);
+    cli_dispatch_set_dns_proxy(res->user_id, enable);
 }
 
 cmdline_parse_token_string_t cmd_dns_proxy_config =
@@ -616,7 +618,7 @@ static void cmd_config_parse_tcp_conntrack(void *parsed_result,
     cmdline_printf(cl, "Setting tcp_conntrack=%s for subscriber %u\n",
         enable ? "on" : "off", res->user_id);
 
-    fastrg_grpc_set_tcp_conntrack(res->user_id, enable);
+    cli_dispatch_set_tcp_conntrack(res->user_id, enable);
 }
 
 cmdline_parse_token_string_t cmd_tcp_conntrack_config =
@@ -675,17 +677,17 @@ static void cmd_exec_parsed(void *parsed_result,
 
     if (strncmp(res->subsystem, "hsi", 3) == 0) {
         if (strcmp(res->action, "start") == 0) {
-            fastrg_grpc_hsi_connect(user_id);
+            cli_dispatch_connect(user_id);
             fastrg_grpc_dhcp_server_start(user_id);
         } else {
-            fastrg_grpc_hsi_disconnect(user_id, false);
+            cli_dispatch_disconnect(user_id, false);
             fastrg_grpc_dhcp_server_stop(user_id);
         }
     } else if (strncmp(res->subsystem, "pppoe", 5) == 0) {
         if (strcmp(res->action, "start") == 0)
-            fastrg_grpc_hsi_connect(user_id);
+            cli_dispatch_connect(user_id);
         else
-            fastrg_grpc_hsi_disconnect(user_id, false);
+            cli_dispatch_disconnect(user_id, false);
     } else if (strncmp(res->subsystem, "dhcp-server", 11) == 0) {
         if (strcmp(res->action, "start") == 0)
             fastrg_grpc_dhcp_server_start(user_id);
@@ -850,7 +852,7 @@ static void cmd_config_dns_parsed(void *parsed_result,
     struct cmd_dns_config_result *res = parsed_result;
 
     if (strncmp(res->cmd_str, "del", 3) == 0) {
-        fastrg_grpc_remove_dns_record(res->user_id, res->domain);
+        cli_dispatch_del_dns(res->user_id, res->domain);
         return;
     }
 
@@ -868,7 +870,7 @@ static void cmd_config_dns_parsed(void *parsed_result,
     cmdline_printf(cl, "  IP: %s\n", ip_str);
     cmdline_printf(cl, "  TTL: %u\n", res->ttl);
 
-    fastrg_grpc_add_dns_record(res->user_id, res->domain, ip_str, res->ttl);
+    cli_dispatch_add_dns(res->user_id, res->domain, ip_str, res->ttl);
 }
 
 /* DNS config tokens */
@@ -1206,7 +1208,7 @@ int main(int argc, char **argv)
 
     /* Configure the controller client (tier 1 of the write fallback). */
     cli_controller_configure(controller_addr, controller_rest, node_uuid);
-    (void)etcd_endpoints;   /* tier 2 (CLI direct etcd) wired in slice 12b-3 */
+    cli_etcd_configure(etcd_endpoints, node_uuid);
     if (controller_addr && node_uuid)
         printf("Controller: %s (node %s). Run 'controller login' to authenticate.\n",
             controller_addr, node_uuid);
