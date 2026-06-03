@@ -41,6 +41,7 @@
 #include <grpc/grpc.h>
 
 #include "../grpc/fastrg_grpc_client.h"
+#include "cli_controller_client.h"
 
 #include "cmds.h"
 
@@ -1024,6 +1025,84 @@ cmdline_parse_inst_t cmd_flush_dns_cache_inst = {
     },
 };
 
+/* ──────────────────────────────────────────────
+ *  controller login — authenticate to the controller (REST /api/login),
+ *  store the JWT for subsequent ConfigService gRPC calls.
+ * ────────────────────────────────────────────── */
+struct cmd_controller_login_result {
+    cmdline_fixed_string_t controller;
+    cmdline_fixed_string_t login;
+};
+
+/* Read a line from stdin (no echo when hide=1, for passwords). */
+static void read_line_prompt(const char *prompt, int hide, char *buf, size_t buflen)
+{
+    struct termios old_term, new_term;
+    printf("%s", prompt);
+    fflush(stdout);
+    if (hide) {
+        tcgetattr(STDIN_FILENO, &old_term);
+        new_term = old_term;
+        new_term.c_lflag &= ~ECHO;
+        tcsetattr(STDIN_FILENO, TCSANOW, &new_term);
+    }
+    if (fgets(buf, buflen, stdin) == NULL)
+        buf[0] = '\0';
+    size_t n = strlen(buf);
+    if (n > 0 && buf[n - 1] == '\n')
+        buf[n - 1] = '\0';
+    if (hide) {
+        tcsetattr(STDIN_FILENO, TCSANOW, &old_term);
+        printf("\n");
+    }
+}
+
+static void cmd_controller_login_parsed(__rte_unused void *parsed_result,
+    struct cmdline *cl, __rte_unused void *data)
+{
+    if (!cli_controller_configured()) {
+        cmdline_printf(cl, "Controller not configured. Start fastrg-cli with "
+            "-c <controller_grpc> -r <controller_rest_url> -n <node_uuid>.\n");
+        return;
+    }
+    char username[128] = { 0 }, password[128] = { 0 };
+    read_line_prompt("Controller username: ", 0, username, sizeof(username));
+    read_line_prompt("Controller password: ", 1, password, sizeof(password));
+
+    cli_ctrl_status_t rc = cli_controller_login(username, password);
+    memset(password, 0, sizeof(password));
+    switch (rc) {
+        case CLI_CTRL_OK:
+            cmdline_printf(cl, "Login successful; token acquired.\n");
+            break;
+        case CLI_CTRL_AUTH:
+            cmdline_printf(cl, "Login failed: wrong username or password. Try 'controller login' again.\n");
+            break;
+        case CLI_CTRL_UNAVAIL:
+            cmdline_printf(cl, "Login failed: controller REST endpoint unreachable.\n");
+            break;
+        default:
+            cmdline_printf(cl, "Login failed.\n");
+            break;
+    }
+}
+
+cmdline_parse_token_string_t cmd_controller_login_controller =
+    TOKEN_STRING_INITIALIZER(struct cmd_controller_login_result, controller, "controller");
+cmdline_parse_token_string_t cmd_controller_login_login =
+    TOKEN_STRING_INITIALIZER(struct cmd_controller_login_result, login, "login");
+
+cmdline_parse_inst_t cmd_controller_login = {
+    .f = cmd_controller_login_parsed,
+    .data = NULL,
+    .help_str = "controller login: authenticate to the controller and acquire a token",
+    .tokens = {
+        (void *)&cmd_controller_login_controller,
+        (void *)&cmd_controller_login_login,
+        NULL,
+    },
+};
+
 /****** CONTEXT (list of instruction) */
 cmdline_parse_ctx_t ctx[] = {
         (cmdline_parse_inst_t *)&cmd_info,
@@ -1046,6 +1125,7 @@ cmdline_parse_ctx_t ctx[] = {
         (cmdline_parse_inst_t *)&cmd_show_dns,
         (cmdline_parse_inst_t *)&cmd_flush_dns_cache_inst,
         (cmdline_parse_inst_t *)&cmd_log,
+        (cmdline_parse_inst_t *)&cmd_controller_login,
     NULL,
 };
 
@@ -1053,27 +1133,37 @@ static void print_usage(const char *prog_name)
 {
     printf("Usage: %s [OPTIONS]\n", prog_name);
     printf("Options:\n");
-    printf("  -s, --socket <path>    Connect to Unix socket (default: unix:///var/run/fastrg/fastrg.sock)\n");
-    printf("  -i, --ip <address>     Connect to IP address (e.g., 127.0.0.1:50051)\n");
-    printf("  -h, --help             Show this help message\n");
-    printf("\nIf no option is specified, Unix socket connection is used by default.\n");
+    printf("  -s, --socket <path>      Node Unix socket (default: unix:///var/run/fastrg/fastrg.sock)\n");
+    printf("  -i, --ip <address>       Node gRPC IP address (e.g., 127.0.0.1:50052)\n");
+    printf("  -c, --controller <addr>  Controller ConfigService gRPC (e.g., 192.168.10.14:50051)\n");
+    printf("  -r, --rest <url>         Controller REST base URL for login (e.g., http://192.168.10.14:8080)\n");
+    printf("  -e, --etcd <endpoints>   etcd endpoints for direct-write fallback (e.g., 192.168.10.14:2379)\n");
+    printf("  -n, --node <uuid>        Managed node UUID (required for controller/etcd config keys)\n");
+    printf("  -h, --help               Show this help message\n");
+    printf("\nWrites use a fallback chain: controller -> etcd -> node. Run 'controller login' to authenticate.\n");
 }
 
 int main(int argc, char **argv)
 {
     char *grpc_target = NULL;
     char target_buffer[256];
+    const char *controller_addr = NULL, *controller_rest = NULL;
+    const char *etcd_endpoints = NULL, *node_uuid = NULL;
     int opt;
 
     static struct option long_options[] = {
         {"socket", required_argument, 0, 's'},
         {"ip", required_argument, 0, 'i'},
+        {"controller", required_argument, 0, 'c'},
+        {"rest", required_argument, 0, 'r'},
+        {"etcd", required_argument, 0, 'e'},
+        {"node", required_argument, 0, 'n'},
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0}
     };
 
     /* Parse command line arguments */
-    while ((opt = getopt_long(argc, argv, "s:i:h", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "s:i:c:r:e:n:h", long_options, NULL)) != -1) {
         switch (opt) {
         case 's':
             /* Unix socket path provided */
@@ -1084,6 +1174,18 @@ int main(int argc, char **argv)
             /* IP address provided */
             snprintf(target_buffer, sizeof(target_buffer), "%s", optarg);
             grpc_target = target_buffer;
+            break;
+        case 'c':
+            controller_addr = optarg;
+            break;
+        case 'r':
+            controller_rest = optarg;
+            break;
+        case 'e':
+            etcd_endpoints = optarg;
+            break;
+        case 'n':
+            node_uuid = optarg;
             break;
         case 'h':
             print_usage(argv[0]);
@@ -1101,6 +1203,13 @@ int main(int argc, char **argv)
     grpc_init();
     printf("Connecting to gRPC server at: %s\n", grpc_target);
     fastrg_grpc_client_connect(grpc_target);
+
+    /* Configure the controller client (tier 1 of the write fallback). */
+    cli_controller_configure(controller_addr, controller_rest, node_uuid);
+    (void)etcd_endpoints;   /* tier 2 (CLI direct etcd) wired in slice 12b-3 */
+    if (controller_addr && node_uuid)
+        printf("Controller: %s (node %s). Run 'controller login' to authenticate.\n",
+            controller_addr, node_uuid);
 
     struct cmdline *cl = cmdline_stdin_new(ctx, "FastRG> ");
     if (cl == NULL) {
