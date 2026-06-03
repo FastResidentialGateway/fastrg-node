@@ -31,6 +31,7 @@
 #include "../utils.h"
 #include "../etcd_integration.h"
 #include "../northbound.h"
+#include "kafka_producer.h"
 
 U32	            ppp_interval;
 
@@ -598,8 +599,11 @@ void exit_ppp(ppp_ccb_t *ppp_ccb)
     FastRG_LOG(INFO, fastrg_ccb->fp, ppp_ccb, PPPLOGMSG, "User %" PRIu16
         " HSI module is terminated.\n", ppp_ccb->user_num);
 
-    /* PPPoE state transitions are reported to the controller via Kafka (slice 11);
-     * the node no longer writes connection status back to etcd. */
+    /* PPPoE "disconnected" transition → controller via Kafka; the node no longer
+     * writes connection status back to etcd. */
+    char uid[8];
+    snprintf(uid, sizeof(uid), "%u", ppp_ccb->user_num);
+    kafka_report_pppoe_state(uid, KAFKA_PPPOE_DISCONNECTED, NULL, NULL, NULL);
 }
 
 STATUS ppp_process(FastRG_t *fastrg_ccb, U8 *pkt_data, U16 len)

@@ -6,15 +6,21 @@ GRPC_CPP_PLUGIN_PATH ?= `which $(GRPC_CPP_PLUGIN)`
 PROTOS_PATH = proto
 PROTO_FILE = $(PROTOS_PATH)/controller.proto
 
-CXXFLAGS = -std=c++17 -g -O3 -DNB_TEST $(shell pkg-config --cflags protobuf grpc++) $(shell pkg-config --cflags jsoncpp)
-LDFLAGS = $(shell pkg-config --libs protobuf grpc++) $(shell pkg-config --libs jsoncpp) -letcd-cpp-api
+CXXFLAGS = -std=c++17 -g -O3 -DNB_TEST $(shell pkg-config --cflags protobuf grpc++) $(shell pkg-config --cflags jsoncpp) $(shell pkg-config --cflags rdkafka)
+LDFLAGS = $(shell pkg-config --libs protobuf grpc++) $(shell pkg-config --libs jsoncpp) -letcd-cpp-api $(shell pkg-config --libs rdkafka)
 
 PROTO_SOURCES = $(PROTOS_PATH)/controller.pb.cc $(PROTOS_PATH)/controller.grpc.pb.cc
 PROTO_HEADERS = $(PROTOS_PATH)/controller.pb.h $(PROTOS_PATH)/controller.grpc.pb.h
 PROTO_OBJECTS = $(PROTOS_PATH)/controller.pb.o $(PROTOS_PATH)/controller.grpc.pb.o
 
-SOURCES = controller_client.cpp etcd_client.cpp
-OBJECTS = controller_client.o etcd_client.o $(PROTO_OBJECTS)
+# Kafka events protobuf (shared contract, single source of truth)
+EVENTS_PROTO_FILE = ../../docs/contracts/kafka-events.proto
+EVENTS_PROTO_SRC = $(PROTOS_PATH)/kafka-events.pb.cc
+EVENTS_PROTO_HDR = $(PROTOS_PATH)/kafka-events.pb.h
+EVENTS_PROTO_OBJ = $(PROTOS_PATH)/kafka-events.pb.o
+
+SOURCES = controller_client.cpp etcd_client.cpp kafka_producer.cpp
+OBJECTS = controller_client.o etcd_client.o kafka_producer.o $(PROTO_OBJECTS) $(EVENTS_PROTO_OBJ)
 
 # Test related variables
 TEST_DIR = test
@@ -48,6 +54,14 @@ controller_client.o: controller_client.cpp $(PROTO_HEADERS)
 # Compile etcd client
 etcd_client.o: etcd_client.cpp etcd_client.h
 	$(CXX) $(CXXFLAGS) -c etcd_client.cpp -o etcd_client.o
+
+# Generate Kafka events protobuf C++ from the shared contract
+$(EVENTS_PROTO_SRC) $(EVENTS_PROTO_HDR): $(EVENTS_PROTO_FILE)
+	$(PROTOC) -I $(dir $(EVENTS_PROTO_FILE)) --cpp_out=$(PROTOS_PATH) $(EVENTS_PROTO_FILE)
+
+# Compile Kafka producer
+kafka_producer.o: kafka_producer.cpp kafka_producer.h $(EVENTS_PROTO_HDR)
+	$(CXX) $(CXXFLAGS) -c kafka_producer.cpp -o kafka_producer.o
 
 # Test targets
 test: test-client test-server test-etcd
@@ -85,5 +99,5 @@ $(TEST_ETCD): $(TEST_ETCD_SRC) $(OBJECTS)
 		$(LDFLAGS) -laddress_sorting -lpthread
 
 clean:
-	rm -f $(OBJECTS) $(PROTO_SOURCES) $(PROTO_HEADERS)
+	rm -f $(OBJECTS) $(PROTO_SOURCES) $(PROTO_HEADERS) $(EVENTS_PROTO_SRC) $(EVENTS_PROTO_HDR)
 	rm -f $(TEST_CLIENT) $(TEST_SERVER) $(TEST_ETCD)

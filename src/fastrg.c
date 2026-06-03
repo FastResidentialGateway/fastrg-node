@@ -31,6 +31,7 @@
 #include "config.h"
 #include "controller.h"
 #include "etcd_integration.h"
+#include "kafka_producer.h"
 #include "utils.h"
 #include "../northbound/grpc/fastrg_grpc_server.h"
 
@@ -350,15 +351,19 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
                     FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "User %d pppoe is terminating\n", pppoe_msg->ccb_id + 1);
                     if (ppp_disconnect(ppp_ccb) == SUCCESS) {
                         fastrg_ccb->cur_user--;
-                        /* PPPoE "disconnecting" transition: reported to the
-                         * controller via Kafka (slice 11), no longer written to etcd. */
+                        /* PPPoE "disconnecting" transition → controller via Kafka. */
+                        char uid[8];
+                        snprintf(uid, sizeof(uid), "%u", pppoe_msg->ccb_id + 1);
+                        kafka_report_pppoe_state(uid, KAFKA_PPPOE_DISCONNECTING, NULL, NULL, NULL);
                     }
                 } else if (pppoe_msg->cmd == PPPoE_CMD_ENABLE) {
                     FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "User %d pppoe is spawning\n", pppoe_msg->ccb_id + 1);
                     if (ppp_connect(ppp_ccb) == SUCCESS) {
                         fastrg_ccb->cur_user++;
-                        /* PPPoE "connecting" transition: reported to the
-                         * controller via Kafka (slice 11), no longer written to etcd. */
+                        /* PPPoE "connecting" transition → controller via Kafka. */
+                        char uid[8];
+                        snprintf(uid, sizeof(uid), "%u", pppoe_msg->ccb_id + 1);
+                        kafka_report_pppoe_state(uid, KAFKA_PPPOE_CONNECTING, NULL, NULL, NULL);
                     }
                 } else if (pppoe_msg->cmd == PPPoE_CMD_FORCE_DISABLE) {
                     FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "User %d pppoe is force terminating\n", pppoe_msg->ccb_id + 1);
@@ -509,6 +514,14 @@ STATUS northbound(FastRG_t *fastrg_ccb)
     fastrg_ccb->is_standalone = is_standalone;
 
     if (is_standalone == FALSE) {
+        /* Start the Kafka telemetry producer (config-apply / PPPoE state / errors).
+         * Empty KafkaBrokers disables it; report_* calls then no-op. */
+        if (fastrg_ccb->kafka_brokers && fastrg_ccb->kafka_brokers[0] != '\0') {
+            if (kafka_producer_init(fastrg_ccb->kafka_brokers, fastrg_ccb->node_uuid) != SUCCESS)
+                FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
+                    "Kafka producer init failed; telemetry disabled");
+        }
+
         // Initialize and start etcd integration
         if (etcd_integration_init(fastrg_ccb) == ERROR) {
             FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Etcd integration initialization failed");
@@ -533,6 +546,8 @@ void fastrg_stop()
 {
     FastRG_LOG(INFO, fastrg_ccb.fp, NULL, NULL, "FastRG system stopping...");
     rte_eal_mp_wait_lcore();
+    // Cleanup Kafka producer (flush pending telemetry)
+    kafka_producer_cleanup();
     // Cleanup etcd integration
     etcd_integration_cleanup(&fastrg_ccb);
 
@@ -572,6 +587,7 @@ void fastrg_stop()
     if (fastrg_ccb.node_grpc_ip_port) free(fastrg_ccb.node_grpc_ip_port);
     if (fastrg_ccb.controller_address) free(fastrg_ccb.controller_address);
     if (fastrg_ccb.etcd_endpoints) free(fastrg_ccb.etcd_endpoints);
+    if (fastrg_ccb.kafka_brokers) free(fastrg_ccb.kafka_brokers);
     if (fastrg_ccb.node_uuid) fastrg_mfree(fastrg_ccb.node_uuid);
     fastrg_mfree(fastrg_ccb.vlan_userid_map);
     fastrg_cleanup_subscriber_stats(&fastrg_ccb, total_ccbs);
@@ -621,8 +637,10 @@ int fastrg_start(int argc, char **argv)
     fastrg_ccb.node_grpc_ip_port = strdup(fastrg_cfg.node_grpc_ip_port);
     fastrg_ccb.controller_address = strdup(fastrg_cfg.controller_address);
     fastrg_ccb.etcd_endpoints = strdup(fastrg_cfg.etcd_endpoints);
+    fastrg_ccb.kafka_brokers = strdup(fastrg_cfg.kafka_brokers);
     if (!fastrg_ccb.unix_sock_path || !fastrg_ccb.node_grpc_ip_port ||
-        !fastrg_ccb.controller_address || !fastrg_ccb.etcd_endpoints) {
+        !fastrg_ccb.controller_address || !fastrg_ccb.etcd_endpoints ||
+        !fastrg_ccb.kafka_brokers) {
         FastRG_LOG(ERR, fastrg_ccb.fp, NULL, NULL, "Memory allocation failed for config strings");
         goto err;
     }
@@ -848,6 +866,7 @@ err:
     if (fastrg_ccb.node_grpc_ip_port) free(fastrg_ccb.node_grpc_ip_port);
     if (fastrg_ccb.controller_address) free(fastrg_ccb.controller_address);
     if (fastrg_ccb.etcd_endpoints) free(fastrg_ccb.etcd_endpoints);
+    if (fastrg_ccb.kafka_brokers) free(fastrg_ccb.kafka_brokers);
     grpc_shutdown();
     rte_eal_cleanup();
     return -1;

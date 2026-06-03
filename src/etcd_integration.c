@@ -9,6 +9,7 @@
 #include "dbg.h"
 #include "utils.h"
 #include "../northbound/controller/etcd_client.h"
+#include "../northbound/controller/kafka_producer.h"
 #include "pppd/pppd.h"
 #include "dhcpd/dhcpd.h"
 #include "avl_tree.h"
@@ -935,12 +936,20 @@ void etcd_event_dispatch(FastRG_t *fastrg_ccb, etcd_event_t *ev)
             STATUS ret = hsi_config_changed_callback(ev->node_id, ev->user_id, cfg,
                 ev->action, ev->revision, fastrg_ccb);
 
-            /* A failed apply is reported to the controller via Kafka (slice 11);
-             * the etcd failed_events/ namespace is removed. For now, just log. */
-            if (ret != SUCCESS) {
-                FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
-                    "HSI %s apply failed for user %s (will be reported via Kafka)",
-                    ev->action == HSI_ACTION_DELETE ? "DELETE" : "apply", ev->user_id);
+            /* Report the apply result to the controller via Kafka for live watch
+             * events only (reconcile/startup-load re-applies would be noise). The
+             * etcd failed_events/ namespace is removed. */
+            if (ev->from_reconcile == FALSE) {
+                const char *action_str = (ev->action == HSI_ACTION_CREATE) ? "create"
+                                       : (ev->action == HSI_ACTION_DELETE) ? "delete" : "update";
+                if (ret == SUCCESS) {
+                    kafka_report_config_apply(ev->user_id, action_str, TRUE, NULL, NULL);
+                } else {
+                    FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+                        "HSI %s apply failed for user %s (reported via Kafka)", action_str, ev->user_id);
+                    kafka_report_config_apply(ev->user_id, action_str, FALSE,
+                        "apply_failed", "node failed to apply HSI config");
+                }
             }
             break;
         }

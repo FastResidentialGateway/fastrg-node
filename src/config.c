@@ -41,7 +41,7 @@ STATUS parse_config(const char *config_path, FastRG_t *fastrg_ccb, struct fastrg
 {
     config_t cfg;
     int max_user_count, init_user_count, heartbeat_interval;
-    const char *loglvl, *unix_sock_path, *log_path, *node_grpc_port, *controller_address, *etcd_endpoints, *ddp_pkg_path;
+    const char *loglvl, *unix_sock_path, *log_path, *node_grpc_port, *controller_address, *etcd_endpoints, *ddp_pkg_path, *kafka_brokers;
 
     config_init(&cfg);
     if (!config_read_file(&cfg, config_path)) {
@@ -121,6 +121,12 @@ STATUS parse_config(const char *config_path, FastRG_t *fastrg_ccb, struct fastrg
         etcd_endpoints = "127.0.0.1:2379";
     strncpy(fastrg_cfg->etcd_endpoints, etcd_endpoints, sizeof(fastrg_cfg->etcd_endpoints) - 1);
     fastrg_cfg->etcd_endpoints[sizeof(fastrg_cfg->etcd_endpoints) - 1] = '\0';
+
+    /* Kafka brokers for node->controller telemetry; empty string disables Kafka. */
+    if (config_lookup_string(&cfg, "KafkaBrokers", &kafka_brokers) == CONFIG_FALSE)
+        kafka_brokers = "";
+    strncpy(fastrg_cfg->kafka_brokers, kafka_brokers, sizeof(fastrg_cfg->kafka_brokers) - 1);
+    fastrg_cfg->kafka_brokers[sizeof(fastrg_cfg->kafka_brokers) - 1] = '\0';
 
     if (config_lookup_string(&cfg, "I40eDdpPkgPath", &ddp_pkg_path) == CONFIG_FALSE)
         ddp_pkg_path = "";
