@@ -35,7 +35,9 @@ void ensure_stub() {
 void set_ctx(grpc::ClientContext& ctx) {
     ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(RPC_DEADLINE_SEC));
     if (!g_token.empty())
-        ctx.AddMetadata("authorization", "Bearer " + g_token);
+        /* Controller gRPC interceptor mirrors the REST middleware: raw token,
+         * no "Bearer " prefix. */
+        ctx.AddMetadata("authorization", g_token);
 }
 
 // Map a gRPC status to the CLI fallback decision.
@@ -112,6 +114,7 @@ cli_ctrl_status_t cli_controller_login(const char* username, const char* passwor
     hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
+    /* Controller REST uses raw token in Authorization header (no "Bearer " prefix). */
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, payload.c_str());
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
