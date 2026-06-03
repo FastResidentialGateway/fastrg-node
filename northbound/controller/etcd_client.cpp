@@ -42,10 +42,11 @@ private:
     // via node gRPC while etcd is unreachable; flushed to etcd on reconnect.
     struct QueueEntry {
         std::string op;        // "put" | "delete"
+        std::string kind;      // "config" (HSI/count edit) | "desire" (desire_status change)
         std::string key;       // full etcd key
-        std::string value;     // JSON value (put only)
+        std::string value;     // "config": JSON value; "desire": the status string
         int64_t     ts_ms;     // enqueue time (ms since epoch), for timestamp merge
-        bool        preserve_desire;  // on flush, keep etcd's existing desire_status
+        bool        preserve_desire;  // config put: keep etcd's existing desire_status
     };
     std::vector<QueueEntry> config_queue_;
     std::mutex config_queue_mutex_;
@@ -1114,18 +1115,37 @@ public:
 
     // Merge context + callback for flushing a queued PUT via cas_put().
     struct FlushCtx {
-        const std::string* value;   // queued JSON value to write
+        const std::string* value;   // config kind: JSON value; desire kind: status string
         int64_t ts_ms;              // queued enqueue time
-        bool preserve_desire;       // keep etcd's existing config.desire_status
-        bool skipped;               // set when etcd is newer → drop queued entry
+        bool preserve_desire;       // config put: keep etcd's existing config.desire_status
+        bool desire_only;           // desire kind: update only config.desire_status, keep config
+        bool skipped;               // set when the queued entry should be dropped (etcd wins / N/A)
     };
 
-    // Object-level timestamp merge: queued value wins unless etcd holds a newer
-    // write (made by the controller/another CLI while the node was offline). For
-    // config edits (preserve_desire), etcd's desire_status is always kept so a
-    // config edit never clobbers PPPoE intent.
+    // Timestamp merge for flushing a queued write.
+    //  - config kind: object-level merge; queued value wins unless etcd holds a
+    //    newer write. For config edits etcd's desire_status is always preserved so
+    //    a config edit never clobbers PPPoE intent.
+    //  - desire kind (desire_only): keep etcd's whole config and update ONLY
+    //    config.desire_status to the queued value, so a queued connect/disconnect
+    //    never clobbers a concurrent config edit (symmetric to the config case).
     static STATUS flush_merge_fn(const char* current_json, char** out_value, void* user_data) {
         FlushCtx* ctx = (FlushCtx*)user_data;
+
+        if (ctx->desire_only) {
+            // Need an existing config to attach the desire_status to.
+            if (current_json == NULL) { ctx->skipped = true; return ERROR; }
+            Json::Value cur; Json::Reader reader;
+            if (!reader.parse(current_json, cur) || !cur.isMember("config")) {
+                ctx->skipped = true; return ERROR;
+            }
+            cur["config"]["desire_status"] = *ctx->value;   // value holds the status string
+            Json::StreamWriterBuilder w; w["indentation"] = "";
+            std::string s = Json::writeString(w, cur);
+            *out_value = strdup(s.c_str());
+            return *out_value ? SUCCESS : ERROR;
+        }
+
         if (current_json == NULL) {
             *out_value = strdup(ctx->value->c_str());
             return *out_value ? SUCCESS : ERROR;
@@ -1159,6 +1179,7 @@ public:
         for (const auto& e : config_queue_) {
             Json::Value j;
             j["op"] = e.op;
+            j["kind"] = e.kind;
             j["key"] = e.key;
             j["value"] = e.value;
             j["ts_ms"] = (Json::Int64)e.ts_ms;
@@ -1196,6 +1217,7 @@ public:
         for (const auto& j : arr) {
             QueueEntry e;
             e.op = j.get("op", "").asString();
+            e.kind = j.get("kind", "config").asString();
             e.key = j.get("key", "").asString();
             e.value = j.get("value", "").asString();
             e.ts_ms = j.get("ts_ms", (Json::Int64)0).asInt64();
@@ -1221,6 +1243,7 @@ public:
         if (!node_id || !user_id || !config) return ETCD_ERROR;
         QueueEntry e;
         e.op = "put";
+        e.kind = "config";
         e.key = "configs/" + std::string(node_id) + "/hsi/" + std::string(user_id);
         e.value = build_hsi_config_json(node_id, config, updated_by);
         e.ts_ms = now_ms();
@@ -1234,7 +1257,23 @@ public:
         if (!node_id || !user_id) return ETCD_ERROR;
         QueueEntry e;
         e.op = "delete";
+        e.kind = "config";
         e.key = "configs/" + std::string(node_id) + "/hsi/" + std::string(user_id);
+        e.ts_ms = now_ms();
+        e.preserve_desire = false;
+        std::lock_guard<std::mutex> lk(config_queue_mutex_);
+        enqueue_locked(e);
+        return ETCD_SUCCESS;
+    }
+
+    etcd_status_t queue_desire_status(const char* node_id, const char* user_id,
+        const char* desire_status) {
+        if (!node_id || !user_id || !desire_status) return ETCD_ERROR;
+        QueueEntry e;
+        e.op = "put";
+        e.kind = "desire";   // flush updates only config.desire_status, preserving config
+        e.key = "configs/" + std::string(node_id) + "/hsi/" + std::string(user_id);
+        e.value = desire_status;   // the status string
         e.ts_ms = now_ms();
         e.preserve_desire = false;
         std::lock_guard<std::mutex> lk(config_queue_mutex_);
@@ -1259,6 +1298,7 @@ public:
 
         QueueEntry e;
         e.op = "put";
+        e.kind = "config";
         e.key = "user_counts/" + std::string(node_id) + "/";
         e.value = Json::writeString(w, root);
         e.ts_ms = now_ms();
@@ -1295,7 +1335,7 @@ public:
                 ccb_id = parse_user_id(m[1].str().c_str(), 0);
 
             if (e.op == "put") {
-                FlushCtx ctx{ &e.value, e.ts_ms, e.preserve_desire, false };
+                FlushCtx ctx{ &e.value, e.ts_ms, e.preserve_desire, (e.kind == "desire"), false };
                 if (ccb_id >= 0) etcd_mark_pending_event(HSI_ACTION_UPDATE, (U16)ccb_id);
                 int64_t rev = 0;
                 etcd_status_t s = cas_put(e.key, &EtcdClientImpl::flush_merge_fn, &ctx, &rev);
@@ -2464,6 +2504,12 @@ etcd_status_t etcd_client_queue_subscriber_count(const char* node_id,
     const char* subscriber_count_str, const char* updated_by) {
     if (!g_etcd_client) return ETCD_ERROR;
     return g_etcd_client->queue_subscriber_count(node_id, subscriber_count_str, updated_by);
+}
+
+etcd_status_t etcd_client_queue_desire_status(const char* node_id, const char* user_id,
+    const char* desire_status) {
+    if (!g_etcd_client) return ETCD_ERROR;
+    return g_etcd_client->queue_desire_status(node_id, user_id, desire_status);
 }
 
 int etcd_client_queue_pending(void) {

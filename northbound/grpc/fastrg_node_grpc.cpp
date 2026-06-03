@@ -224,6 +224,16 @@ grpc::Status FastRGNodeServiceImpl::ConnectHsi(::grpc::ServerContext* context, c
     }
 
     cout << "ConnectHsi called" << endl;
+
+    // SDN + etcd reachable: PPPoE connect/disconnect is driven by desire_status set
+    // via the controller/etcd, not the node gRPC. Only accept when etcd is down.
+    if (etcd_client_is_initialized() && etcd_client_is_connected()) {
+        std::string err = "etcd reachable (SDN mode); set PPPoE state via controller/etcd, not the node";
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, err);
+    }
+    bool sdn_offline = etcd_client_is_initialized();   // SDN but etcd down → queue desire change
+
     if (user_id == 0) {
         for(int i=0; i<fastrg_ccb->user_count; i++) {
             ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, i);
@@ -238,6 +248,10 @@ grpc::Status FastRGNodeServiceImpl::ConnectHsi(::grpc::ServerContext* context, c
             if (fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_PPPoE, PPPoE_CMD_ENABLE, i) == ERROR) {
                 cout << "Failed to generate PPPoE enable event for user " << i + 1 << endl;
                 continue;
+            }
+            if (sdn_offline) {
+                std::string u = std::to_string(i + 1);
+                etcd_client_queue_desire_status(fastrg_ccb->node_uuid, u.c_str(), DESIRE_STATUS_CONNECT);
             }
         }
     } else {
@@ -260,6 +274,9 @@ grpc::Status FastRGNodeServiceImpl::ConnectHsi(::grpc::ServerContext* context, c
             cout << err << endl;
             return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, err);
         }
+        if (sdn_offline)
+            etcd_client_queue_desire_status(fastrg_ccb->node_uuid, std::to_string(user_id).c_str(),
+                DESIRE_STATUS_CONNECT);
     }
 
     return grpc::Status::OK;
@@ -277,6 +294,15 @@ grpc::Status FastRGNodeServiceImpl::DisconnectHsi(::grpc::ServerContext* context
     }
 
     cout << "DisconnectHsi called" << endl;
+
+    // SDN + etcd reachable: driven by desire_status via controller/etcd, not node gRPC.
+    if (etcd_client_is_initialized() && etcd_client_is_connected()) {
+        std::string err = "etcd reachable (SDN mode); set PPPoE state via controller/etcd, not the node";
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, err);
+    }
+    bool sdn_offline = etcd_client_is_initialized();   // SDN but etcd down → queue desire change
+
     if (user_id == 0) {
         for(int i=0; i<fastrg_ccb->user_count; i++) {
             if (force) {
@@ -300,6 +326,10 @@ grpc::Status FastRGNodeServiceImpl::DisconnectHsi(::grpc::ServerContext* context
                 cout << "Failed to generate PPPoE disable event for user " << i + 1 << endl;
                 continue;
             }
+            if (sdn_offline) {
+                std::string u = std::to_string(i + 1);
+                etcd_client_queue_desire_status(fastrg_ccb->node_uuid, u.c_str(), DESIRE_STATUS_DISCONNECT);
+            }
         }
     } else {
         if (force) {
@@ -309,6 +339,9 @@ grpc::Status FastRGNodeServiceImpl::DisconnectHsi(::grpc::ServerContext* context
                 cout << err << endl;
                 return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, err);
             } else {
+                if (sdn_offline)
+                    etcd_client_queue_desire_status(fastrg_ccb->node_uuid, std::to_string(user_id).c_str(),
+                        DESIRE_STATUS_DISCONNECT);
                 return grpc::Status::OK;
             }
         }
@@ -331,6 +364,9 @@ grpc::Status FastRGNodeServiceImpl::DisconnectHsi(::grpc::ServerContext* context
             cout << err << endl;
             return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, err);
         }
+        if (sdn_offline)
+            etcd_client_queue_desire_status(fastrg_ccb->node_uuid, std::to_string(user_id).c_str(),
+                DESIRE_STATUS_DISCONNECT);
     }
 
     return grpc::Status::OK;

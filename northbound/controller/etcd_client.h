@@ -225,6 +225,13 @@ etcd_status_t etcd_client_queue_hsi_delete(const char *node_id, const char *user
 etcd_status_t etcd_client_queue_subscriber_count(const char *node_id,
     const char *subscriber_count_str, const char *updated_by);
 
+/* Enqueue a CLI-originated PPPoE desire_status change (connect/disconnect) for
+ * later flush. On flush the subscriber's existing config in etcd is preserved
+ * and ONLY config.desire_status is updated (a connect/disconnect must not
+ * clobber a concurrent config edit). desire_status must be "connect"/"disconnect". */
+etcd_status_t etcd_client_queue_desire_status(const char *node_id, const char *user_id,
+    const char *desire_status);
+
 /* Number of entries currently pending in the offline queue. */
 int etcd_client_queue_pending(void);
 
