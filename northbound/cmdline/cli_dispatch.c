@@ -210,6 +210,26 @@ void cli_dispatch_set_dns_proxy(U16 user_id, bool enable)
     fastrg_grpc_set_dns_proxy(user_id, enable);
 }
 
+const char *cli_dispatch_get_desire(U16 user_id, char *buf, U32 len)
+{
+    if (cli_controller_configured() && cli_controller_has_token()) {
+        cli_ctrl_status_t st = cli_controller_get_hsi(user_id, buf, len);
+        if (st == CLI_CTRL_OK)
+            return "controller";
+        if (st == CLI_CTRL_INVALID) {
+            snprintf(buf, len, "(not found on controller)");
+            return "controller";
+        }
+        /* AUTH / UNAVAIL / ERR → try etcd */
+    }
+    if (cli_etcd_configured()) {
+        if (cli_etcd_get_hsi(user_id, buf, len) == CLI_ETCD_OK)
+            return "etcd";
+    }
+    snprintf(buf, len, "(desired config unavailable: no controller token / etcd)");
+    return "none";
+}
+
 void cli_dispatch_set_tcp_conntrack(U16 user_id, bool enable)
 {
     int stop = 0;

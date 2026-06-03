@@ -1028,6 +1028,103 @@ cmdline_parse_inst_t cmd_flush_dns_cache_inst = {
 };
 
 /* ──────────────────────────────────────────────
+ *  show config <desire|current|diff> user <id>
+ *    desire  = intended config (controller -> etcd)
+ *    current = running config/state on the node (node gRPC)
+ *    diff    = both, plus a drift summary
+ * ────────────────────────────────────────────── */
+struct cmd_show_config_result {
+    cmdline_fixed_string_t show;
+    cmdline_fixed_string_t config;
+    cmdline_fixed_string_t which;       /* desire / current / diff */
+    cmdline_fixed_string_t user;
+    uint16_t               user_id;
+};
+
+/* Copy the value of "key=" from s (up to the next space) into out. */
+static void extract_kv(const char *s, const char *key, char *out, size_t out_len)
+{
+    out[0] = '\0';
+    char pat[32];
+    snprintf(pat, sizeof(pat), "%s=", key);
+    const char *p = strstr(s, pat);
+    if (!p)
+        return;
+    p += strlen(pat);
+    size_t i = 0;
+    while (*p && *p != ' ' && i < out_len - 1)
+        out[i++] = *p++;
+    out[i] = '\0';
+}
+
+static void cmd_show_config_parsed(void *parsed_result, struct cmdline *cl,
+    __attribute__((unused)) void *data)
+{
+    struct cmd_show_config_result *res = parsed_result;
+    char desire[512] = { 0 }, current[512] = { 0 };
+
+    int want_desire = (strcmp(res->which, "current") != 0);
+    int want_current = (strcmp(res->which, "desire") != 0);
+    const char *src = NULL;
+    int have_current = 0;
+
+    if (want_desire)
+        src = cli_dispatch_get_desire(res->user_id, desire, sizeof(desire));
+    if (want_current)
+        have_current = (fastrg_grpc_get_hsi_user(res->user_id, current, sizeof(current)) == 0);
+
+    if (want_desire)
+        cmdline_printf(cl, "desired  (%s): %s\n", src, desire);
+    if (want_current)
+        cmdline_printf(cl, "current  (node) : %s\n", have_current ? current : "(unavailable)");
+
+    if (strcmp(res->which, "diff") == 0) {
+        if (!have_current || (src && strcmp(src, "none") == 0)) {
+            cmdline_printf(cl, "diff: cannot compare (missing desired or current)\n");
+            return;
+        }
+        char dv[64], cv[64], da[128], ca[128], ddesire[32], cstatus[64];
+        extract_kv(desire, "vlan", dv, sizeof(dv));
+        extract_kv(current, "vlan", cv, sizeof(cv));
+        extract_kv(desire, "account", da, sizeof(da));
+        extract_kv(current, "account", ca, sizeof(ca));
+        extract_kv(desire, "desire_status", ddesire, sizeof(ddesire));
+        extract_kv(current, "status", cstatus, sizeof(cstatus));
+
+        int config_differs = (strcmp(dv, cv) != 0) || (strcmp(da, ca) != 0);
+        cmdline_printf(cl, "diff: config %s (vlan %s/%s, account %s/%s)\n",
+            config_differs ? "DIFFERS" : "in-sync", dv, cv, da, ca);
+        cmdline_printf(cl, "diff: pppoe desired=%s actual=%s\n",
+            ddesire[0] ? ddesire : "?", cstatus[0] ? cstatus : "?");
+    }
+}
+
+cmdline_parse_token_string_t cmd_show_config_show =
+    TOKEN_STRING_INITIALIZER(struct cmd_show_config_result, show, "show");
+cmdline_parse_token_string_t cmd_show_config_config =
+    TOKEN_STRING_INITIALIZER(struct cmd_show_config_result, config, "config");
+cmdline_parse_token_string_t cmd_show_config_which =
+    TOKEN_STRING_INITIALIZER(struct cmd_show_config_result, which, "desire#current#diff");
+cmdline_parse_token_string_t cmd_show_config_user =
+    TOKEN_STRING_INITIALIZER(struct cmd_show_config_result, user, "user");
+cmdline_parse_token_num_t cmd_show_config_user_id =
+    TOKEN_NUM_INITIALIZER(struct cmd_show_config_result, user_id, RTE_UINT16);
+
+cmdline_parse_inst_t cmd_show_config = {
+    .f = cmd_show_config_parsed,
+    .data = NULL,
+    .help_str = "show config <desire|current|diff> user <id>: show desired/current config or their drift",
+    .tokens = {
+        (void *)&cmd_show_config_show,
+        (void *)&cmd_show_config_config,
+        (void *)&cmd_show_config_which,
+        (void *)&cmd_show_config_user,
+        (void *)&cmd_show_config_user_id,
+        NULL,
+    },
+};
+
+/* ──────────────────────────────────────────────
  *  controller login — authenticate to the controller (REST /api/login),
  *  store the JWT for subsequent ConfigService gRPC calls.
  * ────────────────────────────────────────────── */
@@ -1127,6 +1224,7 @@ cmdline_parse_ctx_t ctx[] = {
         (cmdline_parse_inst_t *)&cmd_show_dns,
         (cmdline_parse_inst_t *)&cmd_flush_dns_cache_inst,
         (cmdline_parse_inst_t *)&cmd_log,
+        (cmdline_parse_inst_t *)&cmd_show_config,
         (cmdline_parse_inst_t *)&cmd_controller_login,
     NULL,
 };

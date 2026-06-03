@@ -40,6 +40,9 @@ cli_etcd_status_t cli_etcd_set_tcp_conntrack(U16 user_id, int enable);
 cli_etcd_status_t cli_etcd_snat_set(U16 user_id, U16 eport, const char *dip, U16 iport);
 cli_etcd_status_t cli_etcd_snat_unset(U16 user_id, U16 eport);
 
+/* Read the desired HSI config for a user from etcd into out_buf (human-readable). */
+cli_etcd_status_t cli_etcd_get_hsi(U16 user_id, char *out_buf, U32 out_len);
+
 #ifdef __cplusplus
 }
 #endif

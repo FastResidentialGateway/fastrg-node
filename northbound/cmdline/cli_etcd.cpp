@@ -235,6 +235,38 @@ cli_etcd_status_t cli_etcd_snat_unset(U16 user_id, U16 eport) {
     });
 }
 
+cli_etcd_status_t cli_etcd_get_hsi(U16 user_id, char* out_buf, U32 out_len) {
+    etcd::Client* c = client();
+    if (!c || !out_buf || out_len == 0) return CLI_ETCD_UNAVAIL;
+    try {
+        auto resp = c->get(hsi_key(user_id)).get();
+        if (resp.error_code() == etcdv3::ERROR_KEY_NOT_FOUND) {
+            snprintf(out_buf, out_len, "(no config in etcd for user %u)", user_id);
+            return CLI_ETCD_OK;
+        }
+        if (resp.error_code() != 0)
+            return CLI_ETCD_UNAVAIL;
+        Json::Value root; Json::CharReaderBuilder rb; std::string errs;
+        std::string v = resp.value().as_string();
+        std::unique_ptr<Json::CharReader> reader(rb.newCharReader());
+        if (!reader->parse(v.c_str(), v.c_str() + v.size(), &root, &errs) || !root.isMember("config"))
+            return CLI_ETCD_ERR;
+        const Json::Value& cfg = root["config"];
+        snprintf(out_buf, out_len,
+            "user_id=%s vlan=%s account=%s pool=%s subnet=%s gateway=%s "
+            "dns_proxy=%d tcp_conntrack=%d desire_status=%s",
+            cfg.get("user_id", "").asString().c_str(), cfg.get("vlan_id", "").asString().c_str(),
+            cfg.get("account_name", "").asString().c_str(), cfg.get("dhcp_addr_pool", "").asString().c_str(),
+            cfg.get("dhcp_subnet", "").asString().c_str(), cfg.get("dhcp_gateway", "").asString().c_str(),
+            cfg.get("dns_proxy_enable", true).asBool() ? 1 : 0,
+            cfg.get("tcp_conntrack_enable", true).asBool() ? 1 : 0,
+            cfg.get("desire_status", "disconnect").asString().c_str());
+        return CLI_ETCD_OK;
+    } catch (const std::exception&) {
+        return CLI_ETCD_UNAVAIL;
+    }
+}
+
 cli_etcd_status_t cli_etcd_add_dns(U16 user_id, const char* domain, const char* ip, U32 ttl) {
     return cas(dns_key(user_id), [&](Json::Value& root, bool) {
         Json::Value arr = root.isArray() ? root : Json::Value(Json::arrayValue);
