@@ -33,17 +33,6 @@ typedef enum {
 
 #define ETCD_RETRY_BASE_TIME 1 // in second
 
-// Fallback error reason categories for quick problem identification
-typedef enum {
-    ERROR_REASON_CALLBACK_FAILED = 1,        // Callback function returned error
-    ERROR_REASON_PARSE_FAILED = 2,           // JSON parsing failed
-    ERROR_REASON_INVALID_FORMAT = 3,         // Invalid key/value format
-    ERROR_REASON_MISSING_FIELD = 4,          // Required field missing in config
-    ERROR_REASON_RESOURCE_UNAVAILABLE = 5,   // System resource not available
-    ERROR_REASON_TIMEOUT = 6,                // Processing timeout
-    ERROR_REASON_UNKNOWN = 99                // Unknown error
-} etcd_error_reason_t;
-
 // SNAT port-mapping entry for etcd config
 typedef struct {
     U16 eport;           // external port (host byte order)
@@ -144,8 +133,6 @@ typedef struct etcd_event {
         struct {
             hsi_config_t config;        /* config.port_mappings is heap-owned by this event */
             BOOL         desire_connect;/* derived from config.desire_status == "connect" */
-            char        *raw_value;     /* heap-owned raw JSON: new value (PUT) or deleted
-                                           value (DELETE) */
         } hsi;
         user_count_config_t user_count;
         dns_record_config_t dns_record;
@@ -162,7 +149,6 @@ static inline void etcd_event_free(etcd_event_t *ev) {
         return;
     if (ev->kind == ETCD_EVENT_HSI) {
         hsi_config_free_port_mappings(&ev->event_data.hsi.config);
-        free(ev->event_data.hsi.raw_value);
     } else if (ev->kind == ETCD_EVENT_HSI_SWEEP) {
         free(ev->event_data.sweep.present_ccb_ids);
     }
@@ -183,12 +169,6 @@ void etcd_client_stop_watch(void);
 
 /* Delete processed command from etcd */
 etcd_status_t etcd_client_delete_command(const char *command_key);
-
-/* Write a fallback-error record to etcd's failed_events/ namespace. Used by the
- * control-plane loop to report a config event it could not apply. */
-void etcd_client_write_fallback_error(const char *event_type, const char *key,
-    const char *node_id, const char *user_id, etcd_error_reason_t reason,
-    const char *error_detail, const char *original_value);
 
 /* Check if etcd client is initialized */
 int etcd_client_is_initialized(void);

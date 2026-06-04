@@ -819,86 +819,6 @@ public:
         }
     }
 
-    // Write fallback error event to etcd for failed processing
-    etcd_status_t write_fallback_error(const std::string& event_type,
-        const std::string& key,
-        const std::string& node_id,
-        const std::string& user_id,
-        etcd_error_reason_t reason,
-        const std::string& error_detail,
-        const std::string& original_value = "") {
-
-        if (!client_) {
-            return ETCD_ERROR;
-        }
-
-        try {
-            // Build fallback error key: failed_events/{event_type}/{node_id}/{user_id}/{timestamp}
-            std::time_t now = std::time(nullptr);
-            std::stringstream ss;
-            ss << "failed_events/" << event_type << "/" << node_id << "/" 
-               << user_id << "/" << now;
-            std::string fail_key = ss.str();
-
-            // Build JSON payload
-            Json::Value root;
-            root["event_type"] = event_type;
-            root["original_key"] = key;
-            root["node_id"] = node_id;
-            root["user_id"] = user_id;
-            root["error_reason_code"] = static_cast<int>(reason);
-            root["error_reason_name"] = get_error_reason_name(reason);
-            root["error_detail"] = error_detail;
-            root["timestamp"] = static_cast<Json::Int64>(now);
-
-            // Record the instance's local UTC offset, e.g. "UTC+8". localtime()'s
-            // shared static buffer is fine here — we only read the (effectively
-            // constant) timezone offset, not the time itself.
-            char tz_raw[8] = {0};
-            struct tm *local_tm = std::localtime(&now);
-            if (local_tm)
-                std::strftime(tz_raw, sizeof(tz_raw), "%z", local_tm);  // e.g. "+0800"
-            std::string tz_str = "UTC";
-            if (std::strlen(tz_raw) >= 5) {
-                int hh = (tz_raw[1] - '0') * 10 + (tz_raw[2] - '0');
-                int mm = (tz_raw[3] - '0') * 10 + (tz_raw[4] - '0');
-                tz_str += tz_raw[0];                       // '+' or '-'
-                tz_str += std::to_string(hh);
-                if (mm != 0) {
-                    tz_str += ':';
-                    if (mm < 10)
-                        tz_str += '0';
-                    tz_str += std::to_string(mm);
-                }
-            }
-            root["timezone"] = tz_str;
-
-            // Include original value if available (for DELETE events with prev_kv)
-            if (!original_value.empty()) {
-                root["original_value"] = original_value;
-            }
-
-            // Convert to string
-            Json::StreamWriterBuilder writer;
-            writer["indentation"] = "";  // Compact JSON
-            std::string payload = Json::writeString(writer, root);
-
-            // Write to etcd
-            auto response_task = client_->set(fail_key, payload);
-            auto response = response_task.get();
-
-            if (response.error_code() == 0) {
-                FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "Wrote fallback error to: %s", fail_key.c_str());
-                return ETCD_SUCCESS;
-            } else {
-                FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Failed to write fallback error: %s", response.error_message().c_str());
-                return ETCD_ERROR;
-            }
-        } catch (const std::exception& e) {
-            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Exception writing fallback error: %s", e.what());
-            return ETCD_ERROR;
-        }
-    }
 
     // Generic Compare-And-Swap put keyed on ModRevision.
     // See docs/contracts/cas-convention.md. Later slices (config writes,
@@ -1654,26 +1574,6 @@ public:
         }
     }
 
-    // Convert error reason enum to readable string
-    static std::string get_error_reason_name(etcd_error_reason_t reason) {
-        switch (reason) {
-            case ERROR_REASON_CALLBACK_FAILED:
-                return "CALLBACK_FAILED";
-            case ERROR_REASON_PARSE_FAILED:
-                return "PARSE_FAILED";
-            case ERROR_REASON_INVALID_FORMAT:
-                return "INVALID_FORMAT";
-            case ERROR_REASON_MISSING_FIELD:
-                return "MISSING_FIELD";
-            case ERROR_REASON_RESOURCE_UNAVAILABLE:
-                return "RESOURCE_UNAVAILABLE";
-            case ERROR_REASON_TIMEOUT:
-                return "TIMEOUT";
-            case ERROR_REASON_UNKNOWN:
-            default:
-                return "UNKNOWN";
-        }
-    }
 
     etcd_status_t load_existing_configs(const char* node_uuid,
         hsi_config_callback_t hsi_callback,
@@ -1916,18 +1816,6 @@ private:
                 return ERROR;
             }
             ev->event_data.hsi.desire_connect = is_enabled ? TRUE : FALSE;
-            // Keep the raw JSON so the control-plane loop can record it in
-            // failed_events/ if the apply fails.
-            ev->event_data.hsi.raw_value = dup_string(value);
-        } else {
-            // DELETE: the new kv carries no value; the deleted config is in
-            // prev_kv. Keep it for the failed_events/ record on apply failure.
-            try {
-                if (!event.prev_kv().key().empty())
-                    ev->event_data.hsi.raw_value = dup_string(event.prev_kv().as_string());
-            } catch (...) {
-                // prev_kv unavailable — leave raw_value NULL
-            }
         }
         enqueue_etcd_event(ev);
         return SUCCESS;
@@ -2458,17 +2346,6 @@ etcd_status_t etcd_client_delete_command(const char* command_key) {
     return g_etcd_client->delete_command(command_key);
 }
 
-void etcd_client_write_fallback_error(const char *event_type, const char *key,
-    const char *node_id, const char *user_id, etcd_error_reason_t reason,
-    const char *error_detail, const char *original_value) {
-    if (!g_etcd_client)
-        return;
-    g_etcd_client->write_fallback_error(
-        event_type ? event_type : "", key ? key : "",
-        node_id ? node_id : "", user_id ? user_id : "",
-        reason, error_detail ? error_detail : "",
-        original_value ? original_value : "");
-}
 
 int etcd_client_is_initialized(void) {
     return (g_etcd_client != nullptr) ? 1 : 0;
