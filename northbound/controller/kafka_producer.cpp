@@ -2,12 +2,19 @@
 #include "proto/kafka-events.pb.h"
 
 #include <librdkafka/rdkafka.h>
+#include <json/json.h>
 
 #include <atomic>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <fstream>
+#include <mutex>
+#include <sstream>
 #include <string>
+#include <thread>
+#include <vector>
 
 namespace ev = fastrg::events::v1;
 
@@ -16,22 +23,156 @@ namespace {
 rd_kafka_t       *g_rk = nullptr;
 std::string       g_node_uuid;
 std::atomic<bool> g_ready{false};
-std::atomic<unsigned long> g_dropped{0};   // messages dropped due to a full local queue
+std::atomic<unsigned long> g_dropped{0};   // messages dropped (WAL bound exceeded)
 
-constexpr const char *KAFKA_TOPIC = "fastrg.node.events";
+constexpr const char *KAFKA_TOPIC     = "fastrg.node.events";
+// Durable write-ahead log of events not yet confirmed delivered. Survives node
+// restarts; replayed on startup so telemetry is not lost across a crash (slice 15).
+constexpr const char *KAFKA_QUEUE_PATH = "/etc/fastrg/kafka_queue.json";
+// Bound the WAL so a long broker outage cannot grow it without limit.
+constexpr size_t      MAX_WAL_EVENTS   = 100000;
+
+struct PendingEvent {
+    int64_t     seq;       // local monotonic id, used as the per-message opaque
+    std::string payload;   // serialized NodeEvent protobuf bytes
+};
+
+std::mutex                 g_wal_mutex;   // guards g_pending + the WAL file
+std::vector<PendingEvent>  g_pending;     // events appended but not yet confirmed
+std::atomic<int64_t>       g_seq{0};      // last assigned seq
+
+std::thread                g_poll_thread; // serves delivery reports while idle
+std::atomic<bool>          g_poll_run{false};
 
 int64_t now_unix() { return (int64_t)std::time(nullptr); }
 
-// Delivery-report callback: log permanent failures (rate-limited by librdkafka's
-// own batching). Runs on rd_kafka_poll().
+std::string to_hex(const std::string &in) {
+    static const char *h = "0123456789abcdef";
+    std::string out;
+    out.reserve(in.size() * 2);
+    for (unsigned char c : in) { out.push_back(h[c >> 4]); out.push_back(h[c & 0xf]); }
+    return out;
+}
+
+bool from_hex(const std::string &in, std::string &out) {
+    if (in.size() % 2 != 0) return false;
+    auto nib = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    out.clear();
+    out.reserve(in.size() / 2);
+    for (size_t i = 0; i < in.size(); i += 2) {
+        int hi = nib(in[i]), lo = nib(in[i + 1]);
+        if (hi < 0 || lo < 0) return false;
+        out.push_back((char)((hi << 4) | lo));
+    }
+    return true;
+}
+
+// Persist the whole pending set atomically (tmp + rename). Caller holds g_wal_mutex.
+void persist_wal_locked() {
+    Json::Value arr(Json::arrayValue);
+    for (const auto &e : g_pending) {
+        Json::Value j;
+        j["seq"]     = (Json::Int64)e.seq;
+        j["payload"] = to_hex(e.payload);
+        arr.append(j);
+    }
+    Json::StreamWriterBuilder w;
+    w["indentation"] = "";
+    std::string data = Json::writeString(w, arr);
+
+    std::string tmp = std::string(KAFKA_QUEUE_PATH) + ".tmp";
+    std::ofstream ofs(tmp, std::ios::trunc | std::ios::binary);
+    if (!ofs) {
+        std::fprintf(stderr, "[kafka] failed to open WAL temp file %s\n", tmp.c_str());
+        return;
+    }
+    ofs << data;
+    ofs.flush();
+    ofs.close();
+    if (std::rename(tmp.c_str(), KAFKA_QUEUE_PATH) != 0)
+        std::fprintf(stderr, "[kafka] failed to rename WAL to %s\n", KAFKA_QUEUE_PATH);
+}
+
+// Load the WAL into g_pending and restore the seq counter. Called once at init.
+void load_wal() {
+    std::lock_guard<std::mutex> lk(g_wal_mutex);
+    g_pending.clear();
+    std::ifstream ifs(KAFKA_QUEUE_PATH, std::ios::binary);
+    if (!ifs) return;                         // no file = empty
+    std::stringstream buf;
+    buf << ifs.rdbuf();
+    std::string data = buf.str();
+    if (data.empty()) return;
+
+    Json::Value arr;
+    Json::Reader reader;
+    if (!reader.parse(data, arr) || !arr.isArray()) {
+        std::fprintf(stderr, "[kafka] corrupt WAL %s, ignoring\n", KAFKA_QUEUE_PATH);
+        return;
+    }
+    int64_t maxseq = 0;
+    for (const auto &j : arr) {
+        if (!j.isMember("seq") || !j.isMember("payload")) continue;
+        PendingEvent e;
+        e.seq = j["seq"].asInt64();
+        if (!from_hex(j["payload"].asString(), e.payload)) continue;
+        if (e.seq > maxseq) maxseq = e.seq;
+        g_pending.push_back(std::move(e));
+    }
+    g_seq.store(maxseq);
+}
+
+// Re-produce every buffered event after (re)start. Called once at init, after the
+// producer is ready. Does not re-persist (entries are already in the WAL); a
+// delivery report removes each one as it is confirmed.
+void replay_pending() {
+    std::vector<PendingEvent> snap;
+    {
+        std::lock_guard<std::mutex> lk(g_wal_mutex);
+        snap = g_pending;
+    }
+    if (snap.empty()) return;
+    std::fprintf(stderr, "[kafka] replaying %zu buffered event(s) from WAL\n", snap.size());
+    for (const auto &e : snap) {
+        rd_kafka_producev(
+            g_rk,
+            RD_KAFKA_V_TOPIC(KAFKA_TOPIC),
+            RD_KAFKA_V_KEY(g_node_uuid.data(), g_node_uuid.size()),
+            RD_KAFKA_V_VALUE(const_cast<char *>(e.payload.data()), e.payload.size()),
+            RD_KAFKA_V_MSGFLAGS(RD_KAFKA_MSG_F_COPY),
+            RD_KAFKA_V_OPAQUE((void *)(intptr_t)e.seq),
+            RD_KAFKA_V_END);
+    }
+    rd_kafka_poll(g_rk, 0);
+}
+
+// Delivery-report callback (runs on rd_kafka_poll / flush). On success, drop the
+// confirmed event from the WAL; on failure keep it so it is replayed next start.
 void dr_msg_cb(rd_kafka_t *, const rd_kafka_message_t *rkmessage, void *) {
+    int64_t seq = (int64_t)(intptr_t)rkmessage->_private;
     if (rkmessage->err) {
-        std::fprintf(stderr, "[kafka] delivery failed: %s\n",
-            rd_kafka_err2str(rkmessage->err));
+        std::fprintf(stderr, "[kafka] delivery failed (seq=%lld): %s\n",
+            (long long)seq, rd_kafka_err2str(rkmessage->err));
+        return;   // keep in WAL for restart replay
+    }
+    if (seq <= 0) return;
+    std::lock_guard<std::mutex> lk(g_wal_mutex);
+    for (auto it = g_pending.begin(); it != g_pending.end(); ++it) {
+        if (it->seq == seq) {
+            g_pending.erase(it);
+            persist_wal_locked();
+            break;
+        }
     }
 }
 
-// Serialize a NodeEvent and produce it non-blocking. Drops on a full queue.
+// Serialize a NodeEvent, append it to the durable WAL, then produce it. Never
+// blocks the data/control plane. Undelivered events persist across restarts.
 void produce_event(const ev::NodeEvent &evt) {
     if (!g_ready.load() || g_rk == nullptr)
         return;
@@ -42,24 +183,47 @@ void produce_event(const ev::NodeEvent &evt) {
         return;
     }
 
+    int64_t seq = ++g_seq;
+    {
+        std::lock_guard<std::mutex> lk(g_wal_mutex);
+        g_pending.push_back({seq, payload});
+        // Bound the WAL: drop the oldest if we exceed the cap (telemetry tolerates loss).
+        if (g_pending.size() > MAX_WAL_EVENTS) {
+            g_pending.erase(g_pending.begin());
+            unsigned long n = ++g_dropped;
+            if ((n & (n - 1)) == 0)
+                std::fprintf(stderr, "[kafka] WAL full, dropped oldest; total dropped=%lu\n", n);
+        }
+        persist_wal_locked();
+    }
+
     rd_kafka_resp_err_t err = rd_kafka_producev(
         g_rk,
         RD_KAFKA_V_TOPIC(KAFKA_TOPIC),
         RD_KAFKA_V_KEY(g_node_uuid.data(), g_node_uuid.size()),
         RD_KAFKA_V_VALUE(const_cast<char *>(payload.data()), payload.size()),
-        RD_KAFKA_V_MSGFLAGS(RD_KAFKA_MSG_F_COPY),   // librdkafka copies; payload can go out of scope
+        RD_KAFKA_V_MSGFLAGS(RD_KAFKA_MSG_F_COPY),   // librdkafka copies the value
+        RD_KAFKA_V_OPAQUE((void *)(intptr_t)seq),   // correlate the delivery report
         RD_KAFKA_V_END);
 
     if (err) {
-        // Non-blocking: never wait for queue space; just drop + count.
-        unsigned long n = ++g_dropped;
-        if ((n & (n - 1)) == 0)   // log on powers of two to avoid spam
-            std::fprintf(stderr, "[kafka] produce dropped (%s), total dropped=%lu\n",
-                rd_kafka_err2str(err), n);
+        // Local queue full: the event stays in the WAL and is replayed on the next
+        // start. Do not block waiting for queue space.
+        std::fprintf(stderr, "[kafka] enqueue deferred (seq=%lld): %s\n",
+            (long long)seq, rd_kafka_err2str(err));
     }
 
-    // Serve delivery reports / internal events without blocking.
+    // Serve delivery reports without blocking.
     rd_kafka_poll(g_rk, 0);
+}
+
+// Background poller: serve delivery reports continuously so that confirmations
+// (and WAL pruning) happen even when no new events are being produced.
+void poll_loop() {
+    while (g_poll_run.load()) {
+        if (g_rk) rd_kafka_poll(g_rk, 200);
+        else      break;
+    }
 }
 
 void fill_envelope(ev::NodeEvent *evt, const char *user_id, ev::EventType type) {
@@ -91,7 +255,7 @@ STATUS kafka_producer_init(const char *brokers, const char *node_uuid) {
         rd_kafka_conf_destroy(conf);
         return ERROR;
     }
-    // Bound the local queue so a long outage cannot grow memory without limit.
+    // Bound the in-memory queue so a long outage cannot grow memory without limit.
     rd_kafka_conf_set(conf, "queue.buffering.max.messages", "100000", errstr, sizeof(errstr));
     rd_kafka_conf_set_dr_msg_cb(conf, dr_msg_cb);
 
@@ -107,14 +271,27 @@ STATUS kafka_producer_init(const char *brokers, const char *node_uuid) {
     g_ready.store(true);
     std::fprintf(stderr, "[kafka] producer initialized (brokers=%s, topic=%s)\n",
         brokers, KAFKA_TOPIC);
+
+    // Recover any events buffered before a previous restart and re-send them.
+    load_wal();
+    replay_pending();
+
+    // Start the background poller so delivery reports are served (and the WAL
+    // pruned) even when the node is idle and not producing new events.
+    g_poll_run.store(true);
+    g_poll_thread = std::thread(poll_loop);
     return SUCCESS;
 }
 
 void kafka_producer_cleanup(void) {
     if (!g_ready.exchange(false))
         return;
+    // Stop the poller before touching g_rk so it cannot poll a destroyed handle.
+    g_poll_run.store(false);
+    if (g_poll_thread.joinable())
+        g_poll_thread.join();
     if (g_rk) {
-        rd_kafka_flush(g_rk, 2000);   // best-effort flush, up to 2s
+        rd_kafka_flush(g_rk, 2000);   // best-effort flush; dr_cb prunes the WAL
         rd_kafka_destroy(g_rk);
         g_rk = nullptr;
     }

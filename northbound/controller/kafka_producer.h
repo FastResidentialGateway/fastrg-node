@@ -8,9 +8,11 @@
  * topic "fastrg.node.events" (partition key = node_uuid). Payloads are protobuf
  * NodeEvent messages defined in docs/contracts/kafka-events.proto.
  *
- * Non-blocking: produce never blocks the data/control plane; on a full local
- * queue the message is dropped and counted (telemetry tolerates loss). Durable
- * (disk-WAL) buffering across node restarts is a later hardening slice (15).
+ * Non-blocking: produce never blocks the data/control plane. Events are written
+ * to a durable on-disk WAL (/etc/fastrg/kafka_queue.json) before being produced
+ * and removed once delivery is confirmed, so undelivered events survive a node
+ * restart and are replayed on the next kafka_producer_init() (slice 15). Only a
+ * full WAL (long outage) drops the oldest, counted (telemetry tolerates loss).
  *
  * All kafka_report_* functions are no-ops until kafka_producer_init() succeeds,
  * so call sites can invoke them unconditionally.
