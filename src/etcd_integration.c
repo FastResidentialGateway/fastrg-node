@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <pthread.h>
 #include <time.h>
+#include <rte_cycles.h>
 
 #include "etcd_integration.h"
 #include "fastrg.h"
@@ -616,8 +617,14 @@ BOOL dns_record_matches_local(const char *user_id,
  * TODO(slice 13): add dial-rate limiting (stagger) so a node restart that loads
  * many desire_status=connect subscribers does not issue all PADIs at once.
  */
+/* Minimum spacing between PPPoE dials, to avoid a PADI storm when a node
+ * restart loads many desire_status=connect subscribers at once (slice 13). */
+#define PPPOE_DIAL_MIN_GAP_US 50000   /* 50 ms */
+
 static void reconcile_pppoe_desire(FastRG_t *fastrg_ccb, int ccb_id, const char *desire_status)
 {
+    static uint64_t s_last_dial_cycles = 0;   /* control-plane thread only */
+
     ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
     if (ppp_ccb == NULL)
         return;
@@ -627,6 +634,17 @@ static void reconcile_pppoe_desire(FastRG_t *fastrg_ccb, int ccb_id, const char 
     BOOL is_connected = (rte_atomic16_read(&ppp_ccb->ppp_bool) == 1);
 
     if (want_connect && !is_connected) {
+        /* Stagger consecutive dials: enforce a minimum gap since the last one.
+         * Only consecutive dials (bulk restart/reconcile) ever wait; an isolated
+         * dial proceeds immediately. */
+        uint64_t hz = rte_get_tsc_hz();
+        if (hz > 0 && s_last_dial_cycles != 0) {
+            uint64_t min_gap = (hz / 1000000ULL) * PPPOE_DIAL_MIN_GAP_US;
+            uint64_t elapsed = rte_get_tsc_cycles() - s_last_dial_cycles;
+            if (elapsed < min_gap)
+                rte_delay_us_block((min_gap - elapsed) / (hz / 1000000ULL));
+        }
+        s_last_dial_cycles = rte_get_tsc_cycles();
         FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
             "desire_status=connect for user %d, dialing PPPoE", ccb_id + 1);
         execute_pppoe_dial(fastrg_ccb, ccb_id);

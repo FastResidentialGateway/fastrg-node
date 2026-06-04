@@ -370,6 +370,10 @@ STATUS pppd_disable_ccb(FastRG_t *fastrg_ccb, U16 remove_ccb_count, U16 old_ccb_
     for(U16 i=0; i<remove_ccb_count; i++) {
         U16 ccb_id = old_ccb_count - 1 - i;
         ppp_ccb_t *ppp_ccb = old_array[ccb_id];
+        /* A slot can be NULL when the count was grown past the configured users
+         * (unconfigured slots are not allocated). Nothing to disable there. */
+        if (ppp_ccb == NULL)
+            continue;
         exit_ppp(ppp_ccb);
         reset_vlan_map_ccb_id(fastrg_ccb, rte_atomic16_read(&ppp_ccb->vlan_id));
         ppp_cleanup_config_by_user(ppp_ccb, ccb_id);

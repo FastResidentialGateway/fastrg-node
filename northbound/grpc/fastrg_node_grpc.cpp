@@ -918,6 +918,13 @@ grpc::Status FastRGNodeServiceImpl::GetFastrgHsiInfo(::grpc::ServerContext* cont
         HsiInfo *hsi_info = response->add_hsi_infos();
         ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, i);
         hsi_info->set_user_id(i + 1);
+        /* The CCB pointer array is RCU-protected and a slot may be transiently
+         * NULL while a config change (re)allocates it. Reading through a NULL
+         * pointer here crashes the gRPC worker, so skip empty slots. */
+        if (ppp_ccb == NULL) {
+            hsi_info->set_status("not configured");
+            continue;
+        }
         hsi_info->set_vlan_id(rte_atomic16_read(&ppp_ccb->vlan_id));
         hsi_info->set_account(std::string(reinterpret_cast<const char*>(ppp_ccb->ppp_user_acc)));
         hsi_info->set_password(std::string(reinterpret_cast<const char*>(ppp_ccb->ppp_passwd)));
@@ -979,6 +986,12 @@ grpc::Status FastRGNodeServiceImpl::GetFastrgDhcpInfo(::grpc::ServerContext* con
         DhcpInfo *dhcp_info = response->add_dhcp_infos();
         ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, i);
         dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, i);
+        /* RCU-protected slots may be transiently NULL during a config change. */
+        if (ppp_ccb == NULL || dhcp_ccb == NULL) {
+            dhcp_info->set_user_id(i + 1);
+            dhcp_info->set_status("not configured");
+            continue;
+        }
         if (rte_atomic16_read(&dhcp_ccb->dhcp_bool) == 1) {
             dhcp_info->set_user_id(i + 1);
             dhcp_info->set_status("DHCP server is on");

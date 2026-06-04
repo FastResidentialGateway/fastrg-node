@@ -272,6 +272,9 @@ STATUS dhcpd_disable_ccb(FastRG_t *fastrg_ccb, U16 disable_ccb_count, U16 old_cc
     for(U16 i=0; i<disable_ccb_count; i++) {
         U16 ccb_id = old_ccb_count - 1 - i;
         dhcp_ccb_t *dhcp_ccb = old_array[ccb_id];
+        /* Unconfigured slots past the old count may be NULL — nothing to stop. */
+        if (dhcp_ccb == NULL)
+            continue;
 
         /* Stop DHCP service */
         for(U32 j=0; j<dhcp_ccb->per_lan_user_pool_len; j++) {
