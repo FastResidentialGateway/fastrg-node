@@ -783,9 +783,11 @@ STATUS user_count_changed_callback(const char *node_id,
                 if (pppd_add_ccb(fastrg_ccb, to_add) != SUCCESS) {
                     FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
                         "Failed to add %u PPPoE CCBs", to_add);
-                    char subscriber_count_str[8] = { 0 };
-                    snprintf(subscriber_count_str, sizeof(subscriber_count_str), "%u", current_count);
-                    etcd_client_put_subscriber_count(fastrg_ccb->node_uuid, subscriber_count_str, "fastrg_node");
+                    /* Node is read-only on etcd: report the failure via Kafka
+                     * instead of writing the count back. The desired count stays
+                     * in etcd; the resulting drift is visible to the controller. */
+                    kafka_report_runtime_error("user_count", "CCB_ALLOC_FAILED",
+                        "failed to add PPPoE CCBs for subscriber-count increase", NULL);
                     return ERROR;
                 }
 
@@ -794,9 +796,8 @@ STATUS user_count_changed_callback(const char *node_id,
                     FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
                         "Failed to add %u DHCP CCBs", to_add);
                     pppd_disable_ccb(fastrg_ccb, to_add, current_count + to_add); // Disable the PPPoE CCBs that were just added
-                    char subscriber_count_str[8] = { 0 };
-                    snprintf(subscriber_count_str, sizeof(subscriber_count_str), "%u", current_count);
-                    etcd_client_put_subscriber_count(fastrg_ccb->node_uuid, subscriber_count_str, "fastrg_node");
+                    kafka_report_runtime_error("user_count", "CCB_ALLOC_FAILED",
+                        "failed to add DHCP CCBs for subscriber-count increase", NULL);
                     return ERROR;
                 }
 
@@ -805,9 +806,8 @@ STATUS user_count_changed_callback(const char *node_id,
                         "Failed to modify internal subscriber count to %d", new_count);
                     pppd_disable_ccb(fastrg_ccb, to_add, current_count + to_add); // Disable the PPPoE CCBs that were just added
                     dhcpd_disable_ccb(fastrg_ccb, to_add, current_count + to_add); // Disable the DHCP CCBs that were just added
-                    char subscriber_count_str[8] = { 0 };
-                    snprintf(subscriber_count_str, sizeof(subscriber_count_str), "%u", current_count);
-                    etcd_client_put_subscriber_count(fastrg_ccb->node_uuid, subscriber_count_str, "fastrg_node");
+                    kafka_report_runtime_error("user_count", "COUNT_APPLY_FAILED",
+                        "failed to apply internal subscriber-count increase", NULL);
                     return ERROR;
                 }
 
