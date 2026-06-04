@@ -59,6 +59,23 @@ phase0_setup() {
     export NODE_UUID ETCD_ENDPOINT FASTRG_GRPC_PORT
 
     # ------------------------------------------------------------------
+    # Controller connectivity (writes go through the controller now).
+    # Clear any stale cached token, then verify login works.
+    # ------------------------------------------------------------------
+    rm -f /tmp/.fastrg_e2e_ctrl_token 2>/dev/null || true
+    info "Checking controller login at ${CONTROLLER_REST}..."
+    # Use the python client (urllib) — the runner may not have curl, and the
+    # client is exactly what the write paths use to authenticate.
+    _ctrl_login_chk=$(fastrg_grpc ctrl_login 2>/dev/null \
+        | python3 -c "import sys,json; print(json.load(sys.stdin).get('token_preview',''))" 2>/dev/null || true)
+    if [[ -z "$_ctrl_login_chk" ]]; then
+        error "Cannot log in to controller at ${CONTROLLER_REST} (user=${CONTROLLER_USER})."
+        error "Config writes route through the controller — aborting."
+        exit 1
+    fi
+    info "Controller login OK (token acquired)."
+
+    # ------------------------------------------------------------------
     # Check Python3 + grpcurl + proto (fastrg_grpc_client.py uses grpcurl;
     # no grpcio or pb2 stubs required)
     # ------------------------------------------------------------------
@@ -90,6 +107,27 @@ phase0_setup() {
         exit 1
     fi
     info "proto: ${GRPC_CLIENT_DIR}/fastrg_node.proto"
+
+    # ------------------------------------------------------------------
+    # Ensure the canonical USER_ID test fixture exists in etcd. The suite
+    # assumes the subscriber config is pre-provisioned (HSI + DNS static).
+    # If it is missing, seed it via restore_etcd_config.sh on the node so the
+    # node picks it up on boot (must happen BEFORE the daemon starts).
+    # ------------------------------------------------------------------
+    info "Checking etcd HSI fixture for USER_ID=${USER_ID}..."
+    _seed_hsi=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/${USER_ID}" 2>/dev/null || true)
+    if [[ -z "$_seed_hsi" ]]; then
+        warn "etcd HSI config for USER_ID=${USER_ID} missing — seeding via restore_etcd_config.sh on node..."
+        ssh_node "bash /root/fastrg-node/e2e_test/restore_etcd_config.sh --force" 2>&1 | sed 's/^/    /'
+        _seed_hsi=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/${USER_ID}" 2>/dev/null || true)
+        if [[ -z "$_seed_hsi" ]]; then
+            error "Failed to seed etcd HSI fixture for USER_ID=${USER_ID}."
+            exit 1
+        fi
+        info "Seeded etcd HSI fixture for USER_ID=${USER_ID}."
+    else
+        info "etcd HSI fixture present."
+    fi
 
     # ------------------------------------------------------------------
     # Ensure fastrg daemon is running; start it if not
@@ -173,6 +211,24 @@ phase0_setup() {
         info "fastrg gRPC is reachable."
     fi
 
+    # ------------------------------------------------------------------
+    # Refresh the LAN host's subscriber DHCP lease. After a node (re)start
+    # the LAN device may still hold a stale lease from a previous node
+    # instance (NetworkManager keeps the "valid" lease, so a plain
+    # `netplan apply` won't re-acquire). Force a release+renew so the node's
+    # DHCP server actually hands out the lease (otherwise Step 5 flakes).
+    # vlan3 is NM-managed via the "netplan-vlan3" connection.
+    # ------------------------------------------------------------------
+    info "Refreshing LAN host (${LAN_HOST}) subscriber DHCP lease (vlan3)..."
+    ssh_lan "nmcli con down netplan-vlan3 >/dev/null 2>&1; nmcli con up netplan-vlan3 >/dev/null 2>&1 || netplan apply >/dev/null 2>&1; true" 2>/dev/null || true
+    # Give DHCP a moment to complete before the DHCP checks in later phases.
+    for _i in $(seq 1 6); do
+        _lan_ip=$(ssh_lan "ip -4 addr show vlan3 2>/dev/null | grep -oE '192\\.168\\.4\\.[0-9]+' | head -1" 2>/dev/null | tr -d '[:space:]')
+        [[ -n "$_lan_ip" ]] && { info "  LAN host vlan3 lease: ${_lan_ip}"; break; }
+        sleep 2
+    done
+    [[ -z "$_lan_ip" ]] && warn "  LAN host did not obtain a vlan3 lease yet (Step 5 may flake)."
+
     printf "\n"
     info "Configuration summary:"
     printf "  USER_ID         : %s\n" "$USER_ID"
@@ -183,5 +239,7 @@ phase0_setup() {
     printf "  WAN_IP          : %s\n" "$WAN_IP"
     printf "  NODE_UUID       : %s\n" "$NODE_UUID"
     printf "  ETCD_ENDPOINT   : %s\n" "$ETCD_ENDPOINT"
+    printf "  CONTROLLER_REST : %s\n" "$CONTROLLER_REST"
+    printf "  CONTROLLER_GRPC : %s\n" "$CONTROLLER_GRPC"
     printf "\n"
 }

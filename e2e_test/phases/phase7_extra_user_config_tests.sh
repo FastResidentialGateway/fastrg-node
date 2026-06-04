@@ -56,10 +56,10 @@ phase7_extra_user_config_tests() {
     # ------------------------------------------------------------------
     # Read subscriber 1's config from etcd as the base config
     # ------------------------------------------------------------------
-    info "Reading subscriber 1 config from etcd (configs/${NODE_UUID}/hsi/1)..."
-    _s1_etcd=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/1" 2>/dev/null || true)
+    info "Reading subscriber ${USER_ID} config from etcd (configs/${NODE_UUID}/hsi/${USER_ID}) as baseline..."
+    _s1_etcd=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/${USER_ID}" 2>/dev/null || true)
     if [[ -z "$_s1_etcd" ]]; then
-        warn "Subscriber 1 config not found in etcd — skipping Phase 7"
+        warn "Subscriber ${USER_ID} config not found in etcd — skipping Phase 7"
         return
     fi
 
@@ -127,7 +127,9 @@ phase7_extra_user_config_tests() {
         _e_account=$(printf '%s' "$_u1_etcd" | jq -r '.config.account_name // empty')
         _e_vlan=$(printf '%s'    "$_u1_etcd" | jq -r '.config.vlan_id // empty')
         _e_pool=$(printf '%s'    "$_u1_etcd" | jq -r '.config.dhcp_addr_pool // empty')
-        _e_enable=$(printf '%s'  "$_u1_etcd" | jq -r '.metadata.enableStatus // empty')
+        # PPPoE intent now lives in config.desire_status; ApplyConfig defaults new
+        # subscribers to "disconnect" (replaces the old metadata.enableStatus).
+        _e_enable=$(printf '%s'  "$_u1_etcd" | jq -r '.config.desire_status // empty')
         _e_subnet=$(printf '%s'  "$_u1_etcd" | jq -r '.config.dhcp_subnet // empty')
         _e_gw=$(printf '%s'      "$_u1_etcd" | jq -r '.config.dhcp_gateway // empty')
         # dns_proxy_enable: ApplyConfig should default it to true in etcd.
@@ -139,14 +141,14 @@ phase7_extra_user_config_tests() {
         [[ "$_e_account"   != "$U1_ACCOUNT"   ]] && MISMATCH="${MISMATCH} account(etcd=${_e_account} expected=${U1_ACCOUNT})"
         [[ "$_e_vlan"      != "$U1_VLAN"      ]] && MISMATCH="${MISMATCH} vlan(etcd=${_e_vlan} expected=${U1_VLAN})"
         [[ "$_e_pool"      != "$_expect_pool" ]] && MISMATCH="${MISMATCH} dhcp_pool(etcd=${_e_pool} expected=${_expect_pool})"
-        [[ "$_e_enable"    != "disabled"      ]] && MISMATCH="${MISMATCH} enableStatus(etcd=${_e_enable} expected=disabled)"
+        [[ "$_e_enable"    != "disconnect"    ]] && MISMATCH="${MISMATCH} desire_status(etcd=${_e_enable} expected=disconnect)"
         [[ "$_e_subnet"    != "$U1_SUBNET"    ]] && MISMATCH="${MISMATCH} subnet(etcd=${_e_subnet} expected=${U1_SUBNET})"
         [[ "$_e_gw"        != "$U1_GATEWAY"   ]] && MISMATCH="${MISMATCH} gateway(etcd=${_e_gw} expected=${U1_GATEWAY})"
         [[ "$_e_dns_proxy" != "true"          ]] && MISMATCH="${MISMATCH} dns_proxy_enable(etcd=${_e_dns_proxy} expected=true)"
 
         if [[ -z "$MISMATCH" ]]; then
             pass "Step 19: ApplyConfig user ${U1}" \
-                "account=${_e_account} vlan=${_e_vlan} pool=${_e_pool} enableStatus=${_e_enable} dns_proxy_enable=${_e_dns_proxy}"
+                "account=${_e_account} vlan=${_e_vlan} pool=${_e_pool} desire_status=${_e_enable} dns_proxy_enable=${_e_dns_proxy}"
         else
             fail "Step 19: ApplyConfig user ${U1}" "etcd mismatch:${MISMATCH}"
         fi

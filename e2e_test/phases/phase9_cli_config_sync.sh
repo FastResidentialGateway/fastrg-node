@@ -12,9 +12,8 @@
 #   - Step 30   : sanity that unrelated fields (vlan_id) survive Step 29
 #   - Step 31   : RemoveConfig promoted to graded step
 #                  (Phase 7 runs it silently in cleanup)
-#   - Steps 31-34: full PPPoE enableStatus lifecycle observation
-#                  enabled → disabling → disabled → enabling → enabled
-#                  (Phase 3.5 only verifies the "enabled" terminal state)
+#   - Steps 32-35: PPPoE desire_status lifecycle (connect/disconnect + node reconcile)
+#                  desire_status disconnect<->connect; node reconciles session
 #
 # Steps 26-30 use a synthetic subscriber (_P9_USER_ID = orig_count + 1).
 # Steps 31-34 use USER_ID (the real subscriber with a live PPPoE server).
@@ -38,65 +37,35 @@ _cleanup_phase9_user() {
     fi
 }
 
-# Helper: read .metadata.enableStatus for a user from etcd. Empty on error.
-_p9_etcd_enable_status() {
+# Helper: read .config.desire_status for a user from etcd. Empty on error.
+_p9_etcd_desire() {
     local _uid="$1"
     local _json
     _json=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/${_uid}" 2>/dev/null || true)
     [[ -z "$_json" ]] && return
-    printf '%s' "$_json" | jq -r '.metadata.enableStatus // empty' 2>/dev/null || true
+    printf '%s' "$_json" | jq -r '.config.desire_status // empty' 2>/dev/null || true
 }
 
-# Helper: poll _p9_etcd_enable_status until value matches $2 (regex), or timeout.
-# Records every distinct value observed in _P9_SEEN (caller resets it).
-# $1 = user_id, $2 = regex of acceptable values, $3 = iterations, $4 = sleep seconds
-# Returns 0 if matched, 1 if timeout.
-_p9_poll_enable_status() {
+# Helper: read a user's current PPPoE phase from the node (gRPC). Empty on error.
+_p9_node_phase() {
+    local _uid="$1"
+    fastrg_grpc get_hsi_info 2>/dev/null | \
+        jq -r ".hsi_infos[] | select(.user_id == ${_uid}) | .status" 2>/dev/null || true
+}
+
+# Helper: poll the node PPPoE phase until it matches regex $2, or timeout.
+# $1=user_id $2=phase regex $3=iterations $4=sleep seconds. Returns 0 if matched.
+_p9_poll_node_phase() {
     local _uid="$1" _match="$2" _iters="$3" _sleep="$4"
-    local _i _val _last=""
+    local _i _val
     for _i in $(seq 1 "$_iters"); do
-        _val=$(_p9_etcd_enable_status "$_uid")
-        if [[ -n "$_val" && "$_val" != "$_last" ]]; then
-            _P9_SEEN="${_P9_SEEN}${_P9_SEEN:+,}${_val}"
-            _last="$_val"
-        fi
-        if [[ "$_val" =~ ^${_match}$ ]]; then
+        _val=$(_p9_node_phase "$_uid")
+        if [[ "$_val" =~ ${_match} ]]; then
             return 0
         fi
         sleep "$_sleep"
     done
     return 1
-}
-
-# Helper: start a background `etcdctl watch` on the HSI key for $1 (user_id).
-# Captures every revision (including transient states) into a log on the FastRG node.
-# Caller must invoke _p9_watch_stop_and_read later to terminate and read the log.
-# Globals set: _P9_WATCH_LOG (path on remote node).
-_p9_watch_start() {
-    local _uid="$1"
-    _P9_WATCH_LOG="/tmp/p9_watch_${_uid}.log"
-    ssh_node "rm -f ${_P9_WATCH_LOG}" 2>/dev/null || true
-    # ssh -fn: fork after auth (return immediately) + redirect stdin from /dev/null
-    # stdbuf -oL: line-buffered stdout so reads see each revision as it arrives
-    ssh -fn $SSH_OPTS "root@${FASTRG_NODE}" \
-        "ETCDCTL_API=3 stdbuf -oL etcdctl --endpoints=${ETCD_ENDPOINT} watch configs/${NODE_UUID}/hsi/${_uid} > ${_P9_WATCH_LOG} 2>&1" \
-        2>/dev/null || true
-    sleep 0.5  # let watch register with etcd before caller does the action
-}
-
-# Helper: stop the background watch and return its log content on stdout.
-_p9_watch_stop_and_read() {
-    local _uid="$1"
-    sleep 0.3  # allow last revisions to flush to file
-    ssh_node "pkill -f 'etcdctl.*watch.*${NODE_UUID}.*hsi/${_uid}'" 2>/dev/null || true
-    sleep 0.2
-    ssh_node "cat ${_P9_WATCH_LOG} 2>/dev/null; rm -f ${_P9_WATCH_LOG}" 2>/dev/null || true
-}
-
-# Helper: extract comma-separated sequence of enableStatus values from watch log.
-_p9_extract_status_sequence() {
-    printf '%s' "$1" | grep -oE '"enableStatus":"[a-z]+"' | \
-        awk -F'"' '{print $4}' | tr '\n' ',' | sed 's/,$//'
 }
 
 phase9_cli_config_sync() {
@@ -118,10 +87,10 @@ phase9_cli_config_sync() {
         skip "Step 29: Change HSI DHCP config"     "subscriber count unknown"
         skip "Step 30: vlan_id unchanged"          "subscriber count unknown"
         skip "Step 31: Remove HSI config"          "subscriber count unknown"
-        skip "Step 32: DisconnectHsi → disabling"  "subscriber count unknown"
-        skip "Step 33: DisconnectHsi → disabled"   "subscriber count unknown"
-        skip "Step 34: ConnectHsi → enabling"      "subscriber count unknown"
-        skip "Step 35: ConnectHsi → enabled"       "subscriber count unknown"
+        skip "Step 32: HangupPPPoE → desire_status=disconnect"  "subscriber count unknown"
+        skip "Step 33: node PPPoE torn down"   "subscriber count unknown"
+        skip "Step 34: DialPPPoE → desire_status=connect"      "subscriber count unknown"
+        skip "Step 35: node PPPoE re-established"       "subscriber count unknown"
         return
     fi
     _P9_USER_ID=$(( _P9_ORIG_SUB_COUNT + 1 ))
@@ -130,19 +99,19 @@ phase9_cli_config_sync() {
     # ------------------------------------------------------------------
     # Derive baseline config from subscriber 1
     # ------------------------------------------------------------------
-    info "Reading subscriber 1 config from etcd as baseline..."
-    _p9_s1=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/1" 2>/dev/null || true)
+    info "Reading subscriber ${USER_ID} config from etcd as baseline..."
+    _p9_s1=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/${USER_ID}" 2>/dev/null || true)
     if [[ -z "$_p9_s1" ]]; then
-        warn "Subscriber 1 config not found in etcd — skipping Phase 9"
+        warn "Subscriber ${USER_ID} config not found in etcd — skipping Phase 9"
         skip "Step 27: Add port forwarding"        "no baseline config"
         skip "Step 28: Remove port forwarding"     "no baseline config"
         skip "Step 29: Change HSI DHCP config"     "no baseline config"
         skip "Step 30: vlan_id unchanged"          "no baseline config"
         skip "Step 31: Remove HSI config"          "no baseline config"
-        skip "Step 32: DisconnectHsi → disabling"  "no baseline config"
-        skip "Step 33: DisconnectHsi → disabled"   "no baseline config"
-        skip "Step 34: ConnectHsi → enabling"      "no baseline config"
-        skip "Step 35: ConnectHsi → enabled"       "no baseline config"
+        skip "Step 32: HangupPPPoE → desire_status=disconnect"  "no baseline config"
+        skip "Step 33: node PPPoE torn down"   "no baseline config"
+        skip "Step 34: DialPPPoE → desire_status=connect"      "no baseline config"
+        skip "Step 35: node PPPoE re-established"       "no baseline config"
         return
     fi
 
@@ -176,10 +145,10 @@ phase9_cli_config_sync() {
         skip "Step 29: Change HSI DHCP config"     "baseline ApplyConfig failed"
         skip "Step 30: vlan_id unchanged"          "baseline ApplyConfig failed"
         skip "Step 31: Remove HSI config"          "baseline ApplyConfig failed"
-        skip "Step 32: DisconnectHsi → disabling"  "baseline ApplyConfig failed"
-        skip "Step 33: DisconnectHsi → disabled"   "baseline ApplyConfig failed"
-        skip "Step 34: ConnectHsi → enabling"      "baseline ApplyConfig failed"
-        skip "Step 35: ConnectHsi → enabled"       "baseline ApplyConfig failed"
+        skip "Step 32: HangupPPPoE → desire_status=disconnect"  "baseline ApplyConfig failed"
+        skip "Step 33: node PPPoE torn down"   "baseline ApplyConfig failed"
+        skip "Step 34: DialPPPoE → desire_status=connect"      "baseline ApplyConfig failed"
+        skip "Step 35: node PPPoE re-established"       "baseline ApplyConfig failed"
         _cleanup_phase9_user
         return
     fi
@@ -360,91 +329,61 @@ phase9_cli_config_sync() {
     fi
 
     # ------------------------------------------------------------------
-    # Steps 31-34 — PPPoE enableStatus lifecycle on real subscriber USER_ID
+    # Steps 32-35 — PPPoE desire_status lifecycle on real subscriber USER_ID
+    #
+    # desire_status (etcd) flips connect<->disconnect via the controller and is
+    # deterministic (Steps 32, 34). The node then reconciles the live PPPoE
+    # session toward it; the node phase transition (Steps 33, 35) depends on the
+    # remote PPPoE server and may be slow/flaky in the test bench.
     # ------------------------------------------------------------------
-    info "Step 32-35 prerequisite: reading current enableStatus for USER_ID=${USER_ID}..."
-    _p9_start=$(_p9_etcd_enable_status "${USER_ID}")
-    info "  current metadata.enableStatus = '${_p9_start:-<empty>}'"
+    info "Step 32-35 prerequisite: reading current desire_status for USER_ID=${USER_ID}..."
+    _p9_start=$(_p9_etcd_desire "${USER_ID}")
+    info "  current config.desire_status = '${_p9_start:-<empty>}'"
 
-    if [[ "$_p9_start" != "enabled" ]]; then
-        warn "USER_ID=${USER_ID} is not in 'enabled' state — attempting ConnectHsi to set baseline..."
+    if [[ "$_p9_start" != "connect" ]]; then
+        warn "USER_ID=${USER_ID} is not 'connect' — dialing to set baseline..."
         fastrg_grpc connect_hsi "${USER_ID}" >/dev/null 2>&1 || true
-        _P9_SEEN=""
-        if ! _p9_poll_enable_status "${USER_ID}" "enabled" 30 1; then
-            warn "Could not bring USER_ID=${USER_ID} to 'enabled' — skipping Steps 31-34"
-            skip "Step 32: DisconnectHsi → disabling" "could not establish 'enabled' baseline (seen=${_P9_SEEN:-none})"
-            skip "Step 33: DisconnectHsi → disabled"  "could not establish 'enabled' baseline"
-            skip "Step 34: ConnectHsi → enabling"     "could not establish 'enabled' baseline"
-            skip "Step 35: ConnectHsi → enabled"      "could not establish 'enabled' baseline"
-            _cleanup_phase9_user
-            return
-        fi
+        _p9_poll_node_phase "${USER_ID}" "Data phase" 20 3 || true
     fi
 
-    # ------------------------------------------------------------------
-    # Steps 31+32 — DisconnectHsi: capture "disabling" (transient) + "disabled" (terminal)
-    # Strategy: start etcdctl watch in background BEFORE the action so every
-    # revision is captured; then poll for the terminal state via etcd snapshot.
-    # ------------------------------------------------------------------
-    info "Step 32+32: starting etcd watch on USER_ID=${USER_ID}, then DisconnectHsi..."
-    _p9_watch_start "${USER_ID}"
+    # ---- Step 32: HangupPPPoE → desire_status="disconnect" (deterministic) ----
+    info "Step 32: HangupPPPoE USER_ID=${USER_ID} (controller)..."
     fastrg_grpc disconnect_hsi "${USER_ID}" >/dev/null 2>&1 || true
-
-    _P9_SEEN=""
-    _p9_dis_terminal_ok=0
-    if _p9_poll_enable_status "${USER_ID}" "disabled" 45 1; then
-        _p9_dis_terminal_ok=1
-    fi
-    _p9_dis_log=$(_p9_watch_stop_and_read "${USER_ID}")
-    _p9_dis_seq=$(_p9_extract_status_sequence "$_p9_dis_log")
-
-    # Step 32 — verify watch captured "disabling"
-    if printf '%s' "$_p9_dis_log" | grep -q '"enableStatus":"disabling"'; then
-        pass "Step 32: DisconnectHsi → disabling" "watch captured sequence: ${_p9_dis_seq:-none}"
+    sleep 2
+    _p9_d=$(_p9_etcd_desire "${USER_ID}")
+    if [[ "$_p9_d" == "disconnect" ]]; then
+        pass "Step 32: HangupPPPoE → desire_status=disconnect" "config.desire_status=disconnect"
     else
-        fail "Step 32: DisconnectHsi → disabling" \
-            "watch did not capture 'disabling' (sequence: ${_p9_dis_seq:-none})"
+        fail "Step 32: HangupPPPoE → desire_status=disconnect" "got '${_p9_d:-<empty>}'"
     fi
 
-    # Step 33 — terminal state reached via polling
-    if [[ $_p9_dis_terminal_ok -eq 1 ]]; then
-        pass "Step 33: DisconnectHsi → disabled" "terminal state reached (sequence: ${_p9_dis_seq:-none})"
+    # ---- Step 33: node tears the PPPoE session down (best-effort vs remote server) ----
+    info "Step 33: waiting for node to leave 'Data phase' (remote PPPoE teardown)..."
+    if _p9_poll_node_phase "${USER_ID}" "^(End phase|not configured|PPPoE phase|LCP phase)$" 12 5; then
+        pass "Step 33: node PPPoE torn down" "node phase = '$(_p9_node_phase "${USER_ID}")'"
     else
-        _p9_now=$(_p9_etcd_enable_status "${USER_ID}")
-        fail "Step 33: DisconnectHsi → disabled" \
-            "still '${_p9_now:-unknown}' after 45 s (sequence: ${_p9_dis_seq:-none})"
+        fail "Step 33: node PPPoE torn down" \
+            "node still '$(_p9_node_phase "${USER_ID}")' after 60s (remote PPPoE terminate may be unreliable)"
     fi
 
-    # ------------------------------------------------------------------
-    # Steps 33+34 — ConnectHsi: capture "enabling" (transient) + "enabled" (terminal)
-    # ------------------------------------------------------------------
-    info "Step 34+34: starting etcd watch on USER_ID=${USER_ID}, then ConnectHsi..."
-    _p9_watch_start "${USER_ID}"
+    # ---- Step 34: DialPPPoE → desire_status="connect" (deterministic) ----
+    info "Step 34: DialPPPoE USER_ID=${USER_ID} (controller)..."
     fastrg_grpc connect_hsi "${USER_ID}" >/dev/null 2>&1 || true
-
-    _P9_SEEN=""
-    _p9_en_terminal_ok=0
-    if _p9_poll_enable_status "${USER_ID}" "enabled" 60 0.5; then
-        _p9_en_terminal_ok=1
-    fi
-    _p9_en_log=$(_p9_watch_stop_and_read "${USER_ID}")
-    _p9_en_seq=$(_p9_extract_status_sequence "$_p9_en_log")
-
-    # Step 34 — verify watch captured "enabling"
-    if printf '%s' "$_p9_en_log" | grep -q '"enableStatus":"enabling"'; then
-        pass "Step 34: ConnectHsi → enabling" "watch captured sequence: ${_p9_en_seq:-none}"
+    sleep 2
+    _p9_c=$(_p9_etcd_desire "${USER_ID}")
+    if [[ "$_p9_c" == "connect" ]]; then
+        pass "Step 34: DialPPPoE → desire_status=connect" "config.desire_status=connect"
     else
-        fail "Step 34: ConnectHsi → enabling" \
-            "watch did not capture 'enabling' (sequence: ${_p9_en_seq:-none})"
+        fail "Step 34: DialPPPoE → desire_status=connect" "got '${_p9_c:-<empty>}'"
     fi
 
-    # Step 35 — terminal state reached
-    if [[ $_p9_en_terminal_ok -eq 1 ]]; then
-        pass "Step 35: ConnectHsi → enabled" "terminal state reached (sequence: ${_p9_en_seq:-none})"
+    # ---- Step 35: node re-establishes the PPPoE session (best-effort) ----
+    info "Step 35: waiting for node to reach 'Data phase'..."
+    if _p9_poll_node_phase "${USER_ID}" "Data phase" 14 5; then
+        pass "Step 35: node PPPoE re-established" "node phase = 'Data phase'"
     else
-        _p9_now=$(_p9_etcd_enable_status "${USER_ID}")
-        fail "Step 35: ConnectHsi → enabled" \
-            "still '${_p9_now:-unknown}' after 30 s (sequence: ${_p9_en_seq:-none})"
+        fail "Step 35: node PPPoE re-established" \
+            "node still '$(_p9_node_phase "${USER_ID}")' after 70s (remote PPPoE server may be slow)"
     fi
 
     # ------------------------------------------------------------------

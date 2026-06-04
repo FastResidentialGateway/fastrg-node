@@ -202,6 +202,15 @@ FASTRG_GRPC_PORT="50052"   # fastrg gRPC TCP port (NodeGrpcPort in config.cfg)
 GRPC_CLIENT_DIR="$(cd "$(dirname "$0")" && pwd)"  # directory of fastrg_grpc_client.py
 USER_ID=""
 
+# Controller (SSOT): config writes + PPPoE dial/hangup go here; the node applies
+# from etcd via its watch. REST is used for login + writes; gRPC ConfigService
+# address is used by fastrg_cli in the CLI-fallback phase.
+CONTROLLER_REST="https://192.168.10.212:28443"   # REST base URL (login + config)
+CONTROLLER_GRPC="192.168.10.212:50052"           # ConfigService gRPC (for fastrg_cli)
+CONTROLLER_USER="admin"
+CONTROLLER_PASS="admin"
+ETCD_ENDPOINT_DEFAULT="192.168.10.212:22379"     # CLI tier-2 fallback target
+
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
@@ -221,6 +230,10 @@ while [[ $# -gt 0 ]]; do
         --runner-host)   _E2E_RUNNER_HOST="$2"; shift 2 ;;
         --ssh-key)       SSH_KEY="$2";     shift 2 ;;
         --grpc-port)     FASTRG_GRPC_PORT="$2"; shift 2 ;;
+        --controller-rest) CONTROLLER_REST="$2"; shift 2 ;;
+        --controller-grpc) CONTROLLER_GRPC="$2"; shift 2 ;;
+        --controller-user) CONTROLLER_USER="$2"; shift 2 ;;
+        --controller-pass) CONTROLLER_PASS="$2"; shift 2 ;;
         -*)              error "Unknown option: $1"; exit 1 ;;
         *)
             if [[ -z "$USER_ID" ]]; then
@@ -238,6 +251,9 @@ if [[ -z "$USER_ID" ]]; then
     printf "Run '%s --help' for full usage.\n" "$0"
     exit 1
 fi
+
+# Export controller config so fastrg_grpc_client.py routes writes to the controller.
+export CONTROLLER_REST CONTROLLER_GRPC CONTROLLER_USER CONTROLLER_PASS
 
 # ---------------------------------------------------------------------------
 # SSH helper functions
@@ -305,6 +321,11 @@ fastrg_grpc() {
         "$@" 2>/dev/null || true
 }
 
+# Read a user's desired PPPoE state from the controller. Empty on error.
+_ctrl_desire_status() {
+    fastrg_grpc ctrl_desire "$1" | jq -r '.desire_status // empty' 2>/dev/null || true
+}
+
 # ---------------------------------------------------------------------------
 # Load phase scripts (each file defines one phase function)
 # ---------------------------------------------------------------------------
@@ -321,6 +342,9 @@ source "${_E2E_PHASES_DIR}/phase5_dnat_test.sh"
 source "${_E2E_PHASES_DIR}/phase6_dns_ping.sh"
 source "${_E2E_PHASES_DIR}/phase7_extra_user_config_tests.sh"
 source "${_E2E_PHASES_DIR}/phase9_cli_config_sync.sh"
+source "${_E2E_PHASES_DIR}/phase10_cli_fallback.sh"
+source "${_E2E_PHASES_DIR}/phase11_desire_diff.sh"
+source "${_E2E_PHASES_DIR}/phase12_kafka_pipeline.sh"
 source "${_E2E_PHASES_DIR}/phase8_summary.sh"
 
 # ---------------------------------------------------------------------------
@@ -339,19 +363,16 @@ cleanup_fastrg() {
         info "fastrg stopped."
     fi
 
-    # Restore USER_ID subscriber to 'enabled' state so the next test run starts clean.
-    # Phase9's DisconnectHsi may have left the subscriber in 'disabling'/'disabled'.
-    if [[ -n "${USER_ID:-}" ]] && [[ -n "${NODE_UUID:-}" ]] && [[ -n "${ETCD_ENDPOINT:-}" ]]; then
-        _cur_es=$(ssh_node "ETCDCTL_API=3 etcdctl --endpoints=${ETCD_ENDPOINT} \
-            get --print-value-only 'configs/${NODE_UUID}/hsi/${USER_ID}' 2>/dev/null" \
-            2>/dev/null | jq -r '.metadata.enableStatus // empty' 2>/dev/null || true)
-        if [[ "$_cur_es" != "enabled" ]]; then
-            info "Cleanup: restoring USER_ID=${USER_ID} enableStatus to 'enabled' (was '${_cur_es:-unknown}')..."
-            ssh_node "ETCDCTL_API=3 etcdctl --endpoints=${ETCD_ENDPOINT} \
-                get --print-value-only configs/${NODE_UUID}/hsi/${USER_ID} 2>/dev/null \
-                | jq -c '.metadata.enableStatus = \"enabled\"' \
-                | ETCDCTL_API=3 etcdctl --endpoints=${ETCD_ENDPOINT} \
-                    put configs/${NODE_UUID}/hsi/${USER_ID}" || true
+    # Restore USER_ID subscriber to desire_status="connect" so the next run starts
+    # clean. Phase9's hangup may have left it "disconnect". Done via the controller
+    # (the node is read-only on etcd); falls back to a direct etcd write.
+    if [[ -n "${USER_ID:-}" ]] && [[ -n "${NODE_UUID:-}" ]]; then
+        _cur_ds=$(_ctrl_desire_status "${USER_ID}" 2>/dev/null || true)
+        if [[ "$_cur_ds" != "connect" ]]; then
+            info "Cleanup: restoring USER_ID=${USER_ID} desire_status to 'connect' (was '${_cur_ds:-unknown}')..."
+            python3 "${GRPC_CLIENT_DIR}/fastrg_grpc_client.py" \
+                --node "${FASTRG_NODE}:${FASTRG_GRPC_PORT}" connect_hsi "${USER_ID}" \
+                >/dev/null 2>&1 || true
         fi
     fi
 
@@ -386,6 +407,9 @@ main() {
     phase6_dns_ping
     phase7_extra_user_config_tests
     phase9_cli_config_sync
+    phase10_cli_fallback
+    phase11_desire_diff
+    phase12_kafka_pipeline
     phase8_summary || true
 }
 

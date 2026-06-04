@@ -135,15 +135,11 @@ phase2_etcd_config_sync() {
     # ------------------------------------------------------------------
     # Step 4d — DNS static records
     # ------------------------------------------------------------------
-    info "Step 4d: Comparing DNS static records (gRPC GetDnsStaticRecords vs etcd keys)..."
-    DNS_KEYS=$(etcdctl_get_value "--prefix configs/${NODE_UUID}/${USER_ID}/dns/" 2>/dev/null || true)
-    DNS_DOMAINS=$(printf '%s' "$DNS_KEYS" | jq -r '.domain // empty' 2>/dev/null || true)
-
-    if [[ -z "$DNS_DOMAINS" ]]; then
-        # Try raw key listing (key is the domain, value is JSON)
-        DNS_KEYS_RAW=$(ssh_node "ETCDCTL_API=3 etcdctl --endpoints=${ETCD_ENDPOINT} get --prefix --keys-only configs/${NODE_UUID}/${USER_ID}/dns/" 2>/dev/null || true)
-        DNS_DOMAINS=$(printf '%s' "$DNS_KEYS_RAW" | awk -F'/' '{print $NF}' | grep -v '^$' || true)
-    fi
+    info "Step 4d: Comparing DNS static records (gRPC GetDnsStaticRecords vs etcd key)..."
+    # DNS static records live in ONE combined key per subscriber whose value is a
+    # JSON array: configs/{nodeId}/{userId}/dns -> [{"domain","ip","ttl"}, ...]
+    DNS_VAL=$(etcdctl_get_value "configs/${NODE_UUID}/${USER_ID}/dns" 2>/dev/null || true)
+    DNS_DOMAINS=$(printf '%s' "$DNS_VAL" | jq -r '.[].domain // empty' 2>/dev/null || true)
 
     if [[ -z "$DNS_DOMAINS" ]]; then
         pass "Step 4d: DNS static match" "No DNS static keys in etcd (nothing to verify)"
@@ -169,5 +165,18 @@ phase2_etcd_config_sync() {
         else
             fail "Step 4d: DNS static match" "${DNS_DETAIL}"
         fi
+    fi
+
+    # ------------------------------------------------------------------
+    # Step 4e — config.desire_status present and valid (replaces the old
+    # metadata.enableStatus; PPPoE intent now lives in config.desire_status)
+    # ------------------------------------------------------------------
+    info "Step 4e: Checking config.desire_status for USER_ID=${USER_ID}..."
+    ETCD_DESIRE=$(printf '%s' "$HSI_JSON" | jq -r '.config.desire_status // empty')
+    if [[ "$ETCD_DESIRE" == "connect" || "$ETCD_DESIRE" == "disconnect" ]]; then
+        pass "Step 4e: desire_status valid" "config.desire_status=\"${ETCD_DESIRE}\""
+    else
+        fail "Step 4e: desire_status valid" \
+            "Expected \"connect\"/\"disconnect\", got \"${ETCD_DESIRE:-<empty>}\""
     fi
 }
