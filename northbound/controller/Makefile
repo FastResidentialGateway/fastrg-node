@@ -13,9 +13,9 @@ PROTO_SOURCES = $(PROTOS_PATH)/controller.pb.cc $(PROTOS_PATH)/controller.grpc.p
 PROTO_HEADERS = $(PROTOS_PATH)/controller.pb.h $(PROTOS_PATH)/controller.grpc.pb.h
 PROTO_OBJECTS = $(PROTOS_PATH)/controller.pb.o $(PROTOS_PATH)/controller.grpc.pb.o
 
-# Kafka events protobuf (shared contract under docs/contracts; single source of
-# truth, kept wire-compatible with the controller's copy).
-EVENTS_PROTO_FILE = ../../docs/contracts/kafka-events.proto
+# Kafka events protobuf. Single source of truth = the controller repo; boot.sh
+# downloads it into proto/ alongside controller.proto (see download_controller_grpc).
+EVENTS_PROTO_FILE = $(PROTOS_PATH)/kafka-events.proto
 EVENTS_PROTO_SRC = $(PROTOS_PATH)/kafka-events.pb.cc
 EVENTS_PROTO_HDR = $(PROTOS_PATH)/kafka-events.pb.h
 EVENTS_PROTO_OBJ = $(PROTOS_PATH)/kafka-events.pb.o
