@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # ---------------------------------------------------------------------------
-# Phase 12 — Kafka telemetry pipeline (Steps 41-42)
+# Phase 11 — Kafka telemetry pipeline (Steps 41-42)
 #
 # The node reports config-apply results and PPPoE state transitions to the
 # controller over Kafka; the controller persists them. Verify the controller's
@@ -10,9 +10,9 @@
 #   Step 42  after a dial, the DB status reflects a connected node phase
 # ---------------------------------------------------------------------------
 
-phase12_kafka_pipeline() {
+phase11_kafka_pipeline() {
     bold "═══════════════════════════════════════════════════════"
-    bold " Phase 12 — Kafka telemetry pipeline (Steps 41-42)"
+    bold " Phase 11 — Kafka telemetry pipeline (Steps 41-42)"
     bold "═══════════════════════════════════════════════════════"
 
     # ------------------------------------------------------------------

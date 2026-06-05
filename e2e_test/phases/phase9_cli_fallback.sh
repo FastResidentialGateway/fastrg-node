@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # ---------------------------------------------------------------------------
-# Phase 10 — CLI three-tier write fallback (Steps 36-38)
+# Phase 9 — CLI three-tier write fallback (Steps 36-38)
 #
 # Exercises fastrg_cli on the node:
 #   Step 36  tier 1 — CLI -> controller ConfigService (login + apply)  -> etcd
@@ -20,9 +20,9 @@ _p10_cli() {
     ssh_node "printf '${_cmds}quit\n' | /usr/local/bin/fastrg_cli -i 127.0.0.1:${FASTRG_GRPC_PORT} ${_flags} 2>&1"
 }
 
-phase10_cli_fallback() {
+phase9_cli_fallback() {
     bold "═══════════════════════════════════════════════════════"
-    bold " Phase 10 — CLI three-tier write fallback (Steps 36-38)"
+    bold " Phase 9 — CLI three-tier write fallback (Steps 36-38)"
     bold "═══════════════════════════════════════════════════════"
 
     if ! ssh_node "test -x /usr/local/bin/fastrg_cli" 2>/dev/null; then

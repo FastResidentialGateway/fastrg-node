@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # ---------------------------------------------------------------------------
-# Phase 11 — desire/current config + show config diff (Steps 39-40)
+# Phase 10 — desire/current config + show config diff (Steps 39-40)
 #
 # Exercises `fastrg_cli show config diff`, which compares the DESIRED config
 # (etcd, tier-2 source) with the CURRENT running state (node gRPC) for a user.
@@ -14,9 +14,9 @@ _p11_diff() {
     ssh_node "printf 'show config diff user $1\nquit\n' | /usr/local/bin/fastrg_cli -i 127.0.0.1:${FASTRG_GRPC_PORT} -e ${ETCD_ENDPOINT} -n ${NODE_UUID} 2>&1"
 }
 
-phase11_desire_diff() {
+phase10_desire_diff() {
     bold "═══════════════════════════════════════════════════════"
-    bold " Phase 11 — desire/current diff (Steps 39-40)"
+    bold " Phase 10 — desire/current diff (Steps 39-40)"
     bold "═══════════════════════════════════════════════════════"
 
     if ! ssh_node "test -x /usr/local/bin/fastrg_cli" 2>/dev/null; then

@@ -341,12 +341,12 @@ source "${_E2E_PHASES_DIR}/phase4_5_tcp_spi.sh"
 source "${_E2E_PHASES_DIR}/phase5_dnat_test.sh"
 source "${_E2E_PHASES_DIR}/phase6_dns_ping.sh"
 source "${_E2E_PHASES_DIR}/phase7_extra_user_config_tests.sh"
-source "${_E2E_PHASES_DIR}/phase9_cli_config_sync.sh"
-source "${_E2E_PHASES_DIR}/phase10_cli_fallback.sh"
-source "${_E2E_PHASES_DIR}/phase11_desire_diff.sh"
-source "${_E2E_PHASES_DIR}/phase12_kafka_pipeline.sh"
-source "${_E2E_PHASES_DIR}/phase13_rollback.sh"
-source "${_E2E_PHASES_DIR}/phase14_summary.sh"
+source "${_E2E_PHASES_DIR}/phase8_cli_config_sync.sh"
+source "${_E2E_PHASES_DIR}/phase9_cli_fallback.sh"
+source "${_E2E_PHASES_DIR}/phase10_desire_diff.sh"
+source "${_E2E_PHASES_DIR}/phase11_kafka_pipeline.sh"
+source "${_E2E_PHASES_DIR}/phase12_rollback.sh"
+source "${_E2E_PHASES_DIR}/phase13_summary.sh"
 
 # ---------------------------------------------------------------------------
 # Cleanup — kill fastrg only if the script started it
@@ -407,12 +407,12 @@ main() {
     phase5_dnat_test
     phase6_dns_ping
     phase7_extra_user_config_tests
-    phase9_cli_config_sync
-    phase10_cli_fallback
-    phase11_desire_diff
-    phase12_kafka_pipeline
-    phase13_rollback
-    phase14_summary || true
+    phase8_cli_config_sync
+    phase9_cli_fallback
+    phase10_desire_diff
+    phase11_kafka_pipeline
+    phase12_rollback
+    phase13_summary || true
 }
 
 main "$@"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # ---------------------------------------------------------------------------
-# Phase 9 — CLI Add Config → etcd → Local Sync (Steps 26-34)
+# Phase 8 — CLI Add Config → etcd → Local Sync (Steps 26-34)
 #
 # Fills the coverage gaps left by Phases 2/3.5/7:
 #   - Steps 26/27: SetSnatConfig / RemoveSnatConfig at runtime
@@ -19,7 +19,7 @@
 # Steps 31-34 use USER_ID (the real subscriber with a live PPPoE server).
 # ---------------------------------------------------------------------------
 
-# Helper: remove the Phase 9 synthetic subscriber + restore subscriber count.
+# Helper: remove the Phase 8 synthetic subscriber + restore subscriber count.
 # Idempotent. Called at end of phase9 AND from cleanup_fastrg trap.
 _cleanup_phase9_user() {
     [[ -z "${NODE_UUID:-}" ]] && return
@@ -27,12 +27,12 @@ _cleanup_phase9_user() {
     local _chk
     _chk=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/${_P9_USER_ID}" 2>/dev/null || true)
     if [[ -n "$_chk" ]]; then
-        info "Cleanup(phase9): removing user ${_P9_USER_ID} config (RemoveConfig gRPC)..."
+        info "Cleanup(phase8): removing user ${_P9_USER_ID} config (RemoveConfig gRPC)..."
         fastrg_grpc remove_config "${_P9_USER_ID}" >/dev/null 2>&1 || true
         sleep 1
     fi
     if [[ -n "${_P9_ORIG_SUB_COUNT:-}" ]]; then
-        info "Cleanup(phase9): restoring subscriber count to ${_P9_ORIG_SUB_COUNT}..."
+        info "Cleanup(phase8): restoring subscriber count to ${_P9_ORIG_SUB_COUNT}..."
         fastrg_grpc set_subscriber_count "${_P9_ORIG_SUB_COUNT}" >/dev/null 2>&1 || true
     fi
 }
@@ -68,20 +68,20 @@ _p9_poll_node_phase() {
     return 1
 }
 
-phase9_cli_config_sync() {
+phase8_cli_config_sync() {
     bold "═══════════════════════════════════════════════════════"
-    bold " Phase 9 — CLI Config → etcd → Local Sync (Steps 26-34)"
+    bold " Phase 8 — CLI Config → etcd → Local Sync (Steps 26-34)"
     bold "═══════════════════════════════════════════════════════"
 
     # ------------------------------------------------------------------
     # Determine subscriber count and derive synthetic test user
     # ------------------------------------------------------------------
-    info "Determining current subscriber count for Phase 9..."
+    info "Determining current subscriber count for Phase 8..."
     _sc_sys=$(fastrg_grpc get_system_info)
     _P9_ORIG_SUB_COUNT=$(printf '%s' "$_sc_sys" | jq -r '.num_users // 0' 2>/dev/null || echo 0)
     _P9_ORIG_SUB_COUNT=$(( ${_P9_ORIG_SUB_COUNT:-0} + 0 ))
     if [[ $_P9_ORIG_SUB_COUNT -eq 0 ]]; then
-        warn "Cannot determine subscriber count — skipping Phase 9"
+        warn "Cannot determine subscriber count — skipping Phase 8"
         skip "Step 27: Add port forwarding"        "subscriber count unknown"
         skip "Step 28: Remove port forwarding"     "subscriber count unknown"
         skip "Step 29: Change HSI DHCP config"     "subscriber count unknown"
@@ -94,7 +94,7 @@ phase9_cli_config_sync() {
         return
     fi
     _P9_USER_ID=$(( _P9_ORIG_SUB_COUNT + 1 ))
-    info "Subscriber count: ${_P9_ORIG_SUB_COUNT} → Phase 9 test user: ${_P9_USER_ID}"
+    info "Subscriber count: ${_P9_ORIG_SUB_COUNT} → Phase 8 test user: ${_P9_USER_ID}"
 
     # ------------------------------------------------------------------
     # Derive baseline config from subscriber 1
@@ -102,7 +102,7 @@ phase9_cli_config_sync() {
     info "Reading subscriber ${USER_ID} config from etcd as baseline..."
     _p9_s1=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/${USER_ID}" 2>/dev/null || true)
     if [[ -z "$_p9_s1" ]]; then
-        warn "Subscriber ${USER_ID} config not found in etcd — skipping Phase 9"
+        warn "Subscriber ${USER_ID} config not found in etcd — skipping Phase 8"
         skip "Step 27: Add port forwarding"        "no baseline config"
         skip "Step 28: Remove port forwarding"     "no baseline config"
         skip "Step 29: Change HSI DHCP config"     "no baseline config"
@@ -139,7 +139,7 @@ phase9_cli_config_sync() {
 
     _p9_baseline=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/${_P9_USER_ID}" 2>/dev/null || true)
     if [[ -z "$_p9_baseline" ]]; then
-        warn "Baseline ApplyConfig for user ${_P9_USER_ID} did not land in etcd — skipping Phase 9"
+        warn "Baseline ApplyConfig for user ${_P9_USER_ID} did not land in etcd — skipping Phase 8"
         skip "Step 27: Add port forwarding"        "baseline ApplyConfig failed"
         skip "Step 28: Remove port forwarding"     "baseline ApplyConfig failed"
         skip "Step 29: Change HSI DHCP config"     "baseline ApplyConfig failed"

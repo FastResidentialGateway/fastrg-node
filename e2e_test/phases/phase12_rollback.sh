@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # ---------------------------------------------------------------------------
-# Phase 13 — Config-Apply Failure → Controller Rollback (Steps 43-44)
+# Phase 12 — Config-Apply Failure → Controller Rollback (Steps 43-44)
 #
 # Verifies the end-to-end rollback pipeline:
 #   node apply failure → Kafka CONFIG_APPLY_FAIL
@@ -33,9 +33,9 @@ _p13_wait_etcd_vlan() {
     return 1
 }
 
-phase13_rollback() {
+phase12_rollback() {
     bold "═══════════════════════════════════════════════════════"
-    bold " Phase 13 — Config-Apply Failure + Rollback (Steps 43-44)"
+    bold " Phase 12 — Config-Apply Failure + Rollback (Steps 43-44)"
     bold "═══════════════════════════════════════════════════════"
 
     # ------------------------------------------------------------------
