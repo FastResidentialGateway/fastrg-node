@@ -103,7 +103,7 @@ std::string hsi_key(unsigned int user_id) {
     return "configs/" + g_node_uuid + "/hsi/" + std::to_string(user_id);
 }
 std::string dns_key(unsigned int user_id) {
-    return "configs/" + g_node_uuid + "/" + std::to_string(user_id) + "/dns";
+    return "configs/" + g_node_uuid + "/dns/" + std::to_string(user_id);
 }
 
 void stamp_meta(Json::Value& root) {

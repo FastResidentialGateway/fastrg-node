@@ -345,6 +345,7 @@ source "${_E2E_PHASES_DIR}/phase9_cli_config_sync.sh"
 source "${_E2E_PHASES_DIR}/phase10_cli_fallback.sh"
 source "${_E2E_PHASES_DIR}/phase11_desire_diff.sh"
 source "${_E2E_PHASES_DIR}/phase12_kafka_pipeline.sh"
+source "${_E2E_PHASES_DIR}/phase13_rollback.sh"
 source "${_E2E_PHASES_DIR}/phase8_summary.sh"
 
 # ---------------------------------------------------------------------------
@@ -410,6 +411,7 @@ main() {
     phase10_cli_fallback
     phase11_desire_diff
     phase12_kafka_pipeline
+    phase13_rollback
     phase8_summary || true
 }
 

@@ -357,8 +357,8 @@ public:
                 true  // recursive
             );
 
-            // Watch DNS static records: configs/{nodeId}/{subscriberId}/dns
-            std::string dns_prefix = "configs/" + node_uuid_ + "/";
+            // Watch DNS static records: configs/{nodeId}/dns/{subscriberId}
+            std::string dns_prefix = "configs/" + node_uuid_ + "/dns/";
             dns_record_watcher_ = std::make_unique<etcd::Watcher>(
                 *client_,
                 dns_prefix,
@@ -686,10 +686,10 @@ public:
             }
 
             // Step 3c: DNS static records — enqueue for the control-plane loop.
-            // Key format: configs/{nodeId}/{userId}/dns  value: JSON array of records
+            // Key format: configs/{nodeId}/dns/{userId}  value: JSON array of records
             {
-                std::string dns_base_prefix = "configs/" + node_uuid_ + "/";
-                std::regex dns_key_regex("configs/([^/]+)/([^/]+)/dns");
+                std::string dns_base_prefix = "configs/" + node_uuid_ + "/dns/";
+                std::regex dns_key_regex("configs/([^/]+)/dns/([^/]+)");
                 auto dns_response = client_->ls(dns_base_prefix).get();
                 if (dns_response.error_code() == 0) {
                     int dns_total = 0;
@@ -1680,10 +1680,10 @@ public:
             std::cout << "Loaded " << count << " existing HSI config(s) for node: " << node_uuid << std::endl;
 
             // Load existing DNS static records:
-            // key: configs/{nodeId}/{userId}/dns  value: JSON array of records
+            // key: configs/{nodeId}/dns/{userId}  value: JSON array of records
             if (dns_record_callback) {
-                std::string dns_base_prefix = "configs/" + std::string(node_uuid) + "/";
-                std::regex dns_key_regex("configs/([^/]+)/([^/]+)/dns");
+                std::string dns_base_prefix = "configs/" + std::string(node_uuid) + "/dns/";
+                std::regex dns_key_regex("configs/([^/]+)/dns/([^/]+)");
                 auto dns_response = client_->ls(dns_base_prefix).get();
                 if (dns_response.error_code() == 0) {
                     int dns_count = 0;
@@ -2025,8 +2025,8 @@ private:
     STATUS process_dns_record_event(const etcd::Event& event) {
         std::string key = event.kv().key();
 
-        // Only process keys matching configs/{nodeId}/{subscriberId}/dns (no domain suffix)
-        std::regex dns_regex("configs/([^/]+)/([^/]+)/dns");
+        // Only process keys matching configs/{nodeId}/dns/{subscriberId}
+        std::regex dns_regex("configs/([^/]+)/dns/([^/]+)");
         std::smatch matches;
         if (!std::regex_match(key, matches, dns_regex) || matches.size() != 3)
             return ERROR; // Not a DNS record key, skip silently
@@ -2132,7 +2132,7 @@ public:
         if (!client_ || !node_id || !user_id || !record) return ETCD_ERROR;
 
         try {
-            std::string key = std::string("configs/") + node_id + "/" + user_id + "/dns";
+            std::string key = std::string("configs/") + node_id + "/dns/" + user_id;
             std::string domain_str(record->domain);
 
             // Read existing records
@@ -2192,7 +2192,7 @@ public:
             return ETCD_ERROR;
 
         try {
-            std::string key = std::string("configs/") + node_uuid + "/" + user_id + "/dns";
+            std::string key = std::string("configs/") + node_uuid + "/dns/" + user_id;
 
             auto response = client_->get(key).get();
             if (response.error_code() != 0) {
@@ -2250,7 +2250,7 @@ public:
         if (!client_ || !node_id || !user_id || !domain) return ETCD_ERROR;
 
         try {
-            std::string key = std::string("configs/") + node_id + "/" + user_id + "/dns";
+            std::string key = std::string("configs/") + node_id + "/dns/" + user_id;
             std::string domain_str(domain);
 
             auto get_resp = client_->get(key).get();

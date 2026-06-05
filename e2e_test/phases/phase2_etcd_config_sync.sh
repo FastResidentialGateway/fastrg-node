@@ -138,7 +138,7 @@ phase2_etcd_config_sync() {
     info "Step 4d: Comparing DNS static records (gRPC GetDnsStaticRecords vs etcd key)..."
     # DNS static records live in ONE combined key per subscriber whose value is a
     # JSON array: configs/{nodeId}/{userId}/dns -> [{"domain","ip","ttl"}, ...]
-    DNS_VAL=$(etcdctl_get_value "configs/${NODE_UUID}/${USER_ID}/dns" 2>/dev/null || true)
+    DNS_VAL=$(etcdctl_get_value "configs/${NODE_UUID}/dns/${USER_ID}" 2>/dev/null || true)
     DNS_DOMAINS=$(printf '%s' "$DNS_VAL" | jq -r '.[].domain // empty' 2>/dev/null || true)
 
     if [[ -z "$DNS_DOMAINS" ]]; then

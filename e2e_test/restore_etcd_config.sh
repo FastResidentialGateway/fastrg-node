@@ -103,8 +103,8 @@ NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 # KV 1 — DNS static record for USER_ID=2
 # ---------------------------------------------------------------------------
 # DNS static records are stored as ONE combined key per subscriber whose value
-# is a JSON array (matches the node's load_dns_records + the CLI etcd schema).
-KEY_DNS="configs/${NODE_UUID}/2/dns"
+# is a JSON array. New path: configs/{node}/dns/{userId}
+KEY_DNS="configs/${NODE_UUID}/dns/2"
 VAL_DNS='[{"domain":"www.fastrg.org","ip":"192.168.201.11","ttl":30}]'
 
 # ---------------------------------------------------------------------------

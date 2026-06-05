@@ -380,7 +380,7 @@ etcd_status_t etcd_client_delete_dns_record(const char *node_id, const char *use
  *
  * @brief Load all DNS static records for a specific subscriber from etcd.
  *        Called when a PPPoE session comes up to restore per-user DNS overrides.
- *        key pattern: configs/{nodeId}/{userId}/dns/{domain}
+ *        key pattern: configs/{nodeId}/dns/{userId}/{domain}
  * @param node_uuid Node UUID
  *      Node UUID
  * @param user_id
