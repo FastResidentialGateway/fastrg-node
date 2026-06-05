@@ -32,8 +32,22 @@ phase9_cli_fallback() {
         return
     fi
 
-    local _U1=$(( ${_P9_ORIG_SUB_COUNT:-2} + 2 ))   # tier-1 test user
-    local _U2=$(( ${_P9_ORIG_SUB_COUNT:-2} + 3 ))   # tier-2 test user
+    # Re-read the current subscriber count directly — do not rely solely on
+    # _P9_ORIG_SUB_COUNT which is set by phase8 and may be 0 if phase8 was
+    # skipped (e.g. node gRPC was briefly unavailable).  Also enforce a minimum
+    # offset of 4 from USER_ID so the test users never collide with USER_ID.
+    local _p9_cur_sc
+    _p9_cur_sc=$(fastrg_grpc get_system_info 2>/dev/null | jq -r '.num_users // 0' 2>/dev/null || echo 0)
+    _p9_cur_sc=$(( ${_p9_cur_sc:-0} + 0 ))
+    if [[ $_p9_cur_sc -eq 0 ]]; then
+        _p9_cur_sc="${_P9_ORIG_SUB_COUNT:-2}"
+        _p9_cur_sc=$(( ${_p9_cur_sc:-2} + 0 ))
+        [[ $_p9_cur_sc -lt 2 ]] && _p9_cur_sc=2
+    fi
+    # Ensure _U1/_U2 are always > USER_ID + 3 to avoid colliding with it.
+    local _U1=$(( _p9_cur_sc + 2 ))
+    local _U2=$(( _p9_cur_sc + 3 ))
+    [[ $_U1 -le $(( USER_ID + 3 )) ]] && { _U1=$(( USER_ID + 4 )); _U2=$(( USER_ID + 5 )); }
     # Make room for the test users.
     fastrg_grpc set_subscriber_count "$(( _U2 + 1 ))" >/dev/null 2>&1 || true
     sleep 2

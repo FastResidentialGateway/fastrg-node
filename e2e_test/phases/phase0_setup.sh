@@ -116,8 +116,15 @@ phase0_setup() {
     # ------------------------------------------------------------------
     info "Checking etcd HSI fixture for USER_ID=${USER_ID}..."
     _seed_hsi=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/${USER_ID}" 2>/dev/null || true)
-    if [[ -z "$_seed_hsi" ]]; then
-        warn "etcd HSI config for USER_ID=${USER_ID} missing — seeding via restore_etcd_config.sh on node..."
+    # Validate the fixture: it must exist AND have a non-zero vlan_id (vlan=0 means
+    # a previous run left a bad/un-rolled-back test config — reseed in that case too).
+    _seed_vlan=$(printf '%s' "$_seed_hsi" | jq -r '.config.vlan_id // empty' 2>/dev/null || true)
+    if [[ -z "$_seed_hsi" ]] || [[ -z "$_seed_vlan" ]] || [[ "$_seed_vlan" == "0" ]]; then
+        if [[ -z "$_seed_hsi" ]]; then
+            warn "etcd HSI config for USER_ID=${USER_ID} missing — seeding..."
+        else
+            warn "etcd HSI config for USER_ID=${USER_ID} is corrupt/stale (vlan=${_seed_vlan:-empty}) — reseeding..."
+        fi
         ssh_node "bash /root/fastrg-node/e2e_test/restore_etcd_config.sh --force" 2>&1 | sed 's/^/    /'
         _seed_hsi=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/${USER_ID}" 2>/dev/null || true)
         if [[ -z "$_seed_hsi" ]]; then
@@ -126,7 +133,7 @@ phase0_setup() {
         fi
         info "Seeded etcd HSI fixture for USER_ID=${USER_ID}."
     else
-        info "etcd HSI fixture present."
+        info "etcd HSI fixture present (vlan=${_seed_vlan})."
     fi
 
     # ------------------------------------------------------------------
