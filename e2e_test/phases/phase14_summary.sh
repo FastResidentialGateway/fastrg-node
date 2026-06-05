@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # ---------------------------------------------------------------------------
-# Phase 8 — Summary
+# Phase 14 — Summary
 # ---------------------------------------------------------------------------
-phase8_summary() {
+phase14_summary() {
     local total=${#STEP_NAMES[@]}
     local pass_count=0 fail_count=0 skip_count=0
 
