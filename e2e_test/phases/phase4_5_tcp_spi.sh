@@ -49,16 +49,37 @@ phase4_5_tcp_spi() {
     ssh_wan "pkill -f 'iperf3 -s' 2>/dev/null || true" || true
     sleep 1
     ssh_wan "iperf3 -s -B ${WAN_IP} -p ${SRV_PORT} -D >/dev/null 2>&1 || true" || true
-    sleep 2
+    for _iw in $(seq 1 10); do
+        sleep 1
+        ssh_wan "ss -ltn 2>/dev/null | grep -q ':${SRV_PORT}'" 2>/dev/null && break
+    done
 
     # ------------------------------------------------------------------
     # 3. Run iperf3 client from LAN for 30s in the background, leaving a
     #    live ESTABLISHED entry to inject against.
     #    Steps 13-15 take ~23s total, so 30s gives adequate margin.
     # ------------------------------------------------------------------
-    info "Initiating iperf3 client from LAN host (cport ${CLIENT_CPORT}, 30s)..."
-    ssh_lan "(iperf3 -c ${WAN_IP} -p ${SRV_PORT} --cport ${CLIENT_CPORT} -t 30 -J >/dev/null 2>&1) &" || true
-    sleep 4
+    info "Initiating iperf3 client from LAN host (30s)..."
+    # Do NOT fix the client source port with --cport: a fixed port lingers in
+    # TIME_WAIT for 60s after Step 11's iperf3 ends, causing "Address already
+    # in use" which means no flow is ever established and tcpdump finds nothing.
+    # Let the OS pick an ephemeral source port; we discover it via tcpdump.
+    ssh_lan "(iperf3 -c ${WAN_IP} -p ${SRV_PORT} -t 30 -J >/dev/null 2>&1) &" || true
+    # Wait until the iperf3 TCP flow is actually ESTABLISHED before starting
+    # tcpdump — otherwise a brief NAT-table warmup delay causes a race where
+    # tcpdump runs for its 6-second window before any packets arrive.
+    _spi_flow_ready=0
+    for _sw in $(seq 1 10); do
+        sleep 1
+        _flow=$(ssh_lan "ss -tn 'dport = :${SRV_PORT}' 2>/dev/null | grep ESTAB || true")
+        if [[ -n "$_flow" ]]; then
+            _spi_flow_ready=1
+            info "  iperf3 flow ESTABLISHED after ${_sw}s"
+            break
+        fi
+    done
+    [[ $_spi_flow_ready -eq 0 ]] && info "  iperf3 flow not yet ESTABLISHED; proceeding anyway"
+    sleep 2
 
     # ------------------------------------------------------------------
     # 4. Discover the NAT source port by sniffing any packet of the flow on
@@ -161,7 +182,7 @@ sendp(pkt, iface='${WAN_NIC}', verbose=0)
 
     # Primary verification: LAN-side tcpdump (requires sudo on LAN host).
     # Backup verification: TCPSYNChallenge kernel counter — when the forwarded SYN
-    # hits an ESTABLISHED socket (iperf3 on CLIENT_CPORT), the kernel sends a
+    # hits an ESTABLISHED socket (iperf3 on an ephemeral port), the kernel sends a
     # challenge ACK (RFC 5961) and increments this counter; no root needed.
     local _LAN_IFACE
     _LAN_IFACE=$(ssh_lan "ip -o route get ${WAN_IP} 2>/dev/null | awk 'NR==1{for(i=1;i<=NF;i++) if(\$i==\"dev\"){print \$(i+1); exit}}'" || echo "")
@@ -203,9 +224,11 @@ sendp(pkt, iface='${WAN_NIC}', verbose=0)
     info "  TCPSYNChallenge after: ${_SYNCHALLENGE_AFTER} (delta=${_SYNCHALLENGE_DELTA})"
 
     # Pass if tcpdump captured the forwarded SYN (primary) OR kernel challenge counter rose (backup).
-    # tcpdump -nn output: "IP WAN_IP.SRV_PORT > LAN_IP.CLIENT_CPORT: Flags [S], ..."
-    if printf '%s' "$_P45_15A_CAP" | grep -qE "\.${CLIENT_CPORT}: Flags \[S\]"; then
-        pass "Step 15a: SYN forwarded to LAN when conntrack disabled" "tcpdump captured forwarded SYN to port ${CLIENT_CPORT}"
+    # tcpdump -nn: "IP WAN_IP.SRV_PORT > LAN_IP.<any_port>: Flags [S], ..."
+    # Use src-port filter (WAN_IP.SRV_PORT) rather than dst-port (CLIENT_CPORT)
+    # because the client source port is now ephemeral (not fixed).
+    if printf '%s' "$_P45_15A_CAP" | grep -qE "\.${SRV_PORT} >.*Flags \[S\]"; then
+        pass "Step 15a: SYN forwarded to LAN when conntrack disabled" "tcpdump captured forwarded SYN from port ${SRV_PORT}"
     elif [[ "$_SYNCHALLENGE_DELTA" -ge 1 ]]; then
         pass "Step 15a: SYN forwarded to LAN when conntrack disabled" \
             "LAN kernel sent challenge ACK (TCPSYNChallenge delta=${_SYNCHALLENGE_DELTA}); tcpdump unavailable (iface=${_LAN_IFACE}, sudo required)"

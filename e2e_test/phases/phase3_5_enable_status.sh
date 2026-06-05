@@ -64,6 +64,25 @@ phase3_5_enable_status() {
     if [[ $_35_ppp_ok -eq 1 ]]; then
         pass "Step 8: DialPPPoE USER_ID=${USER_ID}" \
             "PPPoE session re-established (ppp_phase='${_35_phase}')"
+
+        # Dataplane warmup: after PPPoE re-establishes, the NAT table is empty and
+        # the WAN-side ARP cache may be stale. Send a few ICMP pings and wait for a
+        # reply before continuing — this (a) populates the outbound NAT entry and
+        # (b) confirms end-to-end dataplane is ready, preventing the flaky Step 11
+        # iperf3 / Phase 4.5 tcpdump "Connection timed out / no NAT port" failures
+        # that occur when iperf3 starts before the first NAT entry is seeded.
+        info "  Warming up dataplane after PPPoE re-dial (waiting for first ICMP reply)..."
+        _35_warm_ok=0
+        for _35_w in $(seq 1 8); do
+            _35_ping=$(ssh_lan "ping -c 2 -W 2 ${WAN_IP} 2>&1" || true)
+            if printf '%s' "$_35_ping" | grep -qE "0% packet loss|0\.0% packet loss|bytes from"; then
+                _35_warm_ok=1
+                info "  Dataplane warm (ICMP reply received, ${_35_w}x3s after Data phase)"
+                break
+            fi
+            sleep 3
+        done
+        [[ $_35_warm_ok -eq 0 ]] && warn "  Dataplane warmup did not receive ICMP reply within 24s (Step 10 ping will verify)"
     else
         fail "Step 8: DialPPPoE USER_ID=${USER_ID}" \
             "PPPoE session did not come up within 50s (last ppp_phase='${_35_phase:-<empty>}')"
