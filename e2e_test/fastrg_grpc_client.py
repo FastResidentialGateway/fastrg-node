@@ -67,6 +67,7 @@ def _ctrl_token(force=False):
             if t:
                 return t
         except OSError:
+            # Cache read failures are non-fatal; fall back to controller login below.
             pass
     body = json.dumps({"username": CONTROLLER_USER, "password": CONTROLLER_PASS}).encode()
     req = urllib.request.Request(CONTROLLER_REST + "/api/login", data=body,
