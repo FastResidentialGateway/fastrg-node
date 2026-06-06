@@ -189,8 +189,11 @@ STATUS dhcpd_add_ccb(FastRG_t *fastrg_ccb, U16 extra_ccb_count)
         return SUCCESS;
     }
 
-    if (rte_mempool_in_use_count(fastrg_ccb->dhcp_ccb_mp) > fastrg_ccb->user_count) {
-        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, DHCPLOGMSG, "we have unused ccb in mempool, no need to add more");
+    /* Early-return only when all needed slots were already allocated. */
+    U16 dhcp_new_user_count_check = fastrg_ccb->user_count + extra_ccb_count;
+    if (rte_mempool_in_use_count(fastrg_ccb->dhcp_ccb_mp) >= dhcp_new_user_count_check) {
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, DHCPLOGMSG,
+            "DHCP CCBs up to %u already allocated, reusing existing array", dhcp_new_user_count_check);
         return SUCCESS;
     }
 
@@ -201,22 +204,27 @@ STATUS dhcpd_add_ccb(FastRG_t *fastrg_ccb, U16 extra_ccb_count)
     }
 
     dhcp_ccb_t **old_array = (dhcp_ccb_t **)fastrg_ccb->dhcp_ccb;
+    /* Use dhcp pool in_use count as high-water-mark (mirrors pppd_add_ccb logic). */
+    U16 dhcp_old_array_hwm = (U16)rte_mempool_in_use_count(fastrg_ccb->dhcp_ccb_mp);
     U16 old_user_count = fastrg_ccb->user_count;
     U16 new_user_count = old_user_count + extra_ccb_count;
+    if (dhcp_old_array_hwm > new_user_count) dhcp_old_array_hwm = new_user_count;
+    U16 dhcp_truly_new = new_user_count - dhcp_old_array_hwm;
 
-    dhcp_ccb_t **new_array = fastrg_malloc(dhcp_ccb_t *,  
+    dhcp_ccb_t **new_array = fastrg_malloc(dhcp_ccb_t *,
         sizeof(dhcp_ccb_t *) * new_user_count, 0);
     if (new_array == NULL) {
-        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, DHCPLOGMSG, 
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, DHCPLOGMSG,
             "malloc dhcp_ccb array failed");
         rte_atomic16_clear(&fastrg_ccb->dhcp_ccb_updating);
         return ERROR;
     }
 
     if (old_array != NULL)
-        memcpy(new_array, old_array, sizeof(dhcp_ccb_t *) * old_user_count);
+        memcpy(new_array, old_array, sizeof(dhcp_ccb_t *) * dhcp_old_array_hwm);
 
-    memset(&new_array[old_user_count], 0, sizeof(dhcp_ccb_t *) * extra_ccb_count);
+    if (dhcp_truly_new > 0)
+        memset(&new_array[dhcp_old_array_hwm], 0, sizeof(dhcp_ccb_t *) * dhcp_truly_new);
 
     /* Get the shared dhcp_per_lan_user_mempool, assuming it was created in dhcp_init */
     struct rte_mempool *dhcp_per_lan_user_mempool = rte_mempool_lookup("DHCP_PER_LAN_USER_MEMPOOL");
@@ -228,7 +236,7 @@ STATUS dhcpd_add_ccb(FastRG_t *fastrg_ccb, U16 extra_ccb_count)
         return ERROR;
     }
 
-    if (dhcpd_allocate_ccbs(fastrg_ccb, old_user_count, extra_ccb_count, 
+    if (dhcp_truly_new > 0 && dhcpd_allocate_ccbs(fastrg_ccb, dhcp_old_array_hwm, dhcp_truly_new,
             new_array, dhcp_per_lan_user_mempool) == ERROR) {
         fastrg_mfree(new_array);
         rte_atomic16_clear(&fastrg_ccb->dhcp_ccb_updating);

@@ -298,8 +298,15 @@ STATUS pppd_add_ccb(FastRG_t *fastrg_ccb, U16 extra_ccb_count)
         return SUCCESS;
     }
 
-    if (rte_mempool_in_use_count(fastrg_ccb->ppp_ccb_mp) > fastrg_ccb->user_count) {
-        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, PPPLOGMSG, "we have unused ccb in mempool, no need to add more");
+    /* Early-return only when ALL needed slots (0 .. old+extra-1) were already
+     * allocated in a previous expansion.  Checking in_use >= new_user_count
+     * (not just > user_count) ensures the pointer array already covers the full
+     * new range: every pppd_add_ccb that extended the array also allocated pool
+     * objects for every new slot, so in_use_count tracks array high-water-mark. */
+    U16 new_user_count_check = fastrg_ccb->user_count + extra_ccb_count;
+    if (rte_mempool_in_use_count(fastrg_ccb->ppp_ccb_mp) >= new_user_count_check) {
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, PPPLOGMSG,
+            "CCBs up to %u already allocated, reusing existing array", new_user_count_check);
         return SUCCESS;
     }
 
@@ -310,24 +317,36 @@ STATUS pppd_add_ccb(FastRG_t *fastrg_ccb, U16 extra_ccb_count)
     }
 
     ppp_ccb_t **old_array = (ppp_ccb_t **)fastrg_ccb->ppp_ccb;
+    /* Use in_use_count as the array high-water-mark.  When user_count decreases,
+     * the pointer array is NOT shrunk, so existing objects (and their DPDK rings)
+     * remain at their original indices.  Copying only up to user_count would miss
+     * those entries, and re-allocating objects for those slots would create DPDK
+     * rings with duplicate names → ring creation failure. */
+    U16 old_array_hwm = (U16)rte_mempool_in_use_count(fastrg_ccb->ppp_ccb_mp);
     U16 old_user_count = fastrg_ccb->user_count;
     U16 new_user_count = old_user_count + extra_ccb_count;
+    /* Clamp high-water-mark to new_user_count (can't exceed target). */
+    if (old_array_hwm > new_user_count) old_array_hwm = new_user_count;
+    U16 truly_new = new_user_count - old_array_hwm;
 
-    ppp_ccb_t **new_array = fastrg_malloc(ppp_ccb_t *,  
+    ppp_ccb_t **new_array = fastrg_malloc(ppp_ccb_t *,
         sizeof(ppp_ccb_t *) * new_user_count, 0);
     if (new_array == NULL) {
-        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG, 
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG,
             "realloc ppp_ccb array failed");
         rte_atomic16_clear(&fastrg_ccb->ppp_ccb_updating);
         return ERROR;
     }
 
+    /* Copy ALL existing valid entries (up to high-water-mark, not just user_count). */
     if (old_array != NULL)
-        memcpy(new_array, old_array, sizeof(ppp_ccb_t *) * old_user_count);
+        memcpy(new_array, old_array, sizeof(ppp_ccb_t *) * old_array_hwm);
 
-    memset(&new_array[old_user_count], 0, sizeof(ppp_ccb_t *) * extra_ccb_count);
+    if (truly_new > 0) {
+        memset(&new_array[old_array_hwm], 0, sizeof(ppp_ccb_t *) * truly_new);
+    }
 
-    if (pppd_allocate_ccbs(fastrg_ccb, old_user_count, extra_ccb_count, new_array) == ERROR) {
+    if (truly_new > 0 && pppd_allocate_ccbs(fastrg_ccb, old_array_hwm, truly_new, new_array) == ERROR) {
         fastrg_mfree(new_array);
         rte_atomic16_clear(&fastrg_ccb->ppp_ccb_updating);
         return ERROR;

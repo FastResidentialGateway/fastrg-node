@@ -57,8 +57,11 @@ STATUS fastrg_add_subscriber_stats(FastRG_t *fastrg_ccb, U16 extra_count)
         return SUCCESS;
     }
 
-    if (fastrg_ccb->per_subscriber_stats_len > fastrg_ccb->user_count) {
-        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, PPPLOGMSG, "we have unused ccb in mempool, no need to add more");
+    /* Early-return only when all needed stats slots were already allocated. */
+    U16 stats_new_count_check = fastrg_ccb->user_count + extra_count;
+    if (fastrg_ccb->per_subscriber_stats_len >= stats_new_count_check) {
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "subscriber stats up to %u already allocated, reusing", stats_new_count_check);
         return SUCCESS;
     }
 

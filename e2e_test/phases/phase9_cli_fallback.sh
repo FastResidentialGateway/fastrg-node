@@ -48,9 +48,28 @@ phase9_cli_fallback() {
     local _U1=$(( _p9_cur_sc + 2 ))
     local _U2=$(( _p9_cur_sc + 3 ))
     [[ $_U1 -le $(( USER_ID + 3 )) ]] && { _U1=$(( USER_ID + 4 )); _U2=$(( USER_ID + 5 )); }
-    # Make room for the test users.
-    fastrg_grpc set_subscriber_count "$(( _U2 + 1 ))" >/dev/null 2>&1 || true
-    sleep 2
+    # Make room for the test users — wait until the node reports the new count
+    # so that user-IDs _U1/_U2 are within range before we create their configs
+    # (otherwise the node apply fails → rollback deletes the key before we check).
+    local _tgt_sc=$(( _U2 + 1 ))
+    fastrg_grpc set_subscriber_count "${_tgt_sc}" >/dev/null 2>&1 || true
+    local _sc_ok=0
+    for _sci in $(seq 1 12); do
+        sleep 2
+        local _got_sc
+        _got_sc=$(fastrg_grpc get_system_info 2>/dev/null | jq -r '.num_users // 0' 2>/dev/null || echo 0)
+        [[ "${_got_sc:-0}" -ge "${_tgt_sc}" ]] && { _sc_ok=1; break; }
+    done
+    [[ $_sc_ok -eq 0 ]] && warn "subscriber count may not have propagated to node yet (wanted ${_tgt_sc})"
+
+    # Pre-cleanup: from a previous run, _U1/_U2 CCBs may still be active
+    # (remove_hsi_config refuses to remove an active PPPoE CCB, leaving ppp_bool=1).
+    # Disconnect first so apply_hsi_config's "already enabled" guard doesn't block.
+    fastrg_grpc disconnect_hsi "${_U1}" >/dev/null 2>&1 || true
+    fastrg_grpc disconnect_hsi "${_U2}" >/dev/null 2>&1 || true
+    fastrg_grpc remove_config "${_U1}" >/dev/null 2>&1 || true
+    fastrg_grpc remove_config "${_U2}" >/dev/null 2>&1 || true
+    sleep 4  # allow PPPoE teardown + etcd reconcile before CREATE events
 
     # ------------------------------------------------------------------
     # Step 36 — tier 1: CLI -> controller (login + apply config)
@@ -107,7 +126,11 @@ phase9_cli_fallback() {
         fi
     fi
 
-    # Cleanup test users (via controller).
+    # Cleanup test users: disconnect PPPoE first (clears ppp_bool) so the node
+    # can honour remove_hsi_config's "PPPoE must be inactive" guard next run.
+    fastrg_grpc disconnect_hsi "${_U1}" >/dev/null 2>&1 || true
+    fastrg_grpc disconnect_hsi "${_U2}" >/dev/null 2>&1 || true
+    sleep 4
     fastrg_grpc remove_config "${_U1}" >/dev/null 2>&1 || true
     fastrg_grpc remove_config "${_U2}" >/dev/null 2>&1 || true
     [[ -n "${_P9_ORIG_SUB_COUNT:-}" ]] && fastrg_grpc set_subscriber_count "${_P9_ORIG_SUB_COUNT}" >/dev/null 2>&1 || true

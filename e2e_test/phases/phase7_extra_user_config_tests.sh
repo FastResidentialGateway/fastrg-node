@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # ---------------------------------------------------------------------------
-# Phase 7 — Dynamic New Subscriber gRPC→etcd→fastrg Config Tests (Steps 18–25)
+# Phase 7 — Dynamic New Subscriber gRPC→etcd→fastrg Config Tests (Steps 19–26)
 #
 # Determines the current subscriber count (N), creates subscriber N+1,
 # applies the same config as subscriber 1 (with VLAN 100), exercises all
@@ -36,7 +36,7 @@ _cleanup_new_subscriber_config() {
 
 phase7_extra_user_config_tests() {
     bold "═══════════════════════════════════════════════════════"
-    bold " Phase 7 — Extra User gRPC→etcd Config Tests (Steps 18-25)"
+    bold " Phase 7 — Extra User gRPC→etcd Config Tests (Steps 19-26)"
     bold "═══════════════════════════════════════════════════════"
 
     # ------------------------------------------------------------------
@@ -107,7 +107,7 @@ phase7_extra_user_config_tests() {
     if [[ -z "$_apply_status" ]]; then
         fail "Step 19: ApplyConfig user ${U1}" \
             "gRPC ApplyConfig returned no status — response: $(printf '%s' "$_apply_reply")"
-        warn "Skipping Steps 19-25 (ApplyConfig failed)"
+        warn "Skipping Steps 19-26 (ApplyConfig failed)"
         skip "Step 20: fastrg applies user ${U1} config"  "ApplyConfig failed"
         skip "Step 21: ConnectHsi user ${U1}"             "ApplyConfig failed"
         skip "Step 22: DisconnectHsi user ${U1}"          "ApplyConfig failed"
