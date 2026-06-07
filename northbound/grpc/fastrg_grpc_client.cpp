@@ -27,12 +27,8 @@ class FastRGNodeClient {
 std::unique_ptr<FastRGNodeClient> fastrg_client;
 
 void fastrg_grpc_client_connect(char *server_address) {
-    std::cout << "grpc client connecting to " << server_address << std::endl;
     auto channel = grpc::CreateChannel(server_address, grpc::InsecureChannelCredentials());
     fastrg_client = std::make_unique<FastRGNodeClient>(channel);
-    std::cout << "grpc client connected to " << server_address << std::endl;
-
-    return;
 }
 
 void fastrg_grpc_apply_config(U16 user_id, U16 vlan_id, char *pppoe_account, 

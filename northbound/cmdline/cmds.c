@@ -199,20 +199,20 @@ static void cmd_help_parsed(__attribute__((unused)) void *parsed_result,
                 __attribute__((unused)) void *data)
 {
     cmdline_printf(cl,"usage: \n"
-                      "show <hsi|dhcp> to show information\n"
-                      "show system <info|stats|xstats> to show system info/stats/xstats\n"
-                      "config <add|del> user <id> pppoe-dhcp vlan <id> account <account> password <password> pool <start~end> subnet <mask> gateway <ip> to add/update/del PPPoE/DHCP configuration\n"
-                      "configure SNAT port forwarding: config <add|del> user <id> snat eport <port> dip <ip> iport <port>\n"
-                      "config set subscriber_count <count> to set subscriber pool size\n"
-                      "config set subscriber <id> dns_proxy <on|off> to toggle per-subscriber DNS proxy\n"
-                      "config set subscriber <id> tcp_conntrack <on|off> to toggle per-subscriber TCP conntrack\n"
-                      "show user <id> nat port-forwarding to show port forwarding entries\n"
-                      "show user <id> arp-table [count] to show subscriber ARP table (default: 100 entries)\n"
-                      "exec hsi <start|stop> <user id | all> to start/stop HSI (PPPoE + DHCP)\n"
-                      "exec pppoe <start|stop> <user id | all> to start/stop PPPoE only\n"
-                      "exec dhcp-server <start|stop> <user id | all> to start/stop DHCP server only\n"
-                      "help to show usage commands\n"
-                      "quit/exit to quit FastRG CLI\n");
+        "show <hsi|dhcp> to show information\n"
+        "show system <info|stats|xstats> to show system info/stats/xstats\n"
+        "config <add|del> user <id> pppoe-dhcp vlan <id> account <account> password <password> pool <start~end> subnet <mask> gateway <ip> to add/update/del PPPoE/DHCP configuration\n"
+        "configure SNAT port forwarding: config <add|del> user <id> snat eport <port> dip <ip> iport <port>\n"
+        "config set subscriber_count <count> to set subscriber pool size\n"
+        "config set subscriber <id> dns_proxy <on|off> to toggle per-subscriber DNS proxy\n"
+        "config set subscriber <id> tcp_conntrack <on|off> to toggle per-subscriber TCP conntrack\n"
+        "show user <id> nat port-forwarding to show port forwarding entries\n"
+        "show user <id> arp-table [count] to show subscriber ARP table (default: 100 entries)\n"
+        "exec hsi <start|stop> <user id | all> to start/stop HSI (PPPoE + DHCP)\n"
+        "exec pppoe <start|stop> <user id | all> to start/stop PPPoE only\n"
+        "exec dhcp-server <start|stop> <user id | all> to start/stop DHCP server only\n"
+        "help to show usage commands\n"
+        "quit/exit to quit FastRG CLI\n");
 }
 
 cmdline_parse_token_string_t cmd_help_help =
@@ -669,7 +669,7 @@ static void cmd_exec_parsed(void *parsed_result,
         user_id = 0;
     } else {
         user_id = strtoul(res->user_id, NULL, 10);
-        if (user_id <= 0) {
+        if (user_id == 0) {
             cmdline_printf(cl, "Wrong user id\n");
             return;
         }
@@ -1133,27 +1133,35 @@ struct cmd_controller_login_result {
     cmdline_fixed_string_t login;
 };
 
-/* Read a line from stdin (no echo when hide=1, for passwords). */
+/* Read a line from stdin (no echo when hide=1, for passwords).
+ * Always saves and restores the terminal so this works inside DPDK's raw-mode
+ * cmdline (which disables ECHO and ICANON for the whole session). */
 static void read_line_prompt(const char *prompt, int hide, char *buf, size_t buflen)
 {
-    struct termios old_term, new_term;
+    struct termios saved, tmp;
     printf("%s", prompt);
     fflush(stdout);
-    if (hide) {
-        tcgetattr(STDIN_FILENO, &old_term);
-        new_term = old_term;
-        new_term.c_lflag &= ~ECHO;
-        tcsetattr(STDIN_FILENO, TCSANOW, &new_term);
-    }
+
+    tcgetattr(STDIN_FILENO, &saved);
+    tmp = saved;
+    /* Enable canonical (line-buffered) input and CR→NL so fgets works. */
+    tmp.c_lflag |= ICANON;
+    tmp.c_iflag |= ICRNL;
+    if (hide)
+        tmp.c_lflag &= ~ECHO;
+    else
+        tmp.c_lflag |= ECHO;
+    tcsetattr(STDIN_FILENO, TCSANOW, &tmp);
+
     if (fgets(buf, buflen, stdin) == NULL)
         buf[0] = '\0';
     size_t n = strlen(buf);
     if (n > 0 && buf[n - 1] == '\n')
         buf[n - 1] = '\0';
-    if (hide) {
-        tcsetattr(STDIN_FILENO, TCSANOW, &old_term);
+
+    tcsetattr(STDIN_FILENO, TCSANOW, &saved);
+    if (hide)
         printf("\n");
-    }
 }
 
 static void cmd_controller_login_parsed(__rte_unused void *parsed_result,
@@ -1235,12 +1243,23 @@ static void print_usage(const char *prog_name)
     printf("Options:\n");
     printf("  -s, --socket <path>      Node Unix socket (default: unix:///var/run/fastrg/fastrg.sock)\n");
     printf("  -i, --ip <address>       Node gRPC IP address (e.g., 127.0.0.1:50052)\n");
-    printf("  -c, --controller <addr>  Controller ConfigService gRPC (e.g., 192.168.10.14:50051)\n");
-    printf("  -r, --rest <url>         Controller REST base URL for login (e.g., http://192.168.10.14:8080)\n");
-    printf("  -e, --etcd <endpoints>   etcd endpoints for direct-write fallback (e.g., 192.168.10.14:2379)\n");
+    printf("  -c, --controller <addr>  Controller ConfigService gRPC (e.g., 192.168.10.212:50052)\n");
+    printf("  -r, --rest <url>         Controller REST base URL for login (e.g., https://192.168.10.212:28443)\n");
+    printf("  -e, --etcd <endpoints>   etcd endpoints for direct-write fallback (e.g., 192.168.10.212:2379)\n");
     printf("  -n, --node <uuid>        Managed node UUID (required for controller/etcd config keys)\n");
     printf("  -h, --help               Show this help message\n");
-    printf("\nWrites use a fallback chain: controller -> etcd -> node. Run 'controller login' to authenticate.\n");
+    printf("\n");
+    printf("Launch mode examples:\n");
+    printf("  Controller mode  (writes: controller -> etcd -> node)\n");
+    printf("    %s -c 192.168.10.212:50052 -r https://192.168.10.212:28443 -n <node-uuid>\n", prog_name);
+    printf("    then type: controller login\n");
+    printf("\n");
+    printf("  Etcd mode  (writes: etcd -> node, no controller)\n");
+    printf("    %s -e 192.168.10.212:2379 -n <node-uuid>\n", prog_name);
+    printf("\n");
+    printf("  Standalone mode  (writes directly to node gRPC)\n");
+    printf("    %s                          (default Unix socket)\n", prog_name);
+    printf("    %s -i 127.0.0.1:50052\n", prog_name);
 }
 
 int main(int argc, char **argv)
@@ -1301,17 +1320,28 @@ int main(int argc, char **argv)
         grpc_target = "unix:///var/run/fastrg/fastrg.sock";
 
     grpc_init();
-    printf("Connecting to gRPC server at: %s\n", grpc_target);
+    if (!controller_addr)
+        printf("Connecting to gRPC server at: %s\n", grpc_target);
     fastrg_grpc_client_connect(grpc_target);
 
     /* Configure the controller client (tier 1 of the write fallback). */
     cli_controller_configure(controller_addr, controller_rest, node_uuid);
     cli_etcd_configure(etcd_endpoints, node_uuid);
-    if (controller_addr && node_uuid)
-        printf("Controller: %s (node %s). Run 'controller login' to authenticate.\n",
-            controller_addr, node_uuid);
 
-    struct cmdline *cl = cmdline_stdin_new(ctx, "FastRG> ");
+    char prompt[48];
+    if (controller_addr && node_uuid) {
+        printf("[Controller mode] %s  node: %s\n"
+               "Run 'controller login' to authenticate.\n",
+               controller_addr, node_uuid);
+        snprintf(prompt, sizeof(prompt), "FastRG[controller]> ");
+    } else if (etcd_endpoints && node_uuid) {
+        printf("[Etcd mode] %s  node: %s\n", etcd_endpoints, node_uuid);
+        snprintf(prompt, sizeof(prompt), "FastRG[etcd]> ");
+    } else {
+        snprintf(prompt, sizeof(prompt), "FastRG> ");
+    }
+
+    struct cmdline *cl = cmdline_stdin_new(ctx, prompt);
     if (cl == NULL) {
         grpc_shutdown();
         return -1;
