@@ -286,15 +286,27 @@ STATUS kafka_producer_init(const char *brokers, const char *node_uuid) {
 void kafka_producer_cleanup(void) {
     if (!g_ready.exchange(false))
         return;
-    // Stop the poller before touching g_rk so it cannot poll a destroyed handle.
     g_poll_run.store(false);
     if (g_poll_thread.joinable())
         g_poll_thread.join();
-    if (g_rk) {
-        rd_kafka_flush(g_rk, 2000);   // best-effort flush; dr_cb prunes the WAL
-        rd_kafka_destroy(g_rk);
-        g_rk = nullptr;
-    }
+    if (!g_rk)
+        return;
+
+    /* Cancel all queued and in-flight messages immediately so flush returns
+     * quickly even when the broker is unreachable. */
+    rd_kafka_purge(g_rk, RD_KAFKA_PURGE_F_QUEUE |
+                         RD_KAFKA_PURGE_F_INFLIGHT |
+                         RD_KAFKA_PURGE_F_NON_BLOCKING);
+    rd_kafka_flush(g_rk, 1000);
+
+    /* rd_kafka_destroy() blocks until all internal threads exit.  When the
+     * broker is unreachable the reconnect-backoff thread may sleep for up to
+     * reconnect.backoff.max.ms before it notices the terminate signal.  Run
+     * destroy in a detached thread so shutdown is never gated on it — the
+     * process is exiting and the OS cleans up any leftover handle. */
+    rd_kafka_t *rk = g_rk;
+    g_rk = nullptr;
+    std::thread([rk] { rd_kafka_destroy(rk); }).detach();
 }
 
 int kafka_producer_is_ready(void) {

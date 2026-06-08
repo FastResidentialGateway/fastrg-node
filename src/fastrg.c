@@ -857,7 +857,19 @@ int fastrg_start(int argc, char **argv)
     return 0;
 
 err:
-    close(sfd);
+    /* Unblock SIGINT/SIGTERM so Ctrl-C works even though sfd is about to be
+     * closed and the signal-reading loop never ran. */
+    {
+        sigset_t unblock;
+        sigemptyset(&unblock);
+        sigaddset(&unblock, SIGINT);
+        sigaddset(&unblock, SIGTERM);
+        sigprocmask(SIG_UNBLOCK, &unblock, NULL);
+    }
+    /* Stop any data-plane lcores that were already launched. */
+    rte_atomic16_set(&stop_flag, 1);
+    rte_eal_mp_wait_lcore();
+    kafka_producer_cleanup();
     if (fastrg_ccb.fp && fastrg_ccb.fp != stdout) {
         /* Detach DPDK log stream before closing fp; rte_eal_cleanup() below
          * may still log and would otherwise write to a closed FILE*. */
@@ -871,6 +883,7 @@ err:
     if (fastrg_ccb.etcd_endpoints) free(fastrg_ccb.etcd_endpoints);
     if (fastrg_ccb.kafka_brokers) free(fastrg_ccb.kafka_brokers);
     grpc_shutdown();
+    close(sfd);
     rte_eal_cleanup();
     return -1;
 }
