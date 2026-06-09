@@ -205,11 +205,11 @@ USER_ID=""
 # Controller (SSOT): config writes + PPPoE dial/hangup go here; the node applies
 # from etcd via its watch. REST is used for login + writes; gRPC ConfigService
 # address is used by fastrg_cli in the CLI-fallback phase.
-CONTROLLER_REST="https://192.168.10.212:28443"   # REST base URL (login + config)
-CONTROLLER_GRPC="192.168.10.212:50052"           # ConfigService gRPC (for fastrg_cli)
+CONTROLLER_REST="https://192.168.10.212:8443"    # REST base URL (login + config)
+CONTROLLER_GRPC="192.168.10.212:50051"           # ConfigService gRPC (for fastrg_cli)
 CONTROLLER_USER="admin"
 CONTROLLER_PASS="admin"
-ETCD_ENDPOINT_DEFAULT="192.168.10.212:22379"     # CLI tier-2 fallback target
+ETCD_ENDPOINT_DEFAULT="192.168.10.212:2378"      # CLI tier-2 fallback target
 
 # ---------------------------------------------------------------------------
 # Argument parsing
