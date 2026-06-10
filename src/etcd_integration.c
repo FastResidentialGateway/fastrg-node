@@ -645,13 +645,31 @@ static void reconcile_pppoe_desire(FastRG_t *fastrg_ccb, int ccb_id, const char 
                 rte_delay_us_block((min_gap - elapsed) / (hz / 1000000ULL));
         }
         s_last_dial_cycles = rte_get_tsc_cycles();
+        rte_atomic16_set(&ppp_ccb->redial_pending, 0);  /* dialing now, no deferral needed */
         FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
             "desire_status=connect for user %d, dialing PPPoE", ccb_id + 1);
         execute_pppoe_dial(fastrg_ccb, ccb_id);
     } else if (!want_connect && is_connected) {
+        rte_atomic16_set(&ppp_ccb->redial_pending, 0);  /* we want it down */
         FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
             "desire_status=disconnect for user %d, hanging up PPPoE", ccb_id + 1);
         execute_pppoe_hangup(fastrg_ccb, ccb_id);
+    } else if (want_connect && is_connected && ppp_ccb->ppp_processing == TRUE) {
+        /* Desire is connect but the session is still tearing down from an earlier
+         * hangup (ppp_bool stays 1, and ppp_processing==TRUE, until END_PHASE).
+         * execute_pppoe_dial would no-op here because ppp_bool==1, so the connect
+         * would be silently dropped and only recovered by the next 60s reconcile
+         * sweep. Instead, remember the intent: exit_ppp re-dials the moment the
+         * teardown completes. (Loop-safe: ppp_processing is TRUE only while
+         * disconnecting, so a failing dial-up never sets this.) */
+        rte_atomic16_set(&ppp_ccb->redial_pending, 1);
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "desire_status=connect for user %d during teardown; will redial after it completes",
+            ccb_id + 1);
+    } else {
+        /* Stable connected (and desired) or stable down (and not desired): nothing
+         * to do, and no deferred redial should linger. */
+        rte_atomic16_set(&ppp_ccb->redial_pending, 0);
     }
 }
 

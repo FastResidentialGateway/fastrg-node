@@ -139,6 +139,7 @@ STATUS ppp_init_config_by_user(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb, U16 ccb
     rte_timer_init(&(ppp_ccb->ppp_alive));
     rte_atomic16_init(&ppp_ccb->dp_start_bool);
     rte_atomic16_init(&ppp_ccb->ppp_bool);
+    rte_atomic16_init(&ppp_ccb->redial_pending);
     rte_atomic64_init(&ppp_ccb->pppoes_rx_bytes);
     rte_atomic64_init(&ppp_ccb->pppoes_tx_bytes);
     rte_atomic64_init(&ppp_ccb->pppoes_rx_packets);
@@ -637,6 +638,20 @@ void exit_ppp(ppp_ccb_t *ppp_ccb)
     char uid[8];
     snprintf(uid, sizeof(uid), "%u", ppp_ccb->user_num);
     kafka_report_pppoe_state(uid, KAFKA_PPPOE_DISCONNECTED, NULL, NULL, NULL);
+
+    /* Honour a deferred connect: a desire_status=connect that arrived while this
+     * session was tearing down was parked (redial_pending) instead of being
+     * dropped. Now that the session is fully down (ppp_bool just cleared above),
+     * re-dial immediately rather than waiting up to one 60s reconcile sweep.
+     * execute_pppoe_dial only enqueues a northbound ENABLE event, so this is safe
+     * to call from the teardown context. Cleared first so a failing redial cannot
+     * loop (the next attempt falls back to the periodic reconcile). */
+    if (rte_atomic16_cmpset((U16 *)&ppp_ccb->redial_pending.cnt, 1, 0)) {
+        FastRG_LOG(INFO, fastrg_ccb->fp, ppp_ccb, PPPLOGMSG,
+            "User %" PRIu16 " teardown complete; honouring deferred connect (redial)",
+            ppp_ccb->user_num);
+        execute_pppoe_dial(fastrg_ccb, ccb_id);
+    }
 }
 
 STATUS ppp_process(FastRG_t *fastrg_ccb, U8 *pkt_data, U16 len)

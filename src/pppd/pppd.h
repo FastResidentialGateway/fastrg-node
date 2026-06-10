@@ -98,6 +98,7 @@ typedef struct {
     U8                    *ppp_passwd;       /* pap/chap password */
     rte_atomic16_t        ppp_bool;          /* boolean flag for accept ppp packets at data plane */
     rte_atomic16_t        dp_start_bool;     /* hsi data plane starting boolean flag */
+    rte_atomic16_t        redial_pending;    /* desire=connect arrived mid-teardown; redial once down */
     BOOL                  ppp_processing;    /* boolean flag for checking ppp is disconnecting */
     addr_table_t          addr_table[MAX_NAT_ENTRIES]; /* hsi nat addr table */
     port_fwd_entry_t      port_fwd_table[PORT_FWD_TABLE_SIZE]; /* SNAT port forwarding, direct-indexed by eport */
