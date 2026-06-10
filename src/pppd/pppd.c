@@ -517,7 +517,17 @@ STATUS pppd_init(FastRG_t *fastrg_ccb)
         "ppp_ccb_pool",                      /* name */
         mempool_size,                        /* user count */
         sizeof(ppp_ccb_t),                   /* ppp_ccb size */
-        mempool_size * 2 / 3,                /* per-lcore cache size */
+        /* No per-lcore cache. CCB get/put is a control-plane resize operation,
+         * not a per-packet hot path, so the cache buys nothing here. Worse, a
+         * cache strands free CCBs in one lcore's local cache where the lcore
+         * doing the resize cannot reach them: rte_mempool_get then fails with
+         * ENOENT even though rte_mempool_avail_count reports objects free,
+         * which intermittently breaks subscriber-count expansion. cache=0 keeps
+         * every object in the common ring, reachable from any lcore. (The cache
+         * only affects the alloc/free fast path — a ppp_ccb, once allocated, is
+         * shared hugepage memory referenced via the ppp_ccb[] array and stays
+         * fully accessible to the data-plane lcores regardless of cache size.) */
+        0,                                   /* per-lcore cache size */
         0,                                   /* private_data_size */
         NULL, NULL,                          /* mp_init, mp_init_arg */
         NULL, NULL,                          /* obj_init, obj_init_arg */

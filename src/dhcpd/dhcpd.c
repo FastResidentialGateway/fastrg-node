@@ -428,7 +428,11 @@ STATUS dhcp_init(FastRG_t *fastrg_ccb)
         "dhcp_ccb_pool",                     /* name */
         mempool_size,                        /* user count */
         sizeof(dhcp_ccb_t),                  /* dhcp_ccb size */
-        mempool_size * 2 / 3,                /* per-lcore cache size */
+        /* No per-lcore cache: DHCP CCB get/put is a control-plane resize, not a
+         * per-packet hot path. A cache strands free CCBs in one lcore's local
+         * cache, making rte_mempool_get fail with ENOENT during subscriber-count
+         * expansion even while objects are reportedly free. See ppp_ccb_pool. */
+        0,                                   /* per-lcore cache size */
         0,                                   /* private_data_size */
         NULL, NULL,                          /* mp_init, mp_init_arg */
         NULL, NULL,                          /* obj_init, obj_init_arg */

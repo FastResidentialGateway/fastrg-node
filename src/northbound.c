@@ -79,20 +79,29 @@ STATUS apply_hsi_config(FastRG_t *fastrg_ccb, int ccb_id, const hsi_config_t *co
     U16 ori_dp_status = rte_atomic16_exchange((volatile uint16_t *)&ppp_ccb->dp_start_bool.cnt, 0);
     U16 ori_dhcp_status = rte_atomic16_exchange((volatile uint16_t *)&dhcp_ccb->dhcp_bool.cnt, 0);
 
-    /* we don't apply config if this is a new configuration while hsi is still active */
+    /* If this is a new configuration but the subscriber is already provisioned and
+     * active (PPPoE connected and/or DHCP server running), that is exactly the
+     * desired state a re-created "connect" config asks for. Treat it as an
+     * idempotent no-op success instead of a failure, so the controller does not
+     * receive a CONFIG_APPLY_FAIL and trigger an unnecessary rollback. The out:
+     * label restores the active flags (ori_*_status) below.
+     *
+     * This is a CREATE event (is_update==FALSE), i.e. the etcd key was absent
+     * and then PUT — which only happens for an already-active user via a
+     * delete+recreate sequence. When the recreated config DIFFERS from what is
+     * running, we intentionally do NOT apply it here and let the periodic
+     * reconcile sweep converge it instead (reconcile sends an UPDATE, which
+     * re-applies non-disruptively via ppp_update_config_by_user). Deferring is
+     * the *better* behaviour, not just the simpler one: applying a changed VLAN
+     * immediately would tear the live PPPoE session off its old VLAN and leave
+     * the user hung until the PPPoE/LCP timeout (~10s). Letting reconcile do it
+     * gives a buffer window so the operator can disconnect cleanly first. */
     if (is_update == FALSE) {
-        if (ori_dhcp_status == 1) {
-            FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, 
-                "DHCP is already enabled for user %d while applying new HSI config", 
+        if (ori_dhcp_status == 1 || ori_ppp_status == 1) {
+            FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                "User %d already active (PPPoE/DHCP on); treating new HSI config as no-op success",
                 ccb_id + 1);
-            ret = ERROR;
-            goto out;
-        }
-        if (ori_ppp_status == 1) {
-            FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, 
-                "PPPoE is already enabled for user %d while applying new HSI config", 
-                ccb_id + 1);
-            ret = ERROR;
+            ret = SUCCESS;
             goto out;
         }
     }

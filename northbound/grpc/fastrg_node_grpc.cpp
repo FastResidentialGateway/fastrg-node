@@ -52,6 +52,16 @@ grpc::Status FastRGNodeServiceImpl::ApplyConfig(::grpc::ServerContext* context, 
     cout << "DHCP Subnet Mask: " << dhcp_subnet_mask << endl;
     cout << "DHCP Gateway: " << dhcp_gateway << endl;
 
+    // SDN guard first: when etcd is reachable the node never accepts direct
+    // config writes, regardless of user_id validity — the CLI must write through
+    // the controller / etcd. Checking this before the user-existence check keeps
+    // the rejection reason (FAILED_PRECONDITION) deterministic.
+    if (etcd_client_is_initialized() && etcd_client_is_connected()) {
+        std::string err = "etcd reachable (SDN mode); apply config via controller/etcd, not the node";
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, err);
+    }
+
     if (user_id > fastrg_ccb->user_count) {
         std::string err = "Error! User " + std::to_string(user_id) + " is not exist";
         cout << err << endl;
@@ -82,14 +92,6 @@ grpc::Status FastRGNodeServiceImpl::ApplyConfig(::grpc::ServerContext* context, 
         std::string err = "Error! fastrg_ccb or node_uuid is NULL";
         cout << err << endl;
         return grpc::Status(grpc::StatusCode::INTERNAL, err);
-    }
-
-    // In SDN mode with etcd reachable, the node does NOT accept config via gRPC:
-    // the CLI must write through the controller or directly to etcd (point 1).
-    if (etcd_client_is_initialized() && etcd_client_is_connected()) {
-        std::string err = "etcd reachable (SDN mode); apply config via controller/etcd, not the node";
-        cout << err << endl;
-        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, err);
     }
 
     // etcd unreachable (pure standalone, or SDN with etcd down): apply locally now.
