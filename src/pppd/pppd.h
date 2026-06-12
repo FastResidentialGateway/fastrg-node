@@ -96,6 +96,7 @@ typedef struct {
     U16                   auth_method;       /* use chap or pap */
     U8                    *ppp_user_acc;     /* pap/chap account */
     U8                    *ppp_passwd;       /* pap/chap password */
+    U32	                  ppp_interval;      /* ppp timer interval */
     rte_atomic16_t        ppp_bool;          /* boolean flag for accept ppp packets at data plane */
     rte_atomic16_t        dp_start_bool;     /* hsi data plane starting boolean flag */
     rte_atomic16_t        redial_pending;    /* desire=connect arrived mid-teardown; redial once down */
@@ -117,8 +118,6 @@ typedef struct {
      * volatile blocks the compiler from hoisting/caching the load. */
     volatile BOOL         tcp_conntrack_enabled;
 }__rte_cache_aligned ppp_ccb_t;
-
-extern U32 ppp_interval;
 
 void   exit_ppp(ppp_ccb_t *ppp_ccb);
 
