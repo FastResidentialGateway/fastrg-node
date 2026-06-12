@@ -15,7 +15,7 @@ jobs:
     outputs:
       image: ${{ steps.meta.outputs.image }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set lowercase owner
         run: echo "OWNER=$(echo ${{ github.repository_owner }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
@@ -69,7 +69,7 @@ jobs:
       - name: Fix git ownership
         run: git config --global --add safe.directory $GITHUB_WORKSPACE
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           submodules: recursive
 
@@ -83,7 +83,7 @@ jobs:
       contents: read
       packages: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Build Docker image
         run: docker build --no-cache -t fastrg:latest .
@@ -102,7 +102,7 @@ jobs:
     steps:
       - name: Fix git ownership
         run: git config --global --add safe.directory $GITHUB_WORKSPACE
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           submodules: recursive
 
