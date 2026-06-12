@@ -568,7 +568,7 @@ void fastrg_stop()
     fastrg_ccb.user_count = 0;
     pppd_cleanup_ccb(&fastrg_ccb, total_ccbs);
     dhcpd_cleanup_ccb(&fastrg_ccb, total_ccbs);
-    #ifdef RTE_LIBRTE_PDUMP
+    #ifdef RTE_LIB_PDUMP
     /*uninitialize packet capture framework */
     rte_pdump_uninit();
     #endif
@@ -686,7 +686,7 @@ int fastrg_start(int argc, char **argv)
     /* Init the pppoe alive user count */
     fastrg_ccb.cur_user = 0;
     rte_prefetch2(&fastrg_ccb);
-    #ifdef RTE_LIBRTE_PDUMP
+    #ifdef RTE_LIB_PDUMP
     /* initialize packet capture framework */
     rte_pdump_init();
     #endif

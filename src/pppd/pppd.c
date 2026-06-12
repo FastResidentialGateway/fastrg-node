@@ -16,7 +16,6 @@
 #include <rte_memcpy.h>
 #include <rte_flow.h>
 #include <rte_atomic.h>
-#include <rte_pdump.h>
 #include <rte_trace.h>
 #include <rte_rcu_qsbr.h>
 

@@ -79,12 +79,12 @@ download_controller_grpc() {
 }
 
 build_dpdk() {
-    pushd $path/lib/dpdk && git checkout v24.11.4 && meson setup $path/lib/dpdk_build
+    pushd $path/lib/dpdk && git checkout v24.11.6 && meson setup $path/lib/dpdk_build
     popd
     pushd $path/lib/dpdk_build
     meson configure -Dexamples=""
     meson configure -Dtests=false
-    meson configure -Ddisable_apps="test-eventdev,test-gpudev,test-mldev,test-pipeline,test-regex,test-sad,test-security-perf,dumpcap,graph,proc-info,test-bbdev,test-compress-perf,test-dma-perf,test-a[...]"
+    meson configure -Ddisable_apps="test-eventdev,test-gpudev,test-mldev,test-pipeline,test-regex,test-sad,test-security-perf,pdump,graph,proc-info,test-bbdev,test-compress-perf,test-dma-perf,test-a[...]"
     meson configure -Ddisable_libs="bbdev,compressdev,gpudev,mldev,rawdev,regexdev"
     meson configure -Ddisable_drivers="common/dpaax,common/octeontx,common/octeontx2,common/cpt,common/sfc_efx,bus/ifpga,net/ark,net/atlantic,net/axgbe,net/hinic,net/hns3,net/ngbe,net/txgbe,net/cxgbe,[...]"
     #meson configure -Denable_trace_fp=true -Dc_args='-DALLOW_EXPERIMENTAL_API'

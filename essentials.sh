@@ -28,7 +28,7 @@ if [[ "$OS_ID" =~ (rhel|centos|rocky|almalinux) ]]; then
     # Install packages
     dnf -y --enablerepo=crb install protobuf-devel || true
     dnf -y --enablerepo=devel install meson libconfig-devel protobuf-compiler || true
-    dnf -y install grpc grpc-cpp grpc-devel
+    dnf -y install grpc grpc-cpp grpc-devel libpcap-devel
     dnf -y install python3-pyelftools
 
 elif [[ "$OS_ID" == "ubuntu" ]]; then
@@ -43,7 +43,7 @@ elif [[ "$OS_ID" == "ubuntu" ]]; then
         libgrpc++-dev protobuf-compiler-grpc libabsl-dev meson \
         python3-pyelftools ninja-build python3-setuptools \
         libcpprest-dev uuid-dev curl libarchive-dev \
-        librdkafka-dev
+        librdkafka-dev libpcap-dev
 
     apt-get clean -y
     apt-get autoclean -y
