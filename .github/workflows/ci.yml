@@ -53,7 +53,7 @@ jobs:
             ${{ steps.meta.outputs.image }}
             ghcr.io/${{ env.OWNER }}/fastrg-builder:latest
           build-args: |
-            FASTRG_REF=${{ github.ref_name }}
+            FASTRG_REF=${{ github.head_ref || github.ref_name }}
   build:
     needs: prepare-deps
     runs-on: ubuntu-latest

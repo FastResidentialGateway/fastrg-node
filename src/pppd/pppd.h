@@ -98,6 +98,7 @@ typedef struct {
     U8                    *ppp_passwd;       /* pap/chap password */
     rte_atomic16_t        ppp_bool;          /* boolean flag for accept ppp packets at data plane */
     rte_atomic16_t        dp_start_bool;     /* hsi data plane starting boolean flag */
+    rte_atomic16_t        redial_pending;    /* desire=connect arrived mid-teardown; redial once down */
     BOOL                  ppp_processing;    /* boolean flag for checking ppp is disconnecting */
     addr_table_t          addr_table[MAX_NAT_ENTRIES]; /* hsi nat addr table */
     port_fwd_entry_t      port_fwd_table[PORT_FWD_TABLE_SIZE]; /* SNAT port forwarding, direct-indexed by eport */
@@ -106,7 +107,6 @@ typedef struct {
     struct rte_timer      pppoe;             /* pppoe timer */
     struct rte_timer      ppp;               /* ppp timer */
     struct rte_timer      ppp_alive;         /* PPP connection checking timer */
-    struct rte_timer      etcd_pppoe_status_timer; /* etcd pppoe status checking timer */
     rte_atomic64_t        pppoes_rx_bytes;
     rte_atomic64_t        pppoes_tx_bytes;
     rte_atomic64_t        pppoes_rx_packets;
@@ -264,17 +264,5 @@ static __always_inline ppp_ccb_t *pppd_get_ccb(struct rte_rcu_qsbr *ppp_ccb_rcu,
 
     return result;
 }
-
-/**
- * @fn check_etcd_pppoe_status
- * 
- * @brief Check etcd pppoe status and update if necessary
- * 
- * @param tim
- *      Timer pointer
- * @param ppp_ccb
- *      PPP control block pointer
- */
-void check_etcd_pppoe_status(struct rte_timer *tim, ppp_ccb_t *ppp_ccb);
 
 #endif

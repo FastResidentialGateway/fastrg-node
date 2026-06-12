@@ -35,11 +35,77 @@ import sys
 import os
 import json
 import re
+import ssl
 import subprocess
 import argparse
+import urllib.request
+import urllib.error
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
 TIMEOUT_SEC = 10
+
+# ---------------------------------------------------------------------------
+# Controller config (writes go through the controller; reads stay on the node).
+# Provided by run_e2e_test.sh via environment.
+# ---------------------------------------------------------------------------
+CONTROLLER_REST = os.environ.get("CONTROLLER_REST", "")        # e.g. https://192.168.10.212:28443
+CONTROLLER_USER = os.environ.get("CONTROLLER_USER", "admin")
+CONTROLLER_PASS = os.environ.get("CONTROLLER_PASS", "admin")
+NODE_UUID       = os.environ.get("NODE_UUID", "")
+_TOKEN_CACHE    = "/tmp/.fastrg_e2e_ctrl_token"
+_SSL_CTX        = ssl.create_default_context()
+_SSL_CTX.check_hostname = False
+_SSL_CTX.verify_mode = ssl.CERT_NONE
+
+
+def _ctrl_token(force=False):
+    """Return a controller JWT (raw token, no Bearer prefix), cached on disk."""
+    if not force and os.path.exists(_TOKEN_CACHE):
+        try:
+            with open(_TOKEN_CACHE) as f:
+                t = f.read().strip()
+            if t:
+                return t
+        except OSError:
+            # Cache read failures are non-fatal; fall back to controller login below.
+            pass
+    body = json.dumps({"username": CONTROLLER_USER, "password": CONTROLLER_PASS}).encode()
+    req = urllib.request.Request(CONTROLLER_REST + "/api/login", data=body,
+                                 headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=TIMEOUT_SEC, context=_SSL_CTX) as r:
+        tok = json.loads(r.read()).get("token", "")
+    if not tok:
+        raise RuntimeError("controller login returned no token")
+    with open(_TOKEN_CACHE, "w") as f:
+        f.write(tok)
+    return tok
+
+
+def _ctrl(method, path, body=None, _retry=True):
+    """Call the controller REST API with the cached token. Returns parsed JSON ({} if empty)."""
+    if not CONTROLLER_REST or not NODE_UUID:
+        raise RuntimeError("CONTROLLER_REST / NODE_UUID not set in environment")
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(CONTROLLER_REST + path, data=data, method=method,
+                                 headers={"Content-Type": "application/json",
+                                          "Authorization": _ctrl_token()})
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT_SEC, context=_SSL_CTX) as r:
+            raw = r.read().decode()
+            return json.loads(raw) if raw.strip() else {}
+    except urllib.error.HTTPError as e:
+        # Token may have expired — refresh once and retry.
+        if e.code in (401, 403) and _retry:
+            _ctrl_token(force=True)
+            return _ctrl(method, path, body, _retry=False)
+        detail = e.read().decode(errors="replace")
+        raise RuntimeError(f"controller {method} {path} -> HTTP {e.code}: {detail}")
+
+
+def _ctrl_get_hsi(user_id):
+    """Fetch a user's HSI config (the flat .config object) from the controller."""
+    resp = _ctrl("GET", f"/api/config/{NODE_UUID}/hsi/{user_id}")
+    return resp.get("config", resp)
 
 # ---------------------------------------------------------------------------
 # grpcurl helpers
@@ -154,32 +220,40 @@ def get_dns_static(node_addr, user_id):
 
 def apply_config(node_addr, user_id, vlan_id, pppoe_account, pppoe_password,
                  dhcp_pool_start, dhcp_pool_end, dhcp_subnet_mask, dhcp_gateway):
-    resp = _grpcurl(node_addr, 'ApplyConfig', {
-        'user_id':          int(user_id),
-        'vlan_id':          int(vlan_id),
-        'pppoe_account':    pppoe_account,
-        'pppoe_password':   pppoe_password,
-        'dhcp_pool_start':  dhcp_pool_start,
-        'dhcp_pool_end':    dhcp_pool_end,
-        'dhcp_subnet_mask': dhcp_subnet_mask,
-        'dhcp_gateway':     dhcp_gateway,
-    })
-    return {"status": resp.get("status", "")}
+    # Writes go through the controller (SSOT). Create, fall back to update if it
+    # already exists. desire_status is managed by connect/disconnect, not here.
+    cfg = {
+        'user_id':       str(user_id),
+        'vlan_id':       str(vlan_id),
+        'account_name':  pppoe_account,
+        'password':      pppoe_password,
+        'dhcp_addr_pool': f"{dhcp_pool_start}-{dhcp_pool_end}",
+        'dhcp_subnet':   dhcp_subnet_mask,
+        'dhcp_gateway':  dhcp_gateway,
+    }
+    try:
+        _ctrl("POST", f"/api/config/{NODE_UUID}/hsi", cfg)
+    except RuntimeError as e:
+        if "exist" in str(e).lower() or "409" in str(e):
+            _ctrl("PUT", f"/api/config/{NODE_UUID}/hsi/{user_id}", cfg)
+        else:
+            raise
+    return {"status": "Configuration successful"}
 
 
 def remove_config(node_addr, user_id):
-    resp = _grpcurl(node_addr, 'RemoveConfig', {'user_id': int(user_id)})
-    return {"status": resp.get("status", "")}
+    _ctrl("DELETE", f"/api/config/{NODE_UUID}/hsi/{user_id}")
+    return {"status": "Configuration removal successful"}
 
 
 def connect_hsi(node_addr, user_id):
-    resp = _grpcurl(node_addr, 'ConnectHsi', {'user_id': int(user_id)})
-    return {"status": resp.get("status", "")}
+    _ctrl("POST", "/api/pppoe/dial", {"node_id": NODE_UUID, "user_id": str(user_id)})
+    return {"status": "dial requested"}
 
 
 def disconnect_hsi(node_addr, user_id):
-    resp = _grpcurl(node_addr, 'DisconnectHsi', {'user_id': int(user_id)})
-    return {"status": resp.get("status", "")}
+    _ctrl("POST", "/api/pppoe/hangup", {"node_id": NODE_UUID, "user_id": str(user_id)})
+    return {"status": "hangup requested"}
 
 
 def start_dhcp_server(node_addr, user_id):
@@ -193,60 +267,71 @@ def stop_dhcp_server(node_addr, user_id):
 
 
 def add_dns_record(node_addr, user_id, domain, ip, ttl):
-    resp = _grpcurl(node_addr, 'AddDnsRecord', {
-        'user_id': int(user_id),
-        'domain':  domain,
-        'ip':      ip,
-        'ttl':     int(ttl),
-    })
-    return {"status": resp.get("status", "")}
+    _ctrl("POST", f"/api/config/{NODE_UUID}/dns/{user_id}",
+          {"domain": domain, "ip": ip, "ttl": int(ttl)})
+    return {"status": "dns record added"}
 
 
 def remove_dns_record(node_addr, user_id, domain):
-    resp = _grpcurl(node_addr, 'RemoveDnsRecord', {
-        'user_id': int(user_id),
-        'domain':  domain,
-    })
-    return {"status": resp.get("status", "")}
+    _ctrl("DELETE", f"/api/config/{NODE_UUID}/dns/{user_id}/{domain}")
+    return {"status": "dns record removed"}
 
 
 def set_subscriber_count(node_addr, subscriber_count):
-    resp = _grpcurl(node_addr, 'SetSubscriberCount', {'subscriber_count': int(subscriber_count)})
-    return {"status": resp.get("status", "")}
+    _ctrl("PUT", f"/api/nodes/{NODE_UUID}/subscriber-count",
+          {"subscriber_count": int(subscriber_count)})
+    return {"status": "subscriber count set"}
+
+
+def _update_hsi_field(user_id, mutate):
+    """Read-modify-write a user's HSI config via the controller (for SNAT / toggles)."""
+    cfg = _ctrl_get_hsi(user_id)
+    mutate(cfg)
+    _ctrl("PUT", f"/api/config/{NODE_UUID}/hsi/{user_id}", cfg)
 
 
 def set_snat_config(node_addr, user_id, eport, dip, iport):
-    resp = _grpcurl(node_addr, 'SetSnatConfig', {
-        'user_id': int(user_id),
-        'eport':   int(eport),
-        'dip':     dip,
-        'iport':   int(iport),
-    })
-    return {"status": resp.get("status", "")}
+    def mut(cfg):
+        pms = [p for p in cfg.get("port-mapping", []) or [] if str(p.get("eport")) != str(eport)]
+        pms.append({"index": str(len(pms)), "eport": str(eport), "dip": dip, "dport": str(iport)})
+        cfg["port-mapping"] = pms
+    _update_hsi_field(user_id, mut)
+    return {"status": "snat set"}
 
 
 def remove_snat_config(node_addr, user_id, eport):
-    resp = _grpcurl(node_addr, 'RemoveSnatConfig', {
-        'user_id': int(user_id),
-        'eport':   int(eport),
-    })
-    return {"status": resp.get("status", "")}
+    def mut(cfg):
+        cfg["port-mapping"] = [p for p in cfg.get("port-mapping", []) or []
+                               if str(p.get("eport")) != str(eport)]
+    _update_hsi_field(user_id, mut)
+    return {"status": "snat removed"}
 
 
 def set_dns_proxy(node_addr, user_id, enable):
-    resp = _grpcurl(node_addr, 'SetDnsProxy', {
-        'user_id': int(user_id),
-        'enable':  bool(enable),
-    })
-    return {"status": resp.get("status", "")}
+    _update_hsi_field(user_id, lambda cfg: cfg.__setitem__("dns_proxy_enable", bool(enable)))
+    return {"status": "dns_proxy set"}
 
 
 def set_tcp_conntrack(node_addr, user_id, enable):
-    resp = _grpcurl(node_addr, 'SetTcpConntrack', {
-        'user_id': int(user_id),
-        'enable':  bool(enable),
-    })
-    return {"status": resp.get("status", "")}
+    _update_hsi_field(user_id, lambda cfg: cfg.__setitem__("tcp_conntrack_enable", bool(enable)))
+    return {"status": "tcp_conntrack set"}
+
+
+def ctrl_login(node_addr=None):
+    """Verify controller login works; return a short token preview ({} on failure)."""
+    tok = _ctrl_token(force=True)
+    return {"ok": True, "token_preview": tok[:10]}
+
+
+def ctrl_desire(node_addr, user_id):
+    """Desired PPPoE state for a user, read from the controller (etcd-backed)."""
+    cfg = _ctrl_get_hsi(user_id)
+    return {"user_id": user_id, "desire_status": cfg.get("desire_status", "")}
+
+
+def ctrl_pppoe(node_addr, user_id):
+    """Observed PPPoE status for a user from the controller DB (fed by Kafka)."""
+    return _ctrl("GET", f"/api/config/{NODE_UUID}/pppoe/{user_id}")
 
 
 def get_user_drop_count(node_addr, user_id, port_idx=1):
@@ -367,6 +452,18 @@ def main():
                 sys.exit(1)
             enable = opts.args[1].lower() not in ("false", "0", "off")
             result = set_tcp_conntrack(opts.node, opts.args[0], enable)
+        elif opts.command == "ctrl_login":
+            result = ctrl_login(opts.node)
+        elif opts.command == "ctrl_desire":
+            if not opts.args:
+                print(json.dumps({"error": "ctrl_desire requires <user_id>"}), file=sys.stderr)
+                sys.exit(1)
+            result = ctrl_desire(opts.node, int(opts.args[0]))
+        elif opts.command == "ctrl_pppoe":
+            if not opts.args:
+                print(json.dumps({"error": "ctrl_pppoe requires <user_id>"}), file=sys.stderr)
+                sys.exit(1)
+            result = ctrl_pppoe(opts.node, int(opts.args[0]))
         elif opts.command == "get_user_drop_count":
             if not opts.args:
                 print(json.dumps({"error": "get_user_drop_count requires <user_id> [port_idx]"}),

@@ -41,6 +41,9 @@
 #include <grpc/grpc.h>
 
 #include "../grpc/fastrg_grpc_client.h"
+#include "cli_controller_client.h"
+#include "cli_etcd.h"
+#include "cli_dispatch.h"
 
 #include "cmds.h"
 
@@ -196,20 +199,20 @@ static void cmd_help_parsed(__attribute__((unused)) void *parsed_result,
                 __attribute__((unused)) void *data)
 {
     cmdline_printf(cl,"usage: \n"
-                      "show <hsi|dhcp> to show information\n"
-                      "show system <info|stats|xstats> to show system info/stats/xstats\n"
-                      "config <add|del> user <id> pppoe-dhcp vlan <id> account <account> password <password> pool <start~end> subnet <mask> gateway <ip> to add/update/del PPPoE/DHCP configuration\n"
-                      "configure SNAT port forwarding: config <add|del> user <id> snat eport <port> dip <ip> iport <port>\n"
-                      "config set subscriber_count <count> to set subscriber pool size\n"
-                      "config set subscriber <id> dns_proxy <on|off> to toggle per-subscriber DNS proxy\n"
-                      "config set subscriber <id> tcp_conntrack <on|off> to toggle per-subscriber TCP conntrack\n"
-                      "show user <id> nat port-forwarding to show port forwarding entries\n"
-                      "show user <id> arp-table [count] to show subscriber ARP table (default: 100 entries)\n"
-                      "exec hsi <start|stop> <user id | all> to start/stop HSI (PPPoE + DHCP)\n"
-                      "exec pppoe <start|stop> <user id | all> to start/stop PPPoE only\n"
-                      "exec dhcp-server <start|stop> <user id | all> to start/stop DHCP server only\n"
-                      "help to show usage commands\n"
-                      "quit/exit to quit FastRG CLI\n");
+        "show <hsi|dhcp> to show information\n"
+        "show system <info|stats|xstats> to show system info/stats/xstats\n"
+        "config <add|del> user <id> pppoe-dhcp vlan <id> account <account> password <password> pool <start~end> subnet <mask> gateway <ip> to add/update/del PPPoE/DHCP configuration\n"
+        "configure SNAT port forwarding: config <add|del> user <id> snat eport <port> dip <ip> iport <port>\n"
+        "config set subscriber_count <count> to set subscriber pool size\n"
+        "config set subscriber <id> dns_proxy <on|off> to toggle per-subscriber DNS proxy\n"
+        "config set subscriber <id> tcp_conntrack <on|off> to toggle per-subscriber TCP conntrack\n"
+        "show user <id> nat port-forwarding to show port forwarding entries\n"
+        "show user <id> arp-table [count] to show subscriber ARP table (default: 100 entries)\n"
+        "exec hsi <start|stop> <user id | all> to start/stop HSI (PPPoE + DHCP)\n"
+        "exec pppoe <start|stop> <user id | all> to start/stop PPPoE only\n"
+        "exec dhcp-server <start|stop> <user id | all> to start/stop DHCP server only\n"
+        "help to show usage commands\n"
+        "quit/exit to quit FastRG CLI\n");
 }
 
 cmdline_parse_token_string_t cmd_help_help =
@@ -266,7 +269,7 @@ static void cmd_config_pppoe_dhcp_parsed(void *parsed_result,
 
     if (strncmp(res->cmd_str, "del", 3) == 0) {
         /* Call gRPC function to remove the configuration */
-        fastrg_grpc_remove_config(res->user_id);
+        cli_dispatch_remove_hsi(res->user_id);
         return;
     }
 
@@ -312,8 +315,8 @@ static void cmd_config_pppoe_dhcp_parsed(void *parsed_result,
     cmdline_printf(cl, "  Subnet Mask: %s\n", subnet_str);
     cmdline_printf(cl, "  Gateway IP: %s\n", gateway_str);
 
-    fastrg_grpc_apply_config(res->user_id, res->vlan_id, 
-        res->pppoe_account, res->pppoe_password, pool_start, 
+    cli_dispatch_apply_hsi(res->user_id, res->vlan_id,
+        res->pppoe_account, res->pppoe_password, pool_start,
         pool_end, subnet_str, gateway_str);
 }
 
@@ -326,7 +329,7 @@ static void cmd_config_snat_parsed(void *parsed_result,
 
     if (strncmp(res->cmd_str, "del", 3) == 0) {
         /* Call gRPC function to remove the SNAT configuration */
-        fastrg_grpc_hsi_snat_unset(res->user_id, res->eport);
+        cli_dispatch_snat_unset(res->user_id, res->eport);
         return;
     }
 
@@ -345,7 +348,7 @@ static void cmd_config_snat_parsed(void *parsed_result,
     cmdline_printf(cl, "  Internal Port: %u\n", res->iport);
 
     /* Call gRPC function to apply SNAT configuration */
-    fastrg_grpc_hsi_snat_set(res->user_id, res->eport, dip_str, res->iport);
+    cli_dispatch_snat_set(res->user_id, res->eport, dip_str, res->iport);
 }
 
 cmdline_parse_token_string_t cmd_config_config =
@@ -495,7 +498,7 @@ static void cmd_config_parse_subscriber_count(void *parsed_result,
 
     cmdline_printf(cl, "Configuration subscriber count to %u\n", res->subscriber_count);
 
-    fastrg_grpc_set_subscriber(res->subscriber_count);
+    cli_dispatch_set_subscriber_count(res->subscriber_count);
 }
 
 cmdline_parse_token_string_t cmd_config_subscriber_config =
@@ -552,7 +555,7 @@ static void cmd_config_parse_dns_proxy(void *parsed_result,
     cmdline_printf(cl, "Setting dns_proxy=%s for subscriber %u\n",
         enable ? "on" : "off", res->user_id);
 
-    fastrg_grpc_set_dns_proxy(res->user_id, enable);
+    cli_dispatch_set_dns_proxy(res->user_id, enable);
 }
 
 cmdline_parse_token_string_t cmd_dns_proxy_config =
@@ -615,7 +618,7 @@ static void cmd_config_parse_tcp_conntrack(void *parsed_result,
     cmdline_printf(cl, "Setting tcp_conntrack=%s for subscriber %u\n",
         enable ? "on" : "off", res->user_id);
 
-    fastrg_grpc_set_tcp_conntrack(res->user_id, enable);
+    cli_dispatch_set_tcp_conntrack(res->user_id, enable);
 }
 
 cmdline_parse_token_string_t cmd_tcp_conntrack_config =
@@ -666,7 +669,7 @@ static void cmd_exec_parsed(void *parsed_result,
         user_id = 0;
     } else {
         user_id = strtoul(res->user_id, NULL, 10);
-        if (user_id <= 0) {
+        if (user_id == 0) {
             cmdline_printf(cl, "Wrong user id\n");
             return;
         }
@@ -674,17 +677,17 @@ static void cmd_exec_parsed(void *parsed_result,
 
     if (strncmp(res->subsystem, "hsi", 3) == 0) {
         if (strcmp(res->action, "start") == 0) {
-            fastrg_grpc_hsi_connect(user_id);
+            cli_dispatch_connect(user_id);
             fastrg_grpc_dhcp_server_start(user_id);
         } else {
-            fastrg_grpc_hsi_disconnect(user_id, false);
+            cli_dispatch_disconnect(user_id, false);
             fastrg_grpc_dhcp_server_stop(user_id);
         }
     } else if (strncmp(res->subsystem, "pppoe", 5) == 0) {
         if (strcmp(res->action, "start") == 0)
-            fastrg_grpc_hsi_connect(user_id);
+            cli_dispatch_connect(user_id);
         else
-            fastrg_grpc_hsi_disconnect(user_id, false);
+            cli_dispatch_disconnect(user_id, false);
     } else if (strncmp(res->subsystem, "dhcp-server", 11) == 0) {
         if (strcmp(res->action, "start") == 0)
             fastrg_grpc_dhcp_server_start(user_id);
@@ -849,7 +852,7 @@ static void cmd_config_dns_parsed(void *parsed_result,
     struct cmd_dns_config_result *res = parsed_result;
 
     if (strncmp(res->cmd_str, "del", 3) == 0) {
-        fastrg_grpc_remove_dns_record(res->user_id, res->domain);
+        cli_dispatch_del_dns(res->user_id, res->domain);
         return;
     }
 
@@ -867,7 +870,7 @@ static void cmd_config_dns_parsed(void *parsed_result,
     cmdline_printf(cl, "  IP: %s\n", ip_str);
     cmdline_printf(cl, "  TTL: %u\n", res->ttl);
 
-    fastrg_grpc_add_dns_record(res->user_id, res->domain, ip_str, res->ttl);
+    cli_dispatch_add_dns(res->user_id, res->domain, ip_str, res->ttl);
 }
 
 /* DNS config tokens */
@@ -1024,6 +1027,189 @@ cmdline_parse_inst_t cmd_flush_dns_cache_inst = {
     },
 };
 
+/* ──────────────────────────────────────────────
+ *  show config <desire|current|diff> user <id>
+ *    desire  = intended config (controller -> etcd)
+ *    current = running config/state on the node (node gRPC)
+ *    diff    = both, plus a drift summary
+ * ────────────────────────────────────────────── */
+struct cmd_show_config_result {
+    cmdline_fixed_string_t show;
+    cmdline_fixed_string_t config;
+    cmdline_fixed_string_t which;       /* desire / current / diff */
+    cmdline_fixed_string_t user;
+    uint16_t               user_id;
+};
+
+/* Copy the value of "key=" from s (up to the next space) into out. */
+static void extract_kv(const char *s, const char *key, char *out, size_t out_len)
+{
+    out[0] = '\0';
+    char pat[32];
+    snprintf(pat, sizeof(pat), "%s=", key);
+    const char *p = strstr(s, pat);
+    if (!p)
+        return;
+    p += strlen(pat);
+    size_t i = 0;
+    while (*p && *p != ' ' && i < out_len - 1)
+        out[i++] = *p++;
+    out[i] = '\0';
+}
+
+static void cmd_show_config_parsed(void *parsed_result, struct cmdline *cl,
+    __attribute__((unused)) void *data)
+{
+    struct cmd_show_config_result *res = parsed_result;
+    char desire[512] = { 0 }, current[512] = { 0 };
+
+    int want_desire = (strcmp(res->which, "current") != 0);
+    int want_current = (strcmp(res->which, "desire") != 0);
+    const char *src = NULL;
+    int have_current = 0;
+
+    if (want_desire)
+        src = cli_dispatch_get_desire(res->user_id, desire, sizeof(desire));
+    if (want_current)
+        have_current = (fastrg_grpc_get_hsi_user(res->user_id, current, sizeof(current)) == 0);
+
+    if (want_desire)
+        cmdline_printf(cl, "desired  (%s): %s\n", src, desire);
+    if (want_current)
+        cmdline_printf(cl, "current  (node) : %s\n", have_current ? current : "(unavailable)");
+
+    if (strcmp(res->which, "diff") == 0) {
+        if (!have_current || (src && strcmp(src, "none") == 0)) {
+            cmdline_printf(cl, "diff: cannot compare (missing desired or current)\n");
+            return;
+        }
+        char dv[64], cv[64], da[128], ca[128], ddesire[32], cstatus[64];
+        extract_kv(desire, "vlan", dv, sizeof(dv));
+        extract_kv(current, "vlan", cv, sizeof(cv));
+        extract_kv(desire, "account", da, sizeof(da));
+        extract_kv(current, "account", ca, sizeof(ca));
+        extract_kv(desire, "desire_status", ddesire, sizeof(ddesire));
+        extract_kv(current, "status", cstatus, sizeof(cstatus));
+
+        int config_differs = (strcmp(dv, cv) != 0) || (strcmp(da, ca) != 0);
+        cmdline_printf(cl, "diff: config %s (vlan %s/%s, account %s/%s)\n",
+            config_differs ? "DIFFERS" : "in-sync", dv, cv, da, ca);
+        cmdline_printf(cl, "diff: pppoe desired=%s actual=%s\n",
+            ddesire[0] ? ddesire : "?", cstatus[0] ? cstatus : "?");
+    }
+}
+
+cmdline_parse_token_string_t cmd_show_config_show =
+    TOKEN_STRING_INITIALIZER(struct cmd_show_config_result, show, "show");
+cmdline_parse_token_string_t cmd_show_config_config =
+    TOKEN_STRING_INITIALIZER(struct cmd_show_config_result, config, "config");
+cmdline_parse_token_string_t cmd_show_config_which =
+    TOKEN_STRING_INITIALIZER(struct cmd_show_config_result, which, "desire#current#diff");
+cmdline_parse_token_string_t cmd_show_config_user =
+    TOKEN_STRING_INITIALIZER(struct cmd_show_config_result, user, "user");
+cmdline_parse_token_num_t cmd_show_config_user_id =
+    TOKEN_NUM_INITIALIZER(struct cmd_show_config_result, user_id, RTE_UINT16);
+
+cmdline_parse_inst_t cmd_show_config = {
+    .f = cmd_show_config_parsed,
+    .data = NULL,
+    .help_str = "show config <desire|current|diff> user <id>: show desired/current config or their drift",
+    .tokens = {
+        (void *)&cmd_show_config_show,
+        (void *)&cmd_show_config_config,
+        (void *)&cmd_show_config_which,
+        (void *)&cmd_show_config_user,
+        (void *)&cmd_show_config_user_id,
+        NULL,
+    },
+};
+
+/* ──────────────────────────────────────────────
+ *  controller login — authenticate to the controller (REST /api/login),
+ *  store the JWT for subsequent ConfigService gRPC calls.
+ * ────────────────────────────────────────────── */
+struct cmd_controller_login_result {
+    cmdline_fixed_string_t controller;
+    cmdline_fixed_string_t login;
+};
+
+/* Read a line from stdin (no echo when hide=1, for passwords).
+ * Always saves and restores the terminal so this works inside DPDK's raw-mode
+ * cmdline (which disables ECHO and ICANON for the whole session). */
+static void read_line_prompt(const char *prompt, int hide, char *buf, size_t buflen)
+{
+    struct termios saved, tmp;
+    printf("%s", prompt);
+    fflush(stdout);
+
+    tcgetattr(STDIN_FILENO, &saved);
+    tmp = saved;
+    /* Enable canonical (line-buffered) input and CR→NL so fgets works. */
+    tmp.c_lflag |= ICANON;
+    tmp.c_iflag |= ICRNL;
+    if (hide)
+        tmp.c_lflag &= ~ECHO;
+    else
+        tmp.c_lflag |= ECHO;
+    tcsetattr(STDIN_FILENO, TCSANOW, &tmp);
+
+    if (fgets(buf, buflen, stdin) == NULL)
+        buf[0] = '\0';
+    size_t n = strlen(buf);
+    if (n > 0 && buf[n - 1] == '\n')
+        buf[n - 1] = '\0';
+
+    tcsetattr(STDIN_FILENO, TCSANOW, &saved);
+    if (hide)
+        printf("\n");
+}
+
+static void cmd_controller_login_parsed(__rte_unused void *parsed_result,
+    struct cmdline *cl, __rte_unused void *data)
+{
+    if (!cli_controller_configured()) {
+        cmdline_printf(cl, "Controller not configured. Start fastrg-cli with "
+            "-c <controller_grpc> -r <controller_rest_url> -n <node_uuid>.\n");
+        return;
+    }
+    char username[128] = { 0 }, password[128] = { 0 };
+    read_line_prompt("Controller username: ", 0, username, sizeof(username));
+    read_line_prompt("Controller password: ", 1, password, sizeof(password));
+
+    cli_ctrl_status_t rc = cli_controller_login(username, password);
+    memset(password, 0, sizeof(password));
+    switch (rc) {
+        case CLI_CTRL_OK:
+            cmdline_printf(cl, "Login successful; token acquired.\n");
+            break;
+        case CLI_CTRL_AUTH:
+            cmdline_printf(cl, "Login failed: wrong username or password. Try 'controller login' again.\n");
+            break;
+        case CLI_CTRL_UNAVAIL:
+            cmdline_printf(cl, "Login failed: controller REST endpoint unreachable.\n");
+            break;
+        default:
+            cmdline_printf(cl, "Login failed.\n");
+            break;
+    }
+}
+
+cmdline_parse_token_string_t cmd_controller_login_controller =
+    TOKEN_STRING_INITIALIZER(struct cmd_controller_login_result, controller, "controller");
+cmdline_parse_token_string_t cmd_controller_login_login =
+    TOKEN_STRING_INITIALIZER(struct cmd_controller_login_result, login, "login");
+
+cmdline_parse_inst_t cmd_controller_login = {
+    .f = cmd_controller_login_parsed,
+    .data = NULL,
+    .help_str = "controller login: authenticate to the controller and acquire a token",
+    .tokens = {
+        (void *)&cmd_controller_login_controller,
+        (void *)&cmd_controller_login_login,
+        NULL,
+    },
+};
+
 /****** CONTEXT (list of instruction) */
 cmdline_parse_ctx_t ctx[] = {
         (cmdline_parse_inst_t *)&cmd_info,
@@ -1046,6 +1232,8 @@ cmdline_parse_ctx_t ctx[] = {
         (cmdline_parse_inst_t *)&cmd_show_dns,
         (cmdline_parse_inst_t *)&cmd_flush_dns_cache_inst,
         (cmdline_parse_inst_t *)&cmd_log,
+        (cmdline_parse_inst_t *)&cmd_show_config,
+        (cmdline_parse_inst_t *)&cmd_controller_login,
     NULL,
 };
 
@@ -1053,27 +1241,48 @@ static void print_usage(const char *prog_name)
 {
     printf("Usage: %s [OPTIONS]\n", prog_name);
     printf("Options:\n");
-    printf("  -s, --socket <path>    Connect to Unix socket (default: unix:///var/run/fastrg/fastrg.sock)\n");
-    printf("  -i, --ip <address>     Connect to IP address (e.g., 127.0.0.1:50051)\n");
-    printf("  -h, --help             Show this help message\n");
-    printf("\nIf no option is specified, Unix socket connection is used by default.\n");
+    printf("  -s, --socket <path>      Node Unix socket (default: unix:///var/run/fastrg/fastrg.sock)\n");
+    printf("  -i, --ip <address>       Node gRPC IP address (e.g., 127.0.0.1:50052)\n");
+    printf("  -c, --controller <addr>  Controller ConfigService gRPC (e.g., 192.168.10.212:50052)\n");
+    printf("  -r, --rest <url>         Controller REST base URL for login (e.g., https://192.168.10.212:28443)\n");
+    printf("  -e, --etcd <endpoints>   etcd endpoints for direct-write fallback (e.g., 192.168.10.212:2379)\n");
+    printf("  -n, --node <uuid>        Managed node UUID (required for controller/etcd config keys)\n");
+    printf("  -h, --help               Show this help message\n");
+    printf("\n");
+    printf("Launch mode examples:\n");
+    printf("  Controller mode  (writes: controller -> etcd -> node)\n");
+    printf("    %s -c 192.168.10.212:50052 -r https://192.168.10.212:28443 -n <node-uuid>\n", prog_name);
+    printf("    then type: controller login\n");
+    printf("\n");
+    printf("  Etcd mode  (writes: etcd -> node, no controller)\n");
+    printf("    %s -e 192.168.10.212:2379 -n <node-uuid>\n", prog_name);
+    printf("\n");
+    printf("  Standalone mode  (writes directly to node gRPC)\n");
+    printf("    %s                          (default Unix socket)\n", prog_name);
+    printf("    %s -i 127.0.0.1:50052\n", prog_name);
 }
 
 int main(int argc, char **argv)
 {
     char *grpc_target = NULL;
     char target_buffer[256];
+    const char *controller_addr = NULL, *controller_rest = NULL;
+    const char *etcd_endpoints = NULL, *node_uuid = NULL;
     int opt;
 
     static struct option long_options[] = {
         {"socket", required_argument, 0, 's'},
         {"ip", required_argument, 0, 'i'},
+        {"controller", required_argument, 0, 'c'},
+        {"rest", required_argument, 0, 'r'},
+        {"etcd", required_argument, 0, 'e'},
+        {"node", required_argument, 0, 'n'},
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0}
     };
 
     /* Parse command line arguments */
-    while ((opt = getopt_long(argc, argv, "s:i:h", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "s:i:c:r:e:n:h", long_options, NULL)) != -1) {
         switch (opt) {
         case 's':
             /* Unix socket path provided */
@@ -1084,6 +1293,18 @@ int main(int argc, char **argv)
             /* IP address provided */
             snprintf(target_buffer, sizeof(target_buffer), "%s", optarg);
             grpc_target = target_buffer;
+            break;
+        case 'c':
+            controller_addr = optarg;
+            break;
+        case 'r':
+            controller_rest = optarg;
+            break;
+        case 'e':
+            etcd_endpoints = optarg;
+            break;
+        case 'n':
+            node_uuid = optarg;
             break;
         case 'h':
             print_usage(argv[0]);
@@ -1099,10 +1320,28 @@ int main(int argc, char **argv)
         grpc_target = "unix:///var/run/fastrg/fastrg.sock";
 
     grpc_init();
-    printf("Connecting to gRPC server at: %s\n", grpc_target);
+    if (!controller_addr)
+        printf("Connecting to gRPC server at: %s\n", grpc_target);
     fastrg_grpc_client_connect(grpc_target);
 
-    struct cmdline *cl = cmdline_stdin_new(ctx, "FastRG> ");
+    /* Configure the controller client (tier 1 of the write fallback). */
+    cli_controller_configure(controller_addr, controller_rest, node_uuid);
+    cli_etcd_configure(etcd_endpoints, node_uuid);
+
+    char prompt[48];
+    if (controller_addr && node_uuid) {
+        printf("[Controller mode] %s  node: %s\n"
+               "Run 'controller login' to authenticate.\n",
+               controller_addr, node_uuid);
+        snprintf(prompt, sizeof(prompt), "FastRG[controller]> ");
+    } else if (etcd_endpoints && node_uuid) {
+        printf("[Etcd mode] %s  node: %s\n", etcd_endpoints, node_uuid);
+        snprintf(prompt, sizeof(prompt), "FastRG[etcd]> ");
+    } else {
+        snprintf(prompt, sizeof(prompt), "FastRG> ");
+    }
+
+    struct cmdline *cl = cmdline_stdin_new(ctx, prompt);
     if (cl == NULL) {
         grpc_shutdown();
         return -1;

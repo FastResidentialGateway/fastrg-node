@@ -24,13 +24,25 @@ phase4_lan_to_wan() {
     # Step 11 — iperf3
     # ------------------------------------------------------------------
     info "Step 11: iperf3 test (LAN→WAN, port ${SRV_PORT}, cport 47792)..."
-    # Kill any stale iperf3 server from previous runs before starting a fresh daemon
+    # Kill any stale iperf3 server then wait until the new daemon is actually
+    # listening. iperf3 -D fork-execs asynchronously; a plain sleep risks a race
+    # where the client connects before the socket is bound.
     ssh_wan "pkill -f 'iperf3 -s' 2>/dev/null || true" || true
     sleep 1
     ssh_wan "iperf3 -s -B ${WAN_IP} -p ${SRV_PORT} -D --forceflush >/dev/null 2>&1 || true" || true
-    sleep 2
+    _iperf_ready=0
+    for _iw in $(seq 1 10); do
+        sleep 1
+        if ssh_wan "ss -ltn 2>/dev/null | grep -q ':${SRV_PORT}'" 2>/dev/null; then
+            _iperf_ready=1; break
+        fi
+    done
+    [[ $_iperf_ready -eq 0 ]] && warn "iperf3 server did not start listening on ${SRV_PORT} within 10s"
 
-    IPERF_OUT=$(ssh_lan "iperf3 -c ${WAN_IP} -p ${SRV_PORT} --cport 47792 -t 5 -J 2>&1" || true)
+    # Do NOT fix the client source port: a fixed --cport lingers in TIME_WAIT for
+    # 60s after the connection closes, causing "Address already in use" on the
+    # next run. Let the OS pick an ephemeral port instead.
+    IPERF_OUT=$(ssh_lan "iperf3 -c ${WAN_IP} -p ${SRV_PORT} -t 5 -J 2>&1" || true)
     # Cleanup iperf3 server
     ssh_wan "pkill -f 'iperf3 -s' 2>/dev/null || true" || true
 

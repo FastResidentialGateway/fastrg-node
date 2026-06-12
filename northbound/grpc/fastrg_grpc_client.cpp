@@ -27,12 +27,8 @@ class FastRGNodeClient {
 std::unique_ptr<FastRGNodeClient> fastrg_client;
 
 void fastrg_grpc_client_connect(char *server_address) {
-    std::cout << "grpc client connecting to " << server_address << std::endl;
     auto channel = grpc::CreateChannel(server_address, grpc::InsecureChannelCredentials());
     fastrg_client = std::make_unique<FastRGNodeClient>(channel);
-    std::cout << "grpc client connected to " << server_address << std::endl;
-
-    return;
 }
 
 void fastrg_grpc_apply_config(U16 user_id, U16 vlan_id, char *pppoe_account, 
@@ -417,6 +413,29 @@ void fastrg_grpc_get_hsi_info() {
         std::cout << "  Error code: " << status.error_code() << std::endl;
         std::cout << "  Error message: " << status.error_message() << std::endl;
     }
+}
+
+int fastrg_grpc_get_hsi_user(U16 user_id, char *out_buf, U32 out_len) {
+    if (!out_buf || out_len == 0)
+        return -1;
+    google::protobuf::Empty request;
+    FastrgHsiInfo reply;
+    ClientContext context;
+    Status status = fastrg_client->stub_->GetFastrgHsiInfo(&context, request, &reply);
+    if (!status.ok())
+        return -1;
+    for (int i = 0; i < reply.hsi_infos_size(); i++) {
+        const HsiInfo& h = reply.hsi_infos(i);
+        if (h.user_id() != user_id)
+            continue;
+        snprintf(out_buf, out_len,
+            "user_id=%u vlan=%u account=%s status=%s ip=%s gateway=%s",
+            h.user_id(), h.vlan_id(), h.account().c_str(), h.status().c_str(),
+            h.ip_addr().c_str(), h.gateway().c_str());
+        return 0;
+    }
+    snprintf(out_buf, out_len, "(no running state for user %u)", user_id);
+    return 0;
 }
 
 void fastrg_grpc_get_dhcp_info() {

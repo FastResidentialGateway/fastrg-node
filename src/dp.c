@@ -37,7 +37,7 @@
 #include "trace.h"
 #include "utils.h"
 
-#define RX_RING_SIZE 128
+#define RX_RING_SIZE 1024
 
 #define TX_RING_SIZE 512
 

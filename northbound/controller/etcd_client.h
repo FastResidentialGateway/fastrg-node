@@ -15,29 +15,23 @@ typedef enum {
     ETCD_CONNECTION_FAILED = -2,
     ETCD_WATCH_FAILED = -3,
     ETCD_CONFIG_PARSE_FAILED = -4,
-    ETCD_KEY_NOT_FOUND = -5
+    ETCD_KEY_NOT_FOUND = -5,
+    ETCD_CAS_CONFLICT = -6      // Compare-And-Swap exhausted retries (concurrent writer won)
 } etcd_status_t;
 
 typedef enum {
     HSI_ACTION_CREATE = 1,
     HSI_ACTION_UPDATE = 2,
-    HSI_ACTION_DELETE = 3,
-    COMMAND_ACTION_DIAL = 4,
-    COMMAND_ACTION_HANGUP = 5
+    HSI_ACTION_DELETE = 3
 } etcd_action_type_t;
 
-#define ETCD_RETRY_BASE_TIME 1 // in second
+/* PPPoE desired connection state, stored in the HSI config object as
+ * config.desire_status. Only the CLI/controller change it (connect/disconnect).
+ * The node reconciles the live PPPoE session toward this value. */
+#define DESIRE_STATUS_CONNECT    "connect"
+#define DESIRE_STATUS_DISCONNECT "disconnect"
 
-// Fallback error reason categories for quick problem identification
-typedef enum {
-    ERROR_REASON_CALLBACK_FAILED = 1,        // Callback function returned error
-    ERROR_REASON_PARSE_FAILED = 2,           // JSON parsing failed
-    ERROR_REASON_INVALID_FORMAT = 3,         // Invalid key/value format
-    ERROR_REASON_MISSING_FIELD = 4,          // Required field missing in config
-    ERROR_REASON_RESOURCE_UNAVAILABLE = 5,   // System resource not available
-    ERROR_REASON_TIMEOUT = 6,                // Processing timeout
-    ERROR_REASON_UNKNOWN = 99                // Unknown error
-} etcd_error_reason_t;
+#define ETCD_RETRY_BASE_TIME 1 // in second
 
 // SNAT port-mapping entry for etcd config
 typedef struct {
@@ -59,6 +53,7 @@ typedef struct {
     char dns_secondary[32];     /* secondary DNS server IP (e.g. "1.1.1.1") */
     BOOL dns_proxy_enable;      /* per-subscriber DNS proxy enable; defaults to TRUE when absent in etcd */
     BOOL tcp_conntrack_enable;  /* per-subscriber TCP SPI enable; defaults to TRUE when absent in etcd */
+    char desire_status[16];     /* "connect"/"disconnect"; empty = disconnect. Only CLI/controller set it. */
     port_mapping_t *port_mappings;  // heap-allocated; use hsi_config_free_port_mappings() to free
     int port_mapping_count;
 } hsi_config_t;
@@ -72,32 +67,16 @@ static inline void hsi_config_free_port_mappings(hsi_config_t *cfg) {
     }
 }
 
-// PPPoE command structure
-typedef struct {
-    char action[16];        // "dial" or "hangup"
-    char user_id[64];
-    char vlan[16];
-    char account[256];
-    char password[256];
-    long timestamp;
-} pppoe_command_t;
-
 // User count config structure for dynamic scaling
 typedef struct {
     int user_count;         // New user count to scale to
 } user_count_config_t;
 
-typedef enum {
-    ENABLE_STATUS_ENABLED = 1,
-    ENABLE_STATUS_ENABLING = 2,
-    ENABLE_STATUS_DISABLING = 3,
-    ENABLE_STATUS_DISABLED = 4
-} hsi_enable_status_t;
-
-// Full HSI config structure including metadata
+// Full HSI config structure including metadata.
+// PPPoE desired state lives in config.desire_status; observed/actual status is
+// reported to the controller via Kafka (no longer stored in etcd metadata).
 typedef struct {
     hsi_config_t config;
-    hsi_enable_status_t enable_status;
     char updated_by[64];
     char updated_at[32];
     char resource_version[64];
@@ -107,9 +86,6 @@ typedef struct {
 typedef STATUS (*hsi_config_callback_t)(const char *node_id, const char *user_id, 
     const hsi_config_t *config, etcd_action_type_t action, 
     int64_t revision, void *user_data);
-
-typedef STATUS (*pppoe_command_callback_t)(const char *node_id, 
-    const pppoe_command_t *command, void *user_data);
 
 typedef STATUS (*user_count_changed_callback_t)(const char *node_id,
     const user_count_config_t *config, etcd_action_type_t action,
@@ -143,13 +119,12 @@ typedef enum {
     ETCD_EVENT_HSI = 1,        /* HSI config create/update/delete         */
     ETCD_EVENT_USER_COUNT,     /* subscriber-count change                 */
     ETCD_EVENT_DNS_RECORD,     /* DNS static record create/update/delete  */
-    ETCD_EVENT_PPPOE_COMMAND,  /* PPPoE dial/hangup command               */
     ETCD_EVENT_HSI_SWEEP       /* reconcile: keep ccb_ids present in etcd       */
 } etcd_event_kind_t;
 
 typedef struct etcd_event {
     etcd_event_kind_t  kind;
-    etcd_action_type_t action;          /* CREATE/UPDATE/DELETE; unused for command/sweep */
+    etcd_action_type_t action;          /* CREATE/UPDATE/DELETE; unused for sweep */
     int64_t            revision;
     BOOL               from_reconcile;  /* TRUE: periodic reconcile; FALSE: live watch event */
     char               node_id[64];
@@ -157,13 +132,10 @@ typedef struct etcd_event {
     union {
         struct {
             hsi_config_t config;        /* config.port_mappings is heap-owned by this event */
-            BOOL         is_enabled;    /* reconcile: also issue a dial when TRUE */
-            char        *raw_value;     /* heap-owned raw JSON: new value (PUT) or deleted
-                                           value (DELETE); for failed_events/ records */
+            BOOL         desire_connect;/* derived from config.desire_status == "connect" */
         } hsi;
         user_count_config_t user_count;
         dns_record_config_t dns_record;
-        pppoe_command_t     command;
         struct {
             int *present_ccb_ids;       /* heap-owned: ccb_ids that exist in etcd */
             int  count;
@@ -177,7 +149,6 @@ static inline void etcd_event_free(etcd_event_t *ev) {
         return;
     if (ev->kind == ETCD_EVENT_HSI) {
         hsi_config_free_port_mappings(&ev->event_data.hsi.config);
-        free(ev->event_data.hsi.raw_value);
     } else if (ev->kind == ETCD_EVENT_HSI_SWEEP) {
         free(ev->event_data.sweep.present_ccb_ids);
     }
@@ -199,22 +170,92 @@ void etcd_client_stop_watch(void);
 /* Delete processed command from etcd */
 etcd_status_t etcd_client_delete_command(const char *command_key);
 
-/* Write a fallback-error record to etcd's failed_events/ namespace. Used by the
- * control-plane loop to report a config event it could not apply. */
-void etcd_client_write_fallback_error(const char *event_type, const char *key,
-    const char *node_id, const char *user_id, etcd_error_reason_t reason,
-    const char *error_detail, const char *original_value);
-
 /* Check if etcd client is initialized */
 int etcd_client_is_initialized(void);
 
-/* Put or delete HSI config for a node/user
+/* Last-known etcd reachability, updated by the watchdog each tick (and set on a
+ * successful init). Non-blocking. Returns 1 if etcd is currently reachable.
+ * Used by the node gRPC server to decide whether to accept CLI config writes:
+ * reject when SDN + reachable (CLI must go via controller/etcd), accept+queue
+ * when etcd is unreachable. */
+int etcd_client_is_connected(void);
+
+/* ---- Offline config write queue (point 7) -------------------------------
+ * When the node is in SDN mode but etcd is unreachable, CLI config writes that
+ * arrive via the node gRPC server are applied locally AND queued here. The queue
+ * is persisted to disk (survives a node restart while etcd is still down) and
+ * flushed to etcd (with timestamp-based merge + CAS) once etcd is reachable again.
+ * This is the ONLY path by which the node writes config to etcd.
+ */
+
+/* Load any persisted queue from disk. Call once after etcd_client_init(). */
+etcd_status_t etcd_client_queue_load(void);
+
+/* Enqueue a CLI-originated HSI config PUT for later flush to etcd. Builds the
+ * etcd JSON internally and stamps it with the current time. On flush, the
+ * subscriber's existing desire_status in etcd is preserved (a config edit must
+ * not clobber PPPoE intent). */
+etcd_status_t etcd_client_queue_hsi_put(const char *node_id, const char *user_id,
+    const hsi_config_t *config, const char *updated_by);
+
+/* Enqueue a CLI-originated HSI config DELETE for later flush to etcd. */
+etcd_status_t etcd_client_queue_hsi_delete(const char *node_id, const char *user_id);
+
+/* Enqueue a CLI-originated subscriber-count change for later flush to etcd. */
+etcd_status_t etcd_client_queue_subscriber_count(const char *node_id,
+    const char *subscriber_count_str, const char *updated_by);
+
+/* Enqueue a CLI-originated PPPoE desire_status change (connect/disconnect) for
+ * later flush. On flush the subscriber's existing config in etcd is preserved
+ * and ONLY config.desire_status is updated (a connect/disconnect must not
+ * clobber a concurrent config edit). desire_status must be "connect"/"disconnect". */
+etcd_status_t etcd_client_queue_desire_status(const char *node_id, const char *user_id,
+    const char *desire_status);
+
+/* Number of entries currently pending in the offline queue. */
+int etcd_client_queue_pending(void);
+
+/* ---- Compare-And-Swap primitive -----------------------------------------
+ * Generic CAS put built on etcd ModRevision. See docs/contracts/cas-convention.md.
+ * Later slices (config writes, desire_status, offline-queue flush) build on this.
+ */
+
+/**
+ * @brief Mutate callback for etcd_client_cas_put().
+ * @param current_json  Current value as a NUL-terminated JSON string, or NULL if
+ *                      the key does not exist.
+ * @param out_value     On SUCCESS, set to a malloc'd NUL-terminated JSON string to
+ *                      write; etcd_client_cas_put() takes ownership and frees it.
+ * @param user_data     Opaque pointer forwarded from etcd_client_cas_put().
+ * @return SUCCESS to proceed with the write, ERROR to abort the CAS (no write).
+ */
+typedef STATUS (*etcd_mutate_fn_t)(const char *current_json, char **out_value,
+    void *user_data);
+
+/**
+ * @fn etcd_client_cas_put
+ * @brief Compare-And-Swap put on an etcd key, keyed on ModRevision.
+ *
+ * Reads the key, invokes @p mutate_fn to produce the new value, then writes it
+ * back only if the key's revision is unchanged. On a concurrent write (CAS
+ * conflict) it retries with exponential backoff (5 attempts, 50ms..800ms).
+ *
+ * @param key           Full etcd key (e.g. "configs/{node}/hsi/{user}").
+ * @param mutate_fn     Callback that produces the new value from the current one.
+ * @param user_data     Opaque pointer forwarded to @p mutate_fn.
+ * @param out_revision  Optional (may be NULL); receives the new etcd revision on success.
+ * @return ETCD_SUCCESS, ETCD_CAS_CONFLICT (retries exhausted), or ETCD_ERROR.
+ */
+etcd_status_t etcd_client_cas_put(const char *key, etcd_mutate_fn_t mutate_fn,
+    void *user_data, int64_t *out_revision);
+
+/* Put HSI config for a node/user.
  * key: configs/{nodeId}/hsi/{userId}
- * value: JSON matching HSIConfigWithMetadata
+ * value: JSON matching HSIConfigWithMetadata. PPPoE desired state is carried in
+ *        config->desire_status ("connect"/"disconnect").
  */
 etcd_status_t etcd_client_put_hsi_config(const char *node_id, const char *user_id,
-    const hsi_config_t *config, hsi_enable_status_t enable_status, const char *updated_by,
-    int64_t *revision);
+    const hsi_config_t *config, const char *updated_by, int64_t *revision);
 /**
  * @fn etcd_client_delete_hsi_config
  * 
@@ -245,43 +286,8 @@ etcd_status_t etcd_client_delete_hsi_config(const char *node_id,
  * @return
  *        ETCD_SUCCESS or error code
  */
-etcd_status_t etcd_client_get_hsi_config(const char *node_id, 
+etcd_status_t etcd_client_get_hsi_config(const char *node_id,
     const char *user_id, hsi_config_full_t *output);
-
-/**
- * @fn etcd_client_modify_hsi_config_status
- * 
- * @brief Modify HSI config status (enable/disable)
- * This function updates only the metadata.enableStatus field in etcd
- * and marks the change to prevent the watcher from processing it
- * @param node_id
- *      Node UUID
- * @param user_id
- *      User identifier
- * @param enable_status
- *      HSI command status
- * @return
- *      ETCD_SUCCESS or error code
- */
-etcd_status_t etcd_client_modify_hsi_config_status(const char *node_id, 
-    const char *user_id, hsi_enable_status_t enable_status, int64_t *revision);
-
-/**
- * @fn etcd_client_get_hsi_config_status
- * 
- * @brief Get HSI config status from etcd
- *        This function reads the current HSI config status
- * @param node_id
- *        Node UUID
- * @param user_id
- *        User identifier
- * @param output_status
- *        Current HSI config status
- * @return
- *        ETCD_SUCCESS or error code
- */
-etcd_status_t etcd_client_get_hsi_config_status(const char *node_id, 
-    const char *user_id, hsi_enable_status_t *output_status);
 
 /**
  * @fn etcd_client_put_subscriber_count
@@ -323,8 +329,6 @@ etcd_status_t etcd_client_get_subscriber_count(const char* node_id,
  *      Node UUID
  * @param hsi_callback
  *      Callback to invoke for each config
- * @param command_callback
- *      Callback to invoke for each command
  * @param user_count_callback
  *      Callback to invoke for user count config
  * @param user_data
@@ -333,8 +337,7 @@ etcd_status_t etcd_client_get_subscriber_count(const char* node_id,
  *      ETCD_SUCCESS or error code
  */
 etcd_status_t etcd_client_load_existing_configs(const char *node_uuid,
-    hsi_config_callback_t hsi_callback, 
-    pppoe_command_callback_t command_callback,
+    hsi_config_callback_t hsi_callback,
     user_count_changed_callback_t user_count_callback,
     dns_record_callback_t dns_record_callback,
     void *user_data);
@@ -377,7 +380,7 @@ etcd_status_t etcd_client_delete_dns_record(const char *node_id, const char *use
  *
  * @brief Load all DNS static records for a specific subscriber from etcd.
  *        Called when a PPPoE session comes up to restore per-user DNS overrides.
- *        key pattern: configs/{nodeId}/{userId}/dns/{domain}
+ *        key pattern: configs/{nodeId}/dns/{userId}/{domain}
  * @param node_uuid Node UUID
  *      Node UUID
  * @param user_id

@@ -16,7 +16,6 @@
 #include <rte_memcpy.h>
 #include <rte_flow.h>
 #include <rte_atomic.h>
-#include <rte_pdump.h>
 #include <rte_trace.h>
 #include <rte_rcu_qsbr.h>
 
@@ -31,6 +30,7 @@
 #include "../utils.h"
 #include "../etcd_integration.h"
 #include "../northbound.h"
+#include "kafka_producer.h"
 
 U32	            ppp_interval;
 
@@ -136,9 +136,9 @@ STATUS ppp_init_config_by_user(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb, U16 ccb
     rte_timer_init(&(ppp_ccb->pppoe));
     rte_timer_init(&(ppp_ccb->ppp));
     rte_timer_init(&(ppp_ccb->ppp_alive));
-    rte_timer_init(&(ppp_ccb->etcd_pppoe_status_timer));
     rte_atomic16_init(&ppp_ccb->dp_start_bool);
     rte_atomic16_init(&ppp_ccb->ppp_bool);
+    rte_atomic16_init(&ppp_ccb->redial_pending);
     rte_atomic64_init(&ppp_ccb->pppoes_rx_bytes);
     rte_atomic64_init(&ppp_ccb->pppoes_tx_bytes);
     rte_atomic64_init(&ppp_ccb->pppoes_rx_packets);
@@ -298,8 +298,15 @@ STATUS pppd_add_ccb(FastRG_t *fastrg_ccb, U16 extra_ccb_count)
         return SUCCESS;
     }
 
-    if (rte_mempool_in_use_count(fastrg_ccb->ppp_ccb_mp) > fastrg_ccb->user_count) {
-        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, PPPLOGMSG, "we have unused ccb in mempool, no need to add more");
+    /* Early-return only when ALL needed slots (0 .. old+extra-1) were already
+     * allocated in a previous expansion.  Checking in_use >= new_user_count
+     * (not just > user_count) ensures the pointer array already covers the full
+     * new range: every pppd_add_ccb that extended the array also allocated pool
+     * objects for every new slot, so in_use_count tracks array high-water-mark. */
+    U16 new_user_count_check = fastrg_ccb->user_count + extra_ccb_count;
+    if (rte_mempool_in_use_count(fastrg_ccb->ppp_ccb_mp) >= new_user_count_check) {
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, PPPLOGMSG,
+            "CCBs up to %u already allocated, reusing existing array", new_user_count_check);
         return SUCCESS;
     }
 
@@ -310,24 +317,36 @@ STATUS pppd_add_ccb(FastRG_t *fastrg_ccb, U16 extra_ccb_count)
     }
 
     ppp_ccb_t **old_array = (ppp_ccb_t **)fastrg_ccb->ppp_ccb;
+    /* Use in_use_count as the array high-water-mark.  When user_count decreases,
+     * the pointer array is NOT shrunk, so existing objects (and their DPDK rings)
+     * remain at their original indices.  Copying only up to user_count would miss
+     * those entries, and re-allocating objects for those slots would create DPDK
+     * rings with duplicate names → ring creation failure. */
+    U16 old_array_hwm = (U16)rte_mempool_in_use_count(fastrg_ccb->ppp_ccb_mp);
     U16 old_user_count = fastrg_ccb->user_count;
     U16 new_user_count = old_user_count + extra_ccb_count;
+    /* Clamp high-water-mark to new_user_count (can't exceed target). */
+    if (old_array_hwm > new_user_count) old_array_hwm = new_user_count;
+    U16 truly_new = new_user_count - old_array_hwm;
 
-    ppp_ccb_t **new_array = fastrg_malloc(ppp_ccb_t *,  
+    ppp_ccb_t **new_array = fastrg_malloc(ppp_ccb_t *,
         sizeof(ppp_ccb_t *) * new_user_count, 0);
     if (new_array == NULL) {
-        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG, 
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG,
             "realloc ppp_ccb array failed");
         rte_atomic16_clear(&fastrg_ccb->ppp_ccb_updating);
         return ERROR;
     }
 
+    /* Copy ALL existing valid entries (up to high-water-mark, not just user_count). */
     if (old_array != NULL)
-        memcpy(new_array, old_array, sizeof(ppp_ccb_t *) * old_user_count);
+        memcpy(new_array, old_array, sizeof(ppp_ccb_t *) * old_array_hwm);
 
-    memset(&new_array[old_user_count], 0, sizeof(ppp_ccb_t *) * extra_ccb_count);
+    if (truly_new > 0) {
+        memset(&new_array[old_array_hwm], 0, sizeof(ppp_ccb_t *) * truly_new);
+    }
 
-    if (pppd_allocate_ccbs(fastrg_ccb, old_user_count, extra_ccb_count, new_array) == ERROR) {
+    if (truly_new > 0 && pppd_allocate_ccbs(fastrg_ccb, old_array_hwm, truly_new, new_array) == ERROR) {
         fastrg_mfree(new_array);
         rte_atomic16_clear(&fastrg_ccb->ppp_ccb_updating);
         return ERROR;
@@ -370,8 +389,11 @@ STATUS pppd_disable_ccb(FastRG_t *fastrg_ccb, U16 remove_ccb_count, U16 old_ccb_
     for(U16 i=0; i<remove_ccb_count; i++) {
         U16 ccb_id = old_ccb_count - 1 - i;
         ppp_ccb_t *ppp_ccb = old_array[ccb_id];
+        /* A slot can be NULL when the count was grown past the configured users
+         * (unconfigured slots are not allocated). Nothing to disable there. */
+        if (ppp_ccb == NULL)
+            continue;
         exit_ppp(ppp_ccb);
-        rte_timer_stop(&ppp_ccb->etcd_pppoe_status_timer);
         reset_vlan_map_ccb_id(fastrg_ccb, rte_atomic16_read(&ppp_ccb->vlan_id));
         ppp_cleanup_config_by_user(ppp_ccb, ccb_id);
     }
@@ -409,7 +431,6 @@ STATUS pppd_remove_ccb(FastRG_t *fastrg_ccb, U16 remove_ccb_count, U16 old_ccb_c
         U16 ccb_id = old_ccb_count - 1 - i;
         ppp_ccb_t *ppp_ccb = old_array[ccb_id];
         exit_ppp(ppp_ccb);
-        rte_timer_stop(&ppp_ccb->etcd_pppoe_status_timer);
         if (ppp_ccb->ppp_user_acc != NULL)
             fastrg_mfree(ppp_ccb->ppp_user_acc);
         if (ppp_ccb->ppp_passwd != NULL)
@@ -496,7 +517,17 @@ STATUS pppd_init(FastRG_t *fastrg_ccb)
         "ppp_ccb_pool",                      /* name */
         mempool_size,                        /* user count */
         sizeof(ppp_ccb_t),                   /* ppp_ccb size */
-        mempool_size * 2 / 3,                /* per-lcore cache size */
+        /* No per-lcore cache. CCB get/put is a control-plane resize operation,
+         * not a per-packet hot path, so the cache buys nothing here. Worse, a
+         * cache strands free CCBs in one lcore's local cache where the lcore
+         * doing the resize cannot reach them: rte_mempool_get then fails with
+         * ENOENT even though rte_mempool_avail_count reports objects free,
+         * which intermittently breaks subscriber-count expansion. cache=0 keeps
+         * every object in the common ring, reachable from any lcore. (The cache
+         * only affects the alloc/free fast path — a ppp_ccb, once allocated, is
+         * shared hugepage memory referenced via the ppp_ccb[] array and stays
+         * fully accessible to the data-plane lcores regardless of cache size.) */
+        0,                                   /* per-lcore cache size */
         0,                                   /* private_data_size */
         NULL, NULL,                          /* mp_init, mp_init_arg */
         NULL, NULL,                          /* obj_init, obj_init_arg */
@@ -578,48 +609,6 @@ STATUS ppp_disconnect(ppp_ccb_t *ppp_ccb)
     return SUCCESS;
 }
 
-void check_etcd_pppoe_status(struct rte_timer *tim, ppp_ccb_t *ppp_ccb)
-{
-    FastRG_t *fastrg_ccb = ppp_ccb->fastrg_ccb;
-    char *node_id = fastrg_ccb->node_uuid;
-    char user_id_str[8] = { 0 };
-    hsi_enable_status_t hsi_enable_status;
-    int64_t revision = 0;
-
-    snprintf(user_id_str, sizeof(user_id_str), "%u", ppp_ccb->user_num);
-    etcd_status_t status = etcd_client_get_hsi_config_status(node_id, user_id_str, &hsi_enable_status);
-    if (status != ETCD_SUCCESS && status != ETCD_KEY_NOT_FOUND) {
-        if (tim->expire >= (ETCD_RETRY_BASE_TIME << 5)) { // try for 5 times
-            FastRG_LOG(ERR, fastrg_ccb->fp, ppp_ccb, PPPLOGMSG, 
-                "User %" PRIu16 " failed to get HSI config status from etcd after multiple attempts.\n", 
-                ppp_ccb->user_num);
-            return;
-        }
-        tim->expire <<= 1;
-        rte_timer_reset(tim, tim->expire, SINGLE, fastrg_ccb->lcore.ctrl_thread, 
-            (rte_timer_cb_t)check_etcd_pppoe_status, ppp_ccb);
-        return;
-    }
-    if (rte_atomic16_read(&ppp_ccb->ppp_bool) == 0 && hsi_enable_status != ENABLE_STATUS_DISABLED) {
-        etcd_mark_pending_event(HSI_ACTION_UPDATE, ppp_ccb->user_num - 1);
-        if (etcd_client_modify_hsi_config_status(fastrg_ccb->node_uuid, user_id_str, 
-                ENABLE_STATUS_DISABLED, &revision) == ETCD_SUCCESS) {
-            etcd_confirm_pending_event(HSI_ACTION_UPDATE, ppp_ccb->user_num - 1, revision);
-        } else {
-            etcd_remove_event(HSI_ACTION_UPDATE, ppp_ccb->user_num - 1);
-        }
-    } else if (rte_atomic16_read(&ppp_ccb->ppp_bool) == 1 && 
-            hsi_enable_status != ENABLE_STATUS_ENABLED) {
-        etcd_mark_pending_event(HSI_ACTION_UPDATE, ppp_ccb->user_num - 1);
-        if (etcd_client_modify_hsi_config_status(fastrg_ccb->node_uuid, user_id_str, 
-                ENABLE_STATUS_ENABLED, &revision) == ETCD_SUCCESS) {
-            etcd_confirm_pending_event(HSI_ACTION_UPDATE, ppp_ccb->user_num - 1, revision);
-        } else {
-            etcd_remove_event(HSI_ACTION_UPDATE, ppp_ccb->user_num - 1);
-        }
-    }
-}
-
 void exit_ppp(ppp_ccb_t *ppp_ccb)
 {
     FastRG_t *fastrg_ccb = ppp_ccb->fastrg_ccb;
@@ -640,22 +629,27 @@ void exit_ppp(ppp_ccb_t *ppp_ccb)
     ppp_ccb->hsi_primary_dns = 0xffffffff; /* 0xffffffff means no dns assigned by server */
     ppp_ccb->hsi_secondary_dns = 0xffffffff; /* 0xffffffff means no dns assigned by server */
     dns_proxy_cleanup(&dhcp_ccb->dns_state);
-    FastRG_LOG(INFO, fastrg_ccb->fp, ppp_ccb, PPPLOGMSG, "User %" PRIu16 
+    FastRG_LOG(INFO, fastrg_ccb->fp, ppp_ccb, PPPLOGMSG, "User %" PRIu16
         " HSI module is terminated.\n", ppp_ccb->user_num);
 
-    if (fastrg_ccb->is_standalone == FALSE) {
-        char user_id_str[6];
-        snprintf(user_id_str, sizeof(user_id_str), "%u", ppp_ccb->user_num);
-        int64_t revision = 0;
-        etcd_mark_pending_event(HSI_ACTION_UPDATE, ppp_ccb->user_num - 1);
-        if (etcd_client_modify_hsi_config_status(fastrg_ccb->node_uuid, user_id_str, 
-                ENABLE_STATUS_DISABLED, &revision) == ETCD_SUCCESS) {
-            etcd_confirm_pending_event(HSI_ACTION_UPDATE, ppp_ccb->user_num - 1, revision);
-        } else {
-            etcd_remove_event(HSI_ACTION_UPDATE, ppp_ccb->user_num - 1);
-        }
-        rte_timer_reset(&ppp_ccb->etcd_pppoe_status_timer, ETCD_RETRY_BASE_TIME, 
-            SINGLE, fastrg_ccb->lcore.ctrl_thread, (rte_timer_cb_t)check_etcd_pppoe_status, ppp_ccb);
+    /* PPPoE "disconnected" transition → controller via Kafka; the node no longer
+     * writes connection status back to etcd. */
+    char uid[8];
+    snprintf(uid, sizeof(uid), "%u", ppp_ccb->user_num);
+    kafka_report_pppoe_state(uid, KAFKA_PPPOE_DISCONNECTED, NULL, NULL, NULL);
+
+    /* Honour a deferred connect: a desire_status=connect that arrived while this
+     * session was tearing down was parked (redial_pending) instead of being
+     * dropped. Now that the session is fully down (ppp_bool just cleared above),
+     * re-dial immediately rather than waiting up to one 60s reconcile sweep.
+     * execute_pppoe_dial only enqueues a northbound ENABLE event, so this is safe
+     * to call from the teardown context. Cleared first so a failing redial cannot
+     * loop (the next attempt falls back to the periodic reconcile). */
+    if (rte_atomic16_cmpset((U16 *)&ppp_ccb->redial_pending.cnt, 1, 0)) {
+        FastRG_LOG(INFO, fastrg_ccb->fp, ppp_ccb, PPPLOGMSG,
+            "User %" PRIu16 " teardown complete; honouring deferred connect (redial)",
+            ppp_ccb->user_num);
+        execute_pppoe_dial(fastrg_ccb, ccb_id);
     }
 }
 

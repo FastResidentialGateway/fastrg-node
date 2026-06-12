@@ -3,12 +3,14 @@
 #include <stdio.h>
 #include <pthread.h>
 #include <time.h>
+#include <rte_cycles.h>
 
 #include "etcd_integration.h"
 #include "fastrg.h"
 #include "dbg.h"
 #include "utils.h"
 #include "../northbound/controller/etcd_client.h"
+#include "../northbound/controller/kafka_producer.h"
 #include "pppd/pppd.h"
 #include "dhcpd/dhcpd.h"
 #include "avl_tree.h"
@@ -353,9 +355,8 @@ STATUS etcd_integration_start(FastRG_t *fastrg_ccb)
     // Load existing HSI configs from etcd before starting the watcher
     FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "Loading existing HSI configs for node: %s", fastrg_ccb->node_uuid);
     etcd_status_t load_status = etcd_client_load_existing_configs(
-        fastrg_ccb->node_uuid, 
-        hsi_config_changed_callback, 
-        pppoe_command_received_callback,
+        fastrg_ccb->node_uuid,
+        hsi_config_changed_callback,
         user_count_changed_callback,
         NULL, // No need to load DNS records here since they are loaded while PPPoE connections are established
         fastrg_ccb);
@@ -365,26 +366,13 @@ STATUS etcd_integration_start(FastRG_t *fastrg_ccb)
         // Continue even if loading fails - the watcher will still work for new changes
     }
 
-    /* Write initial subscriber count to etcd */
-    U16 current_subscriber_count = 0;
-    etcd_status_t get_status = etcd_client_get_subscriber_count(fastrg_ccb->node_uuid, 
-        &current_subscriber_count);
-    if (get_status != ETCD_SUCCESS || current_subscriber_count != fastrg_ccb->user_count) {
-        char subscriber_count_str[8];
-        snprintf(subscriber_count_str, sizeof(subscriber_count_str), 
-            "%u", fastrg_ccb->user_count);
-        etcd_status_t put_status = etcd_client_put_subscriber_count(
-            fastrg_ccb->node_uuid, subscriber_count_str, "fastrg_node_startup");
-        if (put_status != ETCD_SUCCESS) {
-            FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL, 
-                "Failed to write initial subscriber count to etcd for node: %s", fastrg_ccb->node_uuid);
-            // Continue even if this fails
-        } else {
-            FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, 
-                "Wrote initial subscriber count (%s) to etcd for node: %s", 
-                subscriber_count_str, fastrg_ccb->node_uuid);
-        }
-    }
+    /* The node no longer seeds config/subscriber-count into etcd: config is owned
+     * by the CLI/controller. The node only reads (watch) and, when offline, queues
+     * CLI-originated writes for flush (slice 10). */
+
+    /* Load any offline config-write queue persisted from a previous session; the
+     * watchdog flushes it to etcd once etcd is reachable. */
+    etcd_client_queue_load();
 
     // Start etcd watching. Watch/reconcile events are delivered to fastrg_loop
     // via FastRG_t.etcd_event_q; only sync_request_callback is passed through.
@@ -621,8 +609,72 @@ BOOL dns_record_matches_local(const char *user_id,
     return TRUE;
 }
 
-STATUS hsi_config_changed_callback(const char *node_id, const char *user_id, 
-    const hsi_config_t *config, etcd_action_type_t action, 
+/* Reconcile the live PPPoE session of a subscriber toward its desired state.
+ * desire_status ("connect"/"disconnect"; empty treated as disconnect) is the only
+ * source of PPPoE intent, set exclusively by the CLI/controller. Idempotent:
+ * execute_pppoe_dial/hangup skip when the session is already in the target state.
+ *
+ * TODO(slice 13): add dial-rate limiting (stagger) so a node restart that loads
+ * many desire_status=connect subscribers does not issue all PADIs at once.
+ */
+/* Minimum spacing between PPPoE dials, to avoid a PADI storm when a node
+ * restart loads many desire_status=connect subscribers at once (slice 13). */
+#define PPPOE_DIAL_MIN_GAP_US 50000   /* 50 ms */
+
+static void reconcile_pppoe_desire(FastRG_t *fastrg_ccb, int ccb_id, const char *desire_status)
+{
+    static uint64_t s_last_dial_cycles = 0;   /* control-plane thread only */
+
+    ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
+    if (ppp_ccb == NULL)
+        return;
+
+    BOOL want_connect = (desire_status != NULL &&
+        strcmp(desire_status, DESIRE_STATUS_CONNECT) == 0);
+    BOOL is_connected = (rte_atomic16_read(&ppp_ccb->ppp_bool) == 1);
+
+    if (want_connect && !is_connected) {
+        /* Stagger consecutive dials: enforce a minimum gap since the last one.
+         * Only consecutive dials (bulk restart/reconcile) ever wait; an isolated
+         * dial proceeds immediately. */
+        uint64_t hz = rte_get_tsc_hz();
+        if (hz > 0 && s_last_dial_cycles != 0) {
+            uint64_t min_gap = (hz / 1000000ULL) * PPPOE_DIAL_MIN_GAP_US;
+            uint64_t elapsed = rte_get_tsc_cycles() - s_last_dial_cycles;
+            if (elapsed < min_gap)
+                rte_delay_us_block((min_gap - elapsed) / (hz / 1000000ULL));
+        }
+        s_last_dial_cycles = rte_get_tsc_cycles();
+        rte_atomic16_set(&ppp_ccb->redial_pending, 0);  /* dialing now, no deferral needed */
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "desire_status=connect for user %d, dialing PPPoE", ccb_id + 1);
+        execute_pppoe_dial(fastrg_ccb, ccb_id);
+    } else if (!want_connect && is_connected) {
+        rte_atomic16_set(&ppp_ccb->redial_pending, 0);  /* we want it down */
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "desire_status=disconnect for user %d, hanging up PPPoE", ccb_id + 1);
+        execute_pppoe_hangup(fastrg_ccb, ccb_id);
+    } else if (want_connect && is_connected && ppp_ccb->ppp_processing == TRUE) {
+        /* Desire is connect but the session is still tearing down from an earlier
+         * hangup (ppp_bool stays 1, and ppp_processing==TRUE, until END_PHASE).
+         * execute_pppoe_dial would no-op here because ppp_bool==1, so the connect
+         * would be silently dropped and only recovered by the next 60s reconcile
+         * sweep. Instead, remember the intent: exit_ppp re-dials the moment the
+         * teardown completes. (Loop-safe: ppp_processing is TRUE only while
+         * disconnecting, so a failing dial-up never sets this.) */
+        rte_atomic16_set(&ppp_ccb->redial_pending, 1);
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "desire_status=connect for user %d during teardown; will redial after it completes",
+            ccb_id + 1);
+    } else {
+        /* Stable connected (and desired) or stable down (and not desired): nothing
+         * to do, and no deferred redial should linger. */
+        rte_atomic16_set(&ppp_ccb->redial_pending, 0);
+    }
+}
+
+STATUS hsi_config_changed_callback(const char *node_id, const char *user_id,
+    const hsi_config_t *config, etcd_action_type_t action,
     int64_t revision, void *user_data)
 {
     FastRG_t *fastrg_ccb = (FastRG_t *)user_data;
@@ -660,27 +712,13 @@ STATUS hsi_config_changed_callback(const char *node_id, const char *user_id,
 
             // Apply HSI configuration
             ret = apply_hsi_config(fastrg_ccb, ccb_id, config, is_update);
-            // If apply failed, delete the config from etcd to maintain consistency
+            // The node no longer writes to etcd to "fix" a failed apply; etcd is
+            // owned by the CLI/controller. The failure is reported to the controller
+            // via Kafka (slice 11); here we just log. apply_hsi_config cleans up its
+            // own local state on failure.
             if (ret == ERROR) {
-                int64_t delete_revision = 0;
-                FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, 
-                    "Failed to apply HSI config for user %s, deleting from etcd", user_id);
-
-                // Mark this as a self-initiated deletion with its revision
-                etcd_mark_pending_event(HSI_ACTION_DELETE, ccb_id);
-
-                // Delete and capture the revision
-                etcd_status_t etcd_ret = etcd_client_delete_hsi_config(node_id, user_id, &delete_revision);
-                if (etcd_ret == ETCD_SUCCESS) {
-                    // Confirm with revision
-                    etcd_confirm_pending_event(HSI_ACTION_DELETE, ccb_id, delete_revision);
-                    FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, 
-                        "Deleted HSI config from etcd for user %s (revision %ld)", user_id, delete_revision);
-                } else {
-                    FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, 
-                        "Failed to delete HSI config from etcd for user %s", user_id);
-                    etcd_remove_event(HSI_ACTION_DELETE, ccb_id);
-                }
+                FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+                    "Failed to apply HSI config for user %s (will be reported via Kafka)", user_id);
             } else {
                 // HSI config applied successfully, now reconcile port-mapping rules
                 if (config->port_mapping_count > 0 || action == HSI_ACTION_UPDATE) {
@@ -692,6 +730,15 @@ STATUS hsi_config_changed_callback(const char *node_id, const char *user_id,
                         ret = ERROR; // Signal failure so caller writes fallback error
                     }
                 }
+
+                /* Reconcile the live PPPoE session toward the desired state.
+                 * desire_status is the single source of truth for PPPoE intent
+                 * (set only by CLI/controller). This runs for live updates,
+                 * periodic reconcile, and startup load alike, so the node
+                 * re-establishes/tears down sessions from desire_status alone.
+                 * execute_pppoe_dial/hangup are idempotent (skip when already
+                 * in the target state). */
+                reconcile_pppoe_desire(fastrg_ccb, ccb_id, config->desire_status);
             }
             break;
 
@@ -754,9 +801,11 @@ STATUS user_count_changed_callback(const char *node_id,
                 if (pppd_add_ccb(fastrg_ccb, to_add) != SUCCESS) {
                     FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
                         "Failed to add %u PPPoE CCBs", to_add);
-                    char subscriber_count_str[8] = { 0 };
-                    snprintf(subscriber_count_str, sizeof(subscriber_count_str), "%u", current_count);
-                    etcd_client_put_subscriber_count(fastrg_ccb->node_uuid, subscriber_count_str, "fastrg_node");
+                    /* Node is read-only on etcd: report the failure via Kafka
+                     * instead of writing the count back. The desired count stays
+                     * in etcd; the resulting drift is visible to the controller. */
+                    kafka_report_runtime_error("user_count", "CCB_ALLOC_FAILED",
+                        "failed to add PPPoE CCBs for subscriber-count increase", NULL);
                     return ERROR;
                 }
 
@@ -765,9 +814,8 @@ STATUS user_count_changed_callback(const char *node_id,
                     FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
                         "Failed to add %u DHCP CCBs", to_add);
                     pppd_disable_ccb(fastrg_ccb, to_add, current_count + to_add); // Disable the PPPoE CCBs that were just added
-                    char subscriber_count_str[8] = { 0 };
-                    snprintf(subscriber_count_str, sizeof(subscriber_count_str), "%u", current_count);
-                    etcd_client_put_subscriber_count(fastrg_ccb->node_uuid, subscriber_count_str, "fastrg_node");
+                    kafka_report_runtime_error("user_count", "CCB_ALLOC_FAILED",
+                        "failed to add DHCP CCBs for subscriber-count increase", NULL);
                     return ERROR;
                 }
 
@@ -776,9 +824,8 @@ STATUS user_count_changed_callback(const char *node_id,
                         "Failed to modify internal subscriber count to %d", new_count);
                     pppd_disable_ccb(fastrg_ccb, to_add, current_count + to_add); // Disable the PPPoE CCBs that were just added
                     dhcpd_disable_ccb(fastrg_ccb, to_add, current_count + to_add); // Disable the DHCP CCBs that were just added
-                    char subscriber_count_str[8] = { 0 };
-                    snprintf(subscriber_count_str, sizeof(subscriber_count_str), "%u", current_count);
-                    etcd_client_put_subscriber_count(fastrg_ccb->node_uuid, subscriber_count_str, "fastrg_node");
+                    kafka_report_runtime_error("user_count", "COUNT_APPLY_FAILED",
+                        "failed to apply internal subscriber-count increase", NULL);
                     return ERROR;
                 }
 
@@ -830,228 +877,14 @@ void sync_request_callback(const char *node_id, void *user_data)
         return;
     }
 
-    FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, 
-        "Sync request received after etcd reconnection, writing local state to etcd");
-
-    // Write subscriber count to etcd
-    char subscriber_count_str[8];
-    snprintf(subscriber_count_str, sizeof(subscriber_count_str), "%u", fastrg_ccb->user_count);
-    etcd_status_t sc_status = etcd_client_put_subscriber_count(
-        fastrg_ccb->node_uuid, subscriber_count_str, "etcd_reconnect_sync");
-
-    if (sc_status == ETCD_SUCCESS) {
-        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, 
-            "Wrote subscriber count (%s) to etcd after reconnection", subscriber_count_str);
-    } else {
-        FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL, 
-            "Failed to write subscriber count to etcd after reconnection");
-    }
-
-    // Write all active HSI configs to etcd
-    // Note: We only write configs that are currently active in the local system
-    // This assumes that the ccb array contains the active configurations
-    int written_count = 0;
-    for(int ccb_id=0; ccb_id<fastrg_ccb->user_count; ccb_id++) {
-        ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
-        dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
-        hsi_config_t config = { 0 };
-
-        /* Copy CCB data to hsi_config_t */
-        snprintf(config.user_id, sizeof(config.user_id), "%d", ccb_id + 1);
-        snprintf(config.vlan_id, sizeof(config.vlan_id), "%d", rte_atomic16_read(&ppp_ccb->vlan_id));
-        /* vlan id 0 means this subscriber is inactive */
-        if (rte_atomic16_read(&ppp_ccb->vlan_id) == 0) {
-            FastRG_LOG(DBG, fastrg_ccb->fp, NULL, NULL, 
-                "Skipping inactive subscriber %u during etcd reconnection sync", ccb_id + 1);
-            continue;
-        }
-        strncpy(config.account_name, (const char *)ppp_ccb->ppp_user_acc, sizeof(config.account_name) - 1);
-        strncpy(config.password, (const char *)ppp_ccb->ppp_passwd, sizeof(config.password) - 1);
-        struct in_addr s_ip_addr = {
-            .s_addr = dhcp_ccb->per_lan_user_pool[0]->ip_pool.ip_addr,
-        };
-        struct in_addr e_ip_addr = {
-            .s_addr = dhcp_ccb->per_lan_user_pool[dhcp_ccb->per_lan_user_pool_len - 1]->ip_pool.ip_addr,
-        };
-        char s_ip_addr_str[INET_ADDRSTRLEN];
-        char e_ip_addr_str[INET_ADDRSTRLEN];
-        if (inet_ntop(AF_INET, &s_ip_addr, s_ip_addr_str, sizeof(s_ip_addr_str)) == NULL || 
-                inet_ntop(AF_INET, &e_ip_addr, e_ip_addr_str, sizeof(e_ip_addr_str)) == NULL) {
-            FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL, 
-                "Failed to convert DHCP address pool to string for subscriber %u during etcd reconnection sync", ccb_id + 1);
-            continue;
-        }
-        snprintf(config.dhcp_addr_pool, sizeof(config.dhcp_addr_pool), "%s~%s", 
-            s_ip_addr_str, e_ip_addr_str);
-        struct in_addr subnet_mask_addr = {
-            .s_addr = dhcp_ccb->subnet_mask,
-        };
-        char subnet_mask_str[INET_ADDRSTRLEN];
-        if (inet_ntop(AF_INET, &subnet_mask_addr, subnet_mask_str, sizeof(subnet_mask_str)) == NULL) {
-            FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL, 
-                "Failed to convert subnet mask to string for subscriber %u during etcd reconnection sync", ccb_id + 1);
-            continue;
-        }
-        snprintf(config.dhcp_subnet, sizeof(config.dhcp_subnet), "%s", subnet_mask_str);
-        struct in_addr gateway_addr = {
-            .s_addr = dhcp_ccb->dhcp_server_ip,
-        };
-        char gateway_addr_str[INET_ADDRSTRLEN];
-        if (inet_ntop(AF_INET, &gateway_addr, gateway_addr_str, sizeof(gateway_addr_str)) == NULL) {
-            FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL, 
-                "Failed to convert gateway IP to string for subscriber %u during etcd reconnection sync", ccb_id + 1);
-            continue;
-        }
-        snprintf(config.dhcp_gateway, sizeof(config.dhcp_gateway), "%s", gateway_addr_str);
-
-        config.dns_proxy_enable = dhcp_ccb->dns_state.dns_proxy_enabled;
-        config.tcp_conntrack_enable = ppp_ccb->tcp_conntrack_enabled;
-
-        /* Populate port-mapping from local port_fwd_table */
-        /* First pass: count active entries to size the heap allocation */
-        int active_port_mapping_count = 0;
-        for(U32 eport=0; eport<PORT_FWD_TABLE_SIZE; eport++) {
-            if (rte_atomic16_read(&ppp_ccb->port_fwd_table[eport].is_active) != 0)
-                active_port_mapping_count++;
-        }
-        config.port_mappings = NULL;
-        config.port_mapping_count = 0;
-        if (active_port_mapping_count > 0)
-            config.port_mappings = malloc(active_port_mapping_count * sizeof(port_mapping_t));
-        if (config.port_mappings != NULL) {
-            for(U32 eport=0; eport<PORT_FWD_TABLE_SIZE; eport++) {
-                if (rte_atomic16_read(&ppp_ccb->port_fwd_table[eport].is_active) == 0)
-                    continue;
-                port_mapping_t *pm = &config.port_mappings[config.port_mapping_count];
-                pm->eport = (U16)eport;
-                struct in_addr pm_addr = { .s_addr = ppp_ccb->port_fwd_table[eport].dip };
-                if (inet_ntop(AF_INET, &pm_addr, pm->dip, sizeof(pm->dip)) == NULL)
-                    continue;
-                pm->dport = ppp_ccb->port_fwd_table[eport].iport;
-                config.port_mapping_count++;
-            }
-        }
-
-        hsi_enable_status_t enable_status = ENABLE_STATUS_DISABLED;
-        if (ppp_ccb->phase == DATA_PHASE) {
-            enable_status = ENABLE_STATUS_ENABLED;
-        } else if (ppp_ccb->phase <= END_PHASE) {
-            enable_status = ENABLE_STATUS_DISABLED;
-        } else {
-            enable_status = ENABLE_STATUS_ENABLING; // Treat other phases as in-progress
-        }
-        etcd_status_t hsi_status = etcd_client_put_hsi_config(
-            fastrg_ccb->node_uuid, config.user_id, &config, enable_status, "etcd_reconnect_sync", NULL);
-        hsi_config_free_port_mappings(&config);
-
-        if (hsi_status == ETCD_SUCCESS) {
-            written_count++;
-        } else {
-            FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL, 
-                "Failed to write HSI config for user %u to etcd after reconnection", ccb_id + 1);
-        }
-    }
-
-    FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, 
-        "Wrote %d HSI config(s) to etcd after reconnection", written_count);
-
-    /* Write static DNS records for all active subscribers back to etcd */
-    int dns_written_count = 0;
-    for(int dns_ccb_id=0; dns_ccb_id<fastrg_ccb->user_count; dns_ccb_id++) {
-        ppp_ccb_t *dns_ppp_ccb = PPPD_GET_CCB(fastrg_ccb, dns_ccb_id);
-        if (rte_atomic16_read(&dns_ppp_ccb->vlan_id) == 0)
-            continue; /* skip inactive subscribers */
-
-        dhcp_ccb_t *dns_dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, dns_ccb_id);
-        if (dns_dhcp_ccb == NULL || !dns_dhcp_ccb->dns_state.dns_proxy_enabled)
-            continue;
-
-        dns_static_table_t *tbl = &dns_dhcp_ccb->dns_state.static_table;
-        char dns_user_id_str[8];
-        snprintf(dns_user_id_str, sizeof(dns_user_id_str), "%d", dns_ccb_id + 1);
-
-        for(U32 j=0; j<DNS_STATIC_MAX_RECORDS; j++) {
-            dns_static_record_t *rec = &tbl->records[j];
-            if (!rec->active)
-                continue;
-
-            struct in_addr dns_ip_addr = { .s_addr = rec->ip_addr };
-            char dns_ip_str[INET_ADDRSTRLEN];
-            if (inet_ntop(AF_INET, &dns_ip_addr, dns_ip_str, sizeof(dns_ip_str)) == NULL)
-                continue;
-
-            dns_record_config_t etcd_rec;
-            memset(&etcd_rec, 0, sizeof(etcd_rec));
-            strncpy(etcd_rec.domain, rec->domain, sizeof(etcd_rec.domain) - 1);
-            strncpy(etcd_rec.ip, dns_ip_str, sizeof(etcd_rec.ip) - 1);
-            etcd_rec.ttl = rec->ttl;
-
-            if (etcd_client_put_dns_record(fastrg_ccb->node_uuid, dns_user_id_str,
-                    &etcd_rec) == ETCD_SUCCESS) {
-                dns_written_count++;
-            } else {
-                FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
-                    "Failed to write DNS record %s for user %s to etcd after reconnection",
-                    rec->domain, dns_user_id_str);
-            }
-        }
-    }
+    /* etcd has no data for this node after (re)connection. The node is read-only
+     * on etcd now: config and subscriber count are owned by the CLI/controller,
+     * so the node does NOT seed them back. Local-vs-etcd reconciliation is handled
+     * by the watch/reconcile path; CLI-originated offline writes are flushed from
+     * the local queue (slice 10). */
     FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
-        "Wrote %d DNS static record(s) to etcd after reconnection", dns_written_count);
-}
-
-#define PPPOE_ACTION_DIAL   "dial"
-#define PPPOE_ACTION_HANGUP "hangup"
-STATUS pppoe_command_received_callback(const char *node_id, const pppoe_command_t *command, void *user_data)
-{
-    FastRG_t *fastrg_ccb = (FastRG_t *)user_data;
-    STATUS ret = SUCCESS;
-    int64_t revision = 0;
-
-    if (!fastrg_ccb || !node_id || !command)
-        return ERROR;
-
-    int ccb_id = parse_user_id(command->user_id, fastrg_ccb->user_count);
-    if (ccb_id < 0) {
-        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Invalid user_id in command: %s (valid range: 1-%d)", 
-            command->user_id, fastrg_ccb->user_count);
-        return ERROR;
-    }
-
-    FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, 
-        "PPPoE command received: action=%s, user=%s, vlan=%s, account=%s", 
-        command->action, command->user_id, command->vlan, command->account);
-
-    if (strcmp(command->action, PPPOE_ACTION_DIAL) == 0) {
-        // Execute PPPoE dial
-        ret = execute_pppoe_dial(fastrg_ccb, ccb_id, command);
-        if (ret == SUCCESS) {
-            etcd_mark_pending_event(HSI_ACTION_UPDATE, ccb_id);
-            if (etcd_client_modify_hsi_config_status(fastrg_ccb->node_uuid, command->user_id, 
-                    ENABLE_STATUS_ENABLING, &revision) == ETCD_SUCCESS) {
-                etcd_confirm_pending_event(HSI_ACTION_UPDATE, ccb_id, revision);
-            } else {
-                etcd_remove_event(HSI_ACTION_UPDATE, ccb_id);
-            }
-        }
-    } else if (strcmp(command->action, PPPOE_ACTION_HANGUP) == 0) {
-        // Execute PPPoE hangup
-        ret = execute_pppoe_hangup(fastrg_ccb, ccb_id);
-        if (ret == SUCCESS) {
-            etcd_mark_pending_event(HSI_ACTION_UPDATE, ccb_id);
-            if (etcd_client_modify_hsi_config_status(fastrg_ccb->node_uuid, command->user_id, 
-                    ENABLE_STATUS_DISABLING, &revision) == ETCD_SUCCESS) {
-                etcd_confirm_pending_event(HSI_ACTION_UPDATE, ccb_id, revision);
-            } else {
-                etcd_remove_event(HSI_ACTION_UPDATE, ccb_id);
-            }
-        }
-    } else {
-        FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL, "Unknown PPPoE action: %s", command->action);
-        ret = ERROR;
-    }
-
-    return ret;
+        "etcd (re)connected with no data for node %s; node is read-only on etcd, "
+        "not seeding config back", node_id);
 }
 
 STATUS dns_record_changed_callback(const char *node_id, const char *user_id,
@@ -1122,43 +955,37 @@ void etcd_event_dispatch(FastRG_t *fastrg_ccb, etcd_event_t *ev)
             const hsi_config_t *cfg =
                 (ev->action == HSI_ACTION_DELETE) ? NULL : &ev->event_data.hsi.config;
 
-            /* Reconcile events skip configs whose local state already matches. */
+            /* Reconcile events skip re-applying configs whose local state already
+             * matches, but still reconcile the PPPoE session toward desire_status
+             * so a dropped session is re-dialed (or a stale one torn down). */
             if (ev->from_reconcile && cfg != NULL &&
                     hsi_config_matches_local(ev->user_id, cfg, fastrg_ccb)) {
                 FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
-                    "Reconcile: HSI user %s already matches local state, skipping",
+                    "Reconcile: HSI user %s already matches local state, reconciling PPPoE only",
                     ev->user_id);
+                int rc_ccb_id = parse_user_id(ev->user_id, fastrg_ccb->user_count);
+                if (rc_ccb_id >= 0)
+                    reconcile_pppoe_desire(fastrg_ccb, rc_ccb_id, cfg->desire_status);
                 break;
             }
 
             STATUS ret = hsi_config_changed_callback(ev->node_id, ev->user_id, cfg,
                 ev->action, ev->revision, fastrg_ccb);
 
-            /* Reconcile: re-dial subscribers that etcd says should be enabled. */
-            if (ret == SUCCESS && ev->from_reconcile && ev->event_data.hsi.is_enabled &&
-                    ev->action != HSI_ACTION_DELETE) {
-                pppoe_command_t cmd;
-                memset(&cmd, 0, sizeof(cmd));
-                snprintf(cmd.action, sizeof(cmd.action), "dial");
-                snprintf(cmd.user_id, sizeof(cmd.user_id), "%s", ev->event_data.hsi.config.user_id);
-                snprintf(cmd.vlan, sizeof(cmd.vlan), "%s", ev->event_data.hsi.config.vlan_id);
-                snprintf(cmd.account, sizeof(cmd.account), "%s", ev->event_data.hsi.config.account_name);
-                snprintf(cmd.password, sizeof(cmd.password), "%s", ev->event_data.hsi.config.password);
-                cmd.timestamp = time(NULL);
-                pppoe_command_received_callback(ev->node_id, &cmd, fastrg_ccb);
-            }
-
-            /* A failed apply: record it in failed_events/ with the config's
-             * raw value (new value for PUT, deleted value for DELETE) so the
-             * controller can see what could not be applied. */
-            if (ret != SUCCESS) {
-                char fkey[200];
-                snprintf(fkey, sizeof(fkey), "configs/%s/hsi/%s", ev->node_id, ev->user_id);
-                etcd_client_write_fallback_error("hsi_config", fkey,
-                    ev->node_id, ev->user_id, ERROR_REASON_CALLBACK_FAILED,
-                    ev->action == HSI_ACTION_DELETE ? "HSI DELETE apply returned error"
-                                                    : "HSI apply returned error",
-                    ev->event_data.hsi.raw_value ? ev->event_data.hsi.raw_value : "");
+            /* Report the apply result to the controller via Kafka for live watch
+             * events only (reconcile/startup-load re-applies would be noise). The
+             * etcd failed_events/ namespace is removed. */
+            if (ev->from_reconcile == FALSE) {
+                const char *action_str = (ev->action == HSI_ACTION_CREATE) ? "create"
+                                       : (ev->action == HSI_ACTION_DELETE) ? "delete" : "update";
+                if (ret == SUCCESS) {
+                    kafka_report_config_apply(ev->user_id, action_str, TRUE, NULL, NULL);
+                } else {
+                    FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+                        "HSI %s apply failed for user %s (reported via Kafka)", action_str, ev->user_id);
+                    kafka_report_config_apply(ev->user_id, action_str, FALSE,
+                        "apply_failed", "node failed to apply HSI config");
+                }
             }
             break;
         }
@@ -1177,10 +1004,6 @@ void etcd_event_dispatch(FastRG_t *fastrg_ccb, etcd_event_t *ev)
             }
             dns_record_changed_callback(ev->node_id, ev->user_id, &ev->event_data.dns_record,
                 ev->action, ev->revision, fastrg_ccb);
-            break;
-
-        case ETCD_EVENT_PPPOE_COMMAND:
-            pppoe_command_received_callback(ev->node_id, &ev->event_data.command, fastrg_ccb);
             break;
 
         case ETCD_EVENT_HSI_SWEEP:

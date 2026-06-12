@@ -1,17 +1,29 @@
 #!/usr/bin/env bash
 # =============================================================================
-# restore_etcd_config.sh — Restore standard E2E test etcd config for USER_ID=2
+# restore_etcd_config.sh — Restore standard E2E test config for USER_ID=2
 #
-# Run this script DIRECTLY on the FastRG node (192.168.10.201) when etcd
-# config keys are missing and you need to restore them before running the
-# E2E test suite.
+# Writes through the CONTROLLER REST API (not etcd directly), so the controller
+# DB history is seeded alongside etcd. This lets rollback tests find a
+# "last successful" version, and keeps the controller as the single writer.
+#
+# Ordering matters:
+#   1. subscriber count first — the node must expand its CCB pool before it
+#      applies the HSI config, otherwise apply fails and the controller rolls
+#      the (orphaned) config back out of etcd.
+#   2. HSI config (create, fall back to update) → node applies, emits
+#      CONFIG_APPLY_OK → controller DB history seeded.
+#   3. PPPoE dial → desire_status=connect
+#   4. DNS static record
+#
+# Run from the FastRG node or any host that can reach the controller REST API.
 #
 # Usage:
 #   bash restore_etcd_config.sh [--dry-run] [--force]
 #
-# Options:
-#   --dry-run   Print the keys/values that would be written without writing
-#   --force     Overwrite keys even if they already exist (default: skip)
+# Environment overrides (optional):
+#   CONTROLLER_REST   Controller REST base URL (default: derived from config.cfg, port 8443)
+#   CONTROLLER_USER   Admin username           (default: admin)
+#   CONTROLLER_PASS   Admin password           (default: admin)
 # =============================================================================
 
 set -euo pipefail
@@ -52,85 +64,114 @@ fi
 info "NODE_UUID: ${NODE_UUID}"
 
 # ---------------------------------------------------------------------------
-# Read ETCD_ENDPOINT from /etc/fastrg/config.cfg
+# Controller REST settings (override via env, else derive from config.cfg)
 # ---------------------------------------------------------------------------
-if [[ ! -f /etc/fastrg/config.cfg ]]; then
-    error "/etc/fastrg/config.cfg not found"
-    exit 1
+if [[ -z "${CONTROLLER_REST:-}" ]]; then
+    _ctrl_host=$(awk -F'"' '/ControllerAddress/{print $2}' /etc/fastrg/config.cfg 2>/dev/null | cut -d: -f1)
+    [[ -z "$_ctrl_host" ]] && _ctrl_host="192.168.10.212"
+    CONTROLLER_REST="https://${_ctrl_host}:8443"
 fi
-ETCD_ENDPOINT=$(awk -F'"' '/EtcdEndpoints/{print $2}' /etc/fastrg/config.cfg)
-if [[ -z "$ETCD_ENDPOINT" ]]; then
-    error "Cannot parse EtcdEndpoints from /etc/fastrg/config.cfg"
-    exit 1
+CONTROLLER_USER="${CONTROLLER_USER:-admin}"
+CONTROLLER_PASS="${CONTROLLER_PASS:-admin}"
+info "CONTROLLER_REST: ${CONTROLLER_REST}"
+
+printf "\n"
+_dry_label=""
+[[ "$DRY_RUN" -eq 1 ]] && _dry_label="[DRY-RUN] "
+info "Restoring ${_dry_label}config via controller (FORCE=${FORCE})..."
+printf "\n"
+
+if [[ "$DRY_RUN" -eq 1 ]]; then
+    info "DRY-RUN: PUT  /api/nodes/${NODE_UUID}/subscriber-count {subscriber_count:2}"
+    info "DRY-RUN: POST /api/config/${NODE_UUID}/hsi (user 2, vlan 3)"
+    info "DRY-RUN: POST /api/pppoe/dial (user 2)"
+    info "DRY-RUN: POST /api/config/${NODE_UUID}/dns/2 (www.fastrg.org)"
+    printf "\n"; info "Done."
+    exit 0
 fi
-info "ETCD_ENDPOINT: ${ETCD_ENDPOINT}"
 
 # ---------------------------------------------------------------------------
-# Verify etcdctl is available
+# All controller calls run in one Python process (shared token + ordering).
 # ---------------------------------------------------------------------------
-if ! command -v etcdctl >/dev/null 2>&1; then
-    error "etcdctl not found in PATH"
-    exit 1
-fi
+CONTROLLER_REST="$CONTROLLER_REST" CONTROLLER_USER="$CONTROLLER_USER" \
+CONTROLLER_PASS="$CONTROLLER_PASS" NODE_UUID="$NODE_UUID" FORCE="$FORCE" \
+python3 - <<'PYEOF'
+import os, ssl, json, time, sys, urllib.request, urllib.error
 
-etcdput() {
-    local key="$1" val="$2"
-    local existing
-    existing=$(ETCDCTL_API=3 etcdctl --endpoints="${ETCD_ENDPOINT}" \
-        get --print-value-only "${key}" 2>/dev/null || true)
+CTRL = os.environ["CONTROLLER_REST"]
+NODE = os.environ["NODE_UUID"]
+USER = os.environ["CONTROLLER_USER"]
+PASS = os.environ["CONTROLLER_PASS"]
 
-    if [[ -n "$existing" ]] && [[ "$FORCE" -eq 0 ]]; then
-        warn "SKIP (already exists): ${key}"
-        return
-    fi
+ctx = ssl.create_default_context()
+ctx.check_hostname = False
+ctx.verify_mode = ssl.CERT_NONE
 
-    if [[ "$DRY_RUN" -eq 1 ]]; then
-        info "DRY-RUN put: ${key}"
-        printf "  value: %s\n" "$val"
-        return
-    fi
+def login():
+    req = urllib.request.Request(f"{CTRL}/api/login",
+        data=json.dumps({"username": USER, "password": PASS}).encode(),
+        headers={"Content-Type": "application/json"}, method="POST")
+    return json.loads(urllib.request.urlopen(req, context=ctx, timeout=10).read())["token"]
 
-    ETCDCTL_API=3 etcdctl --endpoints="${ETCD_ENDPOINT}" put "${key}" "${val}" >/dev/null
-    ok "Written: ${key}"
+def call(method, path, body, tok):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(f"{CTRL}{path}", data=data,
+        headers={"Content-Type": "application/json", "Authorization": tok}, method=method)
+    try:
+        r = urllib.request.urlopen(req, context=ctx, timeout=10)
+        return r.status, r.read().decode()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode(errors="replace")
+
+try:
+    tok = login()
+except Exception as e:
+    print(f"\033[0;31m[ERROR]\033[0m login to controller failed: {e}", file=sys.stderr)
+    sys.exit(1)
+print("\033[0;32m[OK]\033[0m    controller login")
+
+# 1. subscriber count first so the node expands its CCB pool before hsi apply
+st, body = call("PUT", f"/api/nodes/{NODE}/subscriber-count", {"subscriber_count": 2}, tok)
+if st != 200:
+    print(f"\033[0;31m[ERROR]\033[0m set subscriber-count: HTTP {st} {body[:160]}", file=sys.stderr)
+    sys.exit(1)
+print("\033[0;32m[OK]\033[0m    subscriber_count=2")
+time.sleep(3)
+
+# 2. HSI config for user 2 — create, fall back to update if it exists
+hsi = {
+    "user_id": "2", "vlan_id": "3", "account_name": "the", "password": "admin",
+    "dhcp_addr_pool": "192.168.4.2-192.168.4.10",
+    "dhcp_subnet": "255.255.255.0", "dhcp_gateway": "192.168.4.1",
+    # Controller HSIConfig expects the hyphenated "port-mapping" key with
+    # index/dip/dport/eport fields; an underscore key is silently dropped, which
+    # leaves etcd with no port-mapping and makes the DNAT test (Step 16) skip.
+    "port-mapping": [{"index": "0", "dip": "192.168.4.2", "dport": "8081", "eport": "12345"}],
 }
+st, body = call("POST", f"/api/config/{NODE}/hsi", hsi, tok)
+if st == 409 or "exist" in body.lower():
+    st, body = call("PUT", f"/api/config/{NODE}/hsi/2", hsi, tok)
+if st != 200:
+    print(f"\033[0;31m[ERROR]\033[0m apply hsi/2: HTTP {st} {body[:160]}", file=sys.stderr)
+    sys.exit(1)
+print("\033[0;32m[OK]\033[0m    configs/" + NODE + "/hsi/2")
+time.sleep(2)
 
-# ---------------------------------------------------------------------------
-# Current timestamp (RFC 3339 / UTC)
-# ---------------------------------------------------------------------------
-NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+# 3. desire_status=connect via dial
+st, body = call("POST", "/api/pppoe/dial", {"node_id": NODE, "user_id": "2"}, tok)
+if st != 200:
+    print(f"\033[1;33m[WARN]\033[0m  dial user 2: HTTP {st} {body[:120]}", file=sys.stderr)
+else:
+    print("\033[0;32m[OK]\033[0m    desire_status=connect (dial)")
 
-# ---------------------------------------------------------------------------
-# KV 1 — DNS static record for USER_ID=2
-# ---------------------------------------------------------------------------
-KEY_DNS="configs/${NODE_UUID}/2/dns/www.fastrg.org"
-VAL_DNS='{"domain":"www.fastrg.org","ip":"192.168.201.11","ttl":30}'
-
-# ---------------------------------------------------------------------------
-# KV 2 — HSI config for USER_ID=2
-# ---------------------------------------------------------------------------
-KEY_HSI="configs/${NODE_UUID}/hsi/2"
-VAL_HSI=$(printf \
-    '{"config":{"account_name":"admin","dhcp_addr_pool":"192.168.4.2-192.168.4.10","dhcp_gateway":"192.168.4.1","dhcp_subnet":"255.255.255.0","password":"admin","port-mapping":[{"dip":"192.168.4.2","dport":"8081","eport":"12345","index":"0"}],"user_id":"2","vlan_id":"2"},"metadata":{"enableStatus":"enabled","node":"%s","resourceVersion":"1","updatedAt":"%s","updatedBy":"restore_etcd_config"}}' \
-    "${NODE_UUID}" "${NOW}")
-
-# ---------------------------------------------------------------------------
-# KV 3 — Subscriber count
-# ---------------------------------------------------------------------------
-KEY_COUNTS="user_counts/${NODE_UUID}/"
-VAL_COUNTS=$(printf \
-    '{"metadata":{"node":"%s","resourceVersion":"","updatedAt":"%s","updatedBy":"restore_etcd_config"},"subscriber_count":"2"}' \
-    "${NODE_UUID}" "${NOW}")
-
-# ---------------------------------------------------------------------------
-# Write
-# ---------------------------------------------------------------------------
-printf "\n"
-info "Restoring ${DRY_RUN:+[DRY-RUN] }etcd config (FORCE=${FORCE})..."
-printf "\n"
-
-etcdput "${KEY_DNS}"    "${VAL_DNS}"
-etcdput "${KEY_HSI}"    "${VAL_HSI}"
-etcdput "${KEY_COUNTS}" "${VAL_COUNTS}"
+# 4. DNS static record
+dns = {"domain": "www.fastrg.org", "ip": "192.168.201.11", "ttl": 30}
+st, body = call("POST", f"/api/config/{NODE}/dns/2", dns, tok)
+if st not in (200, 409):
+    print(f"\033[1;33m[WARN]\033[0m  add dns: HTTP {st} {body[:120]}", file=sys.stderr)
+else:
+    print("\033[0;32m[OK]\033[0m    configs/" + NODE + "/dns/2")
+PYEOF
 
 printf "\n"
 info "Done."

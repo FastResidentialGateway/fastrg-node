@@ -6,6 +6,7 @@
 #include <etcd/Client.hpp>
 #include <etcd/Watcher.hpp>
 #include <etcd/Response.hpp>
+#include <etcd/v3/action_constants.hpp>
 #include <json/json.h>
 #include <memory>
 #include <string>
@@ -20,18 +21,35 @@
 #include <chrono>
 #include <vector>
 #include <mutex>
+#include <fstream>
+
+/* Persisted offline config-write queue (point 7). Path mirrors CONFIG_DIR_PATH. */
+#define CONFIG_QUEUE_PATH "/etc/fastrg/config_queue.json"
 
 class EtcdClientImpl {
 private:
     std::unique_ptr<etcd::Client> client_;
     std::unique_ptr<etcd::Watcher> hsi_watcher_;
-    std::unique_ptr<etcd::Watcher> command_watcher_;
     std::unique_ptr<etcd::Watcher> user_count_watcher_;
     std::unique_ptr<etcd::Watcher> dns_record_watcher_;
     std::atomic<bool> watch_running_;
     std::atomic<bool> shutting_down_{false};   // set once during teardown; blocks new reconnect attempts
+    std::atomic<bool> etcd_reachable_{false};  // last-known etcd reachability (watchdog/init)
     std::string node_uuid_;
     std::string etcd_endpoints_;
+
+    // Offline config-write queue (point 7). Entries are CLI config writes received
+    // via node gRPC while etcd is unreachable; flushed to etcd on reconnect.
+    struct QueueEntry {
+        std::string op;        // "put" | "delete"
+        std::string kind;      // "config" (HSI/count edit) | "desire" (desire_status change)
+        std::string key;       // full etcd key
+        std::string value;     // "config": JSON value; "desire": the status string
+        int64_t     ts_ms;     // enqueue time (ms since epoch), for timestamp merge
+        bool        preserve_desire;  // config put: keep etcd's existing desire_status
+    };
+    std::vector<QueueEntry> config_queue_;
+    std::mutex config_queue_mutex_;
     
     // Watch/reconcile events are delivered to the control-plane loop via
     // FastRG_t.etcd_event_q; the apply-side callbacks are no longer stored
@@ -174,10 +192,16 @@ public:
                 // Test etcd reachability every tick. When reachable, reconcile local state
                 // with etcd so we don't have to wait for a reconnect to recover from missed events.
                 if (test_etcd_connection()) {
+                    etcd_reachable_ = true;
+                    // Flush any CLI writes that were queued while etcd was down,
+                    // BEFORE reconciling, so local (CLI-originated) intent is pushed
+                    // to etcd first and then reconciled back.
+                    flush_config_queue();
                     FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "Watchdog: etcd reachable, syncing state with etcd...");
                     sync_state_with_etcd();
                     update_watch_activity();
                 } else {
+                    etcd_reachable_ = false;
                     // Not reachable — preserve existing tolerance: only trigger reconnect when
                     // watchers have also been inactive longer than WATCH_TIMEOUT_SEC.
                     auto now = std::chrono::steady_clock::now();
@@ -216,10 +240,12 @@ public:
                 // Connection failed, but this might be expected if key doesn't exist
                 // For connection test, we just need to ensure we can communicate
                 if (response.error_code() == 100) { // Key not found is OK for connection test
+                    etcd_reachable_ = true;
                     return ETCD_SUCCESS;
                 }
                 return ETCD_ERROR;
             }
+            etcd_reachable_ = true;
             return ETCD_SUCCESS;
         } catch (const std::exception& e) {
             FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, 
@@ -249,10 +275,6 @@ public:
             if (hsi_watcher_) {
                 hsi_watcher_->Cancel();
                 hsi_watcher_.reset();
-            }
-            if (command_watcher_) {
-                command_watcher_->Cancel();
-                command_watcher_.reset();
             }
 
             if (user_count_watcher_) {
@@ -299,42 +321,8 @@ public:
                 true  // recursive
             );
 
-            // Watch commands: commands/{nodeId}/
-            std::string command_prefix = "commands/" + node_uuid_ + "/";
-
-            // Create command watcher with callback
-            command_watcher_ = std::make_unique<etcd::Watcher>(
-                *client_, 
-                command_prefix,
-                [this](etcd::Response response) {
-                    if (!watch_running_) return;
-                    
-                    update_watch_activity(); // update activity time
-                    
-                    if (response.error_code() == 0) {
-                        for(const auto& event : response.events()) {
-                            if (process_command_event(event) == SUCCESS) {
-                                // Delete command after processing
-                                delete_command(event.kv().key().c_str());
-                            }
-                        }
-                    } else {
-                        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Command watch error: %s", response.error_message().c_str());
-                        // Trigger reconnection on watch error
-                        trigger_reconnect();
-                    }
-                },
-                [this](bool connected) {
-                    update_watch_activity(); // update activity time
-                    
-                    // Connection status callback
-                    if (!connected && watch_running_) {
-                        FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL, "Command watcher disconnected, triggering reconnect...");
-                        trigger_reconnect();
-                    }
-                },
-                true  // recursive
-            );
+            // PPPoE dial/hangup is no longer driven by a commands/ key; it is
+            // driven by config.desire_status on the HSI config watcher above.
 
             std::string user_count_prefix = "user_counts/" + node_uuid_ + "/";
             user_count_watcher_ = std::make_unique<etcd::Watcher>(
@@ -369,8 +357,8 @@ public:
                 true  // recursive
             );
 
-            // Watch DNS static records: configs/{nodeId}/{subscriberId}/dns
-            std::string dns_prefix = "configs/" + node_uuid_ + "/";
+            // Watch DNS static records: configs/{nodeId}/dns/{subscriberId}
+            std::string dns_prefix = "configs/" + node_uuid_ + "/dns/";
             dns_record_watcher_ = std::make_unique<etcd::Watcher>(
                 *client_,
                 dns_prefix,
@@ -444,9 +432,6 @@ public:
             // Stop current watchers
             if (hsi_watcher_) {
                 hsi_watcher_->Cancel();
-            }
-            if (command_watcher_) {
-                command_watcher_->Cancel();
             }
             if (user_count_watcher_) {
                 user_count_watcher_->Cancel();
@@ -670,7 +655,7 @@ public:
                         etcd_event_free(ev);
                         continue;
                     }
-                    ev->event_data.hsi.is_enabled = is_enabled ? TRUE : FALSE;
+                    ev->event_data.hsi.desire_connect = is_enabled ? TRUE : FALSE;
                     enqueue_etcd_event(ev);
                 }
             }
@@ -701,10 +686,10 @@ public:
             }
 
             // Step 3c: DNS static records — enqueue for the control-plane loop.
-            // Key format: configs/{nodeId}/{userId}/dns  value: JSON array of records
+            // Key format: configs/{nodeId}/dns/{userId}  value: JSON array of records
             {
-                std::string dns_base_prefix = "configs/" + node_uuid_ + "/";
-                std::regex dns_key_regex("configs/([^/]+)/([^/]+)/dns");
+                std::string dns_base_prefix = "configs/" + node_uuid_ + "/dns/";
+                std::regex dns_key_regex("configs/([^/]+)/dns/([^/]+)");
                 auto dns_response = client_->ls(dns_base_prefix).get();
                 if (dns_response.error_code() == 0) {
                     int dns_total = 0;
@@ -800,10 +785,6 @@ public:
             hsi_watcher_->Cancel();
             hsi_watcher_.reset();
         }
-        if (command_watcher_) {
-            command_watcher_->Cancel();
-            command_watcher_.reset();
-        }
         if (user_count_watcher_) {
             user_count_watcher_->Cancel();
             user_count_watcher_.reset();
@@ -838,90 +819,143 @@ public:
         }
     }
 
-    // Write fallback error event to etcd for failed processing
-    etcd_status_t write_fallback_error(const std::string& event_type,
-        const std::string& key,
-        const std::string& node_id,
-        const std::string& user_id,
-        etcd_error_reason_t reason,
-        const std::string& error_detail,
-        const std::string& original_value = "") {
 
-        if (!client_) {
-            return ETCD_ERROR;
-        }
+    // Generic Compare-And-Swap put keyed on ModRevision.
+    // See docs/contracts/cas-convention.md. Later slices (config writes,
+    // desire_status updates, offline-queue flush) build on this primitive.
+    etcd_status_t cas_put(const std::string& key, etcd_mutate_fn_t mutate_fn,
+        void* user_data, int64_t* out_revision) {
+        if (!client_ || key.empty() || !mutate_fn) return ETCD_ERROR;
 
-        try {
-            // Build fallback error key: failed_events/{event_type}/{node_id}/{user_id}/{timestamp}
-            std::time_t now = std::time(nullptr);
-            std::stringstream ss;
-            ss << "failed_events/" << event_type << "/" << node_id << "/" 
-               << user_id << "/" << now;
-            std::string fail_key = ss.str();
+        constexpr int CAS_MAX_RETRIES = 5;
+        constexpr int CAS_BACKOFF_INIT_MS = 50;
+        constexpr int CAS_BACKOFF_MULT = 2;
+        int backoff_ms = CAS_BACKOFF_INIT_MS;
 
-            // Build JSON payload
-            Json::Value root;
-            root["event_type"] = event_type;
-            root["original_key"] = key;
-            root["node_id"] = node_id;
-            root["user_id"] = user_id;
-            root["error_reason_code"] = static_cast<int>(reason);
-            root["error_reason_name"] = get_error_reason_name(reason);
-            root["error_detail"] = error_detail;
-            root["timestamp"] = static_cast<Json::Int64>(now);
+        for (int attempt = 0; attempt < CAS_MAX_RETRIES; attempt++) {
+            try {
+                // 1. Read current value + revision
+                std::string current;
+                int64_t mod_revision = 0;
+                bool exists = false;
 
-            // Record the instance's local UTC offset, e.g. "UTC+8". localtime()'s
-            // shared static buffer is fine here — we only read the (effectively
-            // constant) timezone offset, not the time itself.
-            char tz_raw[8] = {0};
-            struct tm *local_tm = std::localtime(&now);
-            if (local_tm)
-                std::strftime(tz_raw, sizeof(tz_raw), "%z", local_tm);  // e.g. "+0800"
-            std::string tz_str = "UTC";
-            if (std::strlen(tz_raw) >= 5) {
-                int hh = (tz_raw[1] - '0') * 10 + (tz_raw[2] - '0');
-                int mm = (tz_raw[3] - '0') * 10 + (tz_raw[4] - '0');
-                tz_str += tz_raw[0];                       // '+' or '-'
-                tz_str += std::to_string(hh);
-                if (mm != 0) {
-                    tz_str += ':';
-                    if (mm < 10)
-                        tz_str += '0';
-                    tz_str += std::to_string(mm);
+                auto get_resp = client_->get(key).get();
+                if (get_resp.error_code() == 0) {
+                    current = get_resp.value().as_string();
+                    mod_revision = get_resp.value().modified_index();
+                    exists = true;
+                } else if (get_resp.error_code() == etcdv3::ERROR_KEY_NOT_FOUND) {
+                    exists = false;   // key absent → create-if-absent below
+                } else {
+                    FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+                        "cas_put: get failed for %s: %s", key.c_str(),
+                        get_resp.error_message().c_str());
+                    return ETCD_ERROR;
                 }
-            }
-            root["timezone"] = tz_str;
 
-            // Include original value if available (for DELETE events with prev_kv)
-            if (!original_value.empty()) {
-                root["original_value"] = original_value;
-            }
+                // 2. Produce new value via caller's mutate function
+                char* out_value = NULL;
+                if (mutate_fn(exists ? current.c_str() : NULL, &out_value, user_data) != SUCCESS
+                        || out_value == NULL) {
+                    free(out_value);
+                    return ETCD_ERROR;
+                }
+                std::string new_value(out_value);
+                free(out_value);
 
-            // Convert to string
-            Json::StreamWriterBuilder writer;
-            writer["indentation"] = "";  // Compact JSON
-            std::string payload = Json::writeString(writer, root);
+                // 3. Conditional write: CAS on revision, or create-if-absent
+                etcd::Response write_resp = exists
+                    ? client_->modify_if(key, new_value, mod_revision).get()
+                    : client_->add(key, new_value).get();
 
-            // Write to etcd
-            auto response_task = client_->set(fail_key, payload);
-            auto response = response_task.get();
+                if (write_resp.error_code() == 0) {
+                    if (out_revision) *out_revision = write_resp.index();
+                    return ETCD_SUCCESS;
+                }
 
-            if (response.error_code() == 0) {
-                FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "Wrote fallback error to: %s", fail_key.c_str());
-                return ETCD_SUCCESS;
-            } else {
-                FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Failed to write fallback error: %s", response.error_message().c_str());
+                // 4. Conflict (compare failed / key already exists) → backoff + retry
+                if (write_resp.error_code() == etcdv3::ERROR_COMPARE_FAILED ||
+                    write_resp.error_code() == etcdv3::ERROR_KEY_ALREADY_EXISTS) {
+                    FastRG_LOG(DBG, fastrg_ccb->fp, NULL, NULL,
+                        "cas_put: conflict on %s (attempt %d/%d), retrying",
+                        key.c_str(), attempt + 1, CAS_MAX_RETRIES);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(backoff_ms));
+                    backoff_ms *= CAS_BACKOFF_MULT;
+                    continue;
+                }
+
+                FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+                    "cas_put: write failed for %s: %s", key.c_str(),
+                    write_resp.error_message().c_str());
+                return ETCD_ERROR;
+            } catch (const std::exception& e) {
+                FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+                    "cas_put: exception for %s: %s", key.c_str(), e.what());
                 return ETCD_ERROR;
             }
-        } catch (const std::exception& e) {
-            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Exception writing fallback error: %s", e.what());
-            return ETCD_ERROR;
         }
+
+        FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
+            "cas_put: exhausted %d retries for %s", CAS_MAX_RETRIES, key.c_str());
+        return ETCD_CAS_CONFLICT;
+    }
+
+    // Build the HSIConfigWithMetadata JSON string for an hsi_config_t. Shared by
+    // put_hsi_config and the offline queue so both serialize identically.
+    std::string build_hsi_config_json(const char* node_id, const hsi_config_t* config,
+        const char* updated_by) {
+        Json::Value root;
+        Json::Value cfg;
+        cfg["user_id"] = std::string(config->user_id);
+        cfg["vlan_id"] = std::string(config->vlan_id);
+        cfg["account_name"] = std::string(config->account_name);
+        cfg["password"] = std::string(config->password);
+        cfg["dhcp_addr_pool"] = std::string(config->dhcp_addr_pool);
+        cfg["dhcp_subnet"] = std::string(config->dhcp_subnet);
+        cfg["dhcp_gateway"] = std::string(config->dhcp_gateway);
+        cfg["dns_proxy_enable"] = (config->dns_proxy_enable == TRUE);
+        cfg["tcp_conntrack_enable"] = (config->tcp_conntrack_enable == TRUE);
+        // PPPoE desired state; default to disconnect when unset.
+        cfg["desire_status"] = (config->desire_status[0] != '\0')
+            ? std::string(config->desire_status) : std::string(DESIRE_STATUS_DISCONNECT);
+
+        if (config->port_mapping_count > 0 && config->port_mappings != NULL) {
+            Json::Value pm_array(Json::arrayValue);
+            for (int i = 0; i < config->port_mapping_count; i++) {
+                Json::Value entry;
+                entry["index"] = std::to_string(i);
+                entry["eport"] = std::to_string(config->port_mappings[i].eport);
+                entry["dip"] = std::string(config->port_mappings[i].dip);
+                entry["dport"] = std::to_string(config->port_mappings[i].dport);
+                pm_array.append(entry);
+            }
+            cfg["port-mapping"] = pm_array;
+        }
+
+        root["config"] = cfg;
+        Json::Value meta;
+        meta["node"] = std::string(node_id);
+        meta["resourceVersion"] = "";
+        meta["updatedBy"] = updated_by ? std::string(updated_by) : std::string("");
+        // enableStatus removed: observed PPPoE status is reported via Kafka, not etcd.
+
+        std::time_t now = std::time(nullptr);
+        std::tm tm{};
+        gmtime_r(&now, &tm);
+        std::ostringstream out;
+        out << std::put_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
+        meta["updatedAt"] = out.str();
+
+        root["metadata"] = meta;
+
+        Json::StreamWriterBuilder writer;
+        writer["indentation"] = "";
+        return Json::writeString(writer, root);
     }
 
     // Put HSI config into etcd under configs/{nodeId}/hsi/{userId}
-    etcd_status_t put_hsi_config(const char* node_id, const char* user_id, 
-        const hsi_config_t* config, hsi_enable_status_t enable_status, const char* updated_by,
+    etcd_status_t put_hsi_config(const char* node_id, const char* user_id,
+        const hsi_config_t* config, const char* updated_by,
         int64_t* revision) {
         if (!client_ || !node_id || !user_id || !config) return ETCD_ERROR;
 
@@ -930,70 +964,7 @@ public:
             ss << "configs/" << node_id << "/hsi/" << user_id;
             std::string key = ss.str();
 
-            Json::Value root;
-            Json::Value cfg;
-            cfg["user_id"] = std::string(config->user_id);
-            cfg["vlan_id"] = std::string(config->vlan_id);
-            cfg["account_name"] = std::string(config->account_name);
-            cfg["password"] = std::string(config->password);
-            cfg["dhcp_addr_pool"] = std::string(config->dhcp_addr_pool);
-            cfg["dhcp_subnet"] = std::string(config->dhcp_subnet);
-            cfg["dhcp_gateway"] = std::string(config->dhcp_gateway);
-            cfg["dns_proxy_enable"] = (config->dns_proxy_enable == TRUE);
-            cfg["tcp_conntrack_enable"] = (config->tcp_conntrack_enable == TRUE);
-
-            // Serialize port-mapping array
-            if (config->port_mapping_count > 0 && config->port_mappings != NULL) {
-                Json::Value pm_array(Json::arrayValue);
-                for (int i = 0; i < config->port_mapping_count; i++) {
-                    Json::Value entry;
-                    entry["index"] = std::to_string(i);
-                    entry["eport"] = std::to_string(config->port_mappings[i].eport);
-                    entry["dip"] = std::string(config->port_mappings[i].dip);
-                    entry["dport"] = std::to_string(config->port_mappings[i].dport);
-                    pm_array.append(entry);
-                }
-                cfg["port-mapping"] = pm_array;
-            }
-
-            root["config"] = cfg;
-            Json::Value meta;
-            meta["node"] = std::string(node_id);
-            meta["resourceVersion"] = "";
-            meta["updatedBy"] = updated_by ? std::string(updated_by) : std::string("");
-            std::string status_str;
-            switch (enable_status) {
-                case ENABLE_STATUS_ENABLED:
-                    status_str = "enabled";
-                    break;
-                case ENABLE_STATUS_ENABLING:
-                    status_str = "enabling";
-                    break;
-                case ENABLE_STATUS_DISABLING:
-                    status_str = "disabling";
-                    break;
-                case ENABLE_STATUS_DISABLED:
-                    status_str = "disabled";
-                    break;
-                default:
-                    status_str = "unknown";
-                    break;
-            }
-            meta["enableStatus"] = status_str;
-
-            // ISO8601-ish timestamp
-            std::time_t now = std::time(nullptr);
-            std::tm tm{};
-            gmtime_r(&now, &tm);
-            std::ostringstream out;
-            out << std::put_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
-            meta["updatedAt"] = out.str();
-
-            root["metadata"] = meta;
-
-            Json::StreamWriterBuilder writer;
-            writer["indentation"] = "";
-            std::string payload = Json::writeString(writer, root);
+            std::string payload = build_hsi_config_json(node_id, config, updated_by);
 
             auto response_task = client_->set(key, payload);
             auto response = response_task.get();
@@ -1042,7 +1013,304 @@ public:
         }
     }
 
-    etcd_status_t get_hsi_config(const std::string& node_id, 
+    // ---- Offline config write queue (point 7) ----------------------------
+
+    bool is_connected() const { return etcd_reachable_.load(); }
+
+    static int64_t now_ms() {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+    }
+
+    // Parse an ISO8601 "YYYY-MM-DDTHH:MM:SSZ" timestamp to ms since epoch (0 on failure).
+    static int64_t iso8601_to_ms(const std::string& s) {
+        int y, mo, d, h, mi, sec;
+        if (sscanf(s.c_str(), "%d-%d-%dT%d:%d:%dZ", &y, &mo, &d, &h, &mi, &sec) != 6)
+            return 0;
+        std::tm tm{};
+        tm.tm_year = y - 1900; tm.tm_mon = mo - 1; tm.tm_mday = d;
+        tm.tm_hour = h; tm.tm_min = mi; tm.tm_sec = sec;
+        return (int64_t)timegm(&tm) * 1000;
+    }
+
+    // Merge context + callback for flushing a queued PUT via cas_put().
+    struct FlushCtx {
+        const std::string* value;   // config kind: JSON value; desire kind: status string
+        int64_t ts_ms;              // queued enqueue time
+        bool preserve_desire;       // config put: keep etcd's existing config.desire_status
+        bool desire_only;           // desire kind: update only config.desire_status, keep config
+        bool skipped;               // set when the queued entry should be dropped (etcd wins / N/A)
+    };
+
+    // Timestamp merge for flushing a queued write.
+    //  - config kind: object-level merge; queued value wins unless etcd holds a
+    //    newer write. For config edits etcd's desire_status is always preserved so
+    //    a config edit never clobbers PPPoE intent.
+    //  - desire kind (desire_only): keep etcd's whole config and update ONLY
+    //    config.desire_status to the queued value, so a queued connect/disconnect
+    //    never clobbers a concurrent config edit (symmetric to the config case).
+    static STATUS flush_merge_fn(const char* current_json, char** out_value, void* user_data) {
+        FlushCtx* ctx = (FlushCtx*)user_data;
+
+        if (ctx->desire_only) {
+            // Need an existing config to attach the desire_status to.
+            if (current_json == NULL) { ctx->skipped = true; return ERROR; }
+            Json::Value cur; Json::Reader reader;
+            if (!reader.parse(current_json, cur) || !cur.isMember("config")) {
+                ctx->skipped = true; return ERROR;
+            }
+            cur["config"]["desire_status"] = *ctx->value;   // value holds the status string
+            Json::StreamWriterBuilder w; w["indentation"] = "";
+            std::string s = Json::writeString(w, cur);
+            *out_value = strdup(s.c_str());
+            return *out_value ? SUCCESS : ERROR;
+        }
+
+        if (current_json == NULL) {
+            *out_value = strdup(ctx->value->c_str());
+            return *out_value ? SUCCESS : ERROR;
+        }
+        Json::Value cur; Json::Reader reader;
+        if (!reader.parse(current_json, cur)) {
+            *out_value = strdup(ctx->value->c_str());   // unparseable → overwrite
+            return *out_value ? SUCCESS : ERROR;
+        }
+        int64_t etcd_ts = 0;
+        if (cur.isMember("metadata") && cur["metadata"].isMember("updatedAt"))
+            etcd_ts = iso8601_to_ms(cur["metadata"]["updatedAt"].asString());
+        if (etcd_ts > ctx->ts_ms) {
+            ctx->skipped = true;   // etcd newer → it wins; abort the CAS
+            return ERROR;
+        }
+        Json::Value newv; Json::Reader r2;
+        if (!r2.parse(*ctx->value, newv)) { ctx->skipped = true; return ERROR; }
+        if (ctx->preserve_desire && cur.isMember("config") &&
+                cur["config"].isMember("desire_status") && newv.isMember("config")) {
+            newv["config"]["desire_status"] = cur["config"]["desire_status"];
+        }
+        Json::StreamWriterBuilder w; w["indentation"] = "";
+        std::string s = Json::writeString(w, newv);
+        *out_value = strdup(s.c_str());
+        return *out_value ? SUCCESS : ERROR;
+    }
+
+    void persist_queue_locked() {
+        Json::Value arr(Json::arrayValue);
+        for (const auto& e : config_queue_) {
+            Json::Value j;
+            j["op"] = e.op;
+            j["kind"] = e.kind;
+            j["key"] = e.key;
+            j["value"] = e.value;
+            j["ts_ms"] = (Json::Int64)e.ts_ms;
+            j["preserve_desire"] = e.preserve_desire;
+            arr.append(j);
+        }
+        Json::StreamWriterBuilder w; w["indentation"] = "";
+        std::string data = Json::writeString(w, arr);
+        std::string tmp = std::string(CONFIG_QUEUE_PATH) + ".tmp";
+        std::ofstream ofs(tmp, std::ios::trunc);
+        if (!ofs) {
+            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Failed to open queue temp file %s", tmp.c_str());
+            return;
+        }
+        ofs << data;
+        ofs.flush();
+        ofs.close();
+        if (std::rename(tmp.c_str(), CONFIG_QUEUE_PATH) != 0)
+            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Failed to rename queue file to %s", CONFIG_QUEUE_PATH);
+    }
+
+    etcd_status_t load_config_queue() {
+        std::lock_guard<std::mutex> lk(config_queue_mutex_);
+        config_queue_.clear();
+        std::ifstream ifs(CONFIG_QUEUE_PATH);
+        if (!ifs) return ETCD_SUCCESS;   // no file = empty queue
+        std::stringstream buf; buf << ifs.rdbuf();
+        std::string data = buf.str();
+        if (data.empty()) return ETCD_SUCCESS;
+        Json::Value arr; Json::Reader reader;
+        if (!reader.parse(data, arr) || !arr.isArray()) {
+            FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL, "Corrupt config queue file, ignoring");
+            return ETCD_ERROR;
+        }
+        for (const auto& j : arr) {
+            QueueEntry e;
+            e.op = j.get("op", "").asString();
+            e.kind = j.get("kind", "config").asString();
+            e.key = j.get("key", "").asString();
+            e.value = j.get("value", "").asString();
+            e.ts_ms = j.get("ts_ms", (Json::Int64)0).asInt64();
+            e.preserve_desire = j.get("preserve_desire", false).asBool();
+            if (!e.op.empty() && !e.key.empty())
+                config_queue_.push_back(e);
+        }
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "Loaded %zu queued config write(s) from disk", config_queue_.size());
+        return ETCD_SUCCESS;
+    }
+
+    void enqueue_locked(const QueueEntry& e) {
+        config_queue_.push_back(e);
+        persist_queue_locked();
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "Queued offline config write: op=%s key=%s (pending=%zu)",
+            e.op.c_str(), e.key.c_str(), config_queue_.size());
+    }
+
+    etcd_status_t queue_hsi_put(const char* node_id, const char* user_id,
+        const hsi_config_t* config, const char* updated_by) {
+        if (!node_id || !user_id || !config) return ETCD_ERROR;
+        QueueEntry e;
+        e.op = "put";
+        e.kind = "config";
+        e.key = "configs/" + std::string(node_id) + "/hsi/" + std::string(user_id);
+        e.value = build_hsi_config_json(node_id, config, updated_by);
+        e.ts_ms = now_ms();
+        e.preserve_desire = true;   // config edit must not clobber etcd desire_status
+        std::lock_guard<std::mutex> lk(config_queue_mutex_);
+        enqueue_locked(e);
+        return ETCD_SUCCESS;
+    }
+
+    etcd_status_t queue_hsi_delete(const char* node_id, const char* user_id) {
+        if (!node_id || !user_id) return ETCD_ERROR;
+        QueueEntry e;
+        e.op = "delete";
+        e.kind = "config";
+        e.key = "configs/" + std::string(node_id) + "/hsi/" + std::string(user_id);
+        e.ts_ms = now_ms();
+        e.preserve_desire = false;
+        std::lock_guard<std::mutex> lk(config_queue_mutex_);
+        enqueue_locked(e);
+        return ETCD_SUCCESS;
+    }
+
+    etcd_status_t queue_desire_status(const char* node_id, const char* user_id,
+        const char* desire_status) {
+        if (!node_id || !user_id || !desire_status) return ETCD_ERROR;
+        QueueEntry e;
+        e.op = "put";
+        e.kind = "desire";   // flush updates only config.desire_status, preserving config
+        e.key = "configs/" + std::string(node_id) + "/hsi/" + std::string(user_id);
+        e.value = desire_status;   // the status string
+        e.ts_ms = now_ms();
+        e.preserve_desire = false;
+        std::lock_guard<std::mutex> lk(config_queue_mutex_);
+        enqueue_locked(e);
+        return ETCD_SUCCESS;
+    }
+
+    etcd_status_t queue_subscriber_count(const char* node_id,
+        const char* count_str, const char* updated_by) {
+        if (!node_id || !count_str) return ETCD_ERROR;
+        Json::Value root;
+        root["subscriber_count"] = std::string(count_str);
+        Json::Value meta;
+        meta["node"] = std::string(node_id);
+        meta["resourceVersion"] = "";
+        meta["updatedBy"] = updated_by ? std::string(updated_by) : std::string("");
+        std::time_t now = std::time(nullptr); std::tm tm{}; gmtime_r(&now, &tm);
+        std::ostringstream out; out << std::put_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
+        meta["updatedAt"] = out.str();
+        root["metadata"] = meta;
+        Json::StreamWriterBuilder w; w["indentation"] = "";
+
+        QueueEntry e;
+        e.op = "put";
+        e.kind = "config";
+        e.key = "user_counts/" + std::string(node_id) + "/";
+        e.value = Json::writeString(w, root);
+        e.ts_ms = now_ms();
+        e.preserve_desire = false;
+        std::lock_guard<std::mutex> lk(config_queue_mutex_);
+        enqueue_locked(e);
+        return ETCD_SUCCESS;
+    }
+
+    int queue_pending() {
+        std::lock_guard<std::mutex> lk(config_queue_mutex_);
+        return (int)config_queue_.size();
+    }
+
+    // Flush queued writes to etcd. Called by the watchdog when etcd is reachable.
+    // etcd_reachable_ is already true here, so the gRPC server rejects (does not
+    // enqueue) concurrent writes — holding the queue lock for the flush is safe.
+    void flush_config_queue() {
+        std::lock_guard<std::mutex> lk(config_queue_mutex_);
+        if (config_queue_.empty()) return;
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "Flushing %zu queued config write(s) to etcd", config_queue_.size());
+
+        std::vector<QueueEntry> remaining;
+        for (auto& e : config_queue_) {
+            bool resolved = false;
+
+            // For HSI keys, recover ccb_id to drive self-event filtering so the
+            // node's own watcher does not re-process this flush write.
+            int ccb_id = -1;
+            std::smatch m;
+            std::regex re("configs/[^/]+/hsi/(.+)");
+            if (std::regex_match(e.key, m, re) && m.size() == 2)
+                ccb_id = parse_user_id(m[1].str().c_str(), 0);
+
+            if (e.op == "put") {
+                FlushCtx ctx{ &e.value, e.ts_ms, e.preserve_desire, (e.kind == "desire"), false };
+                if (ccb_id >= 0) etcd_mark_pending_event(HSI_ACTION_UPDATE, (U16)ccb_id);
+                int64_t rev = 0;
+                etcd_status_t s = cas_put(e.key, &EtcdClientImpl::flush_merge_fn, &ctx, &rev);
+                if (s == ETCD_SUCCESS) {
+                    if (ccb_id >= 0) etcd_confirm_pending_event(HSI_ACTION_UPDATE, (U16)ccb_id, rev);
+                    resolved = true;
+                } else if (ctx.skipped) {
+                    if (ccb_id >= 0) etcd_remove_event(HSI_ACTION_UPDATE, (U16)ccb_id);
+                    resolved = true;   // etcd newer → drop queued write
+                    FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                        "Queued write for %s superseded by newer etcd value, dropping", e.key.c_str());
+                } else {
+                    if (ccb_id >= 0) etcd_remove_event(HSI_ACTION_UPDATE, (U16)ccb_id);
+                    FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
+                        "Failed to flush queued write for %s, will retry", e.key.c_str());
+                }
+            } else if (e.op == "delete") {
+                try {
+                    auto resp = client_->get(e.key).get();
+                    if (resp.error_code() == etcdv3::ERROR_KEY_NOT_FOUND) {
+                        resolved = true;   // already gone
+                    } else if (resp.error_code() == 0) {
+                        int64_t etcd_ts = 0;
+                        Json::Value cur; Json::Reader r;
+                        if (r.parse(resp.value().as_string(), cur) &&
+                                cur.isMember("metadata") && cur["metadata"].isMember("updatedAt"))
+                            etcd_ts = iso8601_to_ms(cur["metadata"]["updatedAt"].asString());
+                        if (etcd_ts > e.ts_ms) {
+                            resolved = true;  // re-created/updated after our delete → keep etcd
+                        } else {
+                            if (ccb_id >= 0) etcd_mark_pending_event(HSI_ACTION_DELETE, (U16)ccb_id);
+                            auto del = client_->rm(e.key).get();
+                            if (del.error_code() == 0) {
+                                if (ccb_id >= 0) etcd_confirm_pending_event(HSI_ACTION_DELETE, (U16)ccb_id, del.index());
+                                resolved = true;
+                            } else if (ccb_id >= 0) {
+                                etcd_remove_event(HSI_ACTION_DELETE, (U16)ccb_id);
+                            }
+                        }
+                    }
+                } catch (const std::exception& ex) {
+                    FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
+                        "Exception flushing delete %s: %s", e.key.c_str(), ex.what());
+                }
+            }
+
+            if (!resolved) remaining.push_back(e);
+        }
+        config_queue_.swap(remaining);
+        persist_queue_locked();
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "Config queue flush complete, %zu entr(ies) still pending", config_queue_.size());
+    }
+
+    etcd_status_t get_hsi_config(const std::string& node_id,
         const std::string& user_id, hsi_config_full_t* output)
     {
         if (!client_ || !output) {
@@ -1132,6 +1400,14 @@ public:
                     output->config.tcp_conntrack_enable = v.asInt() != 0 ? TRUE : FALSE;
             }
 
+            // desire_status: "connect"/"disconnect"; empty/absent treated as disconnect.
+            memset(output->config.desire_status, 0, sizeof(output->config.desire_status));
+            if (config_obj.isMember("desire_status") && config_obj["desire_status"].isString()) {
+                std::strncpy(output->config.desire_status,
+                    config_obj["desire_status"].asString().c_str(),
+                    sizeof(output->config.desire_status) - 1);
+            }
+
             // Parse port-mapping array (dynamic allocation — caller must call hsi_config_free_port_mappings)
             output->config.port_mappings = NULL;
             output->config.port_mapping_count = 0;
@@ -1165,57 +1441,34 @@ public:
             output->config.dhcp_subnet[sizeof(output->config.dhcp_subnet) - 1] = '\0';
             output->config.dhcp_gateway[sizeof(output->config.dhcp_gateway) - 1] = '\0';
 
-            // Parse metadata section
+            // Parse metadata section (enableStatus removed; PPPoE intent lives in
+            // config.desire_status, observed status is reported via Kafka).
             if (root.isMember("metadata")) {
                 Json::Value metadata = root["metadata"];
-                
-                // Parse enableStatus
-                if (metadata["enableStatus"].isString()) {
-                    std::string status = metadata["enableStatus"].asString();
-                    if (status == "enabled") {
-                        output->enable_status = ENABLE_STATUS_ENABLED;
-                    } else if (status == "enabling") {
-                        output->enable_status = ENABLE_STATUS_ENABLING;
-                    } else if (status == "disabling") {
-                        output->enable_status = ENABLE_STATUS_DISABLING;
-                    } else if (status == "disabled") {
-                        output->enable_status = ENABLE_STATUS_DISABLED;
-                    } else {
-                        output->enable_status = ENABLE_STATUS_DISABLED; // default
-                    }
-                } else {
-                    output->enable_status = ENABLE_STATUS_DISABLED;
-                }
 
-                // Parse other metadata fields
-                std::strncpy(output->updated_by, 
-                    metadata.get("updatedBy", "").asString().c_str(), 
+                std::strncpy(output->updated_by,
+                    metadata.get("updatedBy", "").asString().c_str(),
                     sizeof(output->updated_by) - 1);
                 output->updated_by[sizeof(output->updated_by) - 1] = '\0';
 
-                std::strncpy(output->updated_at, 
-                    metadata.get("updatedAt", "").asString().c_str(), 
+                std::strncpy(output->updated_at,
+                    metadata.get("updatedAt", "").asString().c_str(),
                     sizeof(output->updated_at) - 1);
                 output->updated_at[sizeof(output->updated_at) - 1] = '\0';
 
-                std::strncpy(output->resource_version, 
-                    metadata.get("resourceVersion", "").asString().c_str(), 
+                std::strncpy(output->resource_version,
+                    metadata.get("resourceVersion", "").asString().c_str(),
                     sizeof(output->resource_version) - 1);
                 output->resource_version[sizeof(output->resource_version) - 1] = '\0';
             } else {
                 // No metadata section, set defaults
-                output->enable_status = ENABLE_STATUS_DISABLED;
                 output->updated_by[0] = '\0';
                 output->updated_at[0] = '\0';
                 output->resource_version[0] = '\0';
             }
 
-            std::cout << "Successfully retrieved HSI config for user: " 
-                << user_id << " (enableStatus: " 
-                << (output->enable_status == ENABLE_STATUS_ENABLED ? "enabled" :
-                    output->enable_status == ENABLE_STATUS_ENABLING ? "enabling" :
-                    output->enable_status == ENABLE_STATUS_DISABLING ? "disabling" : "disabled")
-                << ")" << std::endl;
+            std::cout << "Successfully retrieved HSI config for user: "
+                << user_id << " (desire_status: " << output->config.desire_status << ")" << std::endl;
 
             return ETCD_SUCCESS;
 
@@ -1321,197 +1574,9 @@ public:
         }
     }
 
-    // Convert error reason enum to readable string
-    static std::string get_error_reason_name(etcd_error_reason_t reason) {
-        switch (reason) {
-            case ERROR_REASON_CALLBACK_FAILED:
-                return "CALLBACK_FAILED";
-            case ERROR_REASON_PARSE_FAILED:
-                return "PARSE_FAILED";
-            case ERROR_REASON_INVALID_FORMAT:
-                return "INVALID_FORMAT";
-            case ERROR_REASON_MISSING_FIELD:
-                return "MISSING_FIELD";
-            case ERROR_REASON_RESOURCE_UNAVAILABLE:
-                return "RESOURCE_UNAVAILABLE";
-            case ERROR_REASON_TIMEOUT:
-                return "TIMEOUT";
-            case ERROR_REASON_UNKNOWN:
-            default:
-                return "UNKNOWN";
-        }
-    }
-
-    etcd_status_t get_hsi_config_status(const std::string& node_id, 
-        const std::string& user_id, hsi_enable_status_t* output_status)
-    {
-        if (!client_ || !output_status) {
-            return ETCD_ERROR;
-        }
-
-        try {
-            std::string key = "configs/" + node_id + "/hsi/" + user_id;
-
-            // Get current config from etcd
-            auto get_response = client_->get(key).get();
-
-            if (get_response.error_code() != 0) {
-                if (get_response.error_code() == 100) {
-                    // Key not found
-                    std::cerr << "HSI config not found for key: " << key << std::endl;
-                    return ETCD_KEY_NOT_FOUND;
-                }
-                std::cerr << "Failed to get HSI config with key: " << key 
-                    << " - " << get_response.error_message() << std::endl;
-                return ETCD_ERROR;
-            }
-
-            std::string value = get_response.value().as_string();
-
-            // Parse JSON
-            Json::Value root;
-            Json::Reader reader;
-
-            if (!reader.parse(value, root)) {
-                std::cerr << "Failed to parse HSI config JSON for get_status" << std::endl;
-                return ETCD_CONFIG_PARSE_FAILED;
-            }
-
-            // Parse metadata section
-            if (root.isMember("metadata")) {
-                Json::Value metadata = root["metadata"];
-                
-                // Parse enableStatus
-                if (metadata["enableStatus"].isString()) {
-                    std::string status = metadata["enableStatus"].asString();
-                    if (status == "enabled") {
-                        *output_status = ENABLE_STATUS_ENABLED;
-                    } else if (status == "enabling") {
-                        *output_status = ENABLE_STATUS_ENABLING;
-                    } else if (status == "disabling") {
-                        *output_status = ENABLE_STATUS_DISABLING;
-                    } else if (status == "disabled") {
-                        *output_status = ENABLE_STATUS_DISABLED;
-                    } else {
-                        *output_status = ENABLE_STATUS_DISABLED; // default
-                    }
-                } else {
-                    *output_status = ENABLE_STATUS_DISABLED;
-                }
-            } else {
-                // No metadata section, set defaults
-                *output_status = ENABLE_STATUS_DISABLED;
-            }
-
-            std::cout << "Successfully retrieved HSI config status for user: " 
-                << user_id << " (enableStatus: " 
-                << (*output_status == ENABLE_STATUS_ENABLED ? "enabled" :
-                    *output_status == ENABLE_STATUS_ENABLING ? "enabling" :
-                    *output_status == ENABLE_STATUS_DISABLING ? "disabling" : "disabled")
-                << ")" << std::endl;
-
-            return ETCD_SUCCESS;
-
-        } catch (const std::exception& e) {
-            std::cerr << "Exception getting HSI config status: " << e.what() << std::endl;
-            return ETCD_ERROR;
-        }
-    }
-
-    etcd_status_t modify_hsi_config_status(const std::string& node_id, 
-        const std::string& user_id, hsi_enable_status_t enable_status, int64_t* revision) {
-        if (!client_) {
-            return ETCD_ERROR;
-        }
-
-        try {
-            std::string key = "configs/" + node_id + "/hsi/" + user_id;
-
-            // Get current config
-            auto get_response = client_->get(key).get();
-
-            if (get_response.error_code() != 0) {
-                std::cerr << "Failed to get HSI config for modify with key: " 
-                    << key << " - " << get_response.error_message() << std::endl;
-                return ETCD_ERROR;
-            }
-
-            std::string value = get_response.value().as_string();
-
-            // Parse JSON
-            Json::Value root;
-            Json::Reader reader;
-
-            if (!reader.parse(value, root)) {
-                std::cerr << "Failed to parse HSI config JSON for modify" << std::endl;
-                return ETCD_CONFIG_PARSE_FAILED;
-            }
-
-            // Modify the enableStatus field in metadata
-            if (!root.isMember("metadata")) {
-                root["metadata"] = Json::Value(Json::objectValue);
-            }
-
-            // Provide a textual enableStatus for intermediate states
-            std::string status_str;
-            switch (enable_status) {
-                case ENABLE_STATUS_ENABLED:
-                    status_str = "enabled";
-                    break;
-                case ENABLE_STATUS_ENABLING:
-                    status_str = "enabling";
-                    break;
-                case ENABLE_STATUS_DISABLING:
-                    status_str = "disabling";
-                    break;
-                case ENABLE_STATUS_DISABLED:
-                    status_str = "disabled";
-                    break;
-                default:
-                    status_str = "unknown";
-                    break;
-            }
-            root["metadata"]["enableStatus"] = status_str;
-
-            // Update the updatedAt timestamp
-            std::time_t now = std::time(nullptr);
-            std::tm tm{};
-            gmtime_r(&now, &tm);
-            std::ostringstream out;
-            out << std::put_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
-            root["metadata"]["updatedAt"] = out.str();
-            root["metadata"]["updatedBy"] = "etcd_client_modify";
-
-            // Convert back to JSON string
-            Json::StreamWriterBuilder writer;
-            writer["indentation"] = "";
-            std::string modified_payload = Json::writeString(writer, root);
-
-            // Write back to etcd
-            auto set_response = client_->set(key, modified_payload).get();
-
-            if (set_response.error_code() != 0) {
-                std::cerr << "Failed to update HSI config status: " << set_response.error_message() << std::endl;
-                return ETCD_ERROR;
-            }
-
-            // Mark this modification as pending to avoid processing in watcher
-            *revision = set_response.index();
-
-            std::cout << "Set HSI enableStatus='" << status_str << "' for user: " << user_id
-                      << " (revision: " << *revision << ")" << std::endl;
-
-            return ETCD_SUCCESS;
-
-        } catch (const std::exception& e) {
-            std::cerr << "Exception modifying HSI config status: " << e.what() << std::endl;
-            return ETCD_ERROR;
-        }
-    }
 
     etcd_status_t load_existing_configs(const char* node_uuid,
         hsi_config_callback_t hsi_callback,
-        pppoe_command_callback_t command_callback,
         user_count_changed_callback_t user_count_callback,
         dns_record_callback_t dns_record_callback,
         void* user_data) {
@@ -1593,25 +1658,16 @@ public:
                     // Get the revision from response
                     int64_t revision = response.index();
 
-                    // Invoke callback with UPDATE action for existing configs
-                    STATUS ret = hsi_callback(node_id.c_str(), user_id.c_str(), &config, 
+                    // Invoke callback with UPDATE action for existing configs. The
+                    // callback applies the config and reconciles PPPoE toward
+                    // config.desire_status (dial when "connect"), so the node
+                    // re-establishes sessions on restart from desire_status alone.
+                    STATUS ret = hsi_callback(node_id.c_str(), user_id.c_str(), &config,
                         HSI_ACTION_UPDATE, revision, user_data);
                     if (ret == SUCCESS) {
                         count++;
-                        std::cout << "Loaded existing HSI config for user: " << user_id << std::endl;
-                        if (is_enabled) {
-                            std::cout << "The loaded HSI config for user: " << user_id << " is enabled." << std::endl;
-                            pppoe_command_t command = { 0 };
-                            std::strncpy(command.action, "dial", sizeof(command.action)-1);
-                            std::strncpy(command.user_id, config.user_id, sizeof(command.user_id)-1);
-                            std::strncpy(command.vlan, config.vlan_id, sizeof(command.vlan)-1);
-                            std::strncpy(command.account, config.account_name, sizeof(command.account)-1);
-                            std::strncpy(command.password, config.password, sizeof(command.password)-1);
-                            command.timestamp = std::time(nullptr);
-                            command_callback(node_id.c_str(), &command, user_data);
-                        } else {
-                            std::cout << "The loaded HSI config for user: " << user_id << " is disabled." << std::endl;
-                        }
+                        std::cout << "Loaded existing HSI config for user: " << user_id
+                            << " (desire_status: " << config.desire_status << ")" << std::endl;
                     } else {
                         std::cerr << "Failed to load HSI config for user: " << user_id << std::endl;
                     }
@@ -1624,10 +1680,10 @@ public:
             std::cout << "Loaded " << count << " existing HSI config(s) for node: " << node_uuid << std::endl;
 
             // Load existing DNS static records:
-            // key: configs/{nodeId}/{userId}/dns  value: JSON array of records
+            // key: configs/{nodeId}/dns/{userId}  value: JSON array of records
             if (dns_record_callback) {
-                std::string dns_base_prefix = "configs/" + std::string(node_uuid) + "/";
-                std::regex dns_key_regex("configs/([^/]+)/([^/]+)/dns");
+                std::string dns_base_prefix = "configs/" + std::string(node_uuid) + "/dns/";
+                std::regex dns_key_regex("configs/([^/]+)/dns/([^/]+)");
                 auto dns_response = client_->ls(dns_base_prefix).get();
                 if (dns_response.error_code() == 0) {
                     int dns_count = 0;
@@ -1704,10 +1760,9 @@ private:
         std::regex hsi_regex("configs/([^/]+)/hsi/(.+)");
         std::smatch matches;
         if (!std::regex_match(key, matches, hsi_regex) || matches.size() != 3) {
+            // Errors are reported to the controller via Kafka (slice 11); the etcd
+            // failed_events/ namespace is removed.
             std::cerr << "Invalid HSI config key format: " << key << std::endl;
-            write_fallback_error("hsi_config", key, node_uuid_, "",
-                ERROR_REASON_INVALID_FORMAT, 
-                "Key does not match expected format: configs/{nodeId}/hsi/{userId}", value);
             return ERROR;
         }
         std::string node_id = matches[1].str();
@@ -1755,84 +1810,18 @@ private:
         if (action != HSI_ACTION_DELETE) {
             bool is_enabled = false;
             if (!parse_hsi_config(value, &ev->event_data.hsi.config, &is_enabled)) {
+                // Parse errors are reported via Kafka (slice 11).
                 std::cerr << "Failed to parse HSI config: " << value << std::endl;
-                write_fallback_error("hsi_config", key, node_id, user_id,
-                    ERROR_REASON_PARSE_FAILED,
-                    "JSON parsing failed or missing required fields", value);
                 etcd_event_free(ev);
                 return ERROR;
             }
-            ev->event_data.hsi.is_enabled = is_enabled ? TRUE : FALSE;
-            // Keep the raw JSON so the control-plane loop can record it in
-            // failed_events/ if the apply fails.
-            ev->event_data.hsi.raw_value = dup_string(value);
-        } else {
-            // DELETE: the new kv carries no value; the deleted config is in
-            // prev_kv. Keep it for the failed_events/ record on apply failure.
-            try {
-                if (!event.prev_kv().key().empty())
-                    ev->event_data.hsi.raw_value = dup_string(event.prev_kv().as_string());
-            } catch (...) {
-                // prev_kv unavailable — leave raw_value NULL
-            }
+            ev->event_data.hsi.desire_connect = is_enabled ? TRUE : FALSE;
         }
         enqueue_etcd_event(ev);
         return SUCCESS;
     }
 
     // Return SUCCESS if this event is PUT and it must be removed after processed
-    STATUS process_command_event(const etcd::Event& event) {
-        std::string key = event.kv().key();
-        std::string value = event.kv().as_string();
-
-        std::cout << "Processing command event: " << key << std::endl;
-
-        // Only process PUT events for commands
-        if (event.event_type() != etcd::Event::EventType::PUT) {
-            std::cout << "Ignoring non-PUT command event: " << key << std::endl;
-            return ERROR;
-        }
-
-        // Extract node_id from key: commands/{nodeId}/pppoe_{action}_{userId}
-        std::regex command_regex("commands/([^/]+)/pppoe_(dial|hangup)_(.+)");
-        std::smatch matches;
-        if (!std::regex_match(key, matches, command_regex) || matches.size() != 4) {
-            // Not a PPPoE command, ignore and write fallback error
-            std::cerr << "Invalid command key format: " << key << std::endl;
-            write_fallback_error("pppoe_command", key, node_uuid_, "",
-                ERROR_REASON_INVALID_FORMAT,
-                "Key does not match expected format: commands/{nodeId}/pppoe_{action}_{userId}",
-                value);
-            return SUCCESS;
-        }
-        std::string node_id = matches[1].str();
-        std::string user_id = matches[3].str();
-
-        etcd_event_t *ev = alloc_etcd_event(ETCD_EVENT_PPPOE_COMMAND);
-        if (!ev)
-            return SUCCESS;
-        ev->from_reconcile = FALSE;
-        std::strncpy(ev->node_id, node_id.c_str(), sizeof(ev->node_id) - 1);
-        std::strncpy(ev->user_id, user_id.c_str(), sizeof(ev->user_id) - 1);
-
-        if (!parse_pppoe_command(value, &ev->event_data.command)) {
-            std::cerr << "Failed to parse PPPoE command: " << value << std::endl;
-            write_fallback_error("pppoe_command", key, node_id, user_id,
-                ERROR_REASON_PARSE_FAILED,
-                "JSON parsing failed or missing required fields", value);
-            etcd_event_free(ev);
-            return SUCCESS;
-        }
-
-        if (!enqueue_etcd_event(ev)) {
-            // A command is imperative and not recovered by reconcile — record the loss.
-            write_fallback_error("pppoe_command", key, node_id, user_id,
-                ERROR_REASON_RESOURCE_UNAVAILABLE,
-                "etcd_event_q full, PPPoE command dropped", value);
-        }
-        return SUCCESS;
-    }
-
     STATUS process_user_count_change_event(const etcd::Event& event) {
         std::cout << "Processing user count change event: " << event.kv().key() << std::endl;
 
@@ -1843,10 +1832,8 @@ private:
         std::regex user_count_regex("user_counts/([^/]+)/");
         std::smatch matches;
         if (!std::regex_match(key, matches, user_count_regex) || matches.size() != 2) {
+            // Errors are reported via Kafka (slice 11); failed_events/ is removed.
             std::cerr << "Invalid user count config key format: " << key << std::endl;
-            write_fallback_error("user_count_config", key, node_uuid_, "",
-                ERROR_REASON_INVALID_FORMAT,
-                "Key does not match expected format: user_counts/{nodeId}/", value);
             return ERROR;
         }
         std::string node_id = matches[1].str();
@@ -1877,10 +1864,8 @@ private:
 
         if (action != HSI_ACTION_DELETE) {
             if (!parse_user_count_config(value, &ev->event_data.user_count)) {
+                // Parse errors are reported via Kafka (slice 11).
                 std::cerr << "Failed to parse user count config: " << value << std::endl;
-                write_fallback_error("user_count_config", key, node_id, "",
-                    ERROR_REASON_PARSE_FAILED,
-                    "JSON parsing failed or missing required fields", value);
                 etcd_event_free(ev);
                 return ERROR;
             }
@@ -1989,6 +1974,13 @@ private:
                     config->tcp_conntrack_enable = v.asInt() != 0 ? TRUE : FALSE;
             }
 
+            // desire_status: "connect"/"disconnect"; empty/absent treated as disconnect.
+            memset(config->desire_status, 0, sizeof(config->desire_status));
+            if (config_obj.isMember("desire_status") && config_obj["desire_status"].isString()) {
+                strncpy(config->desire_status, config_obj["desire_status"].asString().c_str(),
+                    sizeof(config->desire_status) - 1);
+            }
+
             // Parse port-mapping array (dynamic allocation — caller must call hsi_config_free_port_mappings)
             config->port_mappings = NULL;
             config->port_mapping_count = 0;
@@ -2015,14 +2007,10 @@ private:
                 }
             }
 
-            if (root.isMember("metadata") && is_enabled) {
-                Json::Value metadata = root["metadata"];
-                if (metadata["enableStatus"].isString()) {
-                    std::string status = metadata["enableStatus"].asString();
-                    *is_enabled = (status == "enabled" || status == "enabling");
-                } else {
-                    *is_enabled = false;
-                }
+            // "is_enabled" now means "the desired state is connect", derived from
+            // config.desire_status (the only source of truth for PPPoE intent).
+            if (is_enabled) {
+                *is_enabled = (strcmp(config->desire_status, DESIRE_STATUS_CONNECT) == 0);
             }
 
             return true;
@@ -2033,49 +2021,12 @@ private:
         }
     }
 
-    bool parse_pppoe_command(const std::string& json_str, pppoe_command_t* command) {
-        try {
-            Json::Value root;
-            Json::Reader reader;
-
-            if (!reader.parse(json_str, root)) {
-                return false;
-            }
-
-            // Extract command fields
-            strncpy(command->action, root.get("action", "").asString().c_str(), 
-                   sizeof(command->action) - 1);
-            strncpy(command->user_id, root.get("user_id", "").asString().c_str(), 
-                   sizeof(command->user_id) - 1);
-            strncpy(command->vlan, root.get("vlan", "").asString().c_str(), 
-                   sizeof(command->vlan) - 1);
-            strncpy(command->account, root.get("account", "").asString().c_str(), 
-                   sizeof(command->account) - 1);
-            strncpy(command->password, root.get("password", "").asString().c_str(), 
-                   sizeof(command->password) - 1);
-            command->timestamp = root.get("timestamp", 0).asInt64();
-
-            // Ensure null termination
-            command->action[sizeof(command->action) - 1] = '\0';
-            command->user_id[sizeof(command->user_id) - 1] = '\0';
-            command->vlan[sizeof(command->vlan) - 1] = '\0';
-            command->account[sizeof(command->account) - 1] = '\0';
-            command->password[sizeof(command->password) - 1] = '\0';
-
-            return true;
-
-        } catch (const std::exception& e) {
-            std::cerr << "Exception parsing PPPoE command: " << e.what() << std::endl;
-            return false;
-        }
-    }
-
     // DNS record event processing
     STATUS process_dns_record_event(const etcd::Event& event) {
         std::string key = event.kv().key();
 
-        // Only process keys matching configs/{nodeId}/{subscriberId}/dns (no domain suffix)
-        std::regex dns_regex("configs/([^/]+)/([^/]+)/dns");
+        // Only process keys matching configs/{nodeId}/dns/{subscriberId}
+        std::regex dns_regex("configs/([^/]+)/dns/([^/]+)");
         std::smatch matches;
         if (!std::regex_match(key, matches, dns_regex) || matches.size() != 3)
             return ERROR; // Not a DNS record key, skip silently
@@ -2181,7 +2132,7 @@ public:
         if (!client_ || !node_id || !user_id || !record) return ETCD_ERROR;
 
         try {
-            std::string key = std::string("configs/") + node_id + "/" + user_id + "/dns";
+            std::string key = std::string("configs/") + node_id + "/dns/" + user_id;
             std::string domain_str(record->domain);
 
             // Read existing records
@@ -2241,7 +2192,7 @@ public:
             return ETCD_ERROR;
 
         try {
-            std::string key = std::string("configs/") + node_uuid + "/" + user_id + "/dns";
+            std::string key = std::string("configs/") + node_uuid + "/dns/" + user_id;
 
             auto response = client_->get(key).get();
             if (response.error_code() != 0) {
@@ -2299,7 +2250,7 @@ public:
         if (!client_ || !node_id || !user_id || !domain) return ETCD_ERROR;
 
         try {
-            std::string key = std::string("configs/") + node_id + "/" + user_id + "/dns";
+            std::string key = std::string("configs/") + node_id + "/dns/" + user_id;
             std::string domain_str(domain);
 
             auto get_resp = client_->get(key).get();
@@ -2395,57 +2346,75 @@ etcd_status_t etcd_client_delete_command(const char* command_key) {
     return g_etcd_client->delete_command(command_key);
 }
 
-void etcd_client_write_fallback_error(const char *event_type, const char *key,
-    const char *node_id, const char *user_id, etcd_error_reason_t reason,
-    const char *error_detail, const char *original_value) {
-    if (!g_etcd_client)
-        return;
-    g_etcd_client->write_fallback_error(
-        event_type ? event_type : "", key ? key : "",
-        node_id ? node_id : "", user_id ? user_id : "",
-        reason, error_detail ? error_detail : "",
-        original_value ? original_value : "");
-}
 
 int etcd_client_is_initialized(void) {
     return (g_etcd_client != nullptr) ? 1 : 0;
 }
 
-etcd_status_t etcd_client_put_hsi_config(const char* node_id, const char* user_id, 
-    const hsi_config_t* config, hsi_enable_status_t enable_status, const char* updated_by,
-    int64_t* revision) {
+etcd_status_t etcd_client_cas_put(const char* key, etcd_mutate_fn_t mutate_fn,
+    void* user_data, int64_t* out_revision) {
     if (!g_etcd_client) return ETCD_ERROR;
-    return g_etcd_client->put_hsi_config(node_id, user_id, config, enable_status, updated_by, revision);
+    return g_etcd_client->cas_put(std::string(key), mutate_fn, user_data, out_revision);
 }
 
-etcd_status_t etcd_client_get_hsi_config(const char* node_id, 
+int etcd_client_is_connected(void) {
+    return (g_etcd_client && g_etcd_client->is_connected()) ? 1 : 0;
+}
+
+etcd_status_t etcd_client_queue_load(void) {
+    if (!g_etcd_client) return ETCD_ERROR;
+    return g_etcd_client->load_config_queue();
+}
+
+etcd_status_t etcd_client_queue_hsi_put(const char* node_id, const char* user_id,
+    const hsi_config_t* config, const char* updated_by) {
+    if (!g_etcd_client) return ETCD_ERROR;
+    return g_etcd_client->queue_hsi_put(node_id, user_id, config, updated_by);
+}
+
+etcd_status_t etcd_client_queue_hsi_delete(const char* node_id, const char* user_id) {
+    if (!g_etcd_client) return ETCD_ERROR;
+    return g_etcd_client->queue_hsi_delete(node_id, user_id);
+}
+
+etcd_status_t etcd_client_queue_subscriber_count(const char* node_id,
+    const char* subscriber_count_str, const char* updated_by) {
+    if (!g_etcd_client) return ETCD_ERROR;
+    return g_etcd_client->queue_subscriber_count(node_id, subscriber_count_str, updated_by);
+}
+
+etcd_status_t etcd_client_queue_desire_status(const char* node_id, const char* user_id,
+    const char* desire_status) {
+    if (!g_etcd_client) return ETCD_ERROR;
+    return g_etcd_client->queue_desire_status(node_id, user_id, desire_status);
+}
+
+int etcd_client_queue_pending(void) {
+    if (!g_etcd_client) return 0;
+    return g_etcd_client->queue_pending();
+}
+
+etcd_status_t etcd_client_put_hsi_config(const char* node_id, const char* user_id,
+    const hsi_config_t* config, const char* updated_by,
+    int64_t* revision) {
+    if (!g_etcd_client) return ETCD_ERROR;
+    return g_etcd_client->put_hsi_config(node_id, user_id, config, updated_by, revision);
+}
+
+etcd_status_t etcd_client_get_hsi_config(const char* node_id,
     const char* user_id, hsi_config_full_t* output) {
     if (!g_etcd_client) return ETCD_ERROR;
-    return g_etcd_client->get_hsi_config(std::string(node_id), 
+    return g_etcd_client->get_hsi_config(std::string(node_id),
         std::string(user_id), output);
 }
 
-etcd_status_t etcd_client_delete_hsi_config(const char* node_id, const char* user_id, 
+etcd_status_t etcd_client_delete_hsi_config(const char* node_id, const char* user_id,
     int64_t* revision) {
     if (!g_etcd_client) return ETCD_ERROR;
     return g_etcd_client->delete_hsi_config(node_id, user_id, revision);
 }
 
-etcd_status_t etcd_client_modify_hsi_config_status(const char* node_id, 
-    const char* user_id, hsi_enable_status_t enable_status, int64_t* revision) {
-    if (!g_etcd_client) return ETCD_ERROR;
-    return g_etcd_client->modify_hsi_config_status(std::string(node_id), 
-        std::string(user_id), enable_status, revision);
-}
-
-etcd_status_t etcd_client_get_hsi_config_status(const char* node_id, 
-    const char* user_id, hsi_enable_status_t* output_status) {
-    if (!g_etcd_client) return ETCD_ERROR;
-    return g_etcd_client->get_hsi_config_status(std::string(node_id), 
-        std::string(user_id), output_status);
-}
-
-etcd_status_t etcd_client_get_subscriber_count(const char* node_id, 
+etcd_status_t etcd_client_get_subscriber_count(const char* node_id,
     U16 *subscriber_count) {
     if (!g_etcd_client) return ETCD_ERROR;
     return g_etcd_client->get_subscriber_count(node_id, subscriber_count);
@@ -2458,14 +2427,13 @@ etcd_status_t etcd_client_put_subscriber_count(const char* node_id,
 }
 
 etcd_status_t etcd_client_load_existing_configs(const char* node_uuid,
-    hsi_config_callback_t hsi_callback, 
-    pppoe_command_callback_t command_callback,
+    hsi_config_callback_t hsi_callback,
     user_count_changed_callback_t user_count_callback,
     dns_record_callback_t dns_record_callback,
     void* user_data) {
     if (!g_etcd_client) return ETCD_ERROR;
-    return g_etcd_client->load_existing_configs(node_uuid, hsi_callback, 
-        command_callback, user_count_callback, dns_record_callback, user_data);
+    return g_etcd_client->load_existing_configs(node_uuid, hsi_callback,
+        user_count_callback, dns_record_callback, user_data);
 }
 
 void etcd_client_cleanup(void) {

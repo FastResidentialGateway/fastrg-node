@@ -151,32 +151,11 @@ if check_docker; then
             
             sleep 1
             
-            # Test PPPoE command changes
-            echo "  Creating PPPoE dial command for user1..."
-            docker exec "$ETCD_CONTAINER_NAME" /usr/local/bin/etcdctl put "commands/test-node-12345/pppoe_dial_user1" \
-                '{"action":"dial","user_id":"user1","vlan":"100","account":"user1@test.com","password":"secret123","timestamp":1697223600}'
-            
-            sleep 1
-            
-            echo "  Creating PPPoE hangup command for user2..."
-            docker exec "$ETCD_CONTAINER_NAME" /usr/local/bin/etcdctl put "commands/test-node-12345/pppoe_hangup_user2" \
-                '{"action":"hangup","user_id":"user2","vlan":"200","account":"user2@test.com","password":"","timestamp":1697223700}'
-            
-            sleep 1
-            
             echo "  Deleting HSI config for user1..."
             docker exec "$ETCD_CONTAINER_NAME" /usr/local/bin/etcdctl del "configs/test-node-12345/hsi/user1"
             
             sleep 1
             
-            echo "  Creating another PPPoE dial command for user3..."
-            docker exec "$ETCD_CONTAINER_NAME" /usr/local/bin/etcdctl put "commands/test-node-12345/pppoe_dial_user3" \
-                '{"action":"dial","user_id":"user3","vlan":"300","account":"user3@test.com","password":"test123","timestamp":1697223800}'
-            
-            sleep 2
-
-            echo "  Test etcd fallback error handling..."
-            ./test/test_fallback_error.sh "$ETCD_CONTAINER_NAME"
             
             # Stop the etcd client test
             echo "🛑 Stopping etcd client test..."
@@ -188,10 +167,7 @@ if check_docker; then
             echo "   ✅ HSI Config: Created user1 (VLAN 100)"
             echo "   ✅ HSI Config: Updated user1 (VLAN 100→101)"
             echo "   ✅ HSI Config: Created user2 (VLAN 200)"
-            echo "   ✅ PPPoE Command: Dial user1"
-            echo "   ✅ PPPoE Command: Hangup user2"
             echo "   ✅ HSI Config: Deleted user1"
-            echo "   ✅ PPPoE Command: Dial user3"
             echo ""
             echo "✅ etcd client test completed with simulated events!"
         else
