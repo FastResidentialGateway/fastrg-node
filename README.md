@@ -143,8 +143,11 @@ For hugepages, NIC binding and other system configuration, please refer to DPDK 
 ## Test environment:
 
 1. Ubuntu 24.04 with Intel E810, X710, X520 and Mellanox CX4 network card
-2. Successfully test control plane and data plane with CHT(Chunghwa Telecom Co., Ltd.) BRAS, open source RP-PPPoE and Mikrotik RouterOS PPPoE server.
+2. Successfully test control plane and data plane with CHT(Chunghwa Telecom Co., Ltd.) BRAS, [dpdk-bras](https://github.com/FastResidentialGateway/dpdk-bras) and Mikrotik RouterOS PPPoE server.
 3. DPDK 24.11
+
+### Testbed topology:
+![FastRG dataplane testbed](./docs/fastrgtestbed.drawio.png)
 
 ## TODO:
 

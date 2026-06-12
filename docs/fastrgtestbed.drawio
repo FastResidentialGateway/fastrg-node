@@ -1,0 +1,60 @@
+<mxfile host="app.diagrams.net" agent="fastrg">
+  <diagram id="testbed" name="Testbed Data Plane">
+    <mxGraphModel dx="1522" dy="884" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1520" pageHeight="560" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" parent="1" style="text;html=1;fontSize=20;fontStyle=1;align=left;" value="FastRG Testbed — Data Plane" vertex="1">
+          <mxGeometry height="30" width="600" x="200" y="190" as="geometry" />
+        </mxCell>
+        <mxCell id="backbone" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;verticalAlign=top;spacing=8;" value="&lt;b&gt;Backbone / Core Network&lt;/b&gt;&lt;br&gt;Internet uplink&lt;br&gt;&lt;br&gt;&lt;font color=#1A73E8&gt;192.168.201.11/24&lt;/font&gt;" vertex="1">
+          <mxGeometry height="80" width="170" x="200" y="310" as="geometry" />
+        </mxCell>
+        <mxCell id="bras" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;verticalAlign=top;spacing=8;" value="&lt;b&gt;BNG / BRAS&lt;/b&gt;&lt;br&gt;PPPoE server&lt;br&gt;&lt;br&gt;&lt;font color=#1A73E8&gt;to backbone: 192.168.201.1/24&lt;/font&gt;&lt;br&gt;&lt;font color=#1A73E8&gt;PPPoE: 192.168.200.128/25&lt;/font&gt;" vertex="1">
+          <mxGeometry height="90" width="180" x="430" y="305" as="geometry" />
+        </mxCell>
+        <mxCell id="node" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFE8CC;strokeColor=#E8730C;strokeWidth=3;fontSize=12;verticalAlign=top;spacing=8;" value="&lt;b&gt;FastRG Node&lt;/b&gt;&lt;br&gt;PPPoE client / NAT · DHCP server&lt;br&gt;&lt;br&gt;&lt;font color=#1A73E8&gt;uplink: 192.168.200.130/25 (S1)&lt;/font&gt;&lt;br&gt;&lt;font color=#1A73E8&gt;　　　 192.168.200.131/25 (S2)&lt;/font&gt;&lt;br&gt;&lt;font color=#1A73E8&gt;downlink (DHCP server):&lt;/font&gt;&lt;br&gt;&lt;font color=#1A73E8&gt;　192.168.4.1/24&lt;/font&gt;" vertex="1">
+          <mxGeometry height="120" width="280" x="660" y="290" as="geometry" />
+        </mxCell>
+        <mxCell id="olt" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" value="&lt;b&gt;OLT&lt;/b&gt;&lt;br&gt;GPON&lt;br&gt;aggregation" vertex="1">
+          <mxGeometry height="100" width="90" x="1000" y="300" as="geometry" />
+        </mxCell>
+        <mxCell id="ont1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" value="&lt;b&gt;ONT&lt;/b&gt;&lt;br&gt;Fibre modem&lt;div&gt;&lt;span style=&quot;color: rgb(0, 102, 204);&quot;&gt;vlan 100&lt;/span&gt;&lt;/div&gt;" vertex="1">
+          <mxGeometry height="60" width="90" x="1160" y="240" as="geometry" />
+        </mxCell>
+        <mxCell id="sub1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;verticalAlign=top;spacing=8;" value="&lt;b&gt;Subscriber 1&lt;/b&gt;&lt;br&gt;DHCP client&lt;br&gt;&lt;font color=&quot;#1A73E8&quot;&gt;192.168.4.2 ~ 4.9&lt;/font&gt;" vertex="1">
+          <mxGeometry height="57.5" width="130" x="1310" y="241.25" as="geometry" />
+        </mxCell>
+        <mxCell id="ont2" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" value="&lt;b&gt;ONT&lt;/b&gt;&lt;br&gt;Fibre modem&lt;div&gt;&lt;span style=&quot;caret-color: rgb(0, 102, 204); color: rgb(0, 102, 204);&quot;&gt;vlan 100&lt;/span&gt;&lt;br&gt;&lt;/div&gt;" vertex="1">
+          <mxGeometry height="60" width="90" x="1160" y="400" as="geometry" />
+        </mxCell>
+        <mxCell id="sub2" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;verticalAlign=top;spacing=8;" value="&lt;b&gt;Subscriber 2&lt;/b&gt;&lt;br&gt;DHCP client&lt;br&gt;&lt;font color=&quot;#1A73E8&quot;&gt;192.168.4.2 ~ 4.9&lt;/font&gt;" vertex="1">
+          <mxGeometry height="57.5" width="130" x="1310" y="400" as="geometry" />
+        </mxCell>
+        <mxCell id="e_bb_bras" edge="1" parent="1" source="backbone" style="endArrow=classic;startArrow=classic;html=1;strokeColor=#E8730C;fontColor=#A6520B;strokeWidth=3;fontSize=11;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" target="bras" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_bras_node" edge="1" parent="1" source="bras" style="endArrow=classic;startArrow=classic;html=1;strokeColor=#E8730C;fontColor=#A6520B;strokeWidth=3;fontSize=11;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" target="node" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_node_olt" edge="1" parent="1" source="node" style="endArrow=classic;startArrow=classic;html=1;strokeColor=#E8730C;fontColor=#A6520B;strokeWidth=3;fontSize=11;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" target="olt" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_olt_ont1" edge="1" parent="1" source="olt" style="endArrow=classic;startArrow=classic;html=1;strokeColor=#E8730C;fontColor=#A6520B;strokeWidth=3;fontSize=11;exitX=1;exitY=0.3;entryX=0;entryY=0.5;edgeStyle=orthogonalEdgeStyle;rounded=0;" target="ont1" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_olt_ont2" edge="1" parent="1" source="olt" style="endArrow=classic;startArrow=classic;html=1;strokeColor=#E8730C;fontColor=#A6520B;strokeWidth=3;fontSize=11;exitX=1;exitY=0.7;entryX=0;entryY=0.5;edgeStyle=orthogonalEdgeStyle;rounded=0;" target="ont2" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_ont1_sub1" edge="1" parent="1" source="ont1" style="endArrow=classic;startArrow=classic;html=1;strokeColor=#E8730C;fontColor=#A6520B;strokeWidth=3;fontSize=11;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" target="sub1" value="&lt;div&gt;&lt;br/&gt;&lt;/div&gt;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_ont2_sub2" edge="1" parent="1" source="ont2" style="endArrow=classic;startArrow=classic;html=1;strokeColor=#E8730C;fontColor=#A6520B;strokeWidth=3;fontSize=11;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" target="sub2" value="&lt;div&gt;&lt;br/&gt;&lt;/div&gt;">
+          <mxGeometry relative="1" x="0.01" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
