@@ -9,5 +9,5 @@ RUN git clone --branch "${FASTRG_REF}" --recurse-submodules \
         https://github.com/FastResidentialGateway/fastrg-node.git /tmp/fastrg-src
 
 RUN /tmp/fastrg-src/essentials.sh
-RUN /tmp/fastrg-src/boot.sh --env-only
+RUN /tmp/fastrg-src/boot.sh --env-only --ci
 RUN rm -rf /tmp/fastrg-src

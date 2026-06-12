@@ -4,10 +4,12 @@ set -ex
 
 ENV_ONLY=false
 SKIP_ENV=false
+CI_BUILD=false
 for arg in "$@"; do
     case $arg in
         --env-only)  ENV_ONLY=true ;;
         --skip-env)  SKIP_ENV=true ;;
+        --ci)        CI_BUILD=true ;;
     esac
 done
 
@@ -41,9 +43,15 @@ download_controller_grpc() {
     PROTO_NAMES=("controller.proto" "kafka-events.proto")
     for PROTO_NAME in "${PROTO_NAMES[@]}"; do
         PROTO_FILE="$PROTO_DIR/$PROTO_NAME"
+        # kafka-events.proto lives under the eventsv1/ subdirectory in the controller repo
+        if [ "$PROTO_NAME" = "kafka-events.proto" ]; then
+            REMOTE_PATH="proto/eventsv1/$PROTO_NAME"
+        else
+            REMOTE_PATH="proto/$PROTO_NAME"
+        fi
         PROTO_URLS=(
-            "https://raw.githubusercontent.com/FastResidentialGateway/fastrg-controller/$CURRENT_TAG/proto/$PROTO_NAME"
-            "https://raw.githubusercontent.com/FastResidentialGateway/fastrg-controller/master/proto/$PROTO_NAME"
+            "https://raw.githubusercontent.com/FastResidentialGateway/fastrg-controller/$CURRENT_TAG/$REMOTE_PATH"
+            "https://raw.githubusercontent.com/FastResidentialGateway/fastrg-controller/master/$REMOTE_PATH"
         )
 
         DOWNLOAD_SUCCESS=0
@@ -84,6 +92,11 @@ build_dpdk() {
     pushd $path/lib/dpdk_build
     meson configure -Dexamples=""
     meson configure -Dtests=false
+    if [ "$CI_BUILD" = true ]; then
+        meson configure -Dcpu_instruction_set=generic
+    else
+        meson configure -Dcpu_instruction_set=native
+    fi
     meson configure -Ddisable_apps="test-eventdev,test-gpudev,test-mldev,test-pipeline,test-regex,test-sad,test-security-perf,pdump,graph,proc-info,test-bbdev,test-compress-perf,test-dma-perf,test-a[...]"
     meson configure -Ddisable_libs="bbdev,compressdev,gpudev,mldev,rawdev,regexdev"
     meson configure -Ddisable_drivers="common/dpaax,common/octeontx,common/octeontx2,common/cpt,common/sfc_efx,bus/ifpga,net/ark,net/atlantic,net/axgbe,net/hinic,net/hns3,net/ngbe,net/txgbe,net/cxgbe,[...]"

@@ -43,7 +43,7 @@ elif [[ "$OS_ID" == "ubuntu" ]]; then
         libgrpc++-dev protobuf-compiler-grpc libabsl-dev meson \
         python3-pyelftools ninja-build python3-setuptools \
         libcpprest-dev uuid-dev curl libarchive-dev \
-        librdkafka-dev libpcap-dev
+        librdkafka-dev libpcap-dev libsystemd-dev
 
     apt-get clean -y
     apt-get autoclean -y
