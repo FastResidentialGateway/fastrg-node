@@ -21,7 +21,9 @@ struct fastrg_config {
     char etcd_endpoints[512];
     char kafka_brokers[256];   /* comma-separated host:port list; empty = Kafka disabled */
     U16 heartbeat_interval;
+    BOOL enable_ddp;        /* EnableDDP config toggle */
     char ddp_pkg_path[256]; /* path to i40e DDP package; empty string = disabled */
+    char central_office_location[256];
 };
 
 /**

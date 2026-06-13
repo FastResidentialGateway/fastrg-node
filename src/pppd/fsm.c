@@ -701,7 +701,7 @@ STATUS A_this_layer_up(__attribute__((unused)) struct rte_timer *ppp_timer, ppp_
 
     if (s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].ppp_payload.ppp_protocol == rte_cpu_to_be_16(LCP_PROTOCOL)) {
         memset(buffer,0,PPP_MSG_BUF_LEN);
-        rte_timer_reset(&(s_ppp_ccb->ppp_alive), ppp_interval*fastrg_get_cycles_in_sec(), 
+        rte_timer_reset(&(s_ppp_ccb->ppp_alive), s_ppp_ccb->ppp_interval*fastrg_get_cycles_in_sec(), 
             SINGLE, fastrg_ccb->lcore.ctrl_thread, (rte_timer_cb_t)PPP_bye_timer_cb, s_ppp_ccb);
         if (s_ppp_ccb->auth_method == PAP_PROTOCOL)
             build_auth_request_pap(buffer, &mulen, s_ppp_ccb);

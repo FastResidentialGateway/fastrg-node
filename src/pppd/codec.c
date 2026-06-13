@@ -284,7 +284,7 @@ STATUS decode_lcp(U16 ppp_hdr_len, U16 *event, struct rte_timer *tim, ppp_ccb_t 
             if (s_ppp_ccb->phase < LCP_PHASE)
                 return ERROR;
             rte_timer_stop(&(s_ppp_ccb->ppp_alive));
-            rte_timer_reset(&(s_ppp_ccb->ppp_alive), ppp_interval*fastrg_get_cycles_in_sec(), 
+            rte_timer_reset(&(s_ppp_ccb->ppp_alive), s_ppp_ccb->ppp_interval*fastrg_get_cycles_in_sec(), 
                 SINGLE, fastrg_ccb->lcore.ctrl_thread, 
                 (rte_timer_cb_t)PPP_bye_timer_cb, s_ppp_ccb);
             *event = E_RECV_ECHO_REPLY_REQUEST_DISCARD_REQUEST;

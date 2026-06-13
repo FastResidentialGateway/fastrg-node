@@ -80,6 +80,8 @@ typedef struct FastRG {
     char                    *controller_address; /* FastRG controller grpc address */
     char                    *etcd_endpoints;/* etcd endpoints */
     char                    *kafka_brokers; /* Kafka brokers for telemetry; NULL/empty = disabled */
+    char                    *central_office_location; /* central office location identifier */
+    BOOL                    enable_ddp;         /* mirrors EnableDDP config toggle */
     U16                     heartbeat_interval; /* heartbeat interval time in seconds */
     struct nic_info         nic_info;
     void                    **ppp_ccb;       /* pppoe control block */
@@ -98,7 +100,6 @@ typedef struct FastRG {
     rte_atomic16_t          per_subscriber_stats_updating; /* flag indicating stats array is being updated */
     struct rte_timer        link;           /* for physical link checking timer */
     struct rte_timer        heartbeat_timer;/* for controller heartbeat timer */
-    BOOL                    i40e_ddp_enabled; /* TRUE if i40e DDP package loaded */
     datapath_mode_t         datapath_mode;    /* RSS multi-queue vs software distributor */
     struct rte_distributor  *wan_dist;        /* WAN ingress software distributor (DP_MODE_DISTRIBUTOR) */
     struct rte_distributor  *lan_dist;        /* LAN ingress software distributor (DP_MODE_DISTRIBUTOR) */

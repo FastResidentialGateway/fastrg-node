@@ -32,8 +32,6 @@
 #include "../northbound.h"
 #include "kafka_producer.h"
 
-U32	            ppp_interval;
-
 void PPP_bye_timer_cb(__attribute__((unused)) struct rte_timer *tim, 
     ppp_ccb_t *ppp_ccb)
 {
@@ -117,6 +115,8 @@ STATUS ppp_init_config_by_user(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb, U16 ccb
 
     ppp_ccb->user_num = ccb_id + 1;
     rte_atomic16_set(&ppp_ccb->vlan_id, vlan_id);
+
+    ppp_ccb->ppp_interval = 3;  // 3 seconds
 
     ppp_ccb->hsi_ipv4 = 0x0;
     ppp_ccb->hsi_ipv4_gw = 0x0;
@@ -542,7 +542,6 @@ STATUS pppd_init(FastRG_t *fastrg_ccb)
     }
 
     srand(time(NULL));
-    ppp_interval = (uint32_t)(3 * SECOND); 
 
     U16 initial_user_count = fastrg_ccb->user_count;
     /* assume we want to add ccbs from 0 to initial_user_count */
