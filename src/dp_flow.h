@@ -40,19 +40,22 @@ int setup_port_flows(FastRG_t *fastrg_ccb, uint16_t port_id, uint16_t total_queu
 /**
  * @fn i40e_load_ddp_package
  *
- * @brief Load a DDP package onto all i40e (X710) ports via the
+ * @brief Load a DDP package onto a single i40e (X710) port via the
  *        rte_pmd_i40e_process_ddp_package() API.  Must be called after
  *        rte_eal_init() but before rte_eth_dev_configure() so that the
  *        new profile is active when queues and flow rules are set up.
+ *        Call once per i40e port.
  *
  * @param fastrg_ccb
  *      FastRG control block (used for logging).
+ * @param port_id
+ *      Target i40e port to load the package onto.
  * @param pkg_path
  *      Filesystem path to the DDP .pkg file (e.g. "/lib/firmware/…/gtp.pkg").
  * @return
- *      SUCCESS if the package was loaded on at least one i40e port,
+ *      SUCCESS if the package was loaded (or already present) on the port,
  *      ERROR otherwise.
  */
-STATUS i40e_load_ddp_package(FastRG_t *fastrg_ccb, const char *pkg_path);
+STATUS i40e_load_ddp_package(FastRG_t *fastrg_ccb, U16 port_id, const char *pkg_path);
 
 #endif
