@@ -557,7 +557,7 @@ int setup_port_flows(FastRG_t *fastrg_ccb, uint16_t port_id, uint16_t total_queu
             port_id);
 
         if (fastrg_ccb->nic_info.vendor_id == NIC_VENDOR_I40E &&
-                fastrg_ccb->i40e_ddp_enabled) {
+                fastrg_ccb->enable_ddp == TRUE) {
             /*
              * i40e X710 + ppp-oe DDP: the rte_flow PPPOES pattern is rejected
              * by i40e_hash.c (I40E_HASH_ETH_NEXT_ALLOW lacks PPPOES).  Use the
