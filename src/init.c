@@ -230,7 +230,7 @@ STATUS init_port(FastRG_t *fastrg_ccb, struct fastrg_config *fastrg_cfg)
         if (fastrg_ccb->enable_ddp == TRUE &&
                 fastrg_ccb->nic_info.vendor_id == NIC_VENDOR_I40E &&
                 fastrg_cfg->ddp_pkg_path[0] != '\0') {
-            if (i40e_load_ddp_package(fastrg_ccb, fastrg_cfg->ddp_pkg_path) == SUCCESS) {
+            if (i40e_load_ddp_package(fastrg_ccb, portid, fastrg_cfg->ddp_pkg_path) == SUCCESS) {
                 FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
                     "i40e DDP package loaded, multi-queue RSS will be enabled");
             } else {

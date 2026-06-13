@@ -645,8 +645,16 @@ int setup_port_flows(FastRG_t *fastrg_ccb, uint16_t port_id, uint16_t total_queu
 /* ------------------------------------------------------------------ */
 /* i40e DDP package loader                                            */
 /* ------------------------------------------------------------------ */
-STATUS i40e_load_ddp_package(FastRG_t *fastrg_ccb, const char *pkg_path)
+STATUS i40e_load_ddp_package(FastRG_t *fastrg_ccb, U16 port_id, const char *pkg_path)
 {
+    struct rte_eth_dev_info dev_info;
+    if (rte_eth_dev_info_get(port_id, &dev_info) != 0 ||
+        strncmp(dev_info.driver_name, "net_i40e", 8) != 0) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+            "i40e DDP: port %u is not an i40e device\n", port_id);
+        return ERROR;
+    }
+
     FILE *f = fopen(pkg_path, "rb");
     if (f == NULL) {
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
@@ -687,42 +695,23 @@ STATUS i40e_load_ddp_package(FastRG_t *fastrg_ccb, const char *pkg_path)
     }
     fclose(f);
 
-    U16 loaded = 0;
     STATUS result = SUCCESS;
-    U16 port_count = rte_eth_dev_count_avail();
-
-    for(U16 port_id=0; port_id<port_count; port_id++) {
-        struct rte_eth_dev_info dev_info;
-        if (rte_eth_dev_info_get(port_id, &dev_info) != 0)
-            continue;
-        if (strncmp(dev_info.driver_name, "net_i40e", 8) != 0)
-            continue;
-
-        int ret = rte_pmd_i40e_process_ddp_package(port_id, buf,
-            (uint32_t)fsize, RTE_PMD_I40E_PKG_OP_WR_ADD);
-        if (ret == -EEXIST) {
-            FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
-                "Port %u: i40e DDP package already loaded\n", port_id);
-            loaded++;
-        } else if (ret != 0) {
-            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
-                "Port %u: i40e DDP load failed (err=%d): %s\n",
-                port_id, ret, strerror(-ret));
-            result = ERROR;
-        } else {
-            FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
-                "Port %u: i40e DDP package loaded from %s\n", port_id, pkg_path);
-            loaded++;
-        }
+    int ret = rte_pmd_i40e_process_ddp_package(port_id, buf,
+        (uint32_t)fsize, RTE_PMD_I40E_PKG_OP_WR_ADD);
+    if (ret == -EEXIST) {
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "Port %u: i40e DDP package already loaded\n", port_id);
+    } else if (ret != 0) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+            "Port %u: i40e DDP load failed (err=%d): %s\n",
+            port_id, ret, strerror(-ret));
+        result = ERROR;
+    } else {
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "Port %u: i40e DDP package loaded from %s\n", port_id, pkg_path);
     }
 
     fastrg_mfree(buf);
-
-    if (loaded == 0) {
-        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
-            "i40e DDP: no i40e ports found or all loads failed\n");
-        return ERROR;
-    }
 
     return result;
 }
