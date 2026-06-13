@@ -41,7 +41,7 @@ STATUS parse_config(const char *config_path, FastRG_t *fastrg_ccb, struct fastrg
 {
     config_t cfg;
     int max_user_count, init_user_count, heartbeat_interval;
-    const char *loglvl, *unix_sock_path, *log_path, *node_grpc_port, *controller_address, *etcd_endpoints, *ddp_pkg_path, *kafka_brokers;
+    const char *loglvl, *unix_sock_path, *log_path, *node_grpc_port, *controller_address, *etcd_endpoints, *ddp_pkg_path, *kafka_brokers, *central_office_location;
 
     config_init(&cfg);
     if (!config_read_file(&cfg, config_path)) {
@@ -132,6 +132,11 @@ STATUS parse_config(const char *config_path, FastRG_t *fastrg_ccb, struct fastrg
         ddp_pkg_path = "";
     strncpy(fastrg_cfg->ddp_pkg_path, ddp_pkg_path, sizeof(fastrg_cfg->ddp_pkg_path) - 1);
     fastrg_cfg->ddp_pkg_path[sizeof(fastrg_cfg->ddp_pkg_path) - 1] = '\0';
+
+    if (config_lookup_string(&cfg, "CentralOfficeLocation", &central_office_location) == CONFIG_FALSE)
+        central_office_location = "";
+    strncpy(fastrg_cfg->central_office_location, central_office_location, sizeof(fastrg_cfg->central_office_location) - 1);
+    fastrg_cfg->central_office_location[sizeof(fastrg_cfg->central_office_location) - 1] = '\0';
 
     config_destroy(&cfg);
 
