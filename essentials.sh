@@ -29,7 +29,7 @@ if [[ "$OS_ID" =~ (rhel|centos|rocky|almalinux) ]]; then
     dnf -y --enablerepo=crb install protobuf-devel || true
     dnf -y --enablerepo=devel install meson libconfig-devel protobuf-compiler || true
     dnf -y install grpc grpc-cpp grpc-devel libpcap-devel
-    dnf -y install python3-pyelftools
+    dnf -y install python3-pyelftools libxdp-devel and libbpf-devel
 
 elif [[ "$OS_ID" == "ubuntu" ]]; then
     echo "➡ Installing dependencies for Ubuntu (tested on 24.04)"
@@ -43,7 +43,7 @@ elif [[ "$OS_ID" == "ubuntu" ]]; then
         libgrpc++-dev protobuf-compiler-grpc libabsl-dev meson \
         python3-pyelftools ninja-build python3-setuptools \
         libcpprest-dev uuid-dev curl libarchive-dev \
-        librdkafka-dev libpcap-dev libsystemd-dev
+        librdkafka-dev libpcap-dev libsystemd-dev libxdp-dev libbpf-dev
 
     apt-get clean -y
     apt-get autoclean -y

@@ -97,11 +97,12 @@ build_dpdk() {
     else
         meson configure -Dcpu_instruction_set=native
     fi
-    meson configure -Ddisable_apps="test-eventdev,test-gpudev,test-mldev,test-pipeline,test-regex,test-sad,test-security-perf,pdump,graph,proc-info,test-bbdev,test-compress-perf,test-dma-perf,test-a[...]"
+    meson configure -Denable_apps="pdump,dumpcap,test-pmd"
     meson configure -Ddisable_libs="bbdev,compressdev,gpudev,mldev,rawdev,regexdev"
-    meson configure -Ddisable_drivers="common/dpaax,common/octeontx,common/octeontx2,common/cpt,common/sfc_efx,bus/ifpga,net/ark,net/atlantic,net/axgbe,net/hinic,net/hns3,net/ngbe,net/txgbe,net/cxgbe,[...]"
+    meson configure -Denable_drivers="common/iavf,common/idpf,bus/pci,bus/vdev,bus/auxiliary,mempool/ring,net/i40e,net/ixgbe,net/virtio,net/idpf,net/ice,net/igc,net/e1000,net/iavf,net/r8169,net/vmxnet3,net/af_packet,net/tap,net/null,net/ring,net/softnic,net/memif,net/af_xdp"
     #meson configure -Denable_trace_fp=true -Dc_args='-DALLOW_EXPERIMENTAL_API'
-    ninja && meson install
+    ninja
+    meson install
     ldconfig
     popd
 }
