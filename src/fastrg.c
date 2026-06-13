@@ -591,6 +591,7 @@ void fastrg_stop()
     if (fastrg_ccb.controller_address) free(fastrg_ccb.controller_address);
     if (fastrg_ccb.etcd_endpoints) free(fastrg_ccb.etcd_endpoints);
     if (fastrg_ccb.kafka_brokers) free(fastrg_ccb.kafka_brokers);
+    if (fastrg_ccb.central_office_location) free(fastrg_ccb.central_office_location);
     if (fastrg_ccb.node_uuid) fastrg_mfree(fastrg_ccb.node_uuid);
     fastrg_mfree(fastrg_ccb.vlan_userid_map);
     fastrg_cleanup_subscriber_stats(&fastrg_ccb, total_ccbs);
@@ -641,9 +642,10 @@ int fastrg_start(int argc, char **argv)
     fastrg_ccb.controller_address = strdup(fastrg_cfg.controller_address);
     fastrg_ccb.etcd_endpoints = strdup(fastrg_cfg.etcd_endpoints);
     fastrg_ccb.kafka_brokers = strdup(fastrg_cfg.kafka_brokers);
+    fastrg_ccb.central_office_location = strdup(fastrg_cfg.central_office_location);
     if (!fastrg_ccb.unix_sock_path || !fastrg_ccb.node_grpc_ip_port ||
         !fastrg_ccb.controller_address || !fastrg_ccb.etcd_endpoints ||
-        !fastrg_ccb.kafka_brokers) {
+        !fastrg_ccb.kafka_brokers || !fastrg_ccb.central_office_location) {
         FastRG_LOG(ERR, fastrg_ccb.fp, NULL, NULL, "Memory allocation failed for config strings");
         goto err;
     }
@@ -882,6 +884,7 @@ err:
     if (fastrg_ccb.controller_address) free(fastrg_ccb.controller_address);
     if (fastrg_ccb.etcd_endpoints) free(fastrg_ccb.etcd_endpoints);
     if (fastrg_ccb.kafka_brokers) free(fastrg_ccb.kafka_brokers);
+    if (fastrg_ccb.central_office_location) free(fastrg_ccb.central_office_location);
     grpc_shutdown();
     close(sfd);
     rte_eal_cleanup();

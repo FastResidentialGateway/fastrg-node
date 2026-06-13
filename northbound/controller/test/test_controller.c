@@ -26,7 +26,7 @@ int main() {
     // Test node registration (will fail without server, but tests the call)
     const char* node_uuid = "test-uuid-12345";
     const char* version = "1.0.0-test";
-    controller_status_t status = controller_register_node(node_uuid, local_ip, version);
+    controller_status_t status = controller_register_node(node_uuid, local_ip, version, "");
 
     switch (status) {
         case CONTROLLER_SUCCESS:

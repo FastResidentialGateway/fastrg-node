@@ -80,6 +80,7 @@ typedef struct FastRG {
     char                    *controller_address; /* FastRG controller grpc address */
     char                    *etcd_endpoints;/* etcd endpoints */
     char                    *kafka_brokers; /* Kafka brokers for telemetry; NULL/empty = disabled */
+    char                    *central_office_location; /* central office location identifier */
     U16                     heartbeat_interval; /* heartbeat interval time in seconds */
     struct nic_info         nic_info;
     void                    **ppp_ccb;       /* pppoe control block */

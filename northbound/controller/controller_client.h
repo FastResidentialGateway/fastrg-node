@@ -18,7 +18,7 @@ typedef enum {
 int controller_client_init(const char* server_address);
 
 /* Register node with the controller */
-controller_status_t controller_register_node(const char* node_uuid, const char* ip, const char* version);
+controller_status_t controller_register_node(const char* node_uuid, const char* ip, const char* version, const char* location);
 
 /* Send heartbeat to the controller */
 controller_status_t controller_send_heartbeat(const char* node_uuid, long uptime_timestamp, const char* ip);
