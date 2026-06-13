@@ -216,7 +216,7 @@ void LOGGER(U8 level, const char *filename, int line_num, FILE *log_fp, void *cc
     buf[sizeof(buf) - 1] = '\0';
 
     buf[sizeof(buf)-1] = '\0';
-    if (fastrg_ccb->loglvl == LOGDBG)
+    if (fastrg_ccb->loglvl == LOGDBG && log_fp != stdout)
         fprintf(stdout, "%s\n", buf);
     if (log_fp != NULL) {
         fprintf(log_fp, "%s\n", buf);
