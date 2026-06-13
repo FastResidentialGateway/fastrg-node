@@ -227,14 +227,14 @@ STATUS init_port(FastRG_t *fastrg_ccb, struct fastrg_config *fastrg_cfg)
         FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "firmware-version: %s", dev_info.fw_version);
         FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "bus-info: %s", dev_info.bus_info);
 
-        fastrg_ccb->i40e_ddp_enabled = FALSE;
-        if (fastrg_ccb->nic_info.vendor_id == NIC_VENDOR_I40E &&
+        if (fastrg_ccb->enable_ddp == TRUE &&
+                fastrg_ccb->nic_info.vendor_id == NIC_VENDOR_I40E &&
                 fastrg_cfg->ddp_pkg_path[0] != '\0') {
             if (i40e_load_ddp_package(fastrg_ccb, fastrg_cfg->ddp_pkg_path) == SUCCESS) {
-                fastrg_ccb->i40e_ddp_enabled = TRUE;
                 FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
                     "i40e DDP package loaded, multi-queue RSS will be enabled");
             } else {
+                fastrg_ccb->enable_ddp = FALSE;
                 FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
                     "i40e DDP load failed, falling back to single queue mode");
             }
@@ -243,9 +243,9 @@ STATUS init_port(FastRG_t *fastrg_ccb, struct fastrg_config *fastrg_cfg)
         /* Select data-plane mode: hardware PPPoE-aware RSS (ICE/E810 or
          * i40e/X710 with DDP), otherwise the software rte_distributor path.
          * Decided per port but identical for both ports of the same NIC. */
-        if (fastrg_ccb->nic_info.vendor_id == NIC_VENDOR_ICE ||
-                (fastrg_ccb->nic_info.vendor_id == NIC_VENDOR_I40E &&
-                 fastrg_ccb->i40e_ddp_enabled == TRUE))
+        if (fastrg_ccb->enable_ddp == TRUE &&
+                (fastrg_ccb->nic_info.vendor_id == NIC_VENDOR_ICE ||
+                 fastrg_ccb->nic_info.vendor_id == NIC_VENDOR_I40E))
             fastrg_ccb->datapath_mode = DP_MODE_RSS;
         else
             fastrg_ccb->datapath_mode = DP_MODE_DISTRIBUTOR;

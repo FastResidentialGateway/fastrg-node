@@ -40,7 +40,7 @@ STATUS is_unix_sock_path_valid(char *unix_sock_path)
 STATUS parse_config(const char *config_path, FastRG_t *fastrg_ccb, struct fastrg_config *fastrg_cfg) 
 {
     config_t cfg;
-    int max_user_count, init_user_count, heartbeat_interval;
+    int max_user_count, init_user_count, heartbeat_interval, enable_ddp_int;
     const char *loglvl, *unix_sock_path, *log_path, *node_grpc_port, *controller_address, *etcd_endpoints, *ddp_pkg_path, *kafka_brokers, *central_office_location;
 
     config_init(&cfg);
@@ -127,6 +127,10 @@ STATUS parse_config(const char *config_path, FastRG_t *fastrg_ccb, struct fastrg
         kafka_brokers = "";
     strncpy(fastrg_cfg->kafka_brokers, kafka_brokers, sizeof(fastrg_cfg->kafka_brokers) - 1);
     fastrg_cfg->kafka_brokers[sizeof(fastrg_cfg->kafka_brokers) - 1] = '\0';
+
+    if (config_lookup_bool(&cfg, "EnableDDP", &enable_ddp_int) == CONFIG_FALSE)
+        enable_ddp_int = 0;
+    fastrg_cfg->enable_ddp = enable_ddp_int ? TRUE : FALSE;
 
     if (config_lookup_string(&cfg, "I40eDdpPkgPath", &ddp_pkg_path) == CONFIG_FALSE)
         ddp_pkg_path = "";

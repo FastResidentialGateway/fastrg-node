@@ -649,6 +649,7 @@ int fastrg_start(int argc, char **argv)
         FastRG_LOG(ERR, fastrg_ccb.fp, NULL, NULL, "Memory allocation failed for config strings");
         goto err;
     }
+    fastrg_ccb.enable_ddp = fastrg_cfg.enable_ddp;
     fastrg_ccb.heartbeat_interval = fastrg_cfg.heartbeat_interval;
     fastrg_ccb.fp = fopen(fastrg_cfg.log_path, "w+");
     if (fastrg_ccb.fp) {
@@ -704,11 +705,11 @@ int fastrg_start(int argc, char **argv)
      * Queue/worker count: N = max(1, (lcore_count - 4) / 2).
      */
     FastRG_LOG(INFO, fastrg_ccb.fp, NULL, NULL,
-        "NIC Vendor ID: 0x%04x, vendor: %s, datapath: %s, i40e DDP enabled: %s\n",
+        "NIC Vendor ID: 0x%04x, vendor: %s, datapath: %s, DDP enabled: %s\n",
         fastrg_ccb.nic_info.vendor_id,
         fastrg_ccb.nic_info.vendor_name ? fastrg_ccb.nic_info.vendor_name : "unknown",
         fastrg_ccb.datapath_mode == DP_MODE_RSS ? "RSS multi-queue" : "software distributor",
-        fastrg_ccb.i40e_ddp_enabled ? "yes" : "no");
+        fastrg_ccb.enable_ddp ? "yes" : "no");
 
     /* Both data-plane modes share the same lcore budget: main + ctrl + 2 RX +
      * 2N workers, so both require at least 6 even cores. */
