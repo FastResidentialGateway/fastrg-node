@@ -3,14 +3,19 @@
 # FastRG Node — End-to-End Data Plane Test Script
 #
 # Usage:
-#   ./run_e2e_test.sh <USER_ID> [OPTIONS]
+#   ./run_e2e_test.sh [OPTIONS]
 #
 # Options:
+#   --sub-id       SPEC   Subscriber IDs to test  (default: 2,1)
+#                         Accepts a comma list ("2,1,3") or a range ("2-10").
+#                         The FIRST id is the primary (full data-plane suite);
+#                         the rest are secondaries (loaded + PPPoE checks only).
 #   --fastrg-node  IP     FastRG node IP         (default: 192.168.10.201)
 #   --lan-host     IP     LAN-side host IP        (default: 192.168.10.210)
 #   --wan-host     IP     WAN-side host IP        (default: 192.168.10.106)
 #   --wan-ip       IP     WAN subscriber IP       (default: 192.168.201.10)
 #   --runner-host  IP     E2E runner host IP      (default: 192.168.10.207)
+#   --bras-host    IP     BRAS (dpdk-bras) host IP (default: 192.168.10.215)
 #   --ssh-key      PATH   SSH identity file       (default: auto-detect id_ed25519 or id_rsa)
 #   --help                Show this help
 #
@@ -200,7 +205,16 @@ else
 fi
 FASTRG_GRPC_PORT="50052"   # fastrg gRPC TCP port (NodeGrpcPort in config.cfg)
 GRPC_CLIENT_DIR="$(cd "$(dirname "$0")" && pwd)"  # directory of fastrg_grpc_client.py
-USER_ID=""
+
+# Subscriber selection. --sub-id accepts a comma list ("2,1,3") or a range
+# ("2-10"); it expands into SUB_IDS. When omitted, defaults to "2,1".
+SUB_ID_SPEC=""
+SUB_ID_SPEC_DEFAULT="2,1"
+
+# BRAS (dpdk-bras) — the PPPoE/BRAS server simulator the node dials into. The
+# runner SSHes here to launch dpdk-bras before the node starts and to kill it on
+# exit. It serves PPPoE on VLAN 3 (subscriber 2) and VLAN 5 (subscriber 1).
+BRAS_HOST="192.168.10.215"
 
 # Controller (SSOT): config writes + PPPoE dial/hangup go here; the node applies
 # from etcd via its watch. REST is used for login + writes; gRPC ConfigService
@@ -228,6 +242,8 @@ while [[ $# -gt 0 ]]; do
         --wan-host)      WAN_HOST="$2";    shift 2 ;;
         --wan-ip)        WAN_IP="$2";      shift 2 ;;
         --runner-host)   _E2E_RUNNER_HOST="$2"; shift 2 ;;
+        --bras-host)     BRAS_HOST="$2";   shift 2 ;;
+        --sub-id)        SUB_ID_SPEC="$2"; shift 2 ;;
         --ssh-key)       SSH_KEY="$2";     shift 2 ;;
         --grpc-port)     FASTRG_GRPC_PORT="$2"; shift 2 ;;
         --controller-rest) CONTROLLER_REST="$2"; shift 2 ;;
@@ -236,24 +252,67 @@ while [[ $# -gt 0 ]]; do
         --controller-pass) CONTROLLER_PASS="$2"; shift 2 ;;
         -*)              error "Unknown option: $1"; exit 1 ;;
         *)
-            if [[ -z "$USER_ID" ]]; then
-                USER_ID="$1"
-            else
-                error "Unexpected argument: $1"; exit 1
-            fi
-            shift ;;
+            error "Unexpected argument: $1 (subscriber IDs are now passed via --sub-id)"
+            exit 1 ;;
     esac
 done
 
-if [[ -z "$USER_ID" ]]; then
-    error "USER_ID is required."
-    printf "Usage: %s <USER_ID> [--options]\n" "$0"
+# ---------------------------------------------------------------------------
+# Expand --sub-id into the SUB_IDS array.
+#   "2,1,3" -> (2 1 3)        "2-10" -> (2 3 4 5 6 7 8 9 10)
+#   "2-4,7" -> (2 3 4 7)      duplicates are dropped, first-seen order kept.
+# The first id is the primary (drives the full data-plane suite); the rest are
+# secondaries (loaded + PPPoE checks only). Defaults to "2,1" when --sub-id is
+# omitted.
+# ---------------------------------------------------------------------------
+[[ -z "$SUB_ID_SPEC" ]] && SUB_ID_SPEC="$SUB_ID_SPEC_DEFAULT"
+
+expand_sub_ids() {
+    local spec="$1" tok start end i x y seen
+    local -a toks=() out=() uniq=()
+    IFS=',' read -ra toks <<< "$spec" || true
+    for tok in ${toks[@]+"${toks[@]}"}; do
+        tok="${tok//[[:space:]]/}"
+        [[ -z "$tok" ]] && continue
+        if [[ "$tok" =~ ^[0-9]+-[0-9]+$ ]]; then
+            start="${tok%-*}"; end="${tok#*-}"
+            if (( start <= end )); then
+                for (( i=start; i<=end; i++ )); do out+=("$i"); done
+            else
+                for (( i=start; i>=end; i-- )); do out+=("$i"); done
+            fi
+        elif [[ "$tok" =~ ^[0-9]+$ ]]; then
+            out+=("$tok")
+        else
+            error "Invalid --sub-id token: '${tok}' (expected N, N-M, or a comma list)"
+            exit 1
+        fi
+    done
+    for x in ${out[@]+"${out[@]}"}; do
+        seen=0
+        for y in ${uniq[@]+"${uniq[@]}"}; do [[ "$y" == "$x" ]] && { seen=1; break; }; done
+        [[ $seen -eq 0 ]] && uniq+=("$x")
+    done
+    SUB_IDS=(${uniq[@]+"${uniq[@]}"})
+}
+
+SUB_IDS=()
+expand_sub_ids "$SUB_ID_SPEC"
+if [[ ${#SUB_IDS[@]} -eq 0 ]]; then
+    error "--sub-id expanded to an empty subscriber list (spec='${SUB_ID_SPEC}')."
     printf "Run '%s --help' for full usage.\n" "$0"
     exit 1
 fi
 
+# Primary subscriber (full data-plane suite) + secondaries (lighter checks).
+USER_ID="${SUB_IDS[0]}"
+SUB_SECONDARY_IDS=("${SUB_IDS[@]:1}")
+
 # Export controller config so fastrg_grpc_client.py routes writes to the controller.
 export CONTROLLER_REST CONTROLLER_GRPC CONTROLLER_USER CONTROLLER_PASS
+
+# BRAS host + the SUB_IDS / SUB_SECONDARY_IDS arrays are visible to the phase
+# scripts directly (they are sourced, not sub-processed).
 
 # ---------------------------------------------------------------------------
 # SSH helper functions
@@ -263,6 +322,7 @@ SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10 -o BatchMode=yes -i $
 ssh_node() { ssh $SSH_OPTS "root@${FASTRG_NODE}" "$@"; }
 ssh_lan()  { ssh $SSH_OPTS "root@${LAN_HOST}"    "$@"; }
 ssh_wan()  { ssh $SSH_OPTS "root@${WAN_HOST}"   "$@"; }
+ssh_bras() { ssh $SSH_OPTS "root@${BRAS_HOST}"   "$@"; }
 
 # ---------------------------------------------------------------------------
 # Test result tracking (indexed arrays — bash 3.2 compatible)
@@ -364,6 +424,13 @@ cleanup_fastrg() {
         info "fastrg stopped."
     fi
 
+    # Kill dpdk-bras on the BRAS endpoint if this script launched it.
+    if [[ "${_BRAS_STARTED_BY_SCRIPT:-0}" -eq 1 ]]; then
+        info "Stopping dpdk-bras on BRAS endpoint (${BRAS_HOST})..."
+        ssh_bras "pkill -x dpdk-bras 2>/dev/null || true" 2>/dev/null || true
+        info "dpdk-bras stopped."
+    fi
+
     # Restore USER_ID subscriber to desire_status="connect" so the next run starts
     # clean. Phase9's hangup may have left it "disconnect". Done via the controller
     # (the node is read-only on etcd); falls back to a direct etcd write.
@@ -385,6 +452,7 @@ cleanup_fastrg() {
 # ---------------------------------------------------------------------------
 main() {
     _FASTRG_STARTED_BY_SCRIPT=0
+    _BRAS_STARTED_BY_SCRIPT=0
 
     # Clean up anyway on exit
     trap 'cleanup_fastrg' EXIT
@@ -394,7 +462,7 @@ main() {
     bold "║   FastRG Node — E2E Data Plane Test                 ║"
     bold "╚═════════════════════════════════════════════════════╝"
     printf "\n"
-    info "USER_ID: ${USER_ID}"
+    info "Subscribers: ${SUB_IDS[*]} (primary=${USER_ID}, secondaries='${SUB_SECONDARY_IDS[*]:-none}')"
     printf "\n"
 
     phase0_setup

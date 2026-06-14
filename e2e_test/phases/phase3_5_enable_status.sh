@@ -89,6 +89,44 @@ phase3_5_enable_status() {
     fi
 
     # ------------------------------------------------------------------
+    # Step 8-1 — Bring up each secondary subscriber's PPPoE session alongside
+    # the primary subscriber ${USER_ID}. They dial into the same dpdk-bras
+    # (e.g. subscriber 1 on VLAN 5, subscriber ${USER_ID} on VLAN 3); verify
+    # each session also reaches "Data phase".
+    # ------------------------------------------------------------------
+    if [[ ${#SUB_SECONDARY_IDS[@]} -eq 0 ]]; then
+        info "Step 8-1: No secondary subscribers configured — skipping secondary PPPoE check."
+    else
+        for _sub in "${SUB_SECONDARY_IDS[@]}"; do
+            info "Step 8-1: DialPPPoE subscriber ${_sub} via controller — establishing session..."
+            fastrg_grpc connect_hsi "${_sub}" >/dev/null 2>&1 || true
+
+            _35_sub_ok=0
+            _35_sub_phase=""
+            for _35_i in $(seq 1 10); do
+                sleep 5
+                _35_hsi_now=$(fastrg_grpc get_hsi_info 2>/dev/null || true)
+                _35_sub_phase=$(printf '%s' "$_35_hsi_now" | \
+                    jq -r ".hsi_infos[] | select(.user_id == ${_sub}) | .status" \
+                    2>/dev/null || true)
+                if [[ -n "$_35_sub_phase" ]] && [[ "$_35_sub_phase" == "Data phase" ]]; then
+                    _35_sub_ok=1
+                    break
+                fi
+                info "  waiting for subscriber ${_sub} PPPoE session... (${_35_i}x5s, ppp_phase='${_35_sub_phase}')"
+            done
+
+            if [[ $_35_sub_ok -eq 1 ]]; then
+                pass "Step 8-1: DialPPPoE subscriber ${_sub}" \
+                    "PPPoE session established (ppp_phase='${_35_sub_phase}')"
+            else
+                fail "Step 8-1: DialPPPoE subscriber ${_sub}" \
+                    "PPPoE session did not come up within 50s (last ppp_phase='${_35_sub_phase:-<empty>}')"
+            fi
+        done
+    fi
+
+    # ------------------------------------------------------------------
     # Step 9 — Verify etcd config.desire_status = "connect"
     # ------------------------------------------------------------------
     info "Step 9: Checking etcd config.desire_status for USER_ID=${USER_ID}..."

@@ -64,6 +64,37 @@ phase2_etcd_config_sync() {
     fi
 
     # ------------------------------------------------------------------
+    # Step 4a-1 — Secondary subscribers' HSI config loaded at startup
+    #
+    # Every secondary subscriber must be pre-provisioned in etcd and loaded by
+    # the node on boot, exactly like the primary subscriber ${USER_ID} above.
+    # Verify each appears in the gRPC GetFastrgHsiInfo response (loaded) with a
+    # non-empty account; if one did not load at startup, fail the test.
+    # ------------------------------------------------------------------
+    if [[ ${#SUB_SECONDARY_IDS[@]} -eq 0 ]]; then
+        info "Step 4a-1: No secondary subscribers configured — skipping startup-load check."
+    else
+        for _sub in "${SUB_SECONDARY_IDS[@]}"; do
+            info "Step 4a-1: Checking subscriber ${_sub} HSI config loaded at startup (gRPC GetFastrgHsiInfo)..."
+            HSI_SUB=$(printf '%s' "$HSI_GRPC" | jq -r ".hsi_infos[] | select(.user_id == ${_sub})" 2>/dev/null || true)
+            if [[ -z "$HSI_SUB" ]]; then
+                fail "Step 4a-1: Subscriber ${_sub} config loaded" \
+                    "Subscriber ${_sub} not found in gRPC GetFastrgHsiInfo — config did not load at startup"
+            else
+                _sub_account=$(printf '%s' "$HSI_SUB" | jq -r '.account // empty')
+                _sub_vlan=$(printf '%s'    "$HSI_SUB" | jq -r '.vlan_id // empty')
+                if [[ -n "$_sub_account" ]]; then
+                    pass "Step 4a-1: Subscriber ${_sub} config loaded" \
+                        "account=${_sub_account} vlan=${_sub_vlan}"
+                else
+                    fail "Step 4a-1: Subscriber ${_sub} config loaded" \
+                        "Subscriber ${_sub} present but account is empty — config not fully loaded at startup"
+                fi
+            fi
+        done
+    fi
+
+    # ------------------------------------------------------------------
     # Step 4b — DHCP config
     # ------------------------------------------------------------------
     info "Step 4b: Comparing DHCP config (gRPC GetFastrgDhcpInfo vs etcd)..."
