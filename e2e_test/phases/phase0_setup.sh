@@ -137,6 +137,52 @@ phase0_setup() {
     fi
 
     # ------------------------------------------------------------------
+    # Start dpdk-bras on the BRAS endpoint BEFORE the node starts, so the
+    # node's PPPoE sessions have a server to dial into on boot. dpdk-bras is
+    # the PPPoE/BRAS simulator; it serves VLAN 3 (subscriber 2) and VLAN 5
+    # (subscriber 1). It is killed again in cleanup_fastrg on exit.
+    # ------------------------------------------------------------------
+    info "Checking SSH connectivity to BRAS endpoint (${BRAS_HOST})..."
+    if ! ssh_bras "true" 2>/dev/null; then
+        error "Cannot SSH to BRAS endpoint at ${BRAS_HOST}"
+        exit 1
+    fi
+    info "Starting dpdk-bras on BRAS endpoint (${BRAS_HOST})..."
+    # /root/dpdk-bras is the repo dir; the binary is /root/dpdk-bras/dpdk-bras and
+    # --drop-pcap ./test.pcap is relative to it, so launch from inside that dir.
+    # Kill any stale instance first (match the exact process name, not the path —
+    # pgrep/pkill -f dpdk-bras would also match our own ssh command line).
+    ssh_bras "pkill -x dpdk-bras 2>/dev/null || true" 2>/dev/null || true
+    sleep 1
+    # dpdk-bras runs in the foreground on the bras host for the whole test and
+    # streams stats forever, so it never closes the SSH channel. Detaching it
+    # remotely does not help (DPDK re-opens fds, so setsid/nohup still wedge the
+    # channel). Instead run it foreground over a locally-backgrounded SSH client:
+    # this returns control to phase0 immediately while the SSH connection stays
+    # up holding the process. cleanup_fastrg kills dpdk-bras on the bras host,
+    # which makes this SSH exit.
+    ssh_bras "cd /root/dpdk-bras && exec ./dpdk-bras -l 0-7 -n 4 -- --pri-dns 192.168.10.1 --drop-pcap ./test.pcap --vlans 3,5 >/var/log/dpdk-bras.log 2>&1" </dev/null >/dev/null 2>&1 &
+    _BRAS_SSH_PID=$!
+    _BRAS_STARTED_BY_SCRIPT=1
+
+    # Wait for the process to come up (DPDK EAL init takes a few seconds).
+    _bras_ok=0
+    for _i in $(seq 1 12); do
+        sleep 2
+        if ssh_bras "pgrep -x dpdk-bras >/dev/null 2>&1"; then
+            _bras_ok=1
+            break
+        fi
+    done
+    if [[ $_bras_ok -eq 1 ]]; then
+        info "dpdk-bras is running on ${BRAS_HOST}."
+    else
+        error "dpdk-bras did not start on ${BRAS_HOST} within 24s."
+        ssh_bras "tail -20 /var/log/dpdk-bras.log 2>/dev/null || true" 2>/dev/null || true
+        exit 1
+    fi
+
+    # ------------------------------------------------------------------
     # Ensure fastrg daemon is running; start it if not
     # ------------------------------------------------------------------
     info "Checking if fastrg daemon is running on ${FASTRG_NODE}..."
@@ -238,7 +284,8 @@ phase0_setup() {
 
     printf "\n"
     info "Configuration summary:"
-    printf "  USER_ID         : %s\n" "$USER_ID"
+    printf "  SUBSCRIBERS     : %s (primary=%s)\n" "${SUB_IDS[*]}" "$USER_ID"
+    printf "  BRAS_HOST       : %s\n" "$BRAS_HOST"
     printf "  FASTRG_NODE     : %s\n" "$FASTRG_NODE"
     printf "  FASTRG_GRPC     : %s:%s\n" "$FASTRG_NODE" "$FASTRG_GRPC_PORT"
     printf "  LAN_HOST        : %s (user: the)\n" "$LAN_HOST"
