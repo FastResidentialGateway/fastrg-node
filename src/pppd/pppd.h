@@ -96,7 +96,8 @@ typedef struct {
     U16                   auth_method;       /* use chap or pap */
     U8                    *ppp_user_acc;     /* pap/chap account */
     U8                    *ppp_passwd;       /* pap/chap password */
-    U32	                  ppp_interval;      /* ppp timer interval */
+    U32	                  ppp_interval;      /* LCP keepalive echo interval, seconds */
+    U32                   echo_miss_count;   /* consecutive unanswered LCP echo-requests; reset on any frame from peer */
     rte_atomic16_t        ppp_bool;          /* boolean flag for accept ppp packets at data plane */
     rte_atomic16_t        dp_start_bool;     /* hsi data plane starting boolean flag */
     rte_atomic16_t        redial_pending;    /* desire=connect arrived mid-teardown; redial once down */
@@ -144,7 +145,11 @@ STATUS ppp_update_config_by_user(ppp_ccb_t *ppp_ccb, U16 vlan_id, const char *us
 STATUS ppp_init_config_by_user(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb, U16 ccb_id, 
     U16 vlan_id, const char *user_name, const char *password);
 void   ppp_cleanup_config_by_user(ppp_ccb_t *ppp_ccb, U16 ccb_id);
-void   PPP_bye_timer_cb(__attribute__((unused)) struct rte_timer *tim, 
+void   PPP_bye_timer_cb(__attribute__((unused)) struct rte_timer *tim,
+    ppp_ccb_t *ppp_ccb);
+/* Periodic LCP keepalive: probes the peer with an Echo-Request each tick and
+ * tears the session down once LCP_ECHO_MAX_FAIL probes go unanswered. */
+void   PPP_keepalive_cb(__attribute__((unused)) struct rte_timer *tim,
     ppp_ccb_t *ppp_ccb);
 
 /**

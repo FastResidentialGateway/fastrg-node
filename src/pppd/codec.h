@@ -172,6 +172,24 @@ void build_terminate_request(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb);
 void build_echo_reply(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb);
 
 /**
+ * @fn build_echo_request
+ *
+ * @brief Build a node-initiated LCP Echo-Request (keepalive probe) carrying our
+ *        own magic number. Only valid once LCP is up.
+ *
+ * @param buffer
+ *      The output packet buffer.
+ * @param mulen
+ *      The output frame length.
+ * @param s_ppp_ccb
+ *      The ppp ccb.
+ *
+ * @return
+ *      void
+ */
+void build_echo_request(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb);
+
+/**
  * @fn build_auth_request_pap
  *
  * @brief For PAP auth, send after LCP nego complete.

@@ -86,6 +86,10 @@
 
 #define MAX_RECV_UNIT		ETH_MTU - sizeof(pppoe_header_t) - sizeof(ppp_payload_t) - sizeof(vlan_header_t)
 #define MAX_RETRAN			10
+/* LCP keepalive: declare the peer dead after this many consecutive
+ * unanswered Echo-Requests (each spaced ppp_interval seconds apart). */
+#define LCP_ECHO_MAX_FAIL	3
+#define LCP_ALIVE_ECHO_INTERVAL 30  // seconds
 
 typedef struct pppoe_header {
     U8  ver_type;
