@@ -617,6 +617,16 @@ int fastrg_start(int argc, char **argv)
         return -1;
     }
 
+    /* Parse FastRG app args after EAL args (DPDK consumed argv[0..ret-1]) */
+    const char *config_path;
+    int app_argc = argc - ret;
+    char **app_argv = argv + ret;
+    /* Make argv[0] a fake program name so getopt scans the app args */
+    if (app_argc > 0)
+        app_argv[0] = argv[0];
+    if (parse_app_args(app_argc, app_argv, &config_path) != SUCCESS)
+        goto err;
+
     if (rte_eth_dev_count_avail() < 2) {
         FastRG_LOG(ERR, fastrg_ccb.fp, NULL, NULL, "We need at least 2 eth ports.\n");
         goto err;
@@ -631,7 +641,7 @@ int fastrg_start(int argc, char **argv)
 
     /* Read network config */
     struct fastrg_config fastrg_cfg;
-    if (parse_config("/etc/fastrg/config.cfg", &fastrg_ccb, &fastrg_cfg) != SUCCESS) {
+    if (parse_config(config_path, &fastrg_ccb, &fastrg_cfg) != SUCCESS) {
         FastRG_LOG(ERR, fastrg_ccb.fp, NULL, NULL, "parse config file error\n");
         goto err;
     }

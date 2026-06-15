@@ -185,6 +185,44 @@ void get_all_lcore_id(struct lcore_map *lcore, unsigned int cpu_count);
 char *make_eal_args_string(int argc, const char **argv);
 
 /**
+ * @fn fastrg_print_usage
+ *
+ * @brief Print FastRG command-line usage (non-EAL app options) to a stream
+ *
+ * @param prog program name (typically argv[0])
+ * @param fp   output stream (e.g. stdout for --help, stderr on error)
+ */
+void fastrg_print_usage(const char *prog, FILE *fp);
+
+/**
+ * @fn fastrg_help_requested
+ *
+ * @brief Scan the raw argv for -h/--help. Must be called before rte_eal_init(),
+ *        since EAL would reject an unknown -h placed before the '--' separator.
+ *
+ * @param argc raw argument count
+ * @param argv raw argument vector
+ *
+ * @return TRUE if -h/--help appears anywhere in the args, FALSE otherwise
+ */
+BOOL fastrg_help_requested(int argc, char **argv);
+
+/**
+ * @fn parse_app_args
+ *
+ * @brief Parse FastRG application arguments (the args after the DPDK EAL '--'
+ *        separator). Handles --config/-c.
+ *
+ * @param argc            app argument count (argv[0] should be the program name)
+ * @param argv            app argument vector
+ * @param config_path     out: path to config file; set to the default
+ *                        (/etc/fastrg/config.cfg) when --config is not given
+ *
+ * @return SUCCESS on valid args; ERROR on invalid args (usage printed to stderr)
+ */
+STATUS parse_app_args(int argc, char **argv, const char **config_path);
+
+/**
  * @fn parse_ip_range
  * 
  * @brief Parse IP range string to start IP, end IP and pool length

@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <getopt.h>
 #include <pthread.h>
 #include <sched.h>
 #include <sys/stat.h>
@@ -101,6 +102,72 @@ char *make_eal_args_string(int argc, const char **argv)
     }
 
     return result; // caller free()
+}
+
+void fastrg_print_usage(const char *prog, FILE *fp)
+{
+    fprintf(fp,
+            "Usage: %s <EAL args> -- [FastRG options]\n"
+            "\n"
+            "DPDK EAL args (common ones, placed before the '--' separator):\n"
+            "  -l <core list>        Cores to run on, e.g. -l 0-5 (FastRG needs >= 6 cores)\n"
+            "  -n <num>              Number of memory channels\n"
+            "  -a <PCI addr>         Add a PCI device to the allowlist (repeatable)\n"
+            "  --                    Separator: everything after it is a FastRG option\n"
+            "  (see the DPDK EAL documentation for the full parameter list)\n"
+            "\n"
+            "FastRG options (must come after the '--' separator):\n"
+            "  -c, --config <path>   Path to the FastRG config file\n"
+            "                        (default: /etc/fastrg/config.cfg)\n"
+            "  -h, --help            Show this help message and exit\n"
+            "\n"
+            "Example:\n"
+            "  %s -l 0-9 -n 4 -a 0000:07:00.0 -a 0000:08:00.0 -- --config /home/user/myconfig.cfg\n",
+            prog, prog);
+}
+
+BOOL fastrg_help_requested(int argc, char **argv)
+{
+    if (argv == NULL)
+        return FALSE;
+
+    for (int i = 1; i < argc; i++) {
+        if (argv[i] == NULL)
+            continue;
+        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0)
+            return TRUE;
+    }
+
+    return FALSE;
+}
+
+STATUS parse_app_args(int argc, char **argv, const char **config_path)
+{
+    *config_path = "/etc/fastrg/config.cfg";
+
+    if (argc <= 0 || argv == NULL)
+        return SUCCESS;
+
+    /* Note: -h/--help is intentionally handled earlier (before EAL init) by
+     * fastrg_help_requested(), so it is not parsed here. */
+    static struct option long_opts[] = {
+        {"config", required_argument, NULL, 'c'},
+        {NULL, 0, NULL, 0},
+    };
+    optind = 1;
+    int opt;
+    while ((opt = getopt_long(argc, argv, "c:", long_opts, NULL)) != -1) {
+        switch (opt) {
+        case 'c':
+            *config_path = optarg;
+            break;
+        default:
+            fastrg_print_usage(argv[0], stderr);
+            return ERROR;
+        }
+    }
+
+    return SUCCESS;
 }
 
 STATUS parse_ip_range(const char *ip_range_str, U32 *ip_start, U32 *ip_end)
