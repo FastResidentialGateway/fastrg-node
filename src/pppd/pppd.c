@@ -21,6 +21,7 @@
 
 #include "pppd.h"
 #include "fsm.h"
+#include "codec.h"
 #include "../dp.h"
 #include "../dbg.h"
 #include "../init.h"
@@ -32,10 +33,36 @@
 #include "../northbound.h"
 #include "kafka_producer.h"
 
-void PPP_bye_timer_cb(__attribute__((unused)) struct rte_timer *tim, 
+void PPP_bye_timer_cb(__attribute__((unused)) struct rte_timer *tim,
     ppp_ccb_t *ppp_ccb)
 {
     PPP_bye(ppp_ccb);
+}
+
+void PPP_keepalive_cb(__attribute__((unused)) struct rte_timer *tim,
+    ppp_ccb_t *s_ppp_ccb)
+{
+    FastRG_t      *fastrg_ccb = s_ppp_ccb->fastrg_ccb;
+    unsigned char  buffer[PPP_MSG_BUF_LEN];
+    U16            mulen = 0;
+
+    /* No reply to the last LCP_ECHO_MAX_FAIL Echo-Requests (and no other frame
+     * from the peer in between) → treat the peer as dead and tear down. */
+    if (s_ppp_ccb->echo_miss_count >= LCP_ECHO_MAX_FAIL) {
+        FastRG_LOG(WARN, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+            "User %" PRIu16 " LCP keepalive: peer unresponsive for %u echo-requests, tearing down session.",
+            s_ppp_ccb->user_num, s_ppp_ccb->echo_miss_count);
+        PPP_bye(s_ppp_ccb);
+        return;
+    }
+
+    /* Probe: send our own Echo-Request and count it as outstanding. Any frame
+     * received from the peer (handled in decode_lcp/decode_ipcp) resets the
+     * counter back to 0. */
+    memset(buffer, 0, PPP_MSG_BUF_LEN);
+    build_echo_request(buffer, &mulen, s_ppp_ccb);
+    wan_ctrl_tx(fastrg_ccb, s_ppp_ccb->user_num - 1, buffer, mulen);
+    s_ppp_ccb->echo_miss_count++;
 }
 
 void PPP_bye(ppp_ccb_t *s_ppp_ccb)
@@ -116,7 +143,8 @@ STATUS ppp_init_config_by_user(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb, U16 ccb
     ppp_ccb->user_num = ccb_id + 1;
     rte_atomic16_set(&ppp_ccb->vlan_id, vlan_id);
 
-    ppp_ccb->ppp_interval = 3;  // 3 seconds
+    ppp_ccb->ppp_interval = LCP_ALIVE_ECHO_INTERVAL;  // LCP keepalive echo interval: 30 seconds
+    ppp_ccb->echo_miss_count = 0;
 
     ppp_ccb->hsi_ipv4 = 0x0;
     ppp_ccb->hsi_ipv4_gw = 0x0;

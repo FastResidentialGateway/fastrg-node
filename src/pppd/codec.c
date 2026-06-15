@@ -202,8 +202,12 @@ STATUS decode_lcp(U16 ppp_hdr_len, U16 *event, struct rte_timer *tim, ppp_ccb_t 
     ppp_header_t  *ppp_hdr = &(s_ppp_ccb->ppp_phase[0].ppp_hdr);
     ppp_options_t *ppp_options = s_ppp_ccb->ppp_phase[0].ppp_options;
 
+    /* Any LCP frame from the peer proves it is alive — reset the keepalive miss
+     * counter so the periodic Echo-Request probe does not tear the session down. */
+    s_ppp_ccb->echo_miss_count = 0;
+
     switch(ppp_hdr->code) {
-        case CONFIG_REQUEST : 
+        case CONFIG_REQUEST :
             if (s_ppp_ccb->phase != LCP_PHASE)
                 return ERROR;
             /* we check if the request packet contains what we want */
@@ -283,10 +287,9 @@ STATUS decode_lcp(U16 ppp_hdr_len, U16 *event, struct rte_timer *tim, ppp_ccb_t 
         case ECHO_REQUEST:
             if (s_ppp_ccb->phase < LCP_PHASE)
                 return ERROR;
-            rte_timer_stop(&(s_ppp_ccb->ppp_alive));
-            rte_timer_reset(&(s_ppp_ccb->ppp_alive), s_ppp_ccb->ppp_interval*fastrg_get_cycles_in_sec(), 
-                SINGLE, fastrg_ccb->lcore.ctrl_thread, 
-                (rte_timer_cb_t)PPP_bye_timer_cb, s_ppp_ccb);
+            /* Liveness is tracked by the periodic PPP_keepalive_cb; the miss
+             * counter was already reset at the top of decode_lcp. Just reply
+             * (the FSM action A_send_echo_reply sends the Echo-Reply). */
             *event = E_RECV_ECHO_REPLY_REQUEST_DISCARD_REQUEST;
             return SUCCESS;
         case ECHO_REPLY:
@@ -307,8 +310,12 @@ STATUS decode_ipcp(U16 ppp_hdr_len, U16 *event, struct rte_timer *tim, ppp_ccb_t
     ppp_header_t  *ppp_hdr = &(s_ppp_ccb->ppp_phase[1].ppp_hdr);
     ppp_options_t *ppp_options = s_ppp_ccb->ppp_phase[1].ppp_options;
 
+    /* Any IPCP frame from the peer also proves liveness — reset the keepalive
+     * miss counter. */
+    s_ppp_ccb->echo_miss_count = 0;
+
     switch(ppp_hdr->code) {
-        case CONFIG_REQUEST : 
+        case CONFIG_REQUEST :
             switch (check_ipcp_nak_rej(CONFIG_NAK, s_ppp_ccb, ppp_hdr_len)) {
                 case ERROR:
                     return ERROR;
@@ -743,6 +750,47 @@ void build_echo_reply(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb)
     *mulen = pppoe_header->length + sizeof(struct rte_ether_hdr) + sizeof(pppoe_header_t) + sizeof(vlan_header_t);
     ppp_hdr->length = rte_cpu_to_be_16(ppp_hdr->length);
     pppoe_header->length = rte_cpu_to_be_16(pppoe_header->length);
+}
+
+void build_echo_request(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb)
+{
+    FastRG_t             *fastrg_ccb = s_ppp_ccb->fastrg_ccb;
+    struct rte_ether_hdr *eth_hdr = (struct rte_ether_hdr *)buffer;
+    vlan_header_t        *vlan_header = (vlan_header_t *)(eth_hdr + 1);
+    pppoe_header_t       *pppoe_header = (pppoe_header_t *)(vlan_header + 1);
+    ppp_payload_t        *ppp_payload = (ppp_payload_t *)(pppoe_header + 1);
+    ppp_header_t         *ppp_hdr = (ppp_header_t *)(ppp_payload + 1);
+    U8                   *magic_num = (U8 *)(ppp_hdr + 1);
+
+    /* Build the L2/PPPoE headers explicitly (same as build_terminate_request)
+     * rather than copying the ccb's stored copies — those are not valid for the
+     * TX path, which made the BRAS drop our Echo-Request and never reflect it. */
+    rte_ether_addr_copy(&fastrg_ccb->nic_info.hsi_wan_src_mac, &eth_hdr->src_addr);
+    rte_ether_addr_copy(&s_ppp_ccb->PPP_dst_mac, &eth_hdr->dst_addr);
+    eth_hdr->ether_type = rte_cpu_to_be_16(VLAN);
+
+    vlan_header->tci_union.tci_struct.priority = 0;
+    vlan_header->tci_union.tci_struct.DEI = 0;
+    vlan_header->tci_union.tci_struct.vlan_id = rte_atomic16_read(&s_ppp_ccb->vlan_id);
+    vlan_header->next_proto = rte_cpu_to_be_16(ETH_P_PPP_SES);
+    vlan_header->tci_union.tci_value = rte_cpu_to_be_16(vlan_header->tci_union.tci_value);
+
+    pppoe_header->ver_type = VER_TYPE;
+    pppoe_header->code = 0;
+    pppoe_header->session_id = s_ppp_ccb->session_id;
+
+    ppp_payload->ppp_protocol = rte_cpu_to_be_16(LCP_PROTOCOL);
+
+    ppp_hdr->code = ECHO_REQUEST;
+    ppp_hdr->identifier = ((rand() % 254) + 1);
+    *(U32 *)magic_num = s_ppp_ccb->magic_num;
+
+    pppoe_header->length = sizeof(ppp_header_t) + sizeof(ppp_payload->ppp_protocol) + sizeof(s_ppp_ccb->magic_num);
+    ppp_hdr->length = sizeof(ppp_header_t) + sizeof(s_ppp_ccb->magic_num);
+
+    *mulen = pppoe_header->length + sizeof(struct rte_ether_hdr) + sizeof(pppoe_header_t) + sizeof(vlan_header_t);
+    pppoe_header->length = rte_cpu_to_be_16(pppoe_header->length);
+    ppp_hdr->length = rte_cpu_to_be_16(ppp_hdr->length);
 }
 
 void build_terminate_ack(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb)

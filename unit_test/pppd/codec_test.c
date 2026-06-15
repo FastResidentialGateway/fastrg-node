@@ -743,6 +743,60 @@ void test_build_echo_reply(FastRG_t *fastrg_ccb)
         "build_echo_reply packet content", "packet content mismatch");
 }
 
+void test_build_echo_request(FastRG_t *fastrg_ccb)
+{
+    printf("\nTesting build_echo_request function:\n");
+
+    U8 buffer[80] = { 0 };
+    U16 mulen = 0;
+
+    /* ppp_phase[0] (the "LCP slot") is deliberately left as PAP (0xc023): that is
+     * the stale value the slot holds after authentication. The original bug was
+     * build_echo_request copying it; the function must IGNORE it and always emit
+     * the LCP protocol (0xc021). All headers are built from the authoritative
+     * vlan_id / session_id / magic_num, not from stored copies. */
+    ppp_ccb_t s_ppp_ccb_1 = {
+        .ppp_phase = {{
+            .ppp_payload = (ppp_payload_t) {
+                .ppp_protocol = htons(PAP_PROTOCOL),
+            },
+        },{},},
+        .user_num = 1,
+        .vlan_id = {
+            .cnt = 2,
+        },
+        .PPP_dst_mac = (struct rte_ether_addr){
+            .addr_bytes = {0x74, 0x4d, 0x28, 0x8d, 0x00, 0x31},
+        },
+        .session_id = htons(0x000a),
+        .cp = 0,
+        .magic_num = htonl(0x01020304),
+        .fastrg_ccb = fastrg_ccb,
+    };
+
+    /* VLAN-tagged LCP Echo-Request carrying our magic number. The identifier byte
+     * (index 27) is randomised by build_echo_request, so it is copied across from
+     * the produced buffer before the content comparison. */
+    char pkt_lcp[] = {/* mac dst */0x74, 0x4d, 0x28, 0x8d, 0x00, 0x31,
+        /* mac src */0x9c, 0x69, 0xb4, 0x61, 0x16, 0xdd, /* eth type */0x81, 0x00,
+        /* vlan */0x00, 0x02, 0x88, 0x64, /* pppoe hdr */0x11, 0x00, 0x00, 0x0a, 0x00, 0x0a,
+        /* ppp protocol */0xc0, 0x21, /* ppp hdr (code,id,len) */0x09, 0x00, 0x00, 0x08,
+        /* magic number */0x01, 0x02, 0x03, 0x04};
+
+    printf("Test 1: \"%s\"\n", "build_echo_request() LCP result (ignores stale PAP slot)");
+    build_echo_request(buffer, &mulen, &s_ppp_ccb_1);
+    pkt_lcp[27] = buffer[27]; /* identifier is randomised — exclude from compare */
+
+    TEST_ASSERT(mulen == sizeof(pkt_lcp), "build_echo_request packet length",
+        "expected length %zu, got %u", sizeof(pkt_lcp), mulen);
+    TEST_ASSERT(memcmp(buffer, pkt_lcp, sizeof(pkt_lcp)) == 0,
+        "build_echo_request packet content", "packet content mismatch");
+    /* Regression guard for the fixed bug: protocol must be LCP (0xc021). */
+    TEST_ASSERT(buffer[24] == 0xc0 && buffer[25] == 0x21,
+        "build_echo_request emits LCP protocol (not stale PAP)",
+        "expected 0xc021, got 0x%02x%02x", buffer[24], buffer[25]);
+}
+
 void test_build_auth_request_pap(FastRG_t *fastrg_ccb)
 {
     printf("\nTesting build_auth_request_pap function:\n");
@@ -999,6 +1053,7 @@ void test_ppp_codec(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_build_config_nak_rej(fastrg_ccb);
     test_build_terminate_ack(fastrg_ccb);
     test_build_echo_reply(fastrg_ccb);
+    test_build_echo_request(fastrg_ccb);
     test_build_auth_request_pap(fastrg_ccb);
     test_build_auth_ack_pap(fastrg_ccb);
     test_build_proto_reject(fastrg_ccb);
