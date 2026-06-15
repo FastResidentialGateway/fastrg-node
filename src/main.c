@@ -3,13 +3,15 @@
 #include <common.h>
 
 #include "fastrg.h"
+#include "utils.h"
 
 int main(int argc, char **argv)
 {
-    if (argc < 5) {
-        puts("Too less parameter.");
-        puts("Type fastrg <eal_options>");
-        return ERROR;
+    /* Handle -h/--help before anything else so it works regardless of how many
+     * other args are given (and before EAL would reject an unknown -h). */
+    if (fastrg_help_requested(argc, argv)) {
+        fastrg_print_usage(argv[0], stdout);
+        return SUCCESS;
     }
 
     return fastrg_start(argc, argv);
