@@ -125,6 +125,13 @@ To configure SNAT port forwarding for specific subscriber 1.
 
 	FastRG> config add user 1 snat eport 55688 dip 192.168.3.2 iport 8080
 
+To capture subscriber 1's WAN-side packets to a pcap file (optionally filtered).
+
+	FastRG> exec pdump start WAN subscriber 1 filter "vlan and tcp port 80"
+	FastRG> exec pdump stop WAN subscriber 1
+
+See [docs/packet-capture.md](./docs/packet-capture.md) for per-subscriber CLI capture and host `dpdk-dumpcap` usage.
+
 For hugepages, NIC binding and other system configuration, please refer to DPDK documentation: [DPDK doc](http://doc.dpdk.org/guides/linux_gsg/)
 
 ## Note:

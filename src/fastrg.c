@@ -33,6 +33,7 @@
 #include "etcd_integration.h"
 #include "kafka_producer.h"
 #include "utils.h"
+#include "pdump_capture.h"
 #include "../northbound/grpc/fastrg_grpc_server.h"
 
 #define BURST_SIZE        32
@@ -568,6 +569,8 @@ void fastrg_stop()
     fastrg_ccb.user_count = 0;
     pppd_cleanup_ccb(&fastrg_ccb, total_ccbs);
     dhcpd_cleanup_ccb(&fastrg_ccb, total_ccbs);
+    /* stop any active CLI capture session and free its state */
+    fastrg_pdump_capture_cleanup(&fastrg_ccb);
     #ifdef RTE_LIB_PDUMP
     /*uninitialize packet capture framework */
     rte_pdump_uninit();
@@ -586,6 +589,7 @@ void fastrg_stop()
     grpc_shutdown();
     // Free allocated strings
     if (fastrg_ccb.eal_args) free(fastrg_ccb.eal_args);
+    if (fastrg_ccb.log_path) free(fastrg_ccb.log_path);
     if (fastrg_ccb.unix_sock_path) free(fastrg_ccb.unix_sock_path);
     if (fastrg_ccb.node_grpc_ip_port) free(fastrg_ccb.node_grpc_ip_port);
     if (fastrg_ccb.controller_address) free(fastrg_ccb.controller_address);
@@ -647,6 +651,7 @@ int fastrg_start(int argc, char **argv)
     }
     FastRG_LOG(INFO, fastrg_ccb.fp, NULL, NULL, "FastRG log level is %s", loglvl2str(fastrg_ccb.loglvl));
 
+    fastrg_ccb.log_path = strdup(fastrg_cfg.log_path);
     fastrg_ccb.unix_sock_path = strdup(fastrg_cfg.unix_sock_path);
     fastrg_ccb.node_grpc_ip_port = strdup(fastrg_cfg.node_grpc_ip_port);
     fastrg_ccb.controller_address = strdup(fastrg_cfg.controller_address);
@@ -703,6 +708,12 @@ int fastrg_start(int argc, char **argv)
     /* initialize packet capture framework */
     rte_pdump_init();
     #endif
+
+    /* CLI-driven per-subscriber capture state (exec pdump start/stop) */
+    if (fastrg_pdump_capture_init(&fastrg_ccb) == ERROR) {
+        FastRG_LOG(ERR, fastrg_ccb.fp, NULL, NULL, "pdump capture init failed");
+        goto err;
+    }
 
     /* Set up the per-port data plane according to the selected mode:
      *   DP_MODE_RSS         : install PPPoE-aware rte_flow rules (ICE/E810, or
@@ -890,6 +901,7 @@ err:
         fclose(fastrg_ccb.fp);
     }
     if (fastrg_ccb.eal_args) free(fastrg_ccb.eal_args);
+    if (fastrg_ccb.log_path) free(fastrg_ccb.log_path);
     if (fastrg_ccb.unix_sock_path) free(fastrg_ccb.unix_sock_path);
     if (fastrg_ccb.node_grpc_ip_port) free(fastrg_ccb.node_grpc_ip_port);
     if (fastrg_ccb.controller_address) free(fastrg_ccb.controller_address);

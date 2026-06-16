@@ -24,7 +24,7 @@ ifeq (,$(findstring -march=native,$(DPDK_CFLAGS)))
 CFLAGS += -Wno-array-bounds
 endif
 
-LDFLAGS = $(shell pkg-config --static --libs libdpdk) -lutils -lconfig -luuid -Wl,--start-group -lstdc++ $(shell pkg-config --libs grpc++ protobuf jsoncpp) -letcd-cpp-api $(shell pkg-config --libs rdkafka) -laddress_sorting -lpthread -larchive -Wl,--end-group
+LDFLAGS = $(shell pkg-config --static --libs libdpdk) -lutils -lconfig -luuid -Wl,--start-group -lstdc++ $(shell pkg-config --libs grpc++ protobuf jsoncpp) -letcd-cpp-api $(shell pkg-config --libs rdkafka) -laddress_sorting -lpthread -lpcap -larchive -Wl,--end-group
 
 TARGET = fastrg
 VERSION_H = src/version.h

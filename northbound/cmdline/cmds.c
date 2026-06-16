@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include <string.h>
+#include <strings.h>
 #include <stdlib.h>
 #include <stdarg.h>
 #include <inttypes.h>
@@ -211,6 +212,9 @@ static void cmd_help_parsed(__attribute__((unused)) void *parsed_result,
         "exec hsi <start|stop> <user id | all> to start/stop HSI (PPPoE + DHCP)\n"
         "exec pppoe <start|stop> <user id | all> to start/stop PPPoE only\n"
         "exec dhcp-server <start|stop> <user id | all> to start/stop DHCP server only\n"
+        "exec pdump <start|stop> <WAN|LAN|ALL> subscriber <id | all> [size <MB>] to capture packets to a pcap file\n"
+        "    (on start, filter expression is prompted interactively; supports multi-word BPF e.g. \"vlan and tcp port 80\")\n"
+        "    (LAN is VLAN-tagged, WAN is PPPoE; size: max pcap file size in MB, default and maximum 2048 = 2GB)\n"
         "help to show usage commands\n"
         "quit/exit to quit FastRG CLI\n");
 }
@@ -1210,6 +1214,61 @@ cmdline_parse_inst_t cmd_controller_login = {
     },
 };
 
+/* exec pdump — DPDK token entries exist only for tab-completion.
+ * Actual execution is intercepted by fastrg_cli_validate() which parses
+ * the complete one-liner including the multi-word BPF filter expression. */
+
+struct cmd_exec_pdump_result {
+    cmdline_fixed_string_t exec_token;
+    cmdline_fixed_string_t pdump_token;
+    cmdline_fixed_string_t action;    /* start|stop */
+    cmdline_fixed_string_t dir;       /* WAN|LAN|ALL */
+    cmdline_fixed_string_t sub_kw;    /* subscriber */
+    cmdline_fixed_string_t sub_val;   /* all | <number> */
+};
+
+
+/* Stub function — exec pdump lines are intercepted by fastrg_cli_validate()
+ * before cmdline_parse() runs, so this is never called in the normal flow.
+ * It exists only so the DPDK token entries compile and provide tab-completion. */
+static void cmd_exec_pdump_stub(__attribute__((unused)) void *r,
+                                 struct cmdline *cl,
+                                 __attribute__((unused)) void *d)
+{
+    cmdline_printf(cl,
+        "exec pdump <start|stop> <WAN|LAN|ALL> subscriber <id|all>"
+        " [filter \"<bpf expr>\"] [size <MB>]\n");
+}
+
+cmdline_parse_token_string_t cmd_pdump_exec =
+    TOKEN_STRING_INITIALIZER(struct cmd_exec_pdump_result, exec_token, "exec");
+cmdline_parse_token_string_t cmd_pdump_pdump =
+    TOKEN_STRING_INITIALIZER(struct cmd_exec_pdump_result, pdump_token, "pdump");
+cmdline_parse_token_string_t cmd_pdump_action =
+    TOKEN_STRING_INITIALIZER(struct cmd_exec_pdump_result, action, "start#stop");
+cmdline_parse_token_string_t cmd_pdump_dir =
+    TOKEN_STRING_INITIALIZER(struct cmd_exec_pdump_result, dir, "WAN#LAN#ALL");
+cmdline_parse_token_string_t cmd_pdump_sub_kw =
+    TOKEN_STRING_INITIALIZER(struct cmd_exec_pdump_result, sub_kw, "subscriber");
+cmdline_parse_token_string_t cmd_pdump_sub_val =
+    TOKEN_STRING_INITIALIZER(struct cmd_exec_pdump_result, sub_val, NULL);
+
+cmdline_parse_inst_t cmd_exec_pdump = {
+    .f = cmd_exec_pdump_stub,
+    .data = NULL,
+    .help_str = "exec pdump <start|stop> <WAN|LAN|ALL> subscriber <id|all>"
+                " [size <MB>] [filter \"<bpf expr>\"]",
+    .tokens = {
+        (void *)&cmd_pdump_exec,
+        (void *)&cmd_pdump_pdump,
+        (void *)&cmd_pdump_action,
+        (void *)&cmd_pdump_dir,
+        (void *)&cmd_pdump_sub_kw,
+        (void *)&cmd_pdump_sub_val,
+        NULL,
+    },
+};
+
 /****** CONTEXT (list of instruction) */
 cmdline_parse_ctx_t ctx[] = {
         (cmdline_parse_inst_t *)&cmd_info,
@@ -1226,6 +1285,7 @@ cmdline_parse_ctx_t ctx[] = {
         (cmdline_parse_inst_t *)&cmd_config_add_dns,
         (cmdline_parse_inst_t *)&cmd_config_del_dns,
         (cmdline_parse_inst_t *)&cmd_exec,
+        (cmdline_parse_inst_t *)&cmd_exec_pdump,
         (cmdline_parse_inst_t *)&cmd_show_port_fwd,
         (cmdline_parse_inst_t *)&cmd_show_arp_table_count,
         (cmdline_parse_inst_t *)&cmd_show_arp_table,
@@ -1260,6 +1320,193 @@ static void print_usage(const char *prog_name)
     printf("  Standalone mode  (writes directly to node gRPC)\n");
     printf("    %s                          (default Unix socket)\n", prog_name);
     printf("    %s -i 127.0.0.1:50052\n", prog_name);
+}
+
+/*
+ * 'exec pdump' is handled outside the DPDK cmdline parser because the optional
+ * BPF filter is a free-form multi-word expression ("tcp and port 80") and the
+ * tokeniser splits on whitespace.
+ *
+ * Syntax: exec pdump <start|stop> <WAN|LAN|ALL> subscriber <id|all>
+ *                    [filter "<bpf expr>"] [size <MB>]
+ */
+
+static const char *pdump_usage =
+    "usage: exec pdump <start|stop> <WAN|LAN|ALL> subscriber <id|all>"
+    " [size <MB>] [filter \"<bpf expr>\"]\n";
+
+static U32 cli_parse_pdump_size(const char *line)
+{
+    const char *sp = strstr(line, " size ");
+    if (!sp)
+        return 0;
+    return (U32)strtoul(sp + strlen(" size "), NULL, 10);
+}
+
+static void cli_handle_pdump(const char *line)
+{
+    char action[16] = {0}, dirs[16] = {0}, sub_kw[32] = {0}, sub_val[32] = {0};
+
+    int matched = sscanf(line, "exec pdump %15s %15s %31s %31s",
+        action, dirs, sub_kw, sub_val);
+    if (matched < 4 || strcmp(sub_kw, "subscriber") != 0) {
+        printf("%s", pdump_usage);
+        return;
+    }
+
+    U16 dir;
+    if (strcasecmp(dirs, "WAN") == 0)
+        dir = 1;
+    else if (strcasecmp(dirs, "LAN") == 0)
+        dir = 2;
+    else if (strcasecmp(dirs, "ALL") == 0)
+        dir = 0;
+    else {
+        printf("Invalid direction '%s' (expected WAN|LAN|ALL)\n", dirs);
+        return;
+    }
+
+    U16 subscriber;
+    if (strcasecmp(sub_val, "all") == 0) {
+        subscriber = 0;
+    } else {
+        subscriber = (U16)strtoul(sub_val, NULL, 10);
+        if (subscriber == 0) {
+            printf("Invalid subscriber id '%s'\n", sub_val);
+            return;
+        }
+    }
+
+    U32 size_mb = cli_parse_pdump_size(line);
+
+    char filter_buf[1024] = {0};
+    char *filter = NULL;
+    const char *fp = strstr(line, " filter ");
+    if (fp) {
+        fp += strlen(" filter ");
+        while (*fp == ' ')
+            fp++;
+        if (*fp == '"' || *fp == '\'') {
+            char q = *fp++;
+            const char *end = strchr(fp, q);
+            size_t len = end ? (size_t)(end - fp) : strlen(fp);
+            if (len >= sizeof(filter_buf))
+                len = sizeof(filter_buf) - 1;
+            memcpy(filter_buf, fp, len);
+            filter_buf[len] = '\0';
+        } else {
+            snprintf(filter_buf, sizeof(filter_buf), "%s", fp);
+            char *sz = strstr(filter_buf, " size ");
+            if (sz)
+                *sz = '\0';
+            size_t fl = strlen(filter_buf);
+            while (fl > 0 && (filter_buf[fl - 1] == ' ' || filter_buf[fl - 1] == '\t'))
+                filter_buf[--fl] = '\0';
+        }
+        filter = filter_buf;
+    }
+
+    if (strcmp(action, "start") == 0)
+        fastrg_grpc_pdump_start(dir, subscriber, filter, size_mb);
+    else if (strcmp(action, "stop") == 0)
+        fastrg_grpc_pdump_stop(dir, subscriber);
+    else
+        printf("%s", pdump_usage);
+}
+
+/*
+ * fastrg_cli_loop — interactive CLI using DPDK's rdline for full terminal
+ * support (tab-completion, history, arrow keys) while also handling 'exec
+ * pdump' lines whose BPF filter may contain whitespace.
+ *
+ * A custom rdline is layered on top of the cmdline object created by
+ * cmdline_stdin_new():
+ *   • All characters are fed to our rdline, which handles echo, cursor
+ *     movement, history, and tab-completion via cmdline_complete().
+ *   • On Enter our validate callback inspects the complete line:
+ *       – "exec pdump ..." → cli_handle_pdump() (parses multi-word filter).
+ *       – "quit"/"exit"   → exit the loop.
+ *       – anything else   → cmdline_parse() (the DPDK framework handles it).
+ *   • rdline_newline() is called at the end of each validate to display the
+ *     next prompt, restoring the normal DPDK-style interaction.
+ */
+
+struct fastrg_cli_ctx {
+    struct cmdline *cl;
+    const char     *prompt;
+    int             done;
+};
+
+static int fastrg_cli_write_char(struct rdline *rdl, char c)
+{
+    return (write(STDOUT_FILENO, &c, 1) == 1) ? 0 : -1;
+}
+
+static void fastrg_cli_validate(struct rdline *rdl, const char *buf,
+                                 __attribute__((unused)) unsigned int size)
+{
+    struct fastrg_cli_ctx *ctx = rdline_get_opaque(rdl);
+
+    const char *s = buf;
+    while (*s == ' ' || *s == '\t')
+        s++;
+
+    /* rdline already echoed \r\n when Enter was pressed; no extra newline needed. */
+    if (strncmp(s, "exec pdump", 10) == 0) {
+        cli_handle_pdump(s);
+    } else if (strcmp(s, "quit") == 0 || strcmp(s, "exit") == 0) {
+        ctx->done = 1;
+        rdline_quit(rdl);
+        return;
+    } else if (*s) {
+        char line[2048];
+        snprintf(line, sizeof(line), "%s\n", buf);
+        int ret = cmdline_parse(ctx->cl, line);
+        if (ret == CMDLINE_PARSE_AMBIGUOUS)
+            printf("Ambiguous command\n");
+        else if (ret == CMDLINE_PARSE_NOMATCH)
+            printf("Unknown command\n");
+        else if (ret == CMDLINE_PARSE_BAD_ARGS)
+            printf("Bad arguments\n");
+    }
+
+    if (!ctx->done) {
+        rdline_add_history(rdl, buf);
+        rdline_newline(rdl, ctx->prompt);
+    }
+}
+
+static int fastrg_cli_complete(struct rdline *rdl, const char *buf,
+                                char *dstbuf, unsigned int dstsize, int *state)
+{
+    struct fastrg_cli_ctx *ctx = rdline_get_opaque(rdl);
+    return cmdline_complete(ctx->cl, buf, state, dstbuf, dstsize);
+}
+
+static void fastrg_cli_loop(struct cmdline *cl, const char *prompt)
+{
+    struct fastrg_cli_ctx ctx = { .cl = cl, .prompt = prompt, .done = 0 };
+    struct rdline *rdl = rdline_new(fastrg_cli_write_char, fastrg_cli_validate,
+                                    fastrg_cli_complete, &ctx);
+    if (!rdl)
+        return;
+
+    /* cmdline_stdin_new() already printed the first prompt via its internal
+     * rdline.  Erase that line then call rdline_newline() with the real
+     * prompt so rdline stores it for tab-completion redisplay. */
+    if (write(STDOUT_FILENO, "\r\033[2K", 5) < 0) { /* erase cmdline_stdin_new prompt */ }
+    rdline_newline(rdl, prompt);
+
+    char c;
+    while (!ctx.done) {
+        if (read(STDIN_FILENO, &c, 1) <= 0)
+            break;
+        int ret = rdline_char_in(rdl, c);
+        if (ret == RDLINE_RES_EOF || ret == RDLINE_RES_EXITED)
+            break;
+    }
+
+    rdline_free(rdl);
 }
 
 int main(int argc, char **argv)
@@ -1347,7 +1594,7 @@ int main(int argc, char **argv)
         return -1;
     }
 
-    cmdline_interact(cl);
+    fastrg_cli_loop(cl, prompt);
 
     cmdline_stdin_exit(cl);
     grpc_shutdown();

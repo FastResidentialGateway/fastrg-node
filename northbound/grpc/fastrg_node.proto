@@ -45,6 +45,8 @@ service FastrgService {
   rpc FlushDnsCache(DnsCacheFlushRequest) returns(DnsCacheFlushReply) {}
   rpc SetDnsProxy(SetDnsProxyRequest) returns(SetDnsProxyReply) {}
   rpc SetTcpConntrack(SetTcpConntrackRequest) returns(SetTcpConntrackReply) {}
+  rpc PdumpStart(PdumpRequest) returns(PdumpReply) {}
+  rpc PdumpStop(PdumpRequest) returns(PdumpReply) {}
 }
 
 message ConfigRequest {
@@ -304,4 +306,17 @@ message SetTcpConntrackRequest {
 
 message SetTcpConntrackReply {
   string status = 1;
+}
+
+// Per-subscriber packet capture (exec pdump start/stop)
+message PdumpRequest {
+  uint32 direction = 1;     // 0 = ALL, 1 = WAN, 2 = LAN
+  uint32 subscriber = 2;    // 1-based subscriber id, 0 = all subscribers
+  string filter = 3;        // optional tcpdump-style BPF expression (start only)
+  uint32 size_limit_mb = 4; // max capture file size in MB (start only); 0 = default, capped at 2048 (2GB)
+}
+
+message PdumpReply {
+  string status = 1;
+  string pcap_file = 2;  // active capture file path (start only)
 }

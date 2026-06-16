@@ -617,6 +617,37 @@ void fastrg_grpc_set_tcp_conntrack(U16 user_id, bool enable) {
     }
 }
 
+void fastrg_grpc_pdump_start(U16 direction, U16 subscriber, const char *filter, U32 size_mb) {
+    fastrgnodeservice::PdumpRequest request;
+    fastrgnodeservice::PdumpReply reply;
+    request.set_direction(direction);
+    request.set_subscriber(subscriber);
+    if (filter && filter[0])
+        request.set_filter(filter);
+    request.set_size_limit_mb(size_mb);
+    ClientContext context;
+    Status status = fastrg_client->stub_->PdumpStart(&context, request, &reply);
+    if (status.ok()) {
+        std::cout << "pdump capture started: " << reply.pcap_file() << std::endl;
+    } else {
+        std::cout << "Failed to start pdump capture: " << status.error_message() << std::endl;
+    }
+}
+
+void fastrg_grpc_pdump_stop(U16 direction, U16 subscriber) {
+    fastrgnodeservice::PdumpRequest request;
+    fastrgnodeservice::PdumpReply reply;
+    request.set_direction(direction);
+    request.set_subscriber(subscriber);
+    ClientContext context;
+    Status status = fastrg_client->stub_->PdumpStop(&context, request, &reply);
+    if (status.ok()) {
+        std::cout << "pdump capture stopped" << std::endl;
+    } else {
+        std::cout << "Failed to stop pdump capture: " << status.error_message() << std::endl;
+    }
+}
+
 #ifdef __cplusplus
 }
 #endif
