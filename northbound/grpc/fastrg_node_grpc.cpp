@@ -22,6 +22,7 @@ extern "C"
 #include "../../src/dnsd/dnsd.h"
 #include "../../src/dnsd/dns_cache.h"
 #include "../../src/dnsd/dns_static.h"
+#include "../../src/pdump_capture.h"
 
 #ifdef __cplusplus
 }
@@ -1453,5 +1454,47 @@ grpc::Status FastRGNodeServiceImpl::SetTcpConntrack(::grpc::ServerContext* conte
     }
 
     response->set_status("ok");
+    return grpc::Status::OK;
+}
+
+grpc::Status FastRGNodeServiceImpl::PdumpStart(::grpc::ServerContext* context, const ::fastrgnodeservice::PdumpRequest* request, ::fastrgnodeservice::PdumpReply* response)
+{
+    (void)context;
+    int direction = request->direction();
+    uint16_t subscriber = request->subscriber();
+    std::string filter = request->filter();
+    uint32_t size_limit_mb = request->size_limit_mb();
+
+    cout << "PdumpStart called direction=" << direction << " subscriber=" << subscriber
+         << " filter=" << (filter.empty() ? "(none)" : filter)
+         << " size_limit_mb=" << size_limit_mb << endl;
+
+    char out_file[256] = {0};
+    char err[256] = {0};
+    if (fastrg_pdump_start(fastrg_ccb, direction, subscriber,
+            filter.empty() ? NULL : filter.c_str(), size_limit_mb,
+            out_file, sizeof(out_file), err, sizeof(err)) == ERROR) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, err);
+    }
+
+    response->set_status("capture started");
+    response->set_pcap_file(out_file);
+    return grpc::Status::OK;
+}
+
+grpc::Status FastRGNodeServiceImpl::PdumpStop(::grpc::ServerContext* context, const ::fastrgnodeservice::PdumpRequest* request, ::fastrgnodeservice::PdumpReply* response)
+{
+    (void)context;
+    int direction = request->direction();
+    uint16_t subscriber = request->subscriber();
+
+    cout << "PdumpStop called direction=" << direction << " subscriber=" << subscriber << endl;
+
+    char err[256] = {0};
+    if (fastrg_pdump_stop(fastrg_ccb, direction, subscriber, err, sizeof(err)) == ERROR) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, err);
+    }
+
+    response->set_status("capture stopped");
     return grpc::Status::OK;
 }

@@ -72,6 +72,7 @@ typedef struct FastRG {
     U16                     user_count;     /* total FastRG subscriptor */
     U16                     max_user_count; /* max FastRG subscriptor supported */
     struct lcore_map        lcore;          /* lcore map */
+    char                    *log_path;      /* FastRG log file path (pcap captures go in its dir) */
     char                    *unix_sock_path;/* FastRG unix socket file path */
     char                    *node_grpc_ip_port; /* FastRG node grpc ip:port */
     int                     unix_sock_fd;   /* FastRG unix socket file descriptor */

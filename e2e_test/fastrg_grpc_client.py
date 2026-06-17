@@ -346,6 +346,19 @@ def get_user_drop_count(node_addr, user_id, port_idx=1):
     return {"dropped_packets": 0}
 
 
+def pdump_start(node_addr, dir_val, subscriber, filter_expr='', size_mb=0):
+    data = {'direction': int(dir_val), 'subscriber': int(subscriber)}
+    if filter_expr:
+        data['filter'] = filter_expr
+    if size_mb:
+        data['size_limit_mb'] = int(size_mb)
+    return _grpcurl(node_addr, 'PdumpStart', data)
+
+
+def pdump_stop(node_addr, dir_val, subscriber):
+    return _grpcurl(node_addr, 'PdumpStop', {'direction': int(dir_val), 'subscriber': int(subscriber)})
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -471,6 +484,21 @@ def main():
                 sys.exit(1)
             port_idx = int(opts.args[1]) if len(opts.args) > 1 else 1
             result = get_user_drop_count(opts.node, int(opts.args[0]), port_idx)
+        elif opts.command == "pdump_start":
+            # args: dir subscriber [filter_expr [size_mb]]
+            if len(opts.args) < 2:
+                print(json.dumps({"error": "pdump_start requires <dir> <subscriber> [filter] [size_mb]"}),
+                      file=sys.stderr)
+                sys.exit(1)
+            filter_expr = opts.args[2] if len(opts.args) > 2 else ''
+            size_mb = int(opts.args[3]) if len(opts.args) > 3 else 0
+            result = pdump_start(opts.node, opts.args[0], opts.args[1], filter_expr, size_mb)
+        elif opts.command == "pdump_stop":
+            if len(opts.args) < 2:
+                print(json.dumps({"error": "pdump_stop requires <dir> <subscriber>"}),
+                      file=sys.stderr)
+                sys.exit(1)
+            result = pdump_stop(opts.node, opts.args[0], opts.args[1])
         else:
             print(json.dumps({"error": f"Unknown command: {opts.command}"}), file=sys.stderr)
             sys.exit(1)
