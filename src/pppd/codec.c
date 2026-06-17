@@ -290,12 +290,12 @@ STATUS decode_lcp(U16 ppp_hdr_len, U16 *event, struct rte_timer *tim, ppp_ccb_t 
             /* Liveness is tracked by the periodic PPP_keepalive_cb; the miss
              * counter was already reset at the top of decode_lcp. Just reply
              * (the FSM action A_send_echo_reply sends the Echo-Reply). */
-            *event = E_RECV_ECHO_REPLY_REQUEST_DISCARD_REQUEST;
+            *event = E_RECV_ECHO_REQUEST;
             return SUCCESS;
         case ECHO_REPLY:
             if (s_ppp_ccb->phase < LCP_PHASE)
                 return ERROR;
-            *event = E_RECV_ECHO_REPLY_REQUEST_DISCARD_REQUEST;
+            *event = E_RECV_ECHO_REPLY;
             return SUCCESS;
         default :
             *event = E_RECV_UNKNOWN_CODE;
