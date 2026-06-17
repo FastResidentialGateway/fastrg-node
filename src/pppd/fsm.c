@@ -98,7 +98,9 @@ tPPP_STATE_TBL  ppp_fsm_tbl_lcp[] = {
 
 { S_CLOSED,			E_RECV_BAD_CODE_PROTOCOL_REJECT, 				S_CLOSED,			{ A_this_layer_finish, 0 }},
 
-{ S_CLOSED,			E_RECV_ECHO_REPLY_REQUEST_DISCARD_REQUEST, 		S_CLOSED,			{ 0 }},
+{ S_CLOSED,			E_RECV_ECHO_REQUEST, 							S_CLOSED,			{ 0 }},
+
+{ S_CLOSED,			E_RECV_ECHO_REPLY, 								S_CLOSED,			{ 0 }},
 
 /*---------------------------------------------------------------------------*/
 { S_STOPPED,		E_DOWN,     						   			S_STARTING,		    { A_this_layer_start, 0 }},
@@ -128,7 +130,9 @@ tPPP_STATE_TBL  ppp_fsm_tbl_lcp[] = {
 
 { S_STOPPED,		E_RECV_BAD_CODE_PROTOCOL_REJECT, 				S_STOPPED,			{ A_this_layer_finish, 0 }},
 
-{ S_STOPPED,		E_RECV_ECHO_REPLY_REQUEST_DISCARD_REQUEST, 		S_STOPPED,			{ 0 }},
+{ S_STOPPED,		E_RECV_ECHO_REQUEST, 							S_STOPPED,			{ 0 }},
+
+{ S_STOPPED,		E_RECV_ECHO_REPLY, 								S_STOPPED,			{ 0 }},
 
 /*---------------------------------------------------------------------------*/
 { S_CLOSING, 		E_DOWN,								     		S_INIT,			    { 0 }},
@@ -162,7 +166,9 @@ tPPP_STATE_TBL  ppp_fsm_tbl_lcp[] = {
 
 { S_CLOSING,		E_RECV_BAD_CODE_PROTOCOL_REJECT, 				S_CLOSED,			{ A_this_layer_finish, 0 }},
 
-{ S_CLOSING,		E_RECV_ECHO_REPLY_REQUEST_DISCARD_REQUEST, 		S_CLOSING,			{ 0 }},
+{ S_CLOSING,		E_RECV_ECHO_REQUEST, 							S_CLOSING,			{ 0 }},
+
+{ S_CLOSING,		E_RECV_ECHO_REPLY, 								S_CLOSING,			{ 0 }},
 
 /*---------------------------------------------------------------------------*/
 { S_STOPPING, 		E_DOWN,								     		S_STARTING, 	    { 0 }},
@@ -196,7 +202,9 @@ tPPP_STATE_TBL  ppp_fsm_tbl_lcp[] = {
 
 { S_STOPPING,		E_RECV_BAD_CODE_PROTOCOL_REJECT, 				S_STOPPED,			{ A_this_layer_finish, 0 }},
 
-{ S_STOPPING,		E_RECV_ECHO_REPLY_REQUEST_DISCARD_REQUEST, 		S_STOPPING,			{ 0 }},
+{ S_STOPPING,		E_RECV_ECHO_REQUEST, 							S_STOPPING,			{ 0 }},
+
+{ S_STOPPING,		E_RECV_ECHO_REPLY, 								S_STOPPING,			{ 0 }},
 
 /*---------------------------------------------------------------------------*/
 { S_REQUEST_SENT, 	E_DOWN,											S_STARTING, 		{ 0 }},
@@ -228,7 +236,9 @@ tPPP_STATE_TBL  ppp_fsm_tbl_lcp[] = {
 
 { S_REQUEST_SENT, 	E_RECV_BAD_CODE_PROTOCOL_REJECT,				S_STOPPED,			{ A_this_layer_finish, 0 }},
 
-{ S_REQUEST_SENT, 	E_RECV_ECHO_REPLY_REQUEST_DISCARD_REQUEST, 		S_REQUEST_SENT,		{ 0 }},
+{ S_REQUEST_SENT, 	E_RECV_ECHO_REQUEST, 							S_REQUEST_SENT,		{ 0 }},
+
+{ S_REQUEST_SENT, 	E_RECV_ECHO_REPLY, 								S_REQUEST_SENT,		{ 0 }},
 
 /*---------------------------------------------------------------------------*/
 { S_ACK_RECEIVED, 	E_DOWN,											S_STARTING, 		{ 0 }},
@@ -265,7 +275,9 @@ tPPP_STATE_TBL  ppp_fsm_tbl_lcp[] = {
 
 { S_ACK_RECEIVED, 	E_RECV_BAD_CODE_PROTOCOL_REJECT,				S_STOPPED,			{ A_this_layer_finish, 0 }},
 
-{ S_ACK_RECEIVED, 	E_RECV_ECHO_REPLY_REQUEST_DISCARD_REQUEST, 		S_ACK_RECEIVED,		{ 0 }},
+{ S_ACK_RECEIVED, 	E_RECV_ECHO_REQUEST, 							S_ACK_RECEIVED,		{ 0 }},
+
+{ S_ACK_RECEIVED, 	E_RECV_ECHO_REPLY, 								S_ACK_RECEIVED,		{ 0 }},
 
 /*---------------------------------------------------------------------------*/
 { S_ACK_SENT, 		E_DOWN,											S_STARTING, 		{ 0 }},
@@ -297,7 +309,9 @@ tPPP_STATE_TBL  ppp_fsm_tbl_lcp[] = {
 
 { S_ACK_SENT, 		E_RECV_BAD_CODE_PROTOCOL_REJECT,				S_STOPPED,			{ A_this_layer_finish, 0 }},
 
-{ S_ACK_SENT, 		E_RECV_ECHO_REPLY_REQUEST_DISCARD_REQUEST, 		S_ACK_SENT,			{ 0 }},
+{ S_ACK_SENT, 		E_RECV_ECHO_REQUEST, 							S_ACK_SENT,			{ 0 }},
+
+{ S_ACK_SENT, 		E_RECV_ECHO_REPLY, 								S_ACK_SENT,			{ 0 }},
 
 /*---------------------------------------------------------------------------*/
 { S_OPENED, 		E_DOWN,											S_STARTING, 		{ A_this_layer_down, 0 }},
@@ -329,7 +343,9 @@ tPPP_STATE_TBL  ppp_fsm_tbl_lcp[] = {
 
 { S_OPENED, 		E_RECV_BAD_CODE_PROTOCOL_REJECT,				S_STOPPING,			{ A_this_layer_down, A_init_restart_termin, A_send_terminate_request, 0 }},
 
-{ S_OPENED, 		E_RECV_ECHO_REPLY_REQUEST_DISCARD_REQUEST,		S_OPENED,			{ A_send_echo_reply, 0 }},
+{ S_OPENED, 		E_RECV_ECHO_REQUEST,							S_OPENED,			{ A_send_echo_reply, 0 }},
+
+{ S_OPENED, 		E_RECV_ECHO_REPLY,								S_OPENED,			{ 0 }},
 
 { S_INVLD, 0, 0, {0}}
 };
@@ -378,7 +394,9 @@ tPPP_STATE_TBL ppp_fsm_tbl_ncp[] = {
 
 { S_CLOSED,			E_RECV_BAD_CODE_PROTOCOL_REJECT, 				S_CLOSED,			{ A_this_layer_finish, 0 }},
 
-{ S_CLOSED,			E_RECV_ECHO_REPLY_REQUEST_DISCARD_REQUEST, 		S_CLOSED,			{ 0 }},
+{ S_CLOSED,			E_RECV_ECHO_REQUEST, 							S_CLOSED,			{ 0 }},
+
+{ S_CLOSED,			E_RECV_ECHO_REPLY, 								S_CLOSED,			{ 0 }},
 
 /*---------------------------------------------------------------------------*/
 { S_STOPPED,		E_DOWN,     						   			S_STARTING,		    { A_this_layer_start, 0 }},
@@ -408,7 +426,9 @@ tPPP_STATE_TBL ppp_fsm_tbl_ncp[] = {
 
 { S_STOPPED,		E_RECV_BAD_CODE_PROTOCOL_REJECT, 				S_STOPPED,			{ A_this_layer_finish, 0 }},
 
-{ S_STOPPED,		E_RECV_ECHO_REPLY_REQUEST_DISCARD_REQUEST, 		S_STOPPED,			{ 0 }},
+{ S_STOPPED,		E_RECV_ECHO_REQUEST, 							S_STOPPED,			{ 0 }},
+
+{ S_STOPPED,		E_RECV_ECHO_REPLY, 								S_STOPPED,			{ 0 }},
 
 /*---------------------------------------------------------------------------*/
 { S_CLOSING, 		E_DOWN,								     		S_INIT,			    { 0 }},
@@ -442,7 +462,9 @@ tPPP_STATE_TBL ppp_fsm_tbl_ncp[] = {
 
 { S_CLOSING,		E_RECV_BAD_CODE_PROTOCOL_REJECT, 				S_CLOSED,			{ A_this_layer_finish, 0 }},
 
-{ S_CLOSING,		E_RECV_ECHO_REPLY_REQUEST_DISCARD_REQUEST, 		S_CLOSING,			{ 0 }},
+{ S_CLOSING,		E_RECV_ECHO_REQUEST, 							S_CLOSING,			{ 0 }},
+
+{ S_CLOSING,		E_RECV_ECHO_REPLY, 								S_CLOSING,			{ 0 }},
 
 /*---------------------------------------------------------------------------*/
 { S_STOPPING, 		E_DOWN,								     		S_STARTING, 	    { 0 }},
@@ -476,7 +498,9 @@ tPPP_STATE_TBL ppp_fsm_tbl_ncp[] = {
 
 { S_STOPPING,		E_RECV_BAD_CODE_PROTOCOL_REJECT, 				S_STOPPED,			{ A_this_layer_finish, 0 }},
 
-{ S_STOPPING,		E_RECV_ECHO_REPLY_REQUEST_DISCARD_REQUEST, 		S_STOPPING,			{ 0 }},
+{ S_STOPPING,		E_RECV_ECHO_REQUEST, 							S_STOPPING,			{ 0 }},
+
+{ S_STOPPING,		E_RECV_ECHO_REPLY, 								S_STOPPING,			{ 0 }},
 
 /*---------------------------------------------------------------------------*/
 { S_REQUEST_SENT, 	E_DOWN,											S_STARTING, 		{ 0 }},
@@ -508,7 +532,9 @@ tPPP_STATE_TBL ppp_fsm_tbl_ncp[] = {
 
 { S_REQUEST_SENT,   E_RECV_BAD_CODE_PROTOCOL_REJECT,	            S_STOPPED,		    { A_this_layer_finish, 0 }},
 
-{ S_REQUEST_SENT,   E_RECV_ECHO_REPLY_REQUEST_DISCARD_REQUEST,      S_REQUEST_SENT,	    { 0 }},
+{ S_REQUEST_SENT,   E_RECV_ECHO_REQUEST,                            S_REQUEST_SENT,	    { 0 }},
+
+{ S_REQUEST_SENT,   E_RECV_ECHO_REPLY,                              S_REQUEST_SENT,	    { 0 }},
 
 /*---------------------------------------------------------------------------*/
 { S_ACK_RECEIVED,   E_DOWN,							                S_STARTING, 	    { 0 }},
@@ -545,7 +571,9 @@ tPPP_STATE_TBL ppp_fsm_tbl_ncp[] = {
 
 { S_ACK_RECEIVED,   E_RECV_BAD_CODE_PROTOCOL_REJECT,	            S_STOPPED,		    { A_this_layer_finish, 0 }},
 
-{ S_ACK_RECEIVED,   E_RECV_ECHO_REPLY_REQUEST_DISCARD_REQUEST,      S_ACK_RECEIVED,	    { 0 }},
+{ S_ACK_RECEIVED,   E_RECV_ECHO_REQUEST,                            S_ACK_RECEIVED,	    { 0 }},
+
+{ S_ACK_RECEIVED,   E_RECV_ECHO_REPLY,                              S_ACK_RECEIVED,	    { 0 }},
 
 /*---------------------------------------------------------------------------*/
 { S_ACK_SENT, 	    E_DOWN,								            S_STARTING, 	    { 0 }},
@@ -577,7 +605,9 @@ tPPP_STATE_TBL ppp_fsm_tbl_ncp[] = {
 
 { S_ACK_SENT, 	    E_RECV_BAD_CODE_PROTOCOL_REJECT,	            S_STOPPED,		    { A_this_layer_finish, 0 }},
 
-{ S_ACK_SENT, 	    E_RECV_ECHO_REPLY_REQUEST_DISCARD_REQUEST,      S_ACK_SENT,	        { 0 }},
+{ S_ACK_SENT, 	    E_RECV_ECHO_REQUEST,                            S_ACK_SENT,	        { 0 }},
+
+{ S_ACK_SENT, 	    E_RECV_ECHO_REPLY,                              S_ACK_SENT,	        { 0 }},
 
 /*---------------------------------------------------------------------------*/
 { S_OPENED, 	    E_DOWN,								            S_STARTING, 	    { A_this_layer_down, 0 }},
@@ -609,7 +639,9 @@ tPPP_STATE_TBL ppp_fsm_tbl_ncp[] = {
 
 { S_OPENED, 	    E_RECV_BAD_CODE_PROTOCOL_REJECT,	            S_STOPPING,		    { A_this_layer_down, A_init_restart_termin, A_send_terminate_request, 0 }},
 
-{ S_OPENED, 	    E_RECV_ECHO_REPLY_REQUEST_DISCARD_REQUEST,      S_OPENED,           { A_send_echo_reply, 0 }},
+{ S_OPENED, 	    E_RECV_ECHO_REQUEST,                            S_OPENED,           { 0 }},
+
+{ S_OPENED, 	    E_RECV_ECHO_REPLY,                              S_OPENED,           { 0 }},
 
 { S_INVLD, 0, 0, {0}}
 };
