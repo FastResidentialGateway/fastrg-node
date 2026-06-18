@@ -808,6 +808,8 @@ STATUS A_this_layer_down(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb)
         PPP_FSM(ppp_timer, s_ppp_ccb, E_CLOSE);
         rte_atomic16_set(&s_ppp_ccb->dp_start_bool, (S16)0);
     } else if (s_ppp_ccb->cp == 0) {
+        rte_atomic16_set(&s_ppp_ccb->dp_start_bool, (S16)0);
+        s_ppp_ccb->ppp_phase[1].state = S_INIT;
         PPP_FSM(ppp_timer, s_ppp_ccb, E_CLOSE);
         FastRG_LOG(DBG, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "LCP layer is down");
     }

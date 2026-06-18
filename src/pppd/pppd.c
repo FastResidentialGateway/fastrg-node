@@ -90,12 +90,13 @@ void PPP_bye(ppp_ccb_t *s_ppp_ccb)
             PPP_FSM(&(s_ppp_ccb->ppp), s_ppp_ccb, E_CLOSE);
             break;
         case DATA_PHASE:
-            /* modify pppoe phase from DATA_PHASE to IPCP_PHASE */
-            s_ppp_ccb->phase--;
         case IPCP_PHASE:
             s_ppp_ccb->ppp_processing = TRUE;
-            /* set ppp control protocol to IPCP */
-            s_ppp_ccb->cp = 1;
+            /* RFC 1661 §3.7: LCP close is sufficient — skip IPCP terminate. */
+            rte_atomic16_set(&s_ppp_ccb->dp_start_bool, (S16)0);
+            s_ppp_ccb->ppp_phase[1].state = S_INIT;
+            s_ppp_ccb->phase = LCP_PHASE;
+            s_ppp_ccb->cp = 0;
             PPP_FSM(&(s_ppp_ccb->ppp), s_ppp_ccb, E_CLOSE);
             break;
         default:
