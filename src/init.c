@@ -330,6 +330,14 @@ STATUS sys_init(FastRG_t *fastrg_ccb, struct fastrg_config *fastrg_cfg)
         goto err;
     }
 
+    fastrg_ccb->lcore_usage = fastrg_calloc(struct lcore_usage_counter,
+        RTE_MAX_LCORE, sizeof(struct lcore_usage_counter), RTE_CACHE_LINE_SIZE);
+    if (fastrg_ccb->lcore_usage == NULL) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+            "Cannot allocate memory for lcore_usage counters");
+        goto err;
+    }
+
     /* Initialize per_subscriber_stats using RCU-safe function */
     ret = fastrg_add_subscriber_stats(fastrg_ccb, fastrg_ccb->user_count);
     if (ret != SUCCESS) {
@@ -340,6 +348,10 @@ STATUS sys_init(FastRG_t *fastrg_ccb, struct fastrg_config *fastrg_cfg)
 
     return SUCCESS;
 err:
+    if (fastrg_ccb->lcore_usage != NULL) {
+        fastrg_mfree(fastrg_ccb->lcore_usage);
+        fastrg_ccb->lcore_usage = NULL;
+    }
     cleanup_ring(fastrg_ccb);
     cleanup_mem();
     arp_pending_cleanup_pool(&fastrg_ccb->arp_pending_mp);
@@ -374,6 +386,11 @@ void sys_cleanup(FastRG_t *fastrg_ccb)
     if (fastrg_ccb->node_uuid != NULL) {
         fastrg_mfree(fastrg_ccb->node_uuid);
         fastrg_ccb->node_uuid = NULL;
+    }
+
+    if (fastrg_ccb->lcore_usage != NULL) {
+        fastrg_mfree(fastrg_ccb->lcore_usage);
+        fastrg_ccb->lcore_usage = NULL;
     }
 
     cleanup_ring(fastrg_ccb);

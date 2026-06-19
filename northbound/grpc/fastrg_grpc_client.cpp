@@ -1,5 +1,6 @@
 #include <iostream>
 #include <iomanip>
+#include <map>
 #include <inttypes.h>
 #include <grpc++/grpc++.h>
 #include <grpcpp/grpcpp.h>
@@ -350,6 +351,57 @@ void fastrg_grpc_get_system_stats() {
             std::cout << "          Tx bytes: " << per_user_stats.tx_bytes() << std::endl;
             std::cout << "          Dropped packets: " << per_user_stats.dropped_packets() << std::endl;
             std::cout << "          Dropped bytes: " << per_user_stats.dropped_bytes() << std::endl;
+        }
+        if (reply.lcore_usage_size() > 0) {
+            std::map<uint32_t, std::pair<uint64_t, uint64_t>> prev;
+            for (int i = 0; i < reply.lcore_usage_size(); i++) {
+                const LcoreUsage& lu = reply.lcore_usage(i);
+                prev[lu.lcore_id()] = {lu.busy_cycles(), lu.total_cycles()};
+            }
+            sleep(1);
+            FastrgSystemStatsInfo reply2;
+            ClientContext context2;
+            Status status2 = fastrg_client->stub_->GetFastrgSystemStats(&context2, request, &reply2);
+            if (status2.ok() && reply2.lcore_usage_size() > 0) {
+                std::cout << "  Lcore Usage (1s sample):" << std::endl;
+                for (int i = 0; i < reply2.lcore_usage_size(); i++) {
+                    const LcoreUsage& lu = reply2.lcore_usage(i);
+                    auto it = prev.find(lu.lcore_id());
+                    double busyness = 0.0;
+                    if (it != prev.end()) {
+                        uint64_t d_busy = lu.busy_cycles() - it->second.first;
+                        uint64_t d_total = lu.total_cycles() - it->second.second;
+                        if (d_total > 0)
+                            busyness = (double)d_busy * 100.0 / (double)d_total;
+                    }
+                    printf("    lcore %2u [%-16s]   busy: %6.2f%%\n",
+                        lu.lcore_id(), lu.role().c_str(), busyness);
+                }
+                reply = std::move(reply2);
+            }
+        }
+        if (reply.heap_stats_size() > 0) {
+            for (int i = 0; i < reply.heap_stats_size(); i++) {
+                const HeapStats& hs = reply.heap_stats(i);
+                printf("  Heap (socket %u):\n", hs.socket_id());
+                printf("    Total: %lu MB  Used: %lu MB  Free: %lu MB  Largest free block: %lu MB\n",
+                    hs.total_bytes() / (1024 * 1024),
+                    hs.used_bytes() / (1024 * 1024),
+                    hs.free_bytes() / (1024 * 1024),
+                    hs.largest_free_blk() / (1024 * 1024));
+            }
+        }
+        if (reply.mempool_stats_size() > 0) {
+            std::cout << "  Mempools:" << std::endl;
+            for (int i = 0; i < reply.mempool_stats_size(); i++) {
+                const MempoolStats& ms = reply.mempool_stats(i);
+                printf("    %-30s  size: %5u  avail: %5u  in_use: %5u\n",
+                    ms.name().c_str(), ms.size(), ms.avail_count(), ms.in_use_count());
+            }
+        }
+        if (reply.hugepage_pinned_bytes() > 0) {
+            printf("  Hugepage pinned: %lu MB\n",
+                reply.hugepage_pinned_bytes() / (1024 * 1024));
         }
     } else {
         std::cout << "grpc client get system stats failed: " << std::endl;

@@ -112,9 +112,10 @@ message FastrgBaseInfo {
 }
 
 message NicDriverInfo {
-  string driver_name = 1;
-  string pci_addr = 2;
-  bytes mac_addr = 3;
+  string nic_model = 1;
+  string driver_name = 2;
+  string pci_addr = 3;
+  bytes mac_addr = 4;
 }
 
 message PerUserStatistics {
@@ -138,6 +139,29 @@ message Statistics {
   repeated PerUserStatistics per_user_stats = 8;
 }
 
+message LcoreUsage {
+  uint32 lcore_id     = 1;
+  string role         = 2;  // "wan_data", "lan_data", "ctrl", etc.
+  uint64 busy_cycles  = 3;
+  uint64 total_cycles = 4;
+  // Calculate busyness at controller side => busy_cycles / total_cycles
+}
+
+message HeapStats {
+  uint32 socket_id         = 1;
+  uint64 total_bytes       = 2;  // heap count on hugepage
+  uint64 used_bytes        = 3;  // Allocated (in-use) bytes on hugepage;
+  uint64 free_bytes        = 4;
+  uint64 largest_free_blk  = 5;  // largest contiguous free block in the heap; indicates fragmentation level
+}
+
+message MempoolStats {
+  string name         = 1;  // "MBUF_POOL", "ppp_ccb_pool", etc.
+  uint32 size         = 2;  // Total element count
+  uint32 avail_count  = 3;  // Available element count
+  uint32 in_use_count = 4;
+}
+
 message FastrgSystemInfo {
   FastrgBaseInfo base_info = 1;
 }
@@ -145,6 +169,10 @@ message FastrgSystemInfo {
 message FastrgSystemStatsInfo {
   repeated NicDriverInfo nics = 1;
   repeated Statistics stats = 2;
+  repeated LcoreUsage   lcore_usage   = 3;
+  repeated HeapStats    heap_stats    = 4;
+  repeated MempoolStats mempool_stats = 5;
+  uint64 hugepage_pinned_bytes        = 6;  // Hugepages locked by DPDK (in bytes)
 }
 
 message XStat {

@@ -14,6 +14,9 @@ extern "C"
 #include <rte_version.h>
 #include <rte_ethdev.h>
 #include <rte_atomic.h>
+#include <rte_malloc.h>
+#include <rte_memory.h>
+#include <rte_mempool.h>
 #include "../../src/fastrg.h"
 #include "../../src/dhcpd/dhcpd.h"
 #include "../../src/northbound.h"
@@ -892,6 +895,57 @@ grpc::Status FastRGNodeServiceImpl::GetFastrgSystemStats(::grpc::ServerContext* 
         std::string err = "get wan device stats failed";
         return grpc::Status(grpc::StatusCode::INTERNAL, err);
     }
+
+    /* Lcore usage */
+    if (fastrg_ccb->lcore_usage) {
+        auto add_lcore = [&](uint8_t id) {
+            LcoreUsage *lu = response->add_lcore_usage();
+            lu->set_lcore_id(id);
+            const char *r = __atomic_load_n(&fastrg_ccb->lcore_usage[id].role, __ATOMIC_RELAXED);
+            lu->set_role(r ? r : "");
+            lu->set_busy_cycles(__atomic_load_n(&fastrg_ccb->lcore_usage[id].busy_cycles, __ATOMIC_RELAXED));
+            lu->set_total_cycles(__atomic_load_n(&fastrg_ccb->lcore_usage[id].total_cycles, __ATOMIC_RELAXED));
+        };
+        add_lcore(fastrg_ccb->lcore.ctrl_thread);
+        add_lcore(fastrg_ccb->lcore.wan_ctrl_thread);
+        add_lcore(fastrg_ccb->lcore.lan_ctrl_thread);
+        for (int i = 0; i < fastrg_ccb->lcore.num_data_queues; i++) {
+            add_lcore(fastrg_ccb->lcore.wan_data_threads[i]);
+            add_lcore(fastrg_ccb->lcore.lan_data_threads[i]);
+        }
+    }
+
+    /* Heap stats */
+    struct rte_malloc_socket_stats mstats;
+    for(int sid=0; sid<RTE_MAX_NUMA_NODES; sid++) {
+        if (rte_malloc_get_socket_stats(sid, &mstats) == 0) {
+            HeapStats *hs = response->add_heap_stats();
+            hs->set_socket_id(sid);
+            hs->set_total_bytes(mstats.heap_totalsz_bytes);
+            hs->set_used_bytes(mstats.heap_allocsz_bytes);
+            hs->set_free_bytes(mstats.heap_freesz_bytes);
+            hs->set_largest_free_blk(mstats.greatest_free_size);
+        }
+    }
+
+    /* Mempool stats */
+    rte_mempool_walk([](struct rte_mempool *mp, void *arg) {
+        auto *resp = static_cast<FastrgSystemStatsInfo *>(arg);
+        MempoolStats *ms = resp->add_mempool_stats();
+        ms->set_name(mp->name);
+        ms->set_size(mp->size);
+        ms->set_avail_count(rte_mempool_avail_count(mp));
+        ms->set_in_use_count(rte_mempool_in_use_count(mp));
+    }, response);
+
+    /* Hugepage pinned bytes */
+    uint64_t pinned_bytes = 0;
+    rte_memseg_walk([](const struct rte_memseg_list *msl,
+                       const struct rte_memseg *ms, void *arg) -> int {
+        *(uint64_t *)arg += ms->len;
+        return 0;
+    }, &pinned_bytes);
+    response->set_hugepage_pinned_bytes(pinned_bytes);
 
     return grpc::Status::OK;
 }
