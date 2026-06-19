@@ -407,7 +407,8 @@ source "${_E2E_PHASES_DIR}/phase10_desire_diff.sh"
 source "${_E2E_PHASES_DIR}/phase11_kafka_pipeline.sh"
 source "${_E2E_PHASES_DIR}/phase12_rollback.sh"
 source "${_E2E_PHASES_DIR}/phase13_pdump.sh"
-source "${_E2E_PHASES_DIR}/phase14_summary.sh"
+source "${_E2E_PHASES_DIR}/phase14_stress_test.sh"
+source "${_E2E_PHASES_DIR}/phase15_summary.sh"
 
 # ---------------------------------------------------------------------------
 # Cleanup — kill fastrg only if the script started it
@@ -482,7 +483,8 @@ main() {
     phase11_kafka_pipeline
     phase12_rollback
     phase13_pdump
-    phase14_summary || true
+    phase14_stress_test
+    phase15_summary || true
 }
 
 main "$@"

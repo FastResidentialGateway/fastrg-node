@@ -262,6 +262,35 @@ phase0_setup() {
             exit 1
         fi
         info "fastrg gRPC is reachable."
+
+        # Ensure desire_status=connect so fastrg dials immediately without
+        # waiting up to 60s for the next reconcile cycle.
+        info "Triggering connect_hsi for USER_ID=${USER_ID} to ensure desire_status=connect..."
+        fastrg_grpc connect_hsi "${USER_ID}" >/dev/null 2>&1 || true
+
+        # Wait for the primary subscriber PPPoE session to reach Data phase.
+        info "Waiting for USER_ID=${USER_ID} PPPoE session to reach Data phase (up to 120s)..."
+        _dp_ready=0
+        for _i in $(seq 1 24); do
+            _hsi=$(python3 "${GRPC_CLIENT_DIR}/fastrg_grpc_client.py" \
+                      --node "${FASTRG_NODE}:${FASTRG_GRPC_PORT}" \
+                      get_hsi_info 2>/dev/null || true)
+            _phase=$(printf '%s' "$_hsi" | \
+                python3 -c "import sys,json; d=json.load(sys.stdin); \
+                u=[h for h in d.get('hsi_infos',[]) if h.get('user_id')==${USER_ID}]; \
+                print(u[0].get('status','') if u else '')" 2>/dev/null || true)
+            if [[ "$_phase" == "Data phase" ]]; then
+                _dp_ready=1
+                break
+            fi
+            info "  still waiting... (${_i}x5s, status='${_phase}')"
+            sleep 5
+        done
+        if [[ $_dp_ready -eq 0 ]]; then
+            error "USER_ID=${USER_ID} did not reach Data phase within 120s (status='${_phase}')."
+            exit 1
+        fi
+        info "USER_ID=${USER_ID} PPPoE session is in Data phase."
     fi
 
     # ------------------------------------------------------------------
