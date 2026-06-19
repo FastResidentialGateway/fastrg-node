@@ -167,34 +167,43 @@ phase2_etcd_config_sync() {
     # Step 4d — DNS static records
     # ------------------------------------------------------------------
     info "Step 4d: Comparing DNS static records (gRPC GetDnsStaticRecords vs etcd key)..."
-    # DNS static records live in ONE combined key per subscriber whose value is a
-    # JSON array: configs/{nodeId}/{userId}/dns -> [{"domain","ip","ttl"}, ...]
-    DNS_VAL=$(etcdctl_get_value "configs/${NODE_UUID}/dns/${USER_ID}" 2>/dev/null || true)
-    DNS_DOMAINS=$(printf '%s' "$DNS_VAL" | jq -r '.[].domain // empty' 2>/dev/null || true)
 
-    if [[ -z "$DNS_DOMAINS" ]]; then
-        pass "Step 4d: DNS static match" "No DNS static keys in etcd (nothing to verify)"
+    _4d_hsi=$(fastrg_grpc get_hsi_info)
+    _4d_phase=$(printf '%s' "$_4d_hsi" | \
+        jq -r ".hsi_infos[] | select(.user_id == ${USER_ID}) | .status" 2>/dev/null || true)
+    if [[ "$_4d_phase" != "Data phase" ]]; then
+        fail "Step 4d: DNS static match" \
+            "Session not in Data phase (status='${_4d_phase:-<empty>}') — cannot verify DNS static records"
     else
-        DNS_GRPC=$(fastrg_grpc get_dns_static "${USER_ID}")
-        DNS_FAIL=0
-        DNS_DETAIL=""
+        # DNS static records live in ONE combined key per subscriber whose value is a
+        # JSON array: configs/{nodeId}/{userId}/dns -> [{"domain","ip","ttl"}, ...]
+        DNS_VAL=$(etcdctl_get_value "configs/${NODE_UUID}/dns/${USER_ID}" 2>/dev/null || true)
+        DNS_DOMAINS=$(printf '%s' "$DNS_VAL" | jq -r '.[].domain // empty' 2>/dev/null || true)
 
-        while IFS= read -r domain; do
-            [[ -z "$domain" ]] && continue
-            MATCH=$(printf '%s' "$DNS_GRPC" | \
-                jq -r ".entries[] | select(.domain == \"${domain}\") | .domain" 2>/dev/null || true)
-            if [[ -n "$MATCH" ]]; then
-                DNS_DETAIL="${DNS_DETAIL} ${domain}:OK"
-            else
-                DNS_DETAIL="${DNS_DETAIL} ${domain}:MISSING"
-                DNS_FAIL=1
-            fi
-        done <<< "$DNS_DOMAINS"
-
-        if [[ $DNS_FAIL -eq 0 ]]; then
-            pass "Step 4d: DNS static match" "${DNS_DETAIL}"
+        if [[ -z "$DNS_DOMAINS" ]]; then
+            pass "Step 4d: DNS static match" "No DNS static keys in etcd (nothing to verify)"
         else
-            fail "Step 4d: DNS static match" "${DNS_DETAIL}"
+            DNS_GRPC=$(fastrg_grpc get_dns_static "${USER_ID}")
+            DNS_FAIL=0
+            DNS_DETAIL=""
+
+            while IFS= read -r domain; do
+                [[ -z "$domain" ]] && continue
+                MATCH=$(printf '%s' "$DNS_GRPC" | \
+                    jq -r ".entries[] | select(.domain == \"${domain}\") | .domain" 2>/dev/null || true)
+                if [[ -n "$MATCH" ]]; then
+                    DNS_DETAIL="${DNS_DETAIL} ${domain}:OK"
+                else
+                    DNS_DETAIL="${DNS_DETAIL} ${domain}:MISSING"
+                    DNS_FAIL=1
+                fi
+            done <<< "$DNS_DOMAINS"
+
+            if [[ $DNS_FAIL -eq 0 ]]; then
+                pass "Step 4d: DNS static match" "${DNS_DETAIL}"
+            else
+                fail "Step 4d: DNS static match" "${DNS_DETAIL}"
+            fi
         fi
     fi
 
