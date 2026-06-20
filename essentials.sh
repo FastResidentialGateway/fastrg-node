@@ -30,6 +30,7 @@ if [[ "$OS_ID" =~ (rhel|centos|rocky|almalinux) ]]; then
     dnf -y --enablerepo=devel install meson libconfig-devel protobuf-compiler || true
     dnf -y install grpc grpc-cpp grpc-devel libpcap-devel
     dnf -y install python3-pyelftools libxdp-devel and libbpf-devel
+    dnf -y install hwdata # provides /usr/share/*/pci.ids for NIC model lookup
 
 elif [[ "$OS_ID" == "ubuntu" ]]; then
     echo "➡ Installing dependencies for Ubuntu (tested on 24.04)"
@@ -37,7 +38,7 @@ elif [[ "$OS_ID" == "ubuntu" ]]; then
     apt-get update -y
     apt-get install -y \
         libnuma-dev \
-        git gcc make libtool-bin pkg-config pciutils iproute2 \
+        git gcc make libtool-bin pkg-config pciutils pci.ids iproute2 \
         kmod vim net-tools libconfig-dev libjsoncpp-dev \
         cmake libcurl4-openssl-dev libssl-dev \
         libgrpc++-dev protobuf-compiler-grpc libabsl-dev meson \

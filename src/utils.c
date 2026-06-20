@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <ctype.h>
 #include <getopt.h>
 #include <pthread.h>
 #include <sched.h>
@@ -460,4 +461,129 @@ int get_drvinfo(U16 port_id, struct ethtool_drvinfo *drvinfo)
     drvinfo->testinfo_len = 0;
 
     return 0;
+}
+
+/* Default location of the system PCI ID database (provided by pci.ids/hwdata) */
+#define PCI_IDS_DEFAULT_PATH "/usr/share/misc/pci.ids"
+
+/* Extract the human-readable name from a pci.ids entry line: skip the leading
+ * id token and its separating spaces, then strip the trailing newline.
+ * @p id  points at the first hex digit of the id (past any leading TAB). */
+static void pci_ids_extract_name(char *id, char *out, size_t out_len)
+{
+    char *p = id;
+    while (*p && !isspace((unsigned char)*p))
+        p++; /* skip the id token */
+    while (*p && isspace((unsigned char)*p))
+        p++; /* skip separating spaces */
+    char *end = p + strlen(p);
+    while (end > p && (end[-1] == '\n' || end[-1] == '\r'))
+        *--end = '\0';
+    strlcpy(out, p, out_len);
+}
+
+STATUS fastrg_parse_pci_ids(const char *path, U16 vendor_id, U16 device_id,
+                            char *model, size_t model_len)
+{
+    if (path == NULL || model == NULL || model_len == 0)
+        return ERROR;
+
+    FILE *fp = fopen(path, "r");
+    if (fp == NULL)
+        return ERROR;
+
+    /*
+     * pci.ids layout (TAB-indented):
+     *   <vvvv>  Vendor Name
+     *   \t<dddd>  Device Name
+     *   \t\t<sv> <sd>  Subsystem Name
+     * Entries are grouped and sorted by vendor, so once we leave the matching
+     * vendor block without finding the device we can stop.
+     */
+    char line[512];
+    char vendor_name[NIC_MODEL_MAX_LEN] = {0};
+    BOOL in_vendor = FALSE;
+    STATUS ret = ERROR;
+
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        if (line[0] == '#' || line[0] == '\n' || line[0] == '\0')
+            continue;
+
+        if (line[0] != '\t') {
+            /* vendor line */
+            if (in_vendor)
+                break; /* left our vendor block, device not present */
+            unsigned int v;
+            if (sscanf(line, "%x", &v) == 1 && (U16)v == vendor_id) {
+                in_vendor = TRUE;
+                pci_ids_extract_name(line, vendor_name, sizeof(vendor_name));
+            }
+            continue;
+        }
+
+        if (!in_vendor)
+            continue;
+
+        if (line[1] == '\t')
+            continue; /* subsystem line, ignore */
+
+        /* device line */
+        unsigned int d;
+        if (sscanf(line + 1, "%x", &d) == 1 && (U16)d == device_id) {
+            char device_name[NIC_MODEL_MAX_LEN];
+            pci_ids_extract_name(line + 1, device_name, sizeof(device_name));
+            /* prepend the vendor (brand) name, lspci style */
+            snprintf(model, model_len, "%s %s", vendor_name, device_name);
+            ret = SUCCESS;
+            break;
+        }
+    }
+
+    fclose(fp);
+    return ret;
+}
+
+static STATUS read_pci_sysfs_id(const char *bdf, const char *attr, U16 *id)
+{
+    char path[256];
+    unsigned int val;
+
+    snprintf(path, sizeof(path), "/sys/bus/pci/devices/%s/%s", bdf, attr);
+    FILE *fp = fopen(path, "r");
+    if (fp == NULL)
+        return ERROR;
+
+    STATUS ret = (fscanf(fp, "0x%x", &val) == 1) ? SUCCESS : ERROR;
+    fclose(fp);
+    if (ret == SUCCESS)
+        *id = (U16)val;
+
+    return ret;
+}
+
+STATUS fastrg_get_nic_model(U16 port_id, char *model, size_t model_len)
+{
+    struct rte_eth_dev_info dev_info;
+    U16 vendor_id, device_id;
+
+    if (model == NULL || model_len == 0)
+        return ERROR;
+
+    memset(&dev_info, 0, sizeof(dev_info));
+    if (rte_eth_dev_info_get(port_id, &dev_info) != 0)
+        return ERROR;
+
+    const char *bdf = rte_dev_name(dev_info.device);
+    if (bdf == NULL)
+        return ERROR;
+
+    if (read_pci_sysfs_id(bdf, "vendor", &vendor_id) != SUCCESS ||
+        read_pci_sysfs_id(bdf, "device", &device_id) != SUCCESS)
+        return ERROR;
+
+    if (fastrg_parse_pci_ids(PCI_IDS_DEFAULT_PATH, vendor_id, device_id, model,
+            model_len) != SUCCESS)
+        snprintf(model, model_len, "%04x:%04x", vendor_id, device_id);
+
+    return SUCCESS;
 }

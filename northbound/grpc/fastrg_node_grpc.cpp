@@ -874,6 +874,7 @@ grpc::Status FastRGNodeServiceImpl::GetFastrgSystemStats(::grpc::ServerContext* 
         std::string err = "get lan device info failed";
         return grpc::Status(grpc::StatusCode::INTERNAL, err);
     }
+    lan_nic_info->set_nic_model(std::string(fastrg_ccb->nic_info.model[lan_port_id]));
     lan_nic_info->set_mac_addr(std::string(
         reinterpret_cast<const char*>(fastrg_ccb->nic_info.hsi_lan_mac.addr_bytes), 6));
 
@@ -882,6 +883,7 @@ grpc::Status FastRGNodeServiceImpl::GetFastrgSystemStats(::grpc::ServerContext* 
         std::string err = "get wan device info failed";
         return grpc::Status(grpc::StatusCode::INTERNAL, err);
     }
+    wan_nic_info->set_nic_model(std::string(fastrg_ccb->nic_info.model[wan_port_id]));
     wan_nic_info->set_mac_addr(std::string(
         reinterpret_cast<const char*>(fastrg_ccb->nic_info.hsi_wan_src_mac.addr_bytes), 6));
 

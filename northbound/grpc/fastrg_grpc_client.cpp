@@ -318,6 +318,7 @@ void fastrg_grpc_get_system_stats() {
         for(int i=0; i<reply.nics_size() && i<reply.stats_size(); i++) {
             const NicDriverInfo& nic_info = reply.nics(i);
             std::cout << "    NIC " << i << ":" << std::endl;
+            std::cout << "      Model: " << nic_info.nic_model() << std::endl;
             std::cout << "      Driver name: " << nic_info.driver_name() << std::endl;
             std::cout << "      PCI address: " << nic_info.pci_addr() << std::endl;
             std::cout << "      MAC address: ";
