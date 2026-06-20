@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include <common.h>
 
@@ -163,6 +164,50 @@ void test_create_dir_if_not_exists()
     rmdir(test_dir);
 }
 
+void test_parse_pci_ids()
+{
+    printf("\nTesting fastrg_parse_pci_ids function:\n");
+    printf("=========================================\n\n");
+
+    const char *test_file = "/tmp/test_fastrg_pci.ids";
+    FILE *fp = fopen(test_file, "w");
+    fprintf(fp,
+        "# comment line\n"
+        "\n"
+        "8086  Intel Corporation\n"
+        "\t1592  Ethernet Controller E810-C for QSFP\n"
+        "\t1593  Ethernet Controller E810-C for SFP\n"
+        "\t\t8086 0001  subsystem entry to skip\n"
+        "10de  NVIDIA Corporation\n"
+        "\t1234  Some GPU\n");
+    fclose(fp);
+
+    char model[NIC_MODEL_MAX_LEN];
+
+    STATUS ret = fastrg_parse_pci_ids(test_file, 0x8086, 0x1593, model, sizeof(model));
+    TEST_ASSERT(ret == SUCCESS && strcmp(model, "Intel Corporation Ethernet Controller E810-C for SFP") == 0,
+        "parse pci.ids resolves device model with vendor prefix", "ret=%d got '%s'", ret, model);
+
+    ret = fastrg_parse_pci_ids(test_file, 0x8086, 0x1592, model, sizeof(model));
+    TEST_ASSERT(ret == SUCCESS && strcmp(model, "Intel Corporation Ethernet Controller E810-C for QSFP") == 0,
+        "parse pci.ids resolves another device under same vendor", "ret=%d got '%s'", ret, model);
+
+    ret = fastrg_parse_pci_ids(test_file, 0x10de, 0x1234, model, sizeof(model));
+    TEST_ASSERT(ret == SUCCESS && strcmp(model, "NVIDIA Corporation Some GPU") == 0,
+        "parse pci.ids resolves device under second vendor", "ret=%d got '%s'", ret, model);
+
+    ret = fastrg_parse_pci_ids(test_file, 0x8086, 0xffff, model, sizeof(model));
+    TEST_ASSERT(ret == ERROR, "parse pci.ids returns ERROR for unknown device", "ret=%d", ret);
+
+    ret = fastrg_parse_pci_ids(test_file, 0x1234, 0x5678, model, sizeof(model));
+    TEST_ASSERT(ret == ERROR, "parse pci.ids returns ERROR for unknown vendor", "ret=%d", ret);
+
+    ret = fastrg_parse_pci_ids("/nonexistent/path/pci.ids", 0x8086, 0x1593, model, sizeof(model));
+    TEST_ASSERT(ret == ERROR, "parse pci.ids returns ERROR for missing file", "ret=%d", ret);
+
+    unlink(test_file);
+}
+
 void test_utils(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 {
     printf("\n");
@@ -179,6 +224,7 @@ void test_utils(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_is_ip_in_range();
     test_parse_unix_sock_path();
     test_create_dir_if_not_exists();
+    test_parse_pci_ids();
 
     printf("\n");
     printf("╔════════════════════════════════════════════════════════════╗\n");

@@ -380,4 +380,47 @@ U16 fastrg_calc_queue_count(unsigned int cpu_count);
  */
 int get_drvinfo(U16 port_id, struct ethtool_drvinfo *drvinfo);
 
+/**
+ * @fn fastrg_parse_pci_ids
+ *
+ * @brief Look up a PCI vendor:device pair in a pci.ids-format database file
+ *
+ * @param path
+ *      Path to the pci.ids database
+ * @param vendor_id
+ *      PCI vendor ID
+ * @param device_id
+ *      PCI device ID
+ * @param model
+ *      Output buffer for the resolved device model string
+ * @param model_len
+ *      Size of the output buffer
+ *
+ * @return
+ *      SUCCESS if a matching device entry was found, ERROR otherwise
+ */
+STATUS fastrg_parse_pci_ids(const char *path, U16 vendor_id, U16 device_id,
+                            char *model, size_t model_len);
+
+/**
+ * @fn fastrg_get_nic_model
+ *
+ * @brief Resolve a human-readable model string for a port's NIC
+ *
+ * Reads the PCI vendor/device ID from sysfs (via the port's PCI address) and
+ * looks it up in the system pci.ids database. Falls back to "vendor:device"
+ * hex form when the database or a matching entry is unavailable.
+ *
+ * @param port_id
+ *      DPDK port ID
+ * @param model
+ *      Output buffer for the resolved model string
+ * @param model_len
+ *      Size of the output buffer
+ *
+ * @return
+ *      SUCCESS on success (including hex fallback), ERROR on failure to read IDs
+ */
+STATUS fastrg_get_nic_model(U16 port_id, char *model, size_t model_len);
+
 #endif

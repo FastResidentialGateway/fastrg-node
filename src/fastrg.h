@@ -45,9 +45,12 @@ enum {
 extern rte_atomic16_t stop_flag;
 extern rte_atomic16_t start_flag;
 
+#define NIC_MODEL_MAX_LEN 128
+
 struct nic_info {
     char *vendor_name;
     nic_vendor_t vendor_id;
+    char model[PORT_AMOUNT][NIC_MODEL_MAX_LEN]; /* human-readable NIC model per port */
     struct rte_ether_addr hsi_wan_src_mac;/* FastRG WAN side mac addr */
     struct rte_ether_addr hsi_lan_mac;    /* FastRG LAN side mac addr */
 };

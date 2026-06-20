@@ -223,7 +223,13 @@ STATUS init_port(FastRG_t *fastrg_ccb, struct fastrg_config *fastrg_cfg)
             }
         }
 
+        if (fastrg_get_nic_model(portid, fastrg_ccb->nic_info.model[portid],
+                sizeof(fastrg_ccb->nic_info.model[portid])) != SUCCESS)
+            fastrg_ccb->nic_info.model[portid][0] = '\0';
+
         FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "Port %i driver: %s (ver: %s)", portid, dev_info.driver, dev_info.version);
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "Port %i model: %s", portid,
+            fastrg_ccb->nic_info.model[portid][0] ? fastrg_ccb->nic_info.model[portid] : "unknown");
         FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "firmware-version: %s", dev_info.fw_version);
         FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "bus-info: %s", dev_info.bus_info);
 
