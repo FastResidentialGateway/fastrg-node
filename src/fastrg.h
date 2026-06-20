@@ -61,6 +61,12 @@ struct per_ccb_stats {
     rte_atomic64_t dropped_bytes;
 };
 
+struct lcore_usage_counter {
+    uint64_t busy_cycles;
+    uint64_t total_cycles;
+    const char *role;
+} __rte_cache_aligned;
+
 /* FastRG system data structure */
 typedef struct FastRG {
     U8                      cur_user;       /* pppoe alive user count */
@@ -107,6 +113,7 @@ typedef struct FastRG {
     struct rte_ring         *cp_q;            /* data/ctrl plane -> control loop event ring */
     struct rte_ring         *free_mail_ring;  /* pre-allocated tFastRG_MBX slot pool */
     struct rte_ring         *etcd_event_q;    /* etcd watcher threads -> control loop event ring */
+    struct lcore_usage_counter *lcore_usage;  /* per-lcore busy/total cycle counters, index by lcore_id */
 } __rte_cache_aligned FastRG_t;
 
 STATUS fastrg_disable_subscriber_stats(FastRG_t *fastrg_ccb, U16 disable_count, 

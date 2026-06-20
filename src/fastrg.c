@@ -342,7 +342,9 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
     uint64_t prev_tsc = fastrg_get_cur_cycles(), cur_tsc = 0, diff_tsc = 0;
     uint64_t timer_resolution_cycles = fastrg_get_cycles_in_sec() / 10; /* check every 100ms */
 
+    fastrg_ccb->lcore_usage[rte_lcore_id()].role = "ctrl";
     while(rte_atomic16_read(&stop_flag) == 0) {
+        uint64_t _t0 = fastrg_get_cur_cycles();
         burst_size = rte_ring_dequeue_burst(fastrg_ccb->cp_q, (void **)mail, RING_BURST_SIZE, NULL);
         for(int i=0; i<burst_size; i++) {
             recv_type = mail[i]->type;
@@ -484,6 +486,11 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
             rte_timer_manage();
             prev_tsc = cur_tsc;
         }
+
+        uint64_t _elapsed = fastrg_get_cur_cycles() - _t0;
+        fastrg_ccb->lcore_usage[rte_lcore_id()].total_cycles += _elapsed;
+        if (burst_size > 0 || etcd_burst > 0)
+            fastrg_ccb->lcore_usage[rte_lcore_id()].busy_cycles += _elapsed;
     }
 
     return 0;
