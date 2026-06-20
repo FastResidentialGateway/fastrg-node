@@ -203,7 +203,7 @@ static inline U16 nat_learning_port_reuse(struct rte_ether_hdr *eth_hdr,
 
     do {
         /* Skip ports reserved by static port forwarding rules */
-        U16 nat_port_host = rte_be_to_cpu_16(nat_port);
+        U32 nat_port_host = rte_be_to_cpu_16(nat_port);
         if (rte_atomic16_read(&port_fwd_table[nat_port_host].is_active) == 1)
             goto next_nat_port;
 
