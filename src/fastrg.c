@@ -395,12 +395,33 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
             }
             case EV_LINK: {
                 FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "Recv Link Up/Down event");
-                if ((U16)(mail[i]->refp[1]) == 1) {
+                U16 link_port = *(U16 *)&(mail[i]->refp[1]);
+                /* Update per-port link state cache for Prometheus metrics. Count a flap
+                 * whenever the state actually transitions (caught even if it toggles
+                 * faster than the scrape interval). */
+                if (link_port < PORT_AMOUNT) {
+                    U8 new_up = (mail[i]->refp[0] == LINK_UP) ? 1 : 0;
+                    U8 old_up = __atomic_exchange_n(&fastrg_ccb->nic_link_up[link_port],
+                        new_up, __ATOMIC_RELAXED);
+                    if (old_up != new_up)
+                        __atomic_fetch_add(&fastrg_ccb->nic_link_flaps[link_port], 1ULL,
+                            __ATOMIC_RELAXED);
+                    if (new_up) {
+                        struct rte_eth_link lnk = {0};
+                        if (rte_eth_link_get_nowait(link_port, &lnk) == 0)
+                            __atomic_store_n(&fastrg_ccb->nic_link_speed[link_port],
+                                lnk.link_speed, __ATOMIC_RELAXED);
+                    } else {
+                        __atomic_store_n(&fastrg_ccb->nic_link_speed[link_port], 0u,
+                            __ATOMIC_RELAXED);
+                    }
+                }
+                if (link_port == 1) {
                     if (mail[i]->refp[0] == LINK_DOWN) {
                         rte_timer_reset(&fastrg_ccb->link, 
                             LINK_DOWN_TIMEOUT * fastrg_get_cycles_in_sec(), // 10 seconds
                             SINGLE, fastrg_ccb->lcore.timer_thread, 
-                            (rte_timer_cb_t)link_disconnect, fastrg_ccb);           
+                            (rte_timer_cb_t)link_disconnect, fastrg_ccb);
                     } else if (mail[i]->refp[0] == LINK_UP) {
                         rte_timer_stop(&fastrg_ccb->link);
                     }
@@ -549,7 +570,15 @@ STATUS northbound(FastRG_t *fastrg_ccb)
     }
 
     unlink(fastrg_ccb->unix_sock_path);
-    return fastrg_create_pthread("fastrg_grpc", 
+
+    /* Start the Prometheus /metrics HTTP server so Prometheus can scrape this node
+     * directly. Non-fatal on failure — metrics are observability, not core function. */
+    if (fastrg_create_pthread("fastrg_metrics",
+        metrics_server_run, fastrg_ccb, rte_lcore_id()) != SUCCESS)
+        FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
+            "Metrics HTTP server thread failed to start; Prometheus scrape disabled");
+
+    return fastrg_create_pthread("fastrg_grpc",
         fastrg_grpc_server_run, fastrg_ccb, rte_lcore_id());
 }
 
@@ -603,6 +632,7 @@ void fastrg_stop()
     if (fastrg_ccb.etcd_endpoints) free(fastrg_ccb.etcd_endpoints);
     if (fastrg_ccb.kafka_brokers) free(fastrg_ccb.kafka_brokers);
     if (fastrg_ccb.central_office_location) free(fastrg_ccb.central_office_location);
+    if (fastrg_ccb.metrics_ip_port) free(fastrg_ccb.metrics_ip_port);
     if (fastrg_ccb.node_uuid) fastrg_mfree(fastrg_ccb.node_uuid);
     fastrg_mfree(fastrg_ccb.vlan_userid_map);
     fastrg_cleanup_subscriber_stats(&fastrg_ccb, total_ccbs);
@@ -665,9 +695,11 @@ int fastrg_start(int argc, char **argv)
     fastrg_ccb.etcd_endpoints = strdup(fastrg_cfg.etcd_endpoints);
     fastrg_ccb.kafka_brokers = strdup(fastrg_cfg.kafka_brokers);
     fastrg_ccb.central_office_location = strdup(fastrg_cfg.central_office_location);
+    fastrg_ccb.metrics_ip_port = strdup(fastrg_cfg.metrics_ip_port);
     if (!fastrg_ccb.unix_sock_path || !fastrg_ccb.node_grpc_ip_port ||
         !fastrg_ccb.controller_address || !fastrg_ccb.etcd_endpoints ||
-        !fastrg_ccb.kafka_brokers || !fastrg_ccb.central_office_location) {
+        !fastrg_ccb.kafka_brokers || !fastrg_ccb.central_office_location ||
+        !fastrg_ccb.metrics_ip_port) {
         FastRG_LOG(ERR, fastrg_ccb.fp, NULL, NULL, "Memory allocation failed for config strings");
         goto err;
     }
@@ -915,6 +947,7 @@ err:
     if (fastrg_ccb.etcd_endpoints) free(fastrg_ccb.etcd_endpoints);
     if (fastrg_ccb.kafka_brokers) free(fastrg_ccb.kafka_brokers);
     if (fastrg_ccb.central_office_location) free(fastrg_ccb.central_office_location);
+    if (fastrg_ccb.metrics_ip_port) free(fastrg_ccb.metrics_ip_port);
     grpc_shutdown();
     close(sfd);
     rte_eal_cleanup();

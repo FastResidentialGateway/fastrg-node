@@ -20,6 +20,7 @@ struct fastrg_config {
     char controller_address[256];
     char etcd_endpoints[512];
     char kafka_brokers[256];   /* comma-separated host:port list; empty = Kafka disabled */
+    char metrics_ip_port[64];  /* Prometheus /metrics HTTP listen addr, e.g. "0.0.0.0:9091" */
     U16 heartbeat_interval;
     BOOL enable_ddp;        /* EnableDDP config toggle */
     char ddp_pkg_path[256]; /* path to i40e DDP package; empty string = disabled */
