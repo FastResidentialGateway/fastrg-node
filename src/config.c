@@ -41,7 +41,9 @@ STATUS parse_config(const char *config_path, FastRG_t *fastrg_ccb, struct fastrg
 {
     config_t cfg;
     int max_user_count, init_user_count, heartbeat_interval, enable_ddp_int;
-    const char *loglvl, *unix_sock_path, *log_path, *node_grpc_port, *controller_address, *etcd_endpoints, *ddp_pkg_path, *kafka_brokers, *central_office_location;
+    const char *loglvl, *unix_sock_path, *log_path, *node_grpc_port, 
+        *controller_address, *etcd_endpoints, *ddp_pkg_path, *kafka_brokers, 
+        *central_office_location, *metrics_listen_port;
 
     config_init(&cfg);
     if (!config_read_file(&cfg, config_path)) {
@@ -127,6 +129,11 @@ STATUS parse_config(const char *config_path, FastRG_t *fastrg_ccb, struct fastrg
         kafka_brokers = "";
     strncpy(fastrg_cfg->kafka_brokers, kafka_brokers, sizeof(fastrg_cfg->kafka_brokers) - 1);
     fastrg_cfg->kafka_brokers[sizeof(fastrg_cfg->kafka_brokers) - 1] = '\0';
+
+    /* Prometheus /metrics HTTP listen address; node exposes counters for direct scrape. */
+    if (config_lookup_string(&cfg, "MetricsListenPort", &metrics_listen_port) == CONFIG_FALSE)
+        metrics_listen_port = "55688";
+    snprintf(fastrg_cfg->metrics_ip_port, sizeof(fastrg_cfg->metrics_ip_port), "0.0.0.0:%s", metrics_listen_port);
 
     if (config_lookup_bool(&cfg, "EnableDDP", &enable_ddp_int) == CONFIG_FALSE)
         enable_ddp_int = 0;

@@ -1,6 +1,9 @@
 #include <sys/signalfd.h>
 #include <signal.h>
 #include <linux/ethtool.h>
+#include <time.h>
+#include <inttypes.h>
+#include <sys/stat.h>
 
 #include <common.h>
 
@@ -22,12 +25,18 @@
 #include "dbg.h"
 #include "version.h"
 #include "config.h"
+#include "lighthttp.h"
+#include "metrics.h"
 #include "../northbound/controller/controller_client.h"
 
 #define NUM_MBUFS 		8191
 #define MBUF_CACHE_SIZE 512
 #define RING_SIZE 		16384
 #define ETCD_EVENT_RING_SIZE 4096
+
+/* Persisted restart counter for crashloop detection (fastrg_node_restart_total). */
+#define RESTART_COUNT_DIR  "/var/lib/fastrg"
+#define RESTART_COUNT_FILE RESTART_COUNT_DIR "/restart_count"
 
 struct rte_mempool *direct_pool[PORT_AMOUNT];
 struct rte_mempool *indirect_pool[PORT_AMOUNT];
@@ -278,6 +287,89 @@ STATUS init_port(FastRG_t *fastrg_ccb, struct fastrg_config *fastrg_cfg)
     return SUCCESS;
 }
 
+/**
+ * @fn init_node_runtime_state
+ * @brief Seed observability state exposed via Prometheus (/metrics): process start
+ *        time, a restart counter persisted across restarts (crashloop detection),
+ *        and the per-port NIC link-state cache. Must be called after init_port() so
+ *        link status can be read. Failures are non-fatal (logged, not propagated).
+ *
+ * @param fastrg_ccb
+ *      FastRG control block
+ */
+static void init_node_runtime_state(FastRG_t *fastrg_ccb)
+{
+    /* Process start time (Unix epoch seconds) for fastrg_node_start_time_seconds. */
+    fastrg_ccb->node_start_time = (uint64_t)time(NULL);
+
+    /* Restart counter persisted across restarts for crashloop detection. */
+    uint64_t restart_count = 0;
+    FILE *rf = fopen(RESTART_COUNT_FILE, "r");
+    if (rf) {
+        if (fscanf(rf, "%" SCNu64, &restart_count) != 1)
+            restart_count = 0;
+        fclose(rf);
+    }
+    restart_count++;
+    mkdir(RESTART_COUNT_DIR, 0755); /* ignore EEXIST */
+    rf = fopen(RESTART_COUNT_FILE, "w");
+    if (rf) {
+        fprintf(rf, "%" PRIu64 "\n", restart_count);
+        fclose(rf);
+    } else {
+        FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
+            "Cannot persist restart count to %s", RESTART_COUNT_FILE);
+    }
+    fastrg_ccb->node_restart_total = restart_count;
+
+    /* Seed the per-port link-state cache from current NIC link status. */
+    for(U8 p=0; p<PORT_AMOUNT; p++) {
+        struct rte_eth_link lnk = {0};
+        if (rte_eth_link_get_nowait(p, &lnk) == 0) {
+            fastrg_ccb->nic_link_up[p] = lnk.link_status ? 1 : 0;
+            fastrg_ccb->nic_link_speed[p] = lnk.link_status ? lnk.link_speed : 0;
+        } else {
+            fastrg_ccb->nic_link_up[p] = 0;
+            fastrg_ccb->nic_link_speed[p] = 0;
+        }
+        fastrg_ccb->nic_link_flaps[p] = 0;
+    }
+}
+
+/**
+ * @fn metrics_server_run
+ * @brief pthread entry point for the Prometheus /metrics HTTP server. Registers
+ *        the metrics thread's RCU reader slot, binds lighthttp on the configured
+ *        address and serves GET /metrics. Non-fatal on bind failure (observability
+ *        only) — logs a warning and exits the thread.
+ *
+ * @param arg
+ *      FastRG control block (FastRG_t *)
+ */
+void *metrics_server_run(void *arg)
+{
+    FastRG_t *fastrg_ccb = (FastRG_t *)arg;
+    lighthttp_server_t srv;
+
+    /* Register our dedicated RCU reader slot before serving any scrape. */
+    metrics_rcu_register(fastrg_ccb);
+
+    if (lighthttp_init(&srv, fastrg_ccb->metrics_ip_port) != 0) {
+        FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
+            "metrics: failed to start /metrics server on %s; Prometheus scrape disabled",
+            fastrg_ccb->metrics_ip_port);
+        return NULL;
+    }
+    lighthttp_add_route(&srv, "GET", "/metrics", metrics_build, fastrg_ccb);
+    /* Future read-only endpoints (e.g. GET /healthz) register here. */
+
+    FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+        "metrics: Prometheus /metrics listening on %s:%d", srv.host, srv.port);
+
+    lighthttp_serve(&srv); /* blocks until the listen socket fails */
+    return NULL;
+}
+
 STATUS sys_init(FastRG_t *fastrg_ccb, struct fastrg_config *fastrg_cfg)
 {
     STATUS ret;
@@ -295,6 +387,9 @@ STATUS sys_init(FastRG_t *fastrg_ccb, struct fastrg_config *fastrg_cfg)
     ret = init_port(fastrg_ccb, fastrg_cfg);
     if (ret != 0)
         goto err;
+
+    /* Seed Prometheus observability state now that NIC ports are up. */
+    init_node_runtime_state(fastrg_ccb);
 
     rte_timer_init(&fastrg_ccb->link);
     rte_timer_init(&fastrg_ccb->heartbeat_timer);

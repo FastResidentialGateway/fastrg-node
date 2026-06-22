@@ -146,6 +146,7 @@ For hugepages, NIC binding and other system configuration, please refer to DPDK 
 5. The FastRG node supports PPPoE RSS while using Intel E800 and X700 series NICs. For every two more CPU cores, the FastRG node uses 1 more Rx queue pair for LAN and WAN port. Minimum Rx queue count is 2, the maximum is 16. 
 	- For E800, please replace DDP package to ice_comms.pkg in /lib/firmware/updates/intel/ice/ddp/ and /lib/firmware/intel/ice/ddp/ and rename it to ice.pkg to enable PPPoE RSS feature. Th DDP package can be download from https://www.intel.com/content/www/us/en/download/19660/intel-ethernet-800-series-dynamic-device-personalization-ddp-for-telecommunication-comms-package.html
 	- For X700, please download latest DDP from https://www.intel.com/content/www/us/en/download/15084/intel-ethernet-adapter-complete-driver-pack.html and specify the DDP package in ***config.cfg*** file to enable PPPoE RSS feature.
+6. The FastRG node provides a built-in light weightHTTP server to expose Prometheus metrics at http://<node_ip>:55688/metrics. The metrics include PPPoE session count, DHCP lease count, per-subscriber traffic stats, NIC link state and speed, etc. User can use these metrics to monitor the FastRG system status and performance. For more details about the metrics, please refer to [docs/metrics.md](./docs/metrics.md).
 
 ## Test environment:
 

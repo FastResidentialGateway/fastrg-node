@@ -117,6 +117,13 @@ typedef struct FastRG {
     struct rte_ring         *free_mail_ring;  /* pre-allocated tFastRG_MBX slot pool */
     struct rte_ring         *etcd_event_q;    /* etcd watcher threads -> control loop event ring */
     struct lcore_usage_counter *lcore_usage;  /* per-lcore busy/total cycle counters, index by lcore_id */
+    char                    *metrics_ip_port; /* Prometheus /metrics HTTP listen addr, e.g. "0.0.0.0:9101" */
+    uint64_t                node_start_time;  /* process start time (epoch seconds) — crashloop detection */
+    uint64_t                node_restart_total; /* persisted restart count from RESTART_COUNT_FILE */
+    /* Per-port link state cache, updated by EV_LINK handler, read by metrics thread (atomic). */
+    uint8_t                 nic_link_up[PORT_AMOUNT];    /* 1 = link up, 0 = down */
+    uint32_t                nic_link_speed[PORT_AMOUNT]; /* link speed in Mbps */
+    uint64_t                nic_link_flaps[PORT_AMOUNT]; /* cumulative link state transitions */
 } __rte_cache_aligned FastRG_t;
 
 STATUS fastrg_disable_subscriber_stats(FastRG_t *fastrg_ccb, U16 disable_count, 
