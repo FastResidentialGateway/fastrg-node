@@ -1,6 +1,7 @@
 #include <iostream>
 #include <iomanip>
 #include <map>
+#include <chrono>
 #include <inttypes.h>
 #include <grpc++/grpc++.h>
 #include <grpcpp/grpcpp.h>
@@ -353,30 +354,53 @@ void fastrg_grpc_get_system_stats() {
             std::cout << "          Dropped packets: " << per_user_stats.dropped_packets() << std::endl;
             std::cout << "          Dropped bytes: " << per_user_stats.dropped_bytes() << std::endl;
         }
-        if (reply.lcore_usage_size() > 0) {
+        if (reply.lcore_usage_size() > 0 || reply.stats_size() > 0) {
             std::map<uint32_t, std::pair<uint64_t, uint64_t>> prev;
             for (int i = 0; i < reply.lcore_usage_size(); i++) {
                 const LcoreUsage& lu = reply.lcore_usage(i);
                 prev[lu.lcore_id()] = {lu.busy_cycles(), lu.total_cycles()};
             }
+            /* snapshot NIC counters for per-NIC rate (rx_pkts, tx_pkts, rx_bytes, tx_bytes) */
+            std::vector<std::array<uint64_t, 4>> nic_prev;
+            for (int i = 0; i < reply.stats_size(); i++) {
+                const Statistics& s = reply.stats(i);
+                nic_prev.push_back({s.rx_packets(), s.tx_packets(), s.rx_bytes(), s.tx_bytes()});
+            }
+            auto t0 = std::chrono::steady_clock::now();
             sleep(1);
             FastrgSystemStatsInfo reply2;
             ClientContext context2;
             Status status2 = fastrg_client->stub_->GetFastrgSystemStats(&context2, request, &reply2);
-            if (status2.ok() && reply2.lcore_usage_size() > 0) {
-                std::cout << "  Lcore Usage (1s sample):" << std::endl;
-                for (int i = 0; i < reply2.lcore_usage_size(); i++) {
-                    const LcoreUsage& lu = reply2.lcore_usage(i);
-                    auto it = prev.find(lu.lcore_id());
-                    double busyness = 0.0;
-                    if (it != prev.end()) {
-                        uint64_t d_busy = lu.busy_cycles() - it->second.first;
-                        uint64_t d_total = lu.total_cycles() - it->second.second;
-                        if (d_total > 0)
-                            busyness = (double)d_busy * 100.0 / (double)d_total;
+            double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            if (status2.ok()) {
+                if (reply2.lcore_usage_size() > 0) {
+                    std::cout << "  Lcore Usage (1s sample):" << std::endl;
+                    for (int i = 0; i < reply2.lcore_usage_size(); i++) {
+                        const LcoreUsage& lu = reply2.lcore_usage(i);
+                        auto it = prev.find(lu.lcore_id());
+                        double busyness = 0.0;
+                        if (it != prev.end()) {
+                            uint64_t d_busy = lu.busy_cycles() - it->second.first;
+                            uint64_t d_total = lu.total_cycles() - it->second.second;
+                            if (d_total > 0)
+                                busyness = (double)d_busy * 100.0 / (double)d_total;
+                        }
+                        printf("    lcore %2u [%-16s]   busy: %6.2f%%\n",
+                            lu.lcore_id(), lu.role().c_str(), busyness);
                     }
-                    printf("    lcore %2u [%-16s]   busy: %6.2f%%\n",
-                        lu.lcore_id(), lu.role().c_str(), busyness);
+                }
+                if (elapsed > 0 && (size_t)reply2.stats_size() == nic_prev.size()) {
+                    std::cout << "  NIC Throughput (1s sample):" << std::endl;
+                    for (int i = 0; i < reply2.stats_size(); i++) {
+                        const Statistics& s = reply2.stats(i);
+                        /* ibytes/obytes exclude FCS+preamble+IFG, so this is L2-payload rate */
+                        double rx_pps = (s.rx_packets() - nic_prev[i][0]) / elapsed;
+                        double tx_pps = (s.tx_packets() - nic_prev[i][1]) / elapsed;
+                        double rx_gbps = (s.rx_bytes() - nic_prev[i][2]) * 8.0 / elapsed / 1e9;
+                        double tx_gbps = (s.tx_bytes() - nic_prev[i][3]) * 8.0 / elapsed / 1e9;
+                        printf("    NIC %d   rx: %8.3f Gbps %12.0f pps   tx: %8.3f Gbps %12.0f pps\n",
+                            i, rx_gbps, rx_pps, tx_gbps, tx_pps);
+                    }
                 }
                 reply = std::move(reply2);
             }
