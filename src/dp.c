@@ -62,6 +62,9 @@ static struct rte_eth_conf port_conf_default = {
     .intr_conf = {
         .lsc = 1, /**< link status interrupt feature enabled */ },
 };
+/* Per-lcore persistent-online flag for the RCU getter fast path (see fastrg.h). */
+BOOL fastrg_rcu_persistent[RTE_MAX_LCORE];
+
 static int lsi_event_callback(U16 port_id, enum rte_eth_event_type type, void *param);
 
 STATUS PORT_INIT(FastRG_t *fastrg_ccb, U16 port)
@@ -337,9 +340,11 @@ int wan_ctrl_rx(void *arg)
         rte_pause();
 
     fastrg_ccb->lcore_usage[rte_lcore_id()].role = "wan_ctrl";
+    fastrg_rcu_dp_register(fastrg_ccb);
     while(likely(rte_atomic16_read(&stop_flag) == 0)) {
         uint64_t _t0 = rte_rdtsc();
         nb_rx = rte_eth_rx_burst(WAN_PORT, rx_q, pkt, BURST_SIZE);
+        fastrg_rcu_dp_quiescent(fastrg_ccb);
         for(int i=0; i<nb_rx; i++) {
             single_pkt = pkt[i];
             rte_prefetch0(rte_pktmbuf_mtod(single_pkt, void *));
@@ -430,6 +435,7 @@ int wan_ctrl_rx(void *arg)
         if (nb_rx > 0)
             fastrg_ccb->lcore_usage[rte_lcore_id()].busy_cycles += _elapsed;
     }
+    fastrg_rcu_dp_unregister(fastrg_ccb);
     return 0;
 }
 
@@ -465,9 +471,11 @@ int wan_data_rx(void *arg)
         rte_pause();
 
     fastrg_ccb->lcore_usage[rte_lcore_id()].role = "wan_data";
+    fastrg_rcu_dp_register(fastrg_ccb);
     while(likely(rte_atomic16_read(&stop_flag) == 0)) {
         uint64_t _t0 = rte_rdtsc();
         nb_rx = rte_eth_rx_burst(WAN_PORT, rx_q, pkt, BURST_SIZE);
+        fastrg_rcu_dp_quiescent(fastrg_ccb);
         for(int i=0; i<nb_rx; i++) {
             single_pkt = pkt[i];
             rte_prefetch0(rte_pktmbuf_mtod(single_pkt, void *));
@@ -548,6 +556,7 @@ int wan_data_rx(void *arg)
         if (nb_rx > 0)
             fastrg_ccb->lcore_usage[rte_lcore_id()].busy_cycles += _elapsed;
     }
+    fastrg_rcu_dp_unregister(fastrg_ccb);
     return 0;
 }
 
@@ -584,10 +593,12 @@ int lan_ctrl_rx(void *arg)
         rte_pause();
 
     fastrg_ccb->lcore_usage[rte_lcore_id()].role = "lan_ctrl";
+    fastrg_rcu_dp_register(fastrg_ccb);
     struct rte_mbuf *rx_pkt[BURST_SIZE];
     while(likely(rte_atomic16_read(&stop_flag) == 0)) {
         uint64_t _t0 = rte_rdtsc();
         nb_rx = rte_eth_rx_burst(LAN_PORT, rx_q, rx_pkt, BURST_SIZE);
+        fastrg_rcu_dp_quiescent(fastrg_ccb);
         for(int i=0; i<nb_rx; i++) {
             single_pkt = rx_pkt[i];
             rte_prefetch0(rte_pktmbuf_mtod(single_pkt, void *));
@@ -769,6 +780,7 @@ int lan_ctrl_rx(void *arg)
         if (nb_rx > 0)
             fastrg_ccb->lcore_usage[rte_lcore_id()].busy_cycles += _elapsed;
     }
+    fastrg_rcu_dp_unregister(fastrg_ccb);
     return 0;
 }
 
@@ -803,10 +815,12 @@ int lan_data_rx(void *arg)
         rte_pause();
 
     fastrg_ccb->lcore_usage[rte_lcore_id()].role = "lan_data";
+    fastrg_rcu_dp_register(fastrg_ccb);
     struct rte_mbuf *rx_pkt[BURST_SIZE];
     while(likely(rte_atomic16_read(&stop_flag) == 0)) {
         uint64_t _t0 = rte_rdtsc();
         nb_rx = rte_eth_rx_burst(LAN_PORT, rx_q, rx_pkt, BURST_SIZE);
+        fastrg_rcu_dp_quiescent(fastrg_ccb);
         for(int i=0; i<nb_rx; i++) {
             single_pkt = rx_pkt[i];
             rte_prefetch0(rte_pktmbuf_mtod(single_pkt, void *));
@@ -957,6 +971,7 @@ int lan_data_rx(void *arg)
         if (nb_rx > 0)
             fastrg_ccb->lcore_usage[rte_lcore_id()].busy_cycles += _elapsed;
     }
+    fastrg_rcu_dp_unregister(fastrg_ccb);
     return 0;
 }
 

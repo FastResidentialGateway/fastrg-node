@@ -45,6 +45,13 @@ enum {
 extern rte_atomic16_t stop_flag;
 extern rte_atomic16_t start_flag;
 
+/* Set TRUE per data-plane lcore at thread startup (fastrg_rcu_dp_register).
+ * When set, the RCU ccb/stats getters take a lean load-only fast path: the lcore
+ * stays QSBR-online for its whole life and reports quiescent once per burst,
+ * instead of entering/exiting a critical section on every getter call.
+ * Control-plane / metrics threads leave it FALSE and use the full path. */
+extern BOOL fastrg_rcu_persistent[RTE_MAX_LCORE];
+
 #define NIC_MODEL_MAX_LEN 128
 
 struct nic_info {
@@ -163,6 +170,13 @@ static __always_inline struct per_ccb_stats *fastrg_get_per_subscriber_stats(
 
     if (likely(rte_lcore_id() != LCORE_ID_ANY))
         lcore_id = rte_lcore_id();
+
+    /* data-plane lcore: stays QSBR-online for life + quiescent once per burst,
+     * so just do the protected load — skip per-call online/quiescent/offline. */
+    if (likely(fastrg_rcu_persistent[lcore_id])) {
+        struct per_ccb_stats *stats_array = __atomic_load_n(stats_array_ptr, __ATOMIC_ACQUIRE);
+        return likely(stats_array != NULL) ? &stats_array[ccb_id] : NULL;
+    }
 
     // RCU read-side critical section
     rte_rcu_qsbr_thread_online(stats_rcu, lcore_id);
