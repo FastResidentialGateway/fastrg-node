@@ -177,6 +177,14 @@ static __always_inline dhcp_ccb_t *dhcpd_get_ccb(struct rte_rcu_qsbr *dhcp_ccb_r
 
     if (likely(rte_lcore_id() != LCORE_ID_ANY))
         lcore_id = rte_lcore_id();
+
+    /* data-plane lcore: stays QSBR-online for life + quiescent once per burst,
+     * so just do the protected load — skip per-call online/quiescent/offline. */
+    if (likely(fastrg_rcu_persistent[lcore_id])) {
+        dhcp_ccb_t **arr = __atomic_load_n(dhcp_ccb_array_ptr, __ATOMIC_ACQUIRE);
+        return __atomic_load_n(&arr[ccb_id], __ATOMIC_ACQUIRE);
+    }
+
     // RCU read-side critical section
     rte_rcu_qsbr_thread_online(dhcp_ccb_rcu, lcore_id);
     dhcp_ccb_t **dhcp_ccb_array = __atomic_load_n(dhcp_ccb_array_ptr, __ATOMIC_ACQUIRE);

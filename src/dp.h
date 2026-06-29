@@ -103,4 +103,65 @@ static inline void count_tx_packet(FastRG_t *fastrg_ccb, struct rte_mbuf *single
     if (likely(stats)) increase_ccb_tx_count(stats, single_pkt->pkt_len); 
 }
 
+/**
+ * @fn fastrg_rcu_dp_register
+ *
+ * @brief Mark the calling data-plane lcore as persistently QSBR-online for all
+ *        three RCUs (ppp_ccb / dhcp_ccb / per_subscriber_stats).  Call once at
+ *        data thread startup, after the start_flag spin.  Pairs with
+ *        fastrg_rcu_dp_quiescent() called once per poll loop.
+ *
+ * @param fastrg_ccb
+ *      FastRG control block (holds the three qsbr handles)
+ */
+static inline void fastrg_rcu_dp_register(FastRG_t *fastrg_ccb)
+{
+    unsigned int lcore_id = rte_lcore_id();
+    rte_rcu_qsbr_thread_online(fastrg_ccb->ppp_ccb_rcu, lcore_id);
+    rte_rcu_qsbr_thread_online(fastrg_ccb->dhcp_ccb_rcu, lcore_id);
+    rte_rcu_qsbr_thread_online(fastrg_ccb->per_subscriber_stats_rcu, lcore_id);
+    fastrg_rcu_persistent[lcore_id] = TRUE;   /* online first, then flip flag */
+}
+
+/**
+ * @fn fastrg_rcu_dp_quiescent
+ *
+ * @brief Report a quiescent state on all three RCUs for the calling data-plane
+ *        lcore.  Call once at the top of each poll loop (after rte_eth_rx_burst /
+ *        rte_distributor_get_pkt), before touching any RCU-protected pointer.
+ *
+ * @param fastrg_ccb
+ *      FastRG control block
+ */
+static inline void fastrg_rcu_dp_quiescent(FastRG_t *fastrg_ccb)
+{
+    unsigned int lcore_id = rte_lcore_id();
+    rte_rcu_qsbr_quiescent(fastrg_ccb->ppp_ccb_rcu, lcore_id);
+    rte_rcu_qsbr_quiescent(fastrg_ccb->dhcp_ccb_rcu, lcore_id);
+    rte_rcu_qsbr_quiescent(fastrg_ccb->per_subscriber_stats_rcu, lcore_id);
+}
+
+/**
+ * @fn fastrg_rcu_dp_unregister
+ *
+ * @brief Report QSBR-offline on all three RCUs for the calling data-plane lcore
+ *        and clear its persistent flag.  MUST be called once when the thread
+ *        leaves its poll loop (on stop_flag), before returning.  Without this
+ *        the thread exits while still recorded online, and the cleanup-path
+ *        rte_rcu_qsbr_synchronize() waits on it forever (it never reports
+ *        quiescent again) — hanging shutdown and leaking the online state into
+ *        the hugepages, which then stalls the next startup.
+ *
+ * @param fastrg_ccb
+ *      FastRG control block
+ */
+static inline void fastrg_rcu_dp_unregister(FastRG_t *fastrg_ccb)
+{
+    unsigned int lcore_id = rte_lcore_id();
+    fastrg_rcu_persistent[lcore_id] = FALSE;
+    rte_rcu_qsbr_thread_offline(fastrg_ccb->ppp_ccb_rcu, lcore_id);
+    rte_rcu_qsbr_thread_offline(fastrg_ccb->dhcp_ccb_rcu, lcore_id);
+    rte_rcu_qsbr_thread_offline(fastrg_ccb->per_subscriber_stats_rcu, lcore_id);
+}
+
 #endif /* _DP_H_ */
