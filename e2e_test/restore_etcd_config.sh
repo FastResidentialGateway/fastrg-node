@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# restore_etcd_config.sh — Restore standard E2E test config for USER_ID=2
+# restore_etcd_config.sh — Restore standard E2E test config (subscribers 2 + 1)
 #
 # Writes through the CONTROLLER REST API (not etcd directly), so the controller
 # DB history is seeded alongside etcd. This lets rollback tests find a
@@ -14,6 +14,8 @@
 #      CONFIG_APPLY_OK → controller DB history seeded.
 #   3. PPPoE dial → desire_status=connect
 #   4. DNS static record
+#   5. Subscriber 1 HSI (VLAN 5) + dial — the e2e default (SUB_ID_SPEC="2,1")
+#      tests this secondary subscriber too (Step 8-1).
 #
 # Run from the FastRG node or any host that can reach the controller REST API.
 #
@@ -86,6 +88,8 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
     info "DRY-RUN: POST /api/config/${NODE_UUID}/hsi (user 2, vlan 3)"
     info "DRY-RUN: POST /api/pppoe/dial (user 2)"
     info "DRY-RUN: POST /api/config/${NODE_UUID}/dns/2 (www.fastrg.org)"
+    info "DRY-RUN: POST /api/config/${NODE_UUID}/hsi (user 1, vlan 5)"
+    info "DRY-RUN: POST /api/pppoe/dial (user 1)"
     printf "\n"; info "Done."
     exit 0
 fi
@@ -171,6 +175,30 @@ if st not in (200, 409):
     print(f"\033[1;33m[WARN]\033[0m  add dns: HTTP {st} {body[:120]}", file=sys.stderr)
 else:
     print("\033[0;32m[OK]\033[0m    configs/" + NODE + "/dns/2")
+
+# 5. HSI config for user 1 — secondary subscriber on VLAN 5 (the BRAS serves
+#    vlans 3,5). The e2e default SUB_ID_SPEC="2,1" dials this as Step 8-1; without
+#    it that step fails with ppp_phase='not configured'.
+hsi1 = {
+    "user_id": "1", "vlan_id": "5", "account_name": "the", "password": "admin",
+    "dhcp_addr_pool": "192.168.5.2-192.168.5.10",
+    "dhcp_subnet": "255.255.255.0", "dhcp_gateway": "192.168.5.1",
+}
+st, body = call("POST", f"/api/config/{NODE}/hsi", hsi1, tok)
+if st == 409 or "exist" in body.lower():
+    st, body = call("PUT", f"/api/config/{NODE}/hsi/1", hsi1, tok)
+if st != 200:
+    print(f"\033[0;31m[ERROR]\033[0m apply hsi/1: HTTP {st} {body[:160]}", file=sys.stderr)
+    sys.exit(1)
+print("\033[0;32m[OK]\033[0m    configs/" + NODE + "/hsi/1")
+time.sleep(2)
+
+# 6. desire_status=connect via dial for user 1
+st, body = call("POST", "/api/pppoe/dial", {"node_id": NODE, "user_id": "1"}, tok)
+if st != 200:
+    print(f"\033[1;33m[WARN]\033[0m  dial user 1: HTTP {st} {body[:120]}", file=sys.stderr)
+else:
+    print("\033[0;32m[OK]\033[0m    desire_status=connect (dial user 1)")
 PYEOF
 
 printf "\n"
