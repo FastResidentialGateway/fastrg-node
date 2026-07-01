@@ -176,27 +176,32 @@ int metrics_build(lighthttp_buf_t *out, const char **content_type, void *arg)
             per_user[p] = calloc(user_count, sizeof(struct per_user_row));
     }
     rte_rcu_qsbr_thread_online(fastrg_ccb->per_subscriber_stats_rcu, METRICS_RCU_THREAD_ID);
+    /* Sum each subscriber's counters across all per-lcore rows. per_user[] is
+     * calloc'd and unknown_user[] memset to 0, so we accumulate from zero. */
     for(int p=0; p<PORT_AMOUNT; p++) {
-        struct per_ccb_stats *a =
-            __atomic_load_n(&fastrg_ccb->per_subscriber_stats[p], __ATOMIC_ACQUIRE);
-        if (a == NULL)
-            continue;
-        for(U16 i=0; i<user_count; i++) {
-            if (per_user[p] == NULL)
-                break;
-            per_user[p][i].rxp = rte_atomic64_read(&a[i].rx_packets);
-            per_user[p][i].rxb = rte_atomic64_read(&a[i].rx_bytes);
-            per_user[p][i].txp = rte_atomic64_read(&a[i].tx_packets);
-            per_user[p][i].txb = rte_atomic64_read(&a[i].tx_bytes);
-            per_user[p][i].dp = rte_atomic64_read(&a[i].dropped_packets);
-            per_user[p][i].db = rte_atomic64_read(&a[i].dropped_bytes);
+        unsigned int lcore_id;
+        RTE_LCORE_FOREACH(lcore_id) {
+            struct per_ccb_stats *a =
+                __atomic_load_n(&fastrg_ccb->per_subscriber_stats[lcore_id][p], __ATOMIC_ACQUIRE);
+            if (a == NULL)
+                continue;
+            for(U16 i=0; i<user_count; i++) {
+                if (per_user[p] == NULL)
+                    break;
+                per_user[p][i].rxp += __atomic_load_n(&a[i].rx_packets, __ATOMIC_RELAXED);
+                per_user[p][i].rxb += __atomic_load_n(&a[i].rx_bytes, __ATOMIC_RELAXED);
+                per_user[p][i].txp += __atomic_load_n(&a[i].tx_packets, __ATOMIC_RELAXED);
+                per_user[p][i].txb += __atomic_load_n(&a[i].tx_bytes, __ATOMIC_RELAXED);
+                per_user[p][i].dp += __atomic_load_n(&a[i].dropped_packets, __ATOMIC_RELAXED);
+                per_user[p][i].db += __atomic_load_n(&a[i].dropped_bytes, __ATOMIC_RELAXED);
+            }
+            unknown_user[p].rxp += __atomic_load_n(&a[user_count].rx_packets, __ATOMIC_RELAXED);
+            unknown_user[p].rxb += __atomic_load_n(&a[user_count].rx_bytes, __ATOMIC_RELAXED);
+            unknown_user[p].txp += __atomic_load_n(&a[user_count].tx_packets, __ATOMIC_RELAXED);
+            unknown_user[p].txb += __atomic_load_n(&a[user_count].tx_bytes, __ATOMIC_RELAXED);
+            unknown_user[p].dp += __atomic_load_n(&a[user_count].dropped_packets, __ATOMIC_RELAXED);
+            unknown_user[p].db += __atomic_load_n(&a[user_count].dropped_bytes, __ATOMIC_RELAXED);
         }
-        unknown_user[p].rxp = rte_atomic64_read(&a[user_count].rx_packets);
-        unknown_user[p].rxb = rte_atomic64_read(&a[user_count].rx_bytes);
-        unknown_user[p].txp = rte_atomic64_read(&a[user_count].tx_packets);
-        unknown_user[p].txb = rte_atomic64_read(&a[user_count].tx_bytes);
-        unknown_user[p].dp = rte_atomic64_read(&a[user_count].dropped_packets);
-        unknown_user[p].db = rte_atomic64_read(&a[user_count].dropped_bytes);
     }
     rte_rcu_qsbr_quiescent(fastrg_ccb->per_subscriber_stats_rcu, METRICS_RCU_THREAD_ID);
     rte_rcu_qsbr_thread_offline(fastrg_ccb->per_subscriber_stats_rcu, METRICS_RCU_THREAD_ID);

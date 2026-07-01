@@ -464,10 +464,15 @@ err:
         fastrg_mfree(fastrg_ccb->node_uuid);
         fastrg_ccb->node_uuid = NULL;
     }
-    for(int i=0; i<PORT_AMOUNT; i++) {
-        if (fastrg_ccb->per_subscriber_stats[i] != NULL) {
-            fastrg_mfree(fastrg_ccb->per_subscriber_stats[i]);
-            fastrg_ccb->per_subscriber_stats[i] = NULL;
+    {
+        unsigned int lcore_id;
+        RTE_LCORE_FOREACH(lcore_id) {
+            for(int i=0; i<PORT_AMOUNT; i++) {
+                if (fastrg_ccb->per_subscriber_stats[lcore_id][i] != NULL) {
+                    fastrg_mfree(fastrg_ccb->per_subscriber_stats[lcore_id][i]);
+                    fastrg_ccb->per_subscriber_stats[lcore_id][i] = NULL;
+                }
+            }
         }
     }
     return ERROR;
@@ -475,10 +480,15 @@ err:
 
 void sys_cleanup(FastRG_t *fastrg_ccb)
 {
-    for(int i=0; i<PORT_AMOUNT; i++) {
-        if (fastrg_ccb->per_subscriber_stats[i] != NULL) {
-            fastrg_mfree(fastrg_ccb->per_subscriber_stats[i]);
-            fastrg_ccb->per_subscriber_stats[i] = NULL;
+    {
+        unsigned int lcore_id;
+        RTE_LCORE_FOREACH(lcore_id) {
+            for(int i=0; i<PORT_AMOUNT; i++) {
+                if (fastrg_ccb->per_subscriber_stats[lcore_id][i] != NULL) {
+                    fastrg_mfree(fastrg_ccb->per_subscriber_stats[lcore_id][i]);
+                    fastrg_ccb->per_subscriber_stats[lcore_id][i] = NULL;
+                }
+            }
         }
     }
 

@@ -62,13 +62,17 @@ struct nic_info {
     struct rte_ether_addr hsi_lan_mac;    /* FastRG LAN side mac addr */
 };
 
+/* Per-lcore counters: each data/ctrl lcore writes ONLY its own slot
+ * (per_subscriber_stats[lcore][port]) with a plain += — no atomic, no cross-core
+ * cache-line bouncing. Readers (metrics) sum the per-lcore copies with RELAXED
+ * loads. 64-bit aligned, single-writer-per-slot ⇒ stores never tear. */
 struct per_ccb_stats {
-    rte_atomic64_t rx_packets;
-    rte_atomic64_t rx_bytes;
-    rte_atomic64_t tx_packets;
-    rte_atomic64_t tx_bytes;
-    rte_atomic64_t dropped_packets;
-    rte_atomic64_t dropped_bytes;
+    uint64_t rx_packets;
+    uint64_t rx_bytes;
+    uint64_t tx_packets;
+    uint64_t tx_bytes;
+    uint64_t dropped_packets;
+    uint64_t dropped_bytes;
 };
 
 struct lcore_usage_counter {
@@ -111,7 +115,10 @@ typedef struct FastRG {
     rte_atomic16_t          dhcp_ccb_updating; /* flag indicating array is being updated */
     struct rte_mempool      *arp_pending_mp; /* mempool for ARP pending queue entries */
     rte_atomic16_t          *vlan_userid_map; /* vlan to user id map */
-    struct per_ccb_stats    *per_subscriber_stats[PORT_AMOUNT]; /* per subscriber stats */
+    /* Per-lcore × per-port stats: [raw rte_lcore_id()][port] -> (user_count+1)
+     * entry array (last = unknown user). Only EAL-lcore rows are allocated;
+     * each lcore writes only its own row, readers sum across rows. */
+    struct per_ccb_stats    *per_subscriber_stats[RTE_MAX_LCORE][PORT_AMOUNT];
     U16                     per_subscriber_stats_len;
     struct rte_rcu_qsbr     *per_subscriber_stats_rcu; /* RCU for protecting per_subscriber_stats array pointer */
     rte_atomic16_t          per_subscriber_stats_updating; /* flag indicating stats array is being updated */
@@ -156,33 +163,37 @@ STATUS fastrg_modify_subscriber_count(FastRG_t *fastrg_ccb, U16 new_count,
  */
 #define OPENRG_GET_PER_SUBSCRIBER_STATS(fastrg_ccb_ptr, port_id, ccb_id) \
     fastrg_get_per_subscriber_stats((fastrg_ccb_ptr)->per_subscriber_stats_rcu, \
-        &(fastrg_ccb_ptr)->per_subscriber_stats[port_id], (port_id), (ccb_id))
+        (fastrg_ccb_ptr)->per_subscriber_stats, (port_id), (ccb_id))
 
 static __always_inline struct per_ccb_stats *fastrg_get_per_subscriber_stats(
-    struct rte_rcu_qsbr *stats_rcu, 
-    struct per_ccb_stats **stats_array_ptr,
+    struct rte_rcu_qsbr *stats_rcu,
+    struct per_ccb_stats *(*stats_2d)[PORT_AMOUNT],
     U16 port_id, U16 ccb_id)
 {
-    unsigned int lcore_id = 0;
-
     if (unlikely(port_id >= PORT_AMOUNT))
         return NULL;
 
-    if (likely(rte_lcore_id() != LCORE_ID_ANY))
-        lcore_id = rte_lcore_id();
+    /* Stats are written only from EAL data/ctrl lcores; the caller writes its
+     * own per-lcore row. A non-EAL thread has no row (and must not index the
+     * array out of range), so it gets no stats slot. */
+    unsigned int lcore_id = rte_lcore_id();
+    if (unlikely(lcore_id == LCORE_ID_ANY))
+        return NULL;
 
     /* data-plane lcore: stays QSBR-online for life + quiescent once per burst,
      * so just do the protected load — skip per-call online/quiescent/offline. */
     if (likely(fastrg_rcu_persistent[lcore_id])) {
-        struct per_ccb_stats *stats_array = __atomic_load_n(stats_array_ptr, __ATOMIC_ACQUIRE);
+        struct per_ccb_stats *stats_array =
+            __atomic_load_n(&stats_2d[lcore_id][port_id], __ATOMIC_ACQUIRE);
         return likely(stats_array != NULL) ? &stats_array[ccb_id] : NULL;
     }
 
     // RCU read-side critical section
     rte_rcu_qsbr_thread_online(stats_rcu, lcore_id);
 
-    // Atomically load the stats array pointer for this port
-    struct per_ccb_stats *stats_array = __atomic_load_n(stats_array_ptr, __ATOMIC_ACQUIRE);
+    // Atomically load this lcore's stats array pointer for this port
+    struct per_ccb_stats *stats_array =
+        __atomic_load_n(&stats_2d[lcore_id][port_id], __ATOMIC_ACQUIRE);
 
     struct per_ccb_stats *result = NULL;
     if (likely(stats_array != NULL))

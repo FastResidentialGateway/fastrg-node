@@ -51,22 +51,24 @@ typedef struct mbuf_priv {
     vlan_header_t *vlan_hdr;
 } mbuf_priv_t;
 
+/* The caller owns this per-lcore slot exclusively, so a plain non-atomic RMW is
+ * safe (no other writer) and cheap (no lock prefix, no cache-line bounce). */
 static inline void increase_ccb_drop_count(struct per_ccb_stats *stats, U32 pkt_len)
 {
-    rte_atomic64_inc(&stats->dropped_packets);
-    rte_atomic64_add(&stats->dropped_bytes, pkt_len);
+    stats->dropped_packets++;
+    stats->dropped_bytes += pkt_len;
 }
 
 static inline void increase_ccb_rx_count(struct per_ccb_stats *stats, U32 pkt_len)
 {
-    rte_atomic64_inc(&stats->rx_packets);
-    rte_atomic64_add(&stats->rx_bytes, pkt_len);
+    stats->rx_packets++;
+    stats->rx_bytes += pkt_len;
 }
 
 static inline void increase_ccb_tx_count(struct per_ccb_stats *stats, U32 pkt_len)
 {
-    rte_atomic64_inc(&stats->tx_packets);
-    rte_atomic64_add(&stats->tx_bytes, pkt_len);
+    stats->tx_packets++;
+    stats->tx_bytes += pkt_len;
 }
 
 static inline void increase_pppoes_tx_count(ppp_ccb_t *ppp_ccb, U32 pkt_len)
