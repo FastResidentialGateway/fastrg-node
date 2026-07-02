@@ -1,5 +1,5 @@
-#ifndef _OPENRG_H_
-#define _OPENRG_H_
+#ifndef _FASTRG_H_
+#define _FASTRG_H_
 
 #ifdef __cplusplus
 extern "C" {
@@ -75,6 +75,16 @@ struct per_ccb_stats {
     uint64_t dropped_bytes;
 };
 
+/* Per-lcore PPPoE session counters, same per-lcore scheme as per_ccb_stats:
+ * pppoes_stats[lcore][ccb_id], each lcore writes only its own row with a plain
+ * += (no atomic); readers sum the rows with RELAXED loads. */
+struct pppoes_lcore_stats {
+    uint64_t rx_packets;
+    uint64_t rx_bytes;
+    uint64_t tx_packets;
+    uint64_t tx_bytes;
+};
+
 struct lcore_usage_counter {
     uint64_t busy_cycles;
     uint64_t total_cycles;
@@ -122,6 +132,13 @@ typedef struct FastRG {
     U16                     per_subscriber_stats_len;
     struct rte_rcu_qsbr     *per_subscriber_stats_rcu; /* RCU for protecting per_subscriber_stats array pointer */
     rte_atomic16_t          per_subscriber_stats_updating; /* flag indicating stats array is being updated */
+    /* Per-lcore PPPoE session stats: [raw rte_lcore_id()] -> user_count-entry
+     * array. Same scheme as per_subscriber_stats; protected by ppp_ccb_rcu
+     * (resized with the ppp_ccb count, read inside the readers' ppp_ccb_rcu
+     * sections). Only EAL-lcore rows are allocated. */
+    struct pppoes_lcore_stats *pppoes_stats[RTE_MAX_LCORE];
+    U16                     pppoes_stats_len;
+    rte_atomic16_t          pppoes_stats_updating; /* flag indicating pppoes stats array is being updated */
     struct rte_timer        link;           /* for physical link checking timer */
     struct rte_timer        heartbeat_timer;/* for controller heartbeat timer */
     datapath_mode_t         datapath_mode;    /* RSS multi-queue vs software distributor */
@@ -148,7 +165,7 @@ STATUS fastrg_modify_subscriber_count(FastRG_t *fastrg_ccb, U16 new_count,
     U16 old_count);
 
 /**
- * @fn OPENRG_GET_PER_SUBSCRIBER_STATS
+ * @fn FASTRG_GET_PER_SUBSCRIBER_STATS
  * 
  * @brief Get per subscriber stats pointer with RCU protection
  * 
@@ -161,7 +178,7 @@ STATUS fastrg_modify_subscriber_count(FastRG_t *fastrg_ccb, U16 new_count,
  * @return 
  *      Pointer to per_ccb_stats or NULL if failed
  */
-#define OPENRG_GET_PER_SUBSCRIBER_STATS(fastrg_ccb_ptr, port_id, ccb_id) \
+#define FASTRG_GET_PER_SUBSCRIBER_STATS(fastrg_ccb_ptr, port_id, ccb_id) \
     fastrg_get_per_subscriber_stats((fastrg_ccb_ptr)->per_subscriber_stats_rcu, \
         (fastrg_ccb_ptr)->per_subscriber_stats, (port_id), (ccb_id))
 
@@ -205,9 +222,88 @@ static __always_inline struct per_ccb_stats *fastrg_get_per_subscriber_stats(
     return result;
 }
 
+/* Return the calling lcore's PPPoE-session stats slot for ccb_id, protected by
+ * ppp_ccb_rcu (mirrors FASTRG_GET_PER_SUBSCRIBER_STATS; no port dimension). */
+#define FASTRG_GET_PPPOES_STATS(fastrg_ccb_ptr, ccb_id) \
+    fastrg_get_pppoes_stats((fastrg_ccb_ptr)->ppp_ccb_rcu, \
+        (fastrg_ccb_ptr)->pppoes_stats, (ccb_id))
+
+static __always_inline struct pppoes_lcore_stats *fastrg_get_pppoes_stats(
+    struct rte_rcu_qsbr *stats_rcu,
+    struct pppoes_lcore_stats **stats_1d,
+    U16 ccb_id)
+{
+    /* Written only from EAL data/ctrl lcores; a non-EAL caller has no row. */
+    unsigned int lcore_id = rte_lcore_id();
+    if (unlikely(lcore_id == LCORE_ID_ANY))
+        return NULL;
+
+    /* data-plane lcore: persistently online on ppp_ccb_rcu + quiescent per burst,
+     * so just do the protected load — skip per-call online/quiescent/offline. */
+    if (likely(fastrg_rcu_persistent[lcore_id])) {
+        struct pppoes_lcore_stats *stats_array =
+            __atomic_load_n(&stats_1d[lcore_id], __ATOMIC_ACQUIRE);
+        return likely(stats_array != NULL) ? &stats_array[ccb_id] : NULL;
+    }
+
+    rte_rcu_qsbr_thread_online(stats_rcu, lcore_id);
+    struct pppoes_lcore_stats *stats_array = __atomic_load_n(&stats_1d[lcore_id], __ATOMIC_ACQUIRE);
+    struct pppoes_lcore_stats *result = (stats_array != NULL) ? &stats_array[ccb_id] : NULL;
+    rte_rcu_qsbr_quiescent(stats_rcu, lcore_id);
+    rte_rcu_qsbr_thread_offline(stats_rcu, lcore_id);
+    return result;
+}
+
+/* Sum a subscriber's per-lcore packet stats across all lcores into *out. The
+ * caller must be inside a per_subscriber_stats_rcu read-side section (rows are
+ * freed on resize). Keeps the summation in C so the gRPC/metrics readers stay
+ * thin marshalling shells. */
+static __always_inline void fastrg_sum_subscriber_stats(
+    FastRG_t *fastrg_ccb, U16 port_id, U16 ccb_id, struct per_ccb_stats *out)
+{
+    out->rx_packets = 0; out->rx_bytes = 0;
+    out->tx_packets = 0; out->tx_bytes = 0;
+    out->dropped_packets = 0; out->dropped_bytes = 0;
+    if (unlikely(port_id >= PORT_AMOUNT))
+        return;
+    unsigned int lcore;
+    RTE_LCORE_FOREACH(lcore) {
+        struct per_ccb_stats *lcore_stats =
+            __atomic_load_n(&fastrg_ccb->per_subscriber_stats[lcore][port_id], __ATOMIC_ACQUIRE);
+        if (lcore_stats == NULL)
+            continue;
+        out->rx_packets      += __atomic_load_n(&lcore_stats[ccb_id].rx_packets, __ATOMIC_RELAXED);
+        out->rx_bytes        += __atomic_load_n(&lcore_stats[ccb_id].rx_bytes, __ATOMIC_RELAXED);
+        out->tx_packets      += __atomic_load_n(&lcore_stats[ccb_id].tx_packets, __ATOMIC_RELAXED);
+        out->tx_bytes        += __atomic_load_n(&lcore_stats[ccb_id].tx_bytes, __ATOMIC_RELAXED);
+        out->dropped_packets += __atomic_load_n(&lcore_stats[ccb_id].dropped_packets, __ATOMIC_RELAXED);
+        out->dropped_bytes   += __atomic_load_n(&lcore_stats[ccb_id].dropped_bytes, __ATOMIC_RELAXED);
+    }
+}
+
+/* Sum a PPPoE session's per-lcore counters across all lcores into *out. Caller
+ * must be inside a ppp_ccb_rcu read-side section. */
+static __always_inline void fastrg_sum_pppoes_stats(
+    FastRG_t *fastrg_ccb, U16 ccb_id, struct pppoes_lcore_stats *out)
+{
+    out->rx_packets = 0; out->rx_bytes = 0;
+    out->tx_packets = 0; out->tx_bytes = 0;
+    unsigned int lcore;
+    RTE_LCORE_FOREACH(lcore) {
+        struct pppoes_lcore_stats *lcore_stats =
+            __atomic_load_n(&fastrg_ccb->pppoes_stats[lcore], __ATOMIC_ACQUIRE);
+        if (lcore_stats == NULL)
+            continue;
+        out->rx_packets += __atomic_load_n(&lcore_stats[ccb_id].rx_packets, __ATOMIC_RELAXED);
+        out->rx_bytes   += __atomic_load_n(&lcore_stats[ccb_id].rx_bytes, __ATOMIC_RELAXED);
+        out->tx_packets += __atomic_load_n(&lcore_stats[ccb_id].tx_packets, __ATOMIC_RELAXED);
+        out->tx_bytes   += __atomic_load_n(&lcore_stats[ccb_id].tx_bytes, __ATOMIC_RELAXED);
+    }
+}
+
 /**
  * @fn fastrg_add_subscriber_stats
- * 
+ *
  * @brief Add more subscriber stats entries
  * 
  * @param fastrg_ccb
@@ -246,6 +342,13 @@ STATUS fastrg_remove_subscriber_stats(FastRG_t *fastrg_ccb, U16 remove_count, U1
  *      Total number of entries
  */
 void fastrg_cleanup_subscriber_stats(FastRG_t *fastrg_ccb, U16 total_count);
+
+/* Per-lcore PPPoE session stats resize — mirrors the per_subscriber_stats
+ * helpers above and is called from the same subscriber-count-change sites. */
+STATUS fastrg_add_pppoes_stats(FastRG_t *fastrg_ccb, U16 extra_count);
+STATUS fastrg_remove_pppoes_stats(FastRG_t *fastrg_ccb, U16 remove_count, U16 old_count);
+STATUS fastrg_disable_pppoes_stats(FastRG_t *fastrg_ccb, U16 disable_count, U16 old_count);
+void fastrg_cleanup_pppoes_stats(FastRG_t *fastrg_ccb, U16 total_count);
 
 int fastrg_start(int argc, char **argv);
 

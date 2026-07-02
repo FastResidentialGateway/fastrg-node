@@ -779,34 +779,20 @@ int getNicStats(Statistics *stats, uint8_t port_id, FastRG_t *fastrg_ccb)
     
     rte_rcu_qsbr_thread_online(fastrg_ccb->per_subscriber_stats_rcu, lcore_id);
 
-    // Per-lcore stats: sum each subscriber's counters across all lcore rows.
-    auto fill_user = [&](int idx, int user_id) {
-        uint64_t rxp = 0, txp = 0, rxb = 0, txb = 0, db = 0, dp = 0;
-        unsigned int lc;
-        RTE_LCORE_FOREACH(lc) {
-            struct per_ccb_stats *ps =
-                __atomic_load_n(&fastrg_ccb->per_subscriber_stats[lc][port_id], __ATOMIC_ACQUIRE);
-            if (ps == NULL)
-                continue;
-            rxp += __atomic_load_n(&ps[idx].rx_packets, __ATOMIC_RELAXED);
-            txp += __atomic_load_n(&ps[idx].tx_packets, __ATOMIC_RELAXED);
-            rxb += __atomic_load_n(&ps[idx].rx_bytes, __ATOMIC_RELAXED);
-            txb += __atomic_load_n(&ps[idx].tx_bytes, __ATOMIC_RELAXED);
-            db  += __atomic_load_n(&ps[idx].dropped_bytes, __ATOMIC_RELAXED);
-            dp  += __atomic_load_n(&ps[idx].dropped_packets, __ATOMIC_RELAXED);
-        }
+    // Per-lcore stats: C helper sums each subscriber across lcores; here we only
+    // marshal into protobuf. Index user_count is the unknown-user slot (id 0).
+    for(int i=0; i<=fastrg_ccb->user_count; i++) {
+        struct per_ccb_stats sum;
+        fastrg_sum_subscriber_stats(fastrg_ccb, port_id, (U16)i, &sum);
         PerUserStatistics* per_user_stats = stats->add_per_user_stats();
-        per_user_stats->set_user_id(user_id);
-        per_user_stats->set_rx_packets(rxp);
-        per_user_stats->set_tx_packets(txp);
-        per_user_stats->set_rx_bytes(rxb);
-        per_user_stats->set_tx_bytes(txb);
-        per_user_stats->set_dropped_bytes(db);
-        per_user_stats->set_dropped_packets(dp);
-    };
-    for(int i=0; i<fastrg_ccb->user_count; i++)
-        fill_user(i, i + 1);
-    fill_user(fastrg_ccb->user_count, 0); // unknown user => user_id 0
+        per_user_stats->set_user_id(i < fastrg_ccb->user_count ? i + 1 : 0);
+        per_user_stats->set_rx_packets(sum.rx_packets);
+        per_user_stats->set_tx_packets(sum.tx_packets);
+        per_user_stats->set_rx_bytes(sum.rx_bytes);
+        per_user_stats->set_tx_bytes(sum.tx_bytes);
+        per_user_stats->set_dropped_bytes(sum.dropped_bytes);
+        per_user_stats->set_dropped_packets(sum.dropped_packets);
+    }
 
     rte_rcu_qsbr_quiescent(fastrg_ccb->per_subscriber_stats_rcu, lcore_id);
     rte_rcu_qsbr_thread_offline(fastrg_ccb->per_subscriber_stats_rcu, lcore_id);
@@ -1038,10 +1024,21 @@ grpc::Status FastRGNodeServiceImpl::GetFastrgHsiInfo(::grpc::ServerContext* cont
                 hsi_info->set_status("unknown status");
                 break;
         }
-        hsi_info->set_pppoes_rx_packets(rte_atomic64_read(&ppp_ccb->pppoes_rx_packets));
-        hsi_info->set_pppoes_tx_packets(rte_atomic64_read(&ppp_ccb->pppoes_tx_packets));
-        hsi_info->set_pppoes_rx_bytes(rte_atomic64_read(&ppp_ccb->pppoes_rx_bytes));
-        hsi_info->set_pppoes_tx_bytes(rte_atomic64_read(&ppp_ccb->pppoes_tx_bytes));
+        /* PPPoE session counters are per-lcore; the C helper sums them across
+         * lcores. Must run inside a ppp_ccb_rcu section (rows freed on resize);
+         * the C++ side only manages the RCU section and marshals into protobuf. */
+        unsigned int lcore_id = 0;
+        if (unlikely(rte_lcore_id() != LCORE_ID_ANY))
+            lcore_id = rte_lcore_id();
+        rte_rcu_qsbr_thread_online(fastrg_ccb->ppp_ccb_rcu, lcore_id);
+        struct pppoes_lcore_stats sum;
+        fastrg_sum_pppoes_stats(fastrg_ccb, (U16)i, &sum);
+        rte_rcu_qsbr_quiescent(fastrg_ccb->ppp_ccb_rcu, lcore_id);
+        rte_rcu_qsbr_thread_offline(fastrg_ccb->ppp_ccb_rcu, lcore_id);
+        hsi_info->set_pppoes_rx_packets(sum.rx_packets);
+        hsi_info->set_pppoes_tx_packets(sum.tx_packets);
+        hsi_info->set_pppoes_rx_bytes(sum.rx_bytes);
+        hsi_info->set_pppoes_tx_bytes(sum.tx_bytes);
     }
 
     return grpc::Status::OK;

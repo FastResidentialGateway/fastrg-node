@@ -176,32 +176,26 @@ int metrics_build(lighthttp_buf_t *out, const char **content_type, void *arg)
             per_user[p] = calloc(user_count, sizeof(struct per_user_row));
     }
     rte_rcu_qsbr_thread_online(fastrg_ccb->per_subscriber_stats_rcu, METRICS_RCU_THREAD_ID);
-    /* Sum each subscriber's counters across all per-lcore rows. per_user[] is
-     * calloc'd and unknown_user[] memset to 0, so we accumulate from zero. */
+    /* C helper sums each subscriber across lcores; here we only copy into the
+     * gathered rows. Index user_count is the unknown-user slot. */
     for(int p=0; p<PORT_AMOUNT; p++) {
-        unsigned int lcore_id;
-        RTE_LCORE_FOREACH(lcore_id) {
-            struct per_ccb_stats *a =
-                __atomic_load_n(&fastrg_ccb->per_subscriber_stats[lcore_id][p], __ATOMIC_ACQUIRE);
-            if (a == NULL)
-                continue;
-            for(U16 i=0; i<user_count; i++) {
-                if (per_user[p] == NULL)
-                    break;
-                per_user[p][i].rxp += __atomic_load_n(&a[i].rx_packets, __ATOMIC_RELAXED);
-                per_user[p][i].rxb += __atomic_load_n(&a[i].rx_bytes, __ATOMIC_RELAXED);
-                per_user[p][i].txp += __atomic_load_n(&a[i].tx_packets, __ATOMIC_RELAXED);
-                per_user[p][i].txb += __atomic_load_n(&a[i].tx_bytes, __ATOMIC_RELAXED);
-                per_user[p][i].dp += __atomic_load_n(&a[i].dropped_packets, __ATOMIC_RELAXED);
-                per_user[p][i].db += __atomic_load_n(&a[i].dropped_bytes, __ATOMIC_RELAXED);
-            }
-            unknown_user[p].rxp += __atomic_load_n(&a[user_count].rx_packets, __ATOMIC_RELAXED);
-            unknown_user[p].rxb += __atomic_load_n(&a[user_count].rx_bytes, __ATOMIC_RELAXED);
-            unknown_user[p].txp += __atomic_load_n(&a[user_count].tx_packets, __ATOMIC_RELAXED);
-            unknown_user[p].txb += __atomic_load_n(&a[user_count].tx_bytes, __ATOMIC_RELAXED);
-            unknown_user[p].dp += __atomic_load_n(&a[user_count].dropped_packets, __ATOMIC_RELAXED);
-            unknown_user[p].db += __atomic_load_n(&a[user_count].dropped_bytes, __ATOMIC_RELAXED);
+        struct per_ccb_stats sum;
+        for(U16 i=0; i<user_count && per_user[p] != NULL; i++) {
+            fastrg_sum_subscriber_stats(fastrg_ccb, p, i, &sum);
+            per_user[p][i].rxp = sum.rx_packets;
+            per_user[p][i].rxb = sum.rx_bytes;
+            per_user[p][i].txp = sum.tx_packets;
+            per_user[p][i].txb = sum.tx_bytes;
+            per_user[p][i].dp  = sum.dropped_packets;
+            per_user[p][i].db  = sum.dropped_bytes;
         }
+        fastrg_sum_subscriber_stats(fastrg_ccb, p, user_count, &sum);
+        unknown_user[p].rxp = sum.rx_packets;
+        unknown_user[p].rxb = sum.rx_bytes;
+        unknown_user[p].txp = sum.tx_packets;
+        unknown_user[p].txb = sum.tx_bytes;
+        unknown_user[p].dp  = sum.dropped_packets;
+        unknown_user[p].db  = sum.dropped_bytes;
     }
     rte_rcu_qsbr_quiescent(fastrg_ccb->per_subscriber_stats_rcu, METRICS_RCU_THREAD_ID);
     rte_rcu_qsbr_thread_offline(fastrg_ccb->per_subscriber_stats_rcu, METRICS_RCU_THREAD_ID);
@@ -232,10 +226,14 @@ int metrics_build(lighthttp_buf_t *out, const char **content_type, void *arg)
                 default:             phase[7]++; break;
             }
             if (ppp) {
-                ppp[i].rxp = rte_atomic64_read(&c->pppoes_rx_packets);
-                ppp[i].rxb = rte_atomic64_read(&c->pppoes_rx_bytes);
-                ppp[i].txp = rte_atomic64_read(&c->pppoes_tx_packets);
-                ppp[i].txb = rte_atomic64_read(&c->pppoes_tx_bytes);
+                /* C helper sums this session across lcores (ccb_id == i), within
+                 * the surrounding ppp_ccb_rcu online section. */
+                struct pppoes_lcore_stats sum;
+                fastrg_sum_pppoes_stats(fastrg_ccb, i, &sum);
+                ppp[i].rxp = sum.rx_packets;
+                ppp[i].rxb = sum.rx_bytes;
+                ppp[i].txp = sum.tx_packets;
+                ppp[i].txb = sum.tx_bytes;
             }
         }
     }

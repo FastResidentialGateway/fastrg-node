@@ -168,10 +168,6 @@ STATUS ppp_init_config_by_user(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb, U16 ccb
     rte_atomic16_init(&ppp_ccb->dp_start_bool);
     rte_atomic16_init(&ppp_ccb->ppp_bool);
     rte_atomic16_init(&ppp_ccb->redial_pending);
-    rte_atomic64_init(&ppp_ccb->pppoes_rx_bytes);
-    rte_atomic64_init(&ppp_ccb->pppoes_tx_bytes);
-    rte_atomic64_init(&ppp_ccb->pppoes_rx_packets);
-    rte_atomic64_init(&ppp_ccb->pppoes_tx_packets);
     /* Default before any HSI config is applied; overridden per-subscriber
      * by apply_hsi_config() using tcp_conntrack_enable from etcd. */
     ppp_ccb->tcp_conntrack_enabled = TRUE;

@@ -79,7 +79,7 @@ STATUS fastrg_add_subscriber_stats(FastRG_t *fastrg_ccb, U16 extra_count)
     struct per_ccb_stats *old_stats[RTE_MAX_LCORE][PORT_AMOUNT] = {{NULL}};
     unsigned int lcore_id;
 
-    // Step 1: Allocate all new stats arrays first (calloc => new entries are zero)
+    // Step 1: Allocate all new stats arrays first
     RTE_LCORE_FOREACH(lcore_id) {
         for(int i=0; i<PORT_AMOUNT; i++) {
             old_stats[lcore_id][i] = fastrg_ccb->per_subscriber_stats[lcore_id][i];
@@ -90,36 +90,44 @@ STATUS fastrg_add_subscriber_stats(FastRG_t *fastrg_ccb, U16 extra_count)
                 FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
                     "Cannot allocate memory for per_subscriber_stats[%u][%d]", lcore_id, i);
                 // Cleanup already allocated new arrays
-                unsigned int lc2;
-                RTE_LCORE_FOREACH(lc2)
-                    for(int j=0; j<PORT_AMOUNT; j++)
-                        if (new_stats[lc2][j] != NULL)
-                            fastrg_mfree(new_stats[lc2][j]);
+                unsigned int cleanup_lcore;
+                RTE_LCORE_FOREACH(cleanup_lcore)
+                    for(int j=0; j<PORT_AMOUNT; j++) {
+                        if (new_stats[cleanup_lcore][j] != NULL)
+                            fastrg_mfree(new_stats[cleanup_lcore][j]);
+                    }
                 rte_atomic16_clear(&fastrg_ccb->per_subscriber_stats_updating);
                 return ERROR;
             }
 
-            // Preserve existing per-user counts; calloc already zeroed the rest
-            // (the new user slots and the unknown-user slot at [new_user_count]).
-            if (old_stats[lcore_id][i] != NULL)
+            // Preserve existing per-user counts (calloc zeroed the new user slots),
+            // then carry the unknown-user slot from its old position [old_user_count]
+            // to its new position [new_user_count] so its accumulated counters
+            // survive the resize instead of being reset to 0.
+            if (old_stats[lcore_id][i] != NULL) {
                 rte_memcpy(new_stats[lcore_id][i], old_stats[lcore_id][i],
                     old_user_count * sizeof(struct per_ccb_stats));
+                new_stats[lcore_id][i][new_user_count] = old_stats[lcore_id][i][old_user_count];
+            }
         }
     }
 
     // Step 2: Atomically swap all pointers
-    RTE_LCORE_FOREACH(lcore_id)
+    RTE_LCORE_FOREACH(lcore_id) {
         for(int i=0; i<PORT_AMOUNT; i++)
             __atomic_store_n(&fastrg_ccb->per_subscriber_stats[lcore_id][i],
                 new_stats[lcore_id][i], __ATOMIC_RELEASE);
+    }
 
     // Step 3: Wait for RCU grace period before freeing old memory
     rte_rcu_qsbr_synchronize(fastrg_ccb->per_subscriber_stats_rcu, RTE_QSBR_THRID_INVALID);
 
-    RTE_LCORE_FOREACH(lcore_id)
-        for(int i=0; i<PORT_AMOUNT; i++)
+    RTE_LCORE_FOREACH(lcore_id) {
+        for(int i=0; i<PORT_AMOUNT; i++) {
             if (old_stats[lcore_id][i] != NULL)
                 fastrg_mfree(old_stats[lcore_id][i]);
+        }
+    }
 
     rte_atomic16_clear(&fastrg_ccb->per_subscriber_stats_updating);
     fastrg_ccb->per_subscriber_stats_len = new_user_count;
@@ -149,10 +157,10 @@ STATUS fastrg_disable_subscriber_stats(FastRG_t *fastrg_ccb, U16 disable_count, 
     unsigned int lcore_id;
     RTE_LCORE_FOREACH(lcore_id) {
         for(int i=0; i<PORT_AMOUNT; i++) {
-            struct per_ccb_stats *s = fastrg_ccb->per_subscriber_stats[lcore_id][i];
-            if (s == NULL)
+            struct per_ccb_stats *row = fastrg_ccb->per_subscriber_stats[lcore_id][i];
+            if (row == NULL)
                 continue;
-            memset(&s[old_count - disable_count], 0,
+            memset(&row[old_count - disable_count], 0,
                 disable_count * sizeof(struct per_ccb_stats));
         }
     }
@@ -200,41 +208,50 @@ STATUS fastrg_remove_subscriber_stats(FastRG_t *fastrg_ccb, U16 remove_count, U1
                     FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
                         "Cannot allocate memory for per_subscriber_stats[%u][%d]", lcore_id, i);
                     // Cleanup already allocated arrays
-                    unsigned int lc2;
-                    RTE_LCORE_FOREACH(lc2)
-                        for(int j=0; j<PORT_AMOUNT; j++)
-                            if (new_stats[lc2][j] != NULL)
-                                fastrg_mfree(new_stats[lc2][j]);
+                    unsigned int cleanup_lcore;
+                    RTE_LCORE_FOREACH(cleanup_lcore)
+                        for(int j=0; j<PORT_AMOUNT; j++) {
+                            if (new_stats[cleanup_lcore][j] != NULL)
+                                fastrg_mfree(new_stats[cleanup_lcore][j]);
+                        }
                     rte_atomic16_clear(&fastrg_ccb->per_subscriber_stats_updating);
                     return ERROR;
                 }
 
-                // Copy retained data
-                if (old_stats[lcore_id][i] != NULL)
+                // Copy retained users, then carry the unknown-user slot from its
+                // old position [old_count] to its new position [new_user_count] so
+                // its accumulated counters survive the resize instead of being reset.
+                if (old_stats[lcore_id][i] != NULL) {
                     rte_memcpy(new_stats[lcore_id][i], old_stats[lcore_id][i],
-                        (new_user_count + 1) * sizeof(struct per_ccb_stats));
+                        new_user_count * sizeof(struct per_ccb_stats));
+                    new_stats[lcore_id][i][new_user_count] = old_stats[lcore_id][i][old_count];
+                }
             }
         }
     } else {
         // If removing all users, just save old pointers
-        RTE_LCORE_FOREACH(lcore_id)
+        RTE_LCORE_FOREACH(lcore_id) {
             for(int i=0; i<PORT_AMOUNT; i++)
                 old_stats[lcore_id][i] = fastrg_ccb->per_subscriber_stats[lcore_id][i];
+        }
     }
 
     // Step 2: Atomically swap all pointers
-    RTE_LCORE_FOREACH(lcore_id)
-        for(int i=0; i<PORT_AMOUNT; i++)
+    RTE_LCORE_FOREACH(lcore_id) {
+        for(int i=0; i<PORT_AMOUNT; i++) {
             __atomic_store_n(&fastrg_ccb->per_subscriber_stats[lcore_id][i],
                 new_stats[lcore_id][i], __ATOMIC_RELEASE);
+        }
+    }
 
     // Step 3: Wait for RCU grace period before freeing old memory
     rte_rcu_qsbr_synchronize(fastrg_ccb->per_subscriber_stats_rcu, RTE_QSBR_THRID_INVALID);
 
-    RTE_LCORE_FOREACH(lcore_id)
+    RTE_LCORE_FOREACH(lcore_id) {
         for(int i=0; i<PORT_AMOUNT; i++)
             if (old_stats[lcore_id][i] != NULL)
                 fastrg_mfree(old_stats[lcore_id][i]);
+    }
 
     rte_atomic16_clear(&fastrg_ccb->per_subscriber_stats_updating);
 
@@ -268,6 +285,182 @@ void fastrg_cleanup_subscriber_stats(FastRG_t *fastrg_ccb, U16 total_count)
     }
 }
 
+/* ---- Per-lcore PPPoE session stats: same scheme as per_subscriber_stats above,
+ * single-dimension (no port), protected by ppp_ccb_rcu. No unknown-user slot, so
+ * each per-lcore row is exactly user_count entries. ---- */
+
+STATUS fastrg_add_pppoes_stats(FastRG_t *fastrg_ccb, U16 extra_count)
+{
+    if (extra_count == 0) {
+        FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL, "extra_count is 0, nothing to do");
+        return SUCCESS;
+    }
+
+    U16 stats_new_count_check = fastrg_ccb->user_count + extra_count;
+    if (fastrg_ccb->pppoes_stats_len >= stats_new_count_check) {
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "pppoes stats up to %u already allocated, reusing", stats_new_count_check);
+        return SUCCESS;
+    }
+
+    if (!rte_atomic16_cmpset((volatile uint16_t *)&fastrg_ccb->pppoes_stats_updating.cnt, 0, 1)) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+            "Another resize operation is in progress for pppoes_stats");
+        return ERROR;
+    }
+
+    U16 old_user_count = fastrg_ccb->user_count;
+    U16 new_user_count = old_user_count + extra_count;
+    struct pppoes_lcore_stats *new_stats[RTE_MAX_LCORE] = {NULL};
+    struct pppoes_lcore_stats *old_stats[RTE_MAX_LCORE] = {NULL};
+    unsigned int lcore_id;
+
+    // Step 1: Allocate a new array for every EAL lcore row (calloc => zero)
+    RTE_LCORE_FOREACH(lcore_id) {
+        old_stats[lcore_id] = fastrg_ccb->pppoes_stats[lcore_id];
+
+        new_stats[lcore_id] = fastrg_calloc(struct pppoes_lcore_stats,
+            new_user_count, sizeof(struct pppoes_lcore_stats), 0);
+        if (new_stats[lcore_id] == NULL) {
+            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+                "Cannot allocate memory for pppoes_stats[%u]", lcore_id);
+            unsigned int cleanup_lcore;
+            RTE_LCORE_FOREACH(cleanup_lcore)
+                if (new_stats[cleanup_lcore] != NULL)
+                    fastrg_mfree(new_stats[cleanup_lcore]);
+            rte_atomic16_clear(&fastrg_ccb->pppoes_stats_updating);
+            return ERROR;
+        }
+
+        if (old_stats[lcore_id] != NULL)
+            rte_memcpy(new_stats[lcore_id], old_stats[lcore_id],
+                old_user_count * sizeof(struct pppoes_lcore_stats));
+    }
+
+    // Step 2: Atomically swap all pointers
+    RTE_LCORE_FOREACH(lcore_id)
+        __atomic_store_n(&fastrg_ccb->pppoes_stats[lcore_id], new_stats[lcore_id], __ATOMIC_RELEASE);
+
+    // Step 3: Wait for RCU grace period before freeing old memory
+    rte_rcu_qsbr_synchronize(fastrg_ccb->ppp_ccb_rcu, RTE_QSBR_THRID_INVALID);
+
+    RTE_LCORE_FOREACH(lcore_id)
+        if (old_stats[lcore_id] != NULL)
+            fastrg_mfree(old_stats[lcore_id]);
+
+    rte_atomic16_clear(&fastrg_ccb->pppoes_stats_updating);
+    fastrg_ccb->pppoes_stats_len = new_user_count;
+
+    FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "%u pppoes stats entries added", extra_count);
+    return SUCCESS;
+}
+
+STATUS fastrg_disable_pppoes_stats(FastRG_t *fastrg_ccb, U16 disable_count, U16 old_count)
+{
+    if (disable_count > old_count) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Invalid disabling count %u", disable_count);
+        return ERROR;
+    }
+    if (disable_count == 0) {
+        FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL, "disable_count is 0, nothing to do");
+        return SUCCESS;
+    }
+
+    // Reset the disabled range [old_count-disable_count, old_count) in place.
+    unsigned int lcore_id;
+    RTE_LCORE_FOREACH(lcore_id) {
+        struct pppoes_lcore_stats *row = fastrg_ccb->pppoes_stats[lcore_id];
+        if (row == NULL)
+            continue;
+        memset(&row[old_count - disable_count], 0,
+            disable_count * sizeof(struct pppoes_lcore_stats));
+    }
+
+    FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+        "%u pppoes stats entries disabled (not freed)", disable_count);
+    return SUCCESS;
+}
+
+STATUS fastrg_remove_pppoes_stats(FastRG_t *fastrg_ccb, U16 remove_count, U16 old_count)
+{
+    if (remove_count > old_count) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+            "Invalid remove count %u (old_count: %u)", remove_count, old_count);
+        return ERROR;
+    }
+    if (remove_count == 0) {
+        FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL, "remove_count is 0, nothing to do");
+        return SUCCESS;
+    }
+
+    if (!rte_atomic16_cmpset((volatile uint16_t *)&fastrg_ccb->pppoes_stats_updating.cnt, 0, 1)) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+            "Another resize operation is in progress for pppoes_stats");
+        return ERROR;
+    }
+
+    U16 new_user_count = old_count - remove_count;
+    struct pppoes_lcore_stats *new_stats[RTE_MAX_LCORE] = {NULL};
+    struct pppoes_lcore_stats *old_stats[RTE_MAX_LCORE] = {NULL};
+    unsigned int lcore_id;
+
+    if (new_user_count > 0) {
+        RTE_LCORE_FOREACH(lcore_id) {
+            old_stats[lcore_id] = fastrg_ccb->pppoes_stats[lcore_id];
+
+            new_stats[lcore_id] = fastrg_calloc(struct pppoes_lcore_stats,
+                new_user_count, sizeof(struct pppoes_lcore_stats), 0);
+            if (new_stats[lcore_id] == NULL) {
+                FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+                    "Cannot allocate memory for pppoes_stats[%u]", lcore_id);
+                unsigned int cleanup_lcore;
+                RTE_LCORE_FOREACH(cleanup_lcore)
+                    if (new_stats[cleanup_lcore] != NULL)
+                        fastrg_mfree(new_stats[cleanup_lcore]);
+                rte_atomic16_clear(&fastrg_ccb->pppoes_stats_updating);
+                return ERROR;
+            }
+
+            if (old_stats[lcore_id] != NULL)
+                rte_memcpy(new_stats[lcore_id], old_stats[lcore_id],
+                    new_user_count * sizeof(struct pppoes_lcore_stats));
+        }
+    } else {
+        RTE_LCORE_FOREACH(lcore_id)
+            old_stats[lcore_id] = fastrg_ccb->pppoes_stats[lcore_id];
+    }
+
+    RTE_LCORE_FOREACH(lcore_id)
+        __atomic_store_n(&fastrg_ccb->pppoes_stats[lcore_id], new_stats[lcore_id], __ATOMIC_RELEASE);
+
+    rte_rcu_qsbr_synchronize(fastrg_ccb->ppp_ccb_rcu, RTE_QSBR_THRID_INVALID);
+
+    RTE_LCORE_FOREACH(lcore_id)
+        if (old_stats[lcore_id] != NULL)
+            fastrg_mfree(old_stats[lcore_id]);
+
+    rte_atomic16_clear(&fastrg_ccb->pppoes_stats_updating);
+
+    FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "%u pppoes stats entries removed", remove_count);
+    return SUCCESS;
+}
+
+void fastrg_cleanup_pppoes_stats(FastRG_t *fastrg_ccb, U16 total_count)
+{
+    if (fastrg_ccb == NULL)
+        return;
+
+    if (total_count > 0) {
+        unsigned int lcore_id;
+        RTE_LCORE_FOREACH(lcore_id) {
+            if (fastrg_ccb->pppoes_stats[lcore_id] != NULL) {
+                fastrg_mfree(fastrg_ccb->pppoes_stats[lcore_id]);
+                fastrg_ccb->pppoes_stats[lcore_id] = NULL;
+            }
+        }
+    }
+}
+
 STATUS fastrg_modify_subscriber_count(FastRG_t *fastrg_ccb, U16 new_count, 
     U16 old_count)
 {
@@ -293,6 +486,11 @@ STATUS fastrg_modify_subscriber_count(FastRG_t *fastrg_ccb, U16 new_count,
             FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, 
                 "Failed to add %u subscriber stats entries", extra_count);
         }
+        ret = fastrg_add_pppoes_stats(fastrg_ccb, extra_count);
+        if (ret != SUCCESS) {
+            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+                "Failed to add %u pppoes stats entries", extra_count);
+        }
     } else {
         // Remove entries using RCU-safe function
         U16 remove_count = old_count - new_count;
@@ -300,6 +498,11 @@ STATUS fastrg_modify_subscriber_count(FastRG_t *fastrg_ccb, U16 new_count,
         if (ret != SUCCESS) {
             FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, 
                 "Failed to remove %u subscriber stats entries", remove_count);
+        }
+        ret = fastrg_remove_pppoes_stats(fastrg_ccb, remove_count, old_count);
+        if (ret != SUCCESS) {
+            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+                "Failed to remove %u pppoes stats entries", remove_count);
         }
     }
 
@@ -644,6 +847,7 @@ void fastrg_stop()
     if (fastrg_ccb.node_uuid) fastrg_mfree(fastrg_ccb.node_uuid);
     fastrg_mfree(fastrg_ccb.vlan_userid_map);
     fastrg_cleanup_subscriber_stats(&fastrg_ccb, total_ccbs);
+    fastrg_cleanup_pppoes_stats(&fastrg_ccb, total_ccbs);
 }
 
 int fastrg_start(int argc, char **argv)
@@ -741,6 +945,14 @@ int fastrg_start(int argc, char **argv)
 
     if (pppd_init((void *)&fastrg_ccb) == ERROR) {
         FastRG_LOG(ERR, fastrg_ccb.fp, NULL, NULL, "PPP initiation failed");
+        goto err;
+    }
+
+    /* pppoes_stats is protected by ppp_ccb_rcu, so it must be initialised AFTER
+     * pppd_init creates that RCU (sys_init, which inits per_subscriber_stats,
+     * runs before pppd_init). */
+    if (fastrg_add_pppoes_stats(&fastrg_ccb, fastrg_ccb.user_count) == ERROR) {
+        FastRG_LOG(ERR, fastrg_ccb.fp, NULL, NULL, "pppoes_stats initiation failed");
         goto err;
     }
 

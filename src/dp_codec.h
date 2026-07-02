@@ -160,7 +160,7 @@ static int encaps_udp(FastRG_t *fastrg_ccb, struct rte_mbuf **single_pkt,
         }
         count_rx_packet(fastrg_ccb, *single_pkt, LAN_PORT, ccb_id);
         count_tx_packet(fastrg_ccb, *single_pkt, WAN_PORT, ccb_id);
-        increase_pppoes_tx_count(ppp_ccb, (*single_pkt)->pkt_len);
+        increase_pppoes_tx_count(fastrg_ccb, ccb_id, (*single_pkt)->pkt_len);
     }
 
     return new_pkt_num;
@@ -266,7 +266,7 @@ static int encaps_tcp(FastRG_t *fastrg_ccb, struct rte_mbuf **single_pkt,
         }
         count_rx_packet(fastrg_ccb, *single_pkt, LAN_PORT, ccb_id);
         count_tx_packet(fastrg_ccb, *single_pkt, WAN_PORT, ccb_id);
-        increase_pppoes_tx_count(ppp_ccb, (*single_pkt)->pkt_len);
+        increase_pppoes_tx_count(fastrg_ccb, ccb_id, (*single_pkt)->pkt_len);
     }
     return new_pkt_num;
 }
@@ -305,7 +305,7 @@ static int encaps_icmp(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt,
     }
     count_rx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
     count_tx_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
-    increase_pppoes_tx_count(ppp_ccb, single_pkt->pkt_len);
+    increase_pppoes_tx_count(fastrg_ccb, ccb_id, single_pkt->pkt_len);
     new_pkt_num = 1;
 
     return new_pkt_num;
@@ -336,7 +336,7 @@ static int decaps_udp(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt,
             udphdr->dgram_cksum = 0;
             udphdr->dgram_cksum = rte_ipv4_udptcp_cksum(ip_hdr, udphdr);
             count_rx_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
-            increase_pppoes_rx_count(ppp_ccb, single_pkt->pkt_len);
+            increase_pppoes_rx_count(fastrg_ccb, ccb_id, single_pkt->pkt_len);
 
             /* Look up MAC table for destination host */
             mac_table_entry_t *mac_entry = mac_table_lookup(
@@ -368,7 +368,7 @@ static int decaps_udp(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt,
     udphdr->dgram_cksum = rte_ipv4_udptcp_cksum(ip_hdr, udphdr);
     count_tx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
     count_rx_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
-    increase_pppoes_rx_count(ppp_ccb, single_pkt->pkt_len);
+    increase_pppoes_rx_count(fastrg_ccb, ccb_id, single_pkt->pkt_len);
 
     return 1;
 }
@@ -398,7 +398,7 @@ static int decaps_tcp(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt,
             tcphdr->cksum = 0;
             tcphdr->cksum = rte_ipv4_udptcp_cksum(ip_hdr, tcphdr);
             count_rx_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
-            increase_pppoes_rx_count(ppp_ccb, single_pkt->pkt_len);
+            increase_pppoes_rx_count(fastrg_ccb, ccb_id, single_pkt->pkt_len);
 
             /* Look up MAC table for destination host */
             mac_table_entry_t *mac_entry = mac_table_lookup(
@@ -453,7 +453,7 @@ static int decaps_tcp(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt,
     tcphdr->cksum = rte_ipv4_udptcp_cksum(ip_hdr, tcphdr);
     count_tx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
     count_rx_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
-    increase_pppoes_rx_count(ppp_ccb, single_pkt->pkt_len);
+    increase_pppoes_rx_count(fastrg_ccb, ccb_id, single_pkt->pkt_len);
 
     return 1;
 }
@@ -491,7 +491,7 @@ static int decaps_icmp(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt,
     ip_hdr->hdr_checksum = rte_ipv4_cksum(ip_hdr);
     count_tx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
     count_rx_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
-    increase_pppoes_rx_count(ppp_ccb, single_pkt->pkt_len);
+    increase_pppoes_rx_count(fastrg_ccb, ccb_id, single_pkt->pkt_len);
 
     return 1;
 }

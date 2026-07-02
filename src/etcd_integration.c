@@ -844,6 +844,7 @@ STATUS user_count_changed_callback(const char *node_id,
                 pppd_disable_ccb(fastrg_ccb, to_remove, current_count);
                 dhcpd_disable_ccb(fastrg_ccb, to_remove, current_count);
                 fastrg_disable_subscriber_stats(fastrg_ccb, to_remove, current_count);
+                fastrg_disable_pppoes_stats(fastrg_ccb, to_remove, current_count);
                 FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
                     "Successfully removed %u CCBs, new user_count: %d", to_remove, fastrg_ccb->user_count);
             }
