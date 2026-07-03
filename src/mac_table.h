@@ -168,6 +168,13 @@ static __always_inline void mac_table_learn(
         return;
 
     mac_table_entry_t *e = &table[idx];
+    /* Common case: already learned with the same MAC → skip the write. Every
+     * uplink packet calls this; an unconditional store dirties the entry's
+     * cache line (126 MiB table) and forces a writeback that invalidates cores
+     * reading it. Re-writing the identical value buys nothing, so guard it. */
+    if (likely(rte_atomic16_read(&e->valid) == 1 &&
+               rte_is_same_ether_addr(&e->mac, mac)))
+        return;
     rte_ether_addr_copy(mac, &e->mac);
     rte_wmb();  /* ensure MAC is visible before valid flag */
     rte_atomic16_set(&e->valid, 1);
