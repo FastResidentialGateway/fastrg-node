@@ -202,6 +202,41 @@ static void test_invalid_event(void)
 }
 
 /**
+ * Test 5b: Out-of-range state and return-value contract of the O(1) dispatch.
+ * A corrupted tcp_state (>= TCP_CONNTRACK_INVLD) must return ERROR and leave
+ * the entry untouched; a defined-state/undefined-event pair must return
+ * SUCCESS (ignore).
+ */
+static void test_invalid_state(void)
+{
+    printf("\nTesting invalid state handling:\n");
+    printf("==============================\n\n");
+
+    addr_table_t entry;
+
+    /* State = sentinel (INVLD) — not a valid row, FSM must report ERROR */
+    init_entry(&entry, TCP_CONNTRACK_INVLD);
+    TEST_ASSERT(tcp_conntrack_fsm(&entry, RTE_TCP_ACK_FLAG, FALSE) == ERROR,
+        "INVLD state + ACK → ERROR", NULL);
+    TEST_ASSERT(entry.tcp_state == TCP_CONNTRACK_INVLD,
+        "INVLD state unchanged after ERROR",
+        "expected INVLD(%d), got %d", TCP_CONNTRACK_INVLD, entry.tcp_state);
+
+    /* State way out of range (corrupted memory) — also ERROR */
+    init_entry(&entry, 200);
+    TEST_ASSERT(tcp_conntrack_fsm(&entry, RTE_TCP_SYN_FLAG, FALSE) == ERROR,
+        "corrupted state(200) + SYN → ERROR", NULL);
+
+    /* Valid state with no transition for the event — SUCCESS, no change */
+    init_entry(&entry, TCP_CONNTRACK_LAST_ACK);
+    TEST_ASSERT(tcp_conntrack_fsm(&entry, RTE_TCP_SYN_FLAG, FALSE) == SUCCESS,
+        "LAST_ACK + SYN (no transition) → SUCCESS", NULL);
+    TEST_ASSERT(entry.tcp_state == TCP_CONNTRACK_LAST_ACK,
+        "LAST_ACK unchanged on undefined event",
+        "expected LAST_ACK(%d), got %d", TCP_CONNTRACK_LAST_ACK, entry.tcp_state);
+}
+
+/**
  * Test 6: State string conversion
  */
 static void test_state2str(void)
@@ -843,6 +878,7 @@ void test_tcp_conntrack(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_four_way_close();
     test_rst_handling();
     test_invalid_event();
+    test_invalid_state();
     test_state2str();
     test_tcp_flags_to_event();
     test_simultaneous_close();
