@@ -109,10 +109,7 @@ typedef struct {
     struct rte_timer      pppoe;             /* pppoe timer */
     struct rte_timer      ppp;               /* ppp timer */
     struct rte_timer      ppp_alive;         /* PPP connection checking timer */
-    rte_atomic64_t        pppoes_rx_bytes;
-    rte_atomic64_t        pppoes_tx_bytes;
-    rte_atomic64_t        pppoes_rx_packets;
-    rte_atomic64_t        pppoes_tx_packets;
+    /* PPPoE session counters are per-lcore now: FastRG_t.pppoes_stats[lcore][ccb_id]. */
     /* Per-subscriber TCP conntrack (SPI) enable. Written by control plane
      * (apply_hsi_config / SetTcpConntrack), read on every inbound TCP packet
      * by data-plane cores. 1-byte aligned store/load is atomic on x86 (TSO);

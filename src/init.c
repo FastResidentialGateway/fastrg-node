@@ -446,6 +446,8 @@ STATUS sys_init(FastRG_t *fastrg_ccb, struct fastrg_config *fastrg_cfg)
             "Cannot initialize per_subscriber_stats");
         goto err;
     }
+    /* NOTE: pppoes_stats is initialised in fastrg_start() AFTER pppd_init(),
+     * because it is protected by ppp_ccb_rcu which pppd_init creates. */
 
     return SUCCESS;
 err:
@@ -464,21 +466,36 @@ err:
         fastrg_mfree(fastrg_ccb->node_uuid);
         fastrg_ccb->node_uuid = NULL;
     }
-    for(int i=0; i<PORT_AMOUNT; i++) {
-        if (fastrg_ccb->per_subscriber_stats[i] != NULL) {
-            fastrg_mfree(fastrg_ccb->per_subscriber_stats[i]);
-            fastrg_ccb->per_subscriber_stats[i] = NULL;
+    unsigned int lcore_id_err;
+    RTE_LCORE_FOREACH(lcore_id_err) {
+        for(int i=0; i<PORT_AMOUNT; i++) {
+            if (fastrg_ccb->per_subscriber_stats[lcore_id_err][i] != NULL) {
+                fastrg_mfree(fastrg_ccb->per_subscriber_stats[lcore_id_err][i]);
+                fastrg_ccb->per_subscriber_stats[lcore_id_err][i] = NULL;
+            }
+        }
+        if (fastrg_ccb->pppoes_stats[lcore_id_err] != NULL) {
+            fastrg_mfree(fastrg_ccb->pppoes_stats[lcore_id_err]);
+            fastrg_ccb->pppoes_stats[lcore_id_err] = NULL;
         }
     }
+
     return ERROR;
 }
 
 void sys_cleanup(FastRG_t *fastrg_ccb)
 {
-    for(int i=0; i<PORT_AMOUNT; i++) {
-        if (fastrg_ccb->per_subscriber_stats[i] != NULL) {
-            fastrg_mfree(fastrg_ccb->per_subscriber_stats[i]);
-            fastrg_ccb->per_subscriber_stats[i] = NULL;
+    unsigned int lcore_id;
+    RTE_LCORE_FOREACH(lcore_id) {
+        for(int i=0; i<PORT_AMOUNT; i++) {
+            if (fastrg_ccb->per_subscriber_stats[lcore_id][i] != NULL) {
+                fastrg_mfree(fastrg_ccb->per_subscriber_stats[lcore_id][i]);
+                fastrg_ccb->per_subscriber_stats[lcore_id][i] = NULL;
+            }
+        }
+        if (fastrg_ccb->pppoes_stats[lcore_id] != NULL) {
+            fastrg_mfree(fastrg_ccb->pppoes_stats[lcore_id]);
+            fastrg_ccb->pppoes_stats[lcore_id] = NULL;
         }
     }
 

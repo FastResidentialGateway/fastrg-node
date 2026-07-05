@@ -11,6 +11,7 @@
 #include <rte_icmp.h>
 
 #include "../src/dp_codec.h"
+#include "../src/dp.h"
 #include "../src/protocol.h"
 #include "../src/fastrg.h"
 #include "test_helper.h"
@@ -190,6 +191,44 @@ void test_build_icmp_unreach(FastRG_t *fastrg_ccb)
         calculated_icmp_cksum, saved_icmp_cksum);
 }
 
+/* Per-lcore subscriber stats: each data/ctrl lcore writes ONLY its own
+ * per_ccb_stats row with a plain += (no atomic); readers sum the rows. Verify
+ * the write inlines accumulate correctly and that summing two separate per-lcore
+ * rows yields the combined total (the metrics / gRPC reader invariant). */
+static void test_per_lcore_stats_sum(FastRG_t *fastrg_ccb)
+{
+    (void)fastrg_ccb;
+    struct per_ccb_stats row_a, row_b;
+    memset(&row_a, 0, sizeof(row_a));
+    memset(&row_b, 0, sizeof(row_b));
+
+    /* lcore A: 3 rx pkts @1000B + 1 drop @100B; lcore B: 2 rx @500B + 1 tx @200B */
+    increase_ccb_rx_count(&row_a, 1000);
+    increase_ccb_rx_count(&row_a, 1000);
+    increase_ccb_rx_count(&row_a, 1000);
+    increase_ccb_drop_count(&row_a, 100);
+    increase_ccb_rx_count(&row_b, 500);
+    increase_ccb_rx_count(&row_b, 500);
+    increase_ccb_tx_count(&row_b, 200);
+
+    TEST_ASSERT(row_a.rx_packets == 3 && row_a.rx_bytes == 3000,
+        "per-lcore write: row A rx accumulates", "expect 3 pkts / 3000 B");
+    TEST_ASSERT(row_b.rx_packets == 2 && row_b.rx_bytes == 1000,
+        "per-lcore write: row B rx accumulates", "expect 2 pkts / 1000 B");
+    TEST_ASSERT(row_a.dropped_packets == 1 && row_a.dropped_bytes == 100,
+        "per-lcore write: row A drop accumulates", "expect 1 pkt / 100 B");
+
+    /* reader-style sum across the two per-lcore rows for the same subscriber */
+    TEST_ASSERT(row_a.rx_packets + row_b.rx_packets == 5,
+        "per-lcore sum: rx_packets total", "3 + 2 should be 5");
+    TEST_ASSERT(row_a.rx_bytes + row_b.rx_bytes == 4000,
+        "per-lcore sum: rx_bytes total", "3000 + 1000 should be 4000");
+    TEST_ASSERT(row_a.tx_bytes + row_b.tx_bytes == 200,
+        "per-lcore sum: tx_bytes total", "0 + 200 should be 200");
+    TEST_ASSERT(row_a.dropped_packets + row_b.dropped_packets == 1,
+        "per-lcore sum: dropped_packets total", "1 + 0 should be 1");
+}
+
 void test_dp_codec(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 {
     printf("\n");
@@ -201,6 +240,7 @@ void test_dp_codec(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     pass_count = 0;
 
     test_build_icmp_unreach(fastrg_ccb);
+    test_per_lcore_stats_sum(fastrg_ccb);
 
     printf("\n");
     printf("╔════════════════════════════════════════════════════════════╗\n");

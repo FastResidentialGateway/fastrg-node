@@ -1478,7 +1478,7 @@ int lan_dist_rx(void *arg)
                     single_pkt->data_len += pppoe_len;
                     count_rx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                     count_tx_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
-                    increase_pppoes_tx_count(ppp_ccb, single_pkt->pkt_len);
+                    increase_pppoes_tx_count(fastrg_ccb, ccb_id, single_pkt->pkt_len);
                     wan_pkt[total_wan_tx++] = single_pkt;
                 } else if (ip_hdr->next_proto_id == PROTO_TYPE_TCP) {
                     /* TCP → NAT + PPPoE encap (offloaded to worker) */
@@ -1669,7 +1669,7 @@ void wan_ctrl_tx(FastRG_t *fastrg_ccb, U16 ccb_id, U8 *mu, U16 mulen)
     pkt = rte_pktmbuf_alloc(direct_pool[0]);
     if (pkt == NULL) {
         {
-            struct per_ccb_stats *__stats = OPENRG_GET_PER_SUBSCRIBER_STATS(fastrg_ccb, WAN_PORT, ccb_id);
+            struct per_ccb_stats *__stats = FASTRG_GET_PER_SUBSCRIBER_STATS(fastrg_ccb, WAN_PORT, ccb_id);
             if (likely(__stats)) increase_ccb_drop_count(__stats, mulen);
         };
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "wan_ctrl_tx failed: rte_pktmbuf_alloc failed: %s\n", rte_strerror(rte_errno));
@@ -1692,7 +1692,7 @@ void lan_ctrl_tx(FastRG_t *fastrg_ccb, U16 ccb_id, U8 *mu, U16 mulen)
     pkt = rte_pktmbuf_alloc(direct_pool[0]);
     if (pkt == NULL) {
         {
-            struct per_ccb_stats *__stats = OPENRG_GET_PER_SUBSCRIBER_STATS(fastrg_ccb, LAN_PORT, ccb_id);
+            struct per_ccb_stats *__stats = FASTRG_GET_PER_SUBSCRIBER_STATS(fastrg_ccb, LAN_PORT, ccb_id);
             if (likely(__stats)) increase_ccb_drop_count(__stats, mulen);
         };
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "lan_ctrl_tx failed: rte_pktmbuf_alloc failed: %s\n", rte_strerror(rte_errno));
