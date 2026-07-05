@@ -43,6 +43,8 @@
 
 #define BURST_SIZE 32
 
+#define PREFETCH_OFFSET 4
+
 #define	IPV4_MTU_DEFAULT	RTE_ETHER_MTU
 #define	IPV6_MTU_DEFAULT	RTE_ETHER_MTU
 
@@ -311,6 +313,31 @@ static inline void send2cp(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt,
 }
 
 /**
+ * @fn rx_prefetch_prologue
+ *
+ * @brief Prime an l3fwd-style rolling prefetch pipeline: prefetch the packet
+ *      data (not the mbuf struct, which is already hot from the PMD write)
+ *      of the first k packets of a burst, so the steady-state loop can keep
+ *      prefetch running PREFETCH_OFFSET packets ahead of processing instead
+ *      of prefetching a packet immediately before it is used.
+ * @param pkt
+ *      Burst array of received mbufs
+ * @param nb_rx
+ *      Number of valid entries in pkt
+ * @return
+ *      k = min(PREFETCH_OFFSET, nb_rx), the number of packets prefetched;
+ *      the caller's loop should prefetch pkt[i + k] before processing pkt[i]
+ */
+static inline U16 rx_prefetch_prologue(struct rte_mbuf **pkt, U16 nb_rx)
+{
+    U16 k = RTE_MIN((U16)PREFETCH_OFFSET, nb_rx);
+
+    for(U16 j=0; j<k; j++)
+        rte_prefetch0(rte_pktmbuf_mtod(pkt[j], void *));
+    return k;
+}
+
+/**
  * wan_ctrl_rx - WAN port queue 0 handler.
  *
  * Handles PPPoE control (discovery + LCP/IPCP/PAP) → send2cp,
@@ -345,9 +372,11 @@ int wan_ctrl_rx(void *arg)
         uint64_t _t0 = rte_rdtsc();
         nb_rx = rte_eth_rx_burst(WAN_PORT, rx_q, pkt, BURST_SIZE);
         fastrg_rcu_dp_quiescent(fastrg_ccb);
+        U16 pf_k = rx_prefetch_prologue(pkt, nb_rx);
         for(int i=0; i<nb_rx; i++) {
+            if (i + pf_k < nb_rx)
+                rte_prefetch0(rte_pktmbuf_mtod(pkt[i + pf_k], void *));
             single_pkt = pkt[i];
-            rte_prefetch0(rte_pktmbuf_mtod(single_pkt, void *));
             if (unlikely(parse_l2_hdr(fastrg_ccb, single_pkt, WAN_PORT) == ERROR)) {
                 drop_packet(fastrg_ccb, single_pkt, WAN_PORT, fastrg_ccb->user_count);
                 continue;
@@ -476,9 +505,11 @@ int wan_data_rx(void *arg)
         uint64_t _t0 = rte_rdtsc();
         nb_rx = rte_eth_rx_burst(WAN_PORT, rx_q, pkt, BURST_SIZE);
         fastrg_rcu_dp_quiescent(fastrg_ccb);
+        U16 pf_k = rx_prefetch_prologue(pkt, nb_rx);
         for(int i=0; i<nb_rx; i++) {
+            if (i + pf_k < nb_rx)
+                rte_prefetch0(rte_pktmbuf_mtod(pkt[i + pf_k], void *));
             single_pkt = pkt[i];
-            rte_prefetch0(rte_pktmbuf_mtod(single_pkt, void *));
             if (unlikely(parse_l2_hdr(fastrg_ccb, single_pkt, WAN_PORT) == ERROR)) {
                 drop_packet(fastrg_ccb, single_pkt, WAN_PORT, fastrg_ccb->user_count);
                 continue;
@@ -599,9 +630,11 @@ int lan_ctrl_rx(void *arg)
         uint64_t _t0 = rte_rdtsc();
         nb_rx = rte_eth_rx_burst(LAN_PORT, rx_q, rx_pkt, BURST_SIZE);
         fastrg_rcu_dp_quiescent(fastrg_ccb);
+        U16 pf_k = rx_prefetch_prologue(rx_pkt, nb_rx);
         for(int i=0; i<nb_rx; i++) {
+            if (i + pf_k < nb_rx)
+                rte_prefetch0(rte_pktmbuf_mtod(rx_pkt[i + pf_k], void *));
             single_pkt = rx_pkt[i];
-            rte_prefetch0(rte_pktmbuf_mtod(single_pkt, void *));
             if (unlikely(parse_l2_hdr(fastrg_ccb, single_pkt, LAN_PORT) == ERROR)) {
                 drop_packet(fastrg_ccb, single_pkt, LAN_PORT, fastrg_ccb->user_count);
                 continue;
@@ -821,9 +854,11 @@ int lan_data_rx(void *arg)
         uint64_t _t0 = rte_rdtsc();
         nb_rx = rte_eth_rx_burst(LAN_PORT, rx_q, rx_pkt, BURST_SIZE);
         fastrg_rcu_dp_quiescent(fastrg_ccb);
+        U16 pf_k = rx_prefetch_prologue(rx_pkt, nb_rx);
         for(int i=0; i<nb_rx; i++) {
+            if (i + pf_k < nb_rx)
+                rte_prefetch0(rte_pktmbuf_mtod(rx_pkt[i + pf_k], void *));
             single_pkt = rx_pkt[i];
-            rte_prefetch0(rte_pktmbuf_mtod(single_pkt, void *));
             if (unlikely(parse_l2_hdr(fastrg_ccb, single_pkt, LAN_PORT) == ERROR)) {
                 drop_packet(fastrg_ccb, single_pkt, LAN_PORT, fastrg_ccb->user_count);
                 continue;
@@ -1014,9 +1049,11 @@ int wan_dist_rx(void *arg)
         uint64_t _t0 = rte_rdtsc();
         nb_rx = rte_eth_rx_burst(WAN_PORT, rx_q, pkt, BURST_SIZE);
         dist_n = 0;
+        U16 pf_k = rx_prefetch_prologue(pkt, nb_rx);
         for(int i=0; i<nb_rx; i++) {
+            if (i + pf_k < nb_rx)
+                rte_prefetch0(rte_pktmbuf_mtod(pkt[i + pf_k], void *));
             single_pkt = pkt[i];
-            rte_prefetch0(rte_pktmbuf_mtod(single_pkt, void *));
             if (unlikely(parse_l2_hdr(fastrg_ccb, single_pkt, WAN_PORT) == ERROR)) {
                 drop_packet(fastrg_ccb, single_pkt, WAN_PORT, fastrg_ccb->user_count);
                 continue;
@@ -1182,7 +1219,10 @@ int wan_dist_worker(void *arg)
     while(likely(rte_atomic16_read(&stop_flag) == 0)) {
         uint64_t _t0 = rte_rdtsc();
         U16 total_tx = 0;
+        U16 pf_k = rx_prefetch_prologue(bufs, (U16)n);
         for(int i=0; i<n; i++) {
+            if (i + pf_k < n)
+                rte_prefetch0(rte_pktmbuf_mtod(bufs[i + pf_k], void *));
             single_pkt = bufs[i];
             mbuf_priv_t *mbuf_priv = rte_mbuf_to_priv(single_pkt);
             eth_hdr = mbuf_priv->eth_hdr;
@@ -1267,9 +1307,11 @@ int lan_dist_rx(void *arg)
         uint64_t _t0 = rte_rdtsc();
         nb_rx = rte_eth_rx_burst(LAN_PORT, rx_q, rx_pkt, BURST_SIZE);
         dist_n = 0;
+        U16 pf_k = rx_prefetch_prologue(rx_pkt, nb_rx);
         for(int i=0; i<nb_rx; i++) {
+            if (i + pf_k < nb_rx)
+                rte_prefetch0(rte_pktmbuf_mtod(rx_pkt[i + pf_k], void *));
             single_pkt = rx_pkt[i];
-            rte_prefetch0(rte_pktmbuf_mtod(single_pkt, void *));
             if (unlikely(parse_l2_hdr(fastrg_ccb, single_pkt, LAN_PORT) == ERROR)) {
                 drop_packet(fastrg_ccb, single_pkt, LAN_PORT, fastrg_ccb->user_count);
                 continue;
@@ -1618,7 +1660,10 @@ int lan_dist_worker(void *arg)
     while(likely(rte_atomic16_read(&stop_flag) == 0)) {
         uint64_t _t0 = rte_rdtsc();
         U16 total_wan_tx = 0;
+        U16 pf_k = rx_prefetch_prologue(bufs, (U16)n);
         for(int i=0; i<n; i++) {
+            if (i + pf_k < n)
+                rte_prefetch0(rte_pktmbuf_mtod(bufs[i + pf_k], void *));
             single_pkt = bufs[i];
             mbuf_priv_t *mbuf_priv = rte_mbuf_to_priv(single_pkt);
             eth_hdr = mbuf_priv->eth_hdr;
