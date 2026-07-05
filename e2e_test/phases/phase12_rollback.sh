@@ -33,6 +33,36 @@ _p13_wait_etcd_vlan() {
     return 1
 }
 
+# Helper: this phase deliberately writes an invalid vlan_id=0 config into
+# USER_ID's canonical hsi fixture (Step 43) and a stray never-configured-user
+# key (Step 44) to trigger controller rollback. Both are normally cleaned up
+# inline once each step's assertions finish, but if the phase dies mid-step
+# (before the controller rolls back / before the inline stray-key delete),
+# the bad state would otherwise survive into the next run. Idempotent —
+# checks current etcd state before acting. Called at end of phase12 AND from
+# the cleanup_fastrg EXIT trap.
+_cleanup_phase12_rollback() {
+    [[ -z "${NODE_UUID:-}" ]] && return
+    if [[ -n "${_P12_NEW_UID:-}" ]]; then
+        local _chk
+        _chk=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/${_P12_NEW_UID}" 2>/dev/null || true)
+        if [[ -n "$_chk" ]]; then
+            info "Cleanup(phase12): removing stray test key hsi/${_P12_NEW_UID}..."
+            ssh_node "ETCDCTL_API=3 etcdctl --endpoints=${ETCD_ENDPOINT} del configs/${NODE_UUID}/hsi/${_P12_NEW_UID}" \
+                >/dev/null 2>&1 || true
+        fi
+    fi
+    if [[ -n "${_P12_ORIG_VLAN:-}" ]]; then
+        local _cur_vlan
+        _cur_vlan=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/${USER_ID}" 2>/dev/null | \
+            jq -r '.config.vlan_id // empty' 2>/dev/null || true)
+        if [[ "$_cur_vlan" != "${_P12_ORIG_VLAN}" ]]; then
+            info "Cleanup(phase12): hsi/${USER_ID} vlan=${_cur_vlan} (expected ${_P12_ORIG_VLAN}); restoring canonical fixture..."
+            ssh_node "bash /root/fastrg-node/e2e_test/restore_etcd_config.sh --force" >/dev/null 2>&1 || true
+        fi
+    fi
+}
+
 phase12_rollback() {
     bold "═══════════════════════════════════════════════════════"
     bold " Phase 12 — Config-Apply Failure + Rollback (Steps 43-44)"
@@ -53,6 +83,9 @@ phase12_rollback() {
     _p13_cur_vlan=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/${USER_ID}" 2>/dev/null | \
         jq -r '.config.vlan_id // empty' 2>/dev/null || true)
     info "  current etcd: acct=${_p13_cur_acct} vlan=${_p13_cur_vlan}"
+    # Not `local`: arms _cleanup_phase12_rollback (callable from the
+    # cleanup_fastrg EXIT trap) before the bad config is written below.
+    _P12_ORIG_VLAN="$_p13_cur_vlan"
 
     # Write an invalid config (vlan_id=0 is always rejected by the node).
     local _p13_now
@@ -100,6 +133,9 @@ phase12_rollback() {
     local _sc
     _sc=$(fastrg_grpc get_system_info 2>/dev/null | jq -r '.num_users // 0' 2>/dev/null || echo 0)
     local _new_uid=$(( _sc + 50 ))   # well beyond count so apply definitely fails
+    # Not `local`: arms _cleanup_phase12_rollback's stray-key delete before
+    # the bad config for this user is written below.
+    _P12_NEW_UID="$_new_uid"
     local _p13_bad2
     _p13_bad2=$(printf \
         '{"config":{"account_name":"e2e_new_bad","dhcp_addr_pool":"10.99.0.2-10.99.0.10","dhcp_gateway":"10.99.0.1","dhcp_subnet":"255.255.255.0","password":"x","user_id":"%s","vlan_id":"199","desire_status":"connect"},"metadata":{"node":"%s","resourceVersion":"1","updatedAt":"%s","updatedBy":"e2e_rollback_test"}}' \
@@ -138,20 +174,9 @@ phase12_rollback() {
             >/dev/null 2>&1 || true
     fi
 
-    # ------------------------------------------------------------------
-    # Unconditional cleanup: Step 43 wrote vlan=0 into configs/.../hsi/USER_ID.
-    # If the controller rollback succeeded the key is already correct; if it
-    # failed (Kafka consumer down etc.) the bad config is still there.
-    # Either way, force-restore the canonical fixture so subsequent phases
-    # (diff, kafka, summary) and the NEXT run all see the correct state.
-    # ------------------------------------------------------------------
-    local _cur_vlan
-    _cur_vlan=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/${USER_ID}" 2>/dev/null | \
-        jq -r '.config.vlan_id // empty' 2>/dev/null || true)
-    if [[ "$_cur_vlan" != "${_p13_cur_vlan}" ]]; then
-        info "Phase 12 cleanup: hsi/${USER_ID} vlan=${_cur_vlan} (expected ${_p13_cur_vlan}); restoring canonical fixture..."
-        ssh_node "bash /root/fastrg-node/e2e_test/restore_etcd_config.sh --force" \
-            >/dev/null 2>&1 || true
-        info "  canonical fixture restored"
-    fi
+    # Unconditional cleanup: Step 43 wrote vlan=0 into configs/.../hsi/USER_ID,
+    # and Step 44 may have left a stray key if its own fail-branch delete above
+    # didn't run. Either way, force-restore/delete so subsequent phases (diff,
+    # kafka, summary) and the NEXT run all see the correct state.
+    _cleanup_phase12_rollback
 }

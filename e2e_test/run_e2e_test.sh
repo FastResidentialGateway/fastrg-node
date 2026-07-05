@@ -421,6 +421,9 @@ cleanup_fastrg() {
     # Best-effort: remove new subscriber config if the test left it in etcd
     _cleanup_new_subscriber_config 2>/dev/null || true
     _cleanup_phase9_user 2>/dev/null || true
+    _cleanup_phase9_cli_fallback 2>/dev/null || true
+    _cleanup_phase12_rollback 2>/dev/null || true
+    _cleanup_phase16_rcu_concurrency 2>/dev/null || true
 
     if [[ "${_FASTRG_STARTED_BY_SCRIPT:-0}" -eq 1 ]]; then
         info "Stopping fastrg (started by this script)..."

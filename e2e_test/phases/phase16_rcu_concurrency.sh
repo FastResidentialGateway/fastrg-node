@@ -15,6 +15,18 @@
 # crash. Both steps passing under sustained load confirms reader/writer
 # concurrency is correct.
 # ---------------------------------------------------------------------------
+# Helper: restore the subscriber count churned by the Step 64 loop below +
+# stop the iperf3 server. Idempotent (set_subscriber_count/pkill both tolerate
+# an already-correct/already-dead target). Called at end of phase16 AND from
+# the cleanup_fastrg EXIT trap.
+_cleanup_phase16_rcu_concurrency() {
+    [[ -z "${_cnt_orig:-}" ]] && return
+    [[ "${_cnt_orig}" -le 0 ]] 2>/dev/null && return
+    info "Cleanup(phase16): restoring subscriber count to ${_cnt_orig}..."
+    fastrg_grpc set_subscriber_count "${_cnt_orig}" >/dev/null 2>&1 || true
+    ssh_wan "pkill -f 'iperf3 -s' 2>/dev/null || true" || true
+}
+
 phase16_rcu_concurrency() {
     bold "═══════════════════════════════════════════════════════"
     bold " Phase 16 — RCU reader/writer concurrency under load"
@@ -23,8 +35,10 @@ phase16_rcu_concurrency() {
     local SRV_PORT=5901
     local ITERS=8
 
-    local _sys _cnt_orig
+    local _sys
     _sys=$(fastrg_grpc get_system_info)
+    # We can't set _cnt_orig to local, because the cleanup_fastrg EXIT trap calls
+    # _cleanup_phase16_rcu_concurrency from outside this function's scope.
     _cnt_orig=$(printf '%s' "$_sys" | jq -r '.num_users // 0' 2>/dev/null || echo 0)
     if [[ "${_cnt_orig:-0}" -le 0 ]]; then
         skip "Step 64: writer churn under load" "cannot read subscriber count"

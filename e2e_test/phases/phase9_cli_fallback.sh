@@ -20,6 +20,19 @@ _p10_cli() {
     ssh_node "printf '${_cmds}quit\n' | /usr/local/bin/fastrg_cli -i 127.0.0.1:${FASTRG_GRPC_PORT} ${_flags} 2>&1"
 }
 
+# Helper: disconnect/remove Phase 9 CLI test users + restore subscriber count.
+# Idempotent (all calls already tolerate a missing target). Called at end of
+# phase9 AND from the cleanup_fastrg EXIT trap.
+_cleanup_phase9_cli_fallback() {
+    [[ -z "${NODE_UUID:-}" ]] && return
+    [[ -n "${_U1:-}" ]] && fastrg_grpc disconnect_hsi "${_U1}" >/dev/null 2>&1 || true
+    [[ -n "${_U2:-}" ]] && fastrg_grpc disconnect_hsi "${_U2}" >/dev/null 2>&1 || true
+    sleep 4
+    [[ -n "${_U1:-}" ]] && fastrg_grpc remove_config "${_U1}" >/dev/null 2>&1 || true
+    [[ -n "${_U2:-}" ]] && fastrg_grpc remove_config "${_U2}" >/dev/null 2>&1 || true
+    [[ -n "${_P9_ORIG_SUB_COUNT:-}" ]] && fastrg_grpc set_subscriber_count "${_P9_ORIG_SUB_COUNT}" >/dev/null 2>&1 || true
+}
+
 phase9_cli_fallback() {
     bold "═══════════════════════════════════════════════════════"
     bold " Phase 9 — CLI three-tier write fallback (Steps 36-38)"
@@ -45,8 +58,10 @@ phase9_cli_fallback() {
         [[ $_p9_cur_sc -lt 2 ]] && _p9_cur_sc=2
     fi
     # Ensure _U1/_U2 are always > USER_ID + 3 to avoid colliding with it.
-    local _U1=$(( _p9_cur_sc + 2 ))
-    local _U2=$(( _p9_cur_sc + 3 ))
+    # Not `local`: the cleanup_fastrg EXIT trap calls _cleanup_phase9_cli_fallback
+    # from outside this function's scope and needs to see these values.
+    _U1=$(( _p9_cur_sc + 2 ))
+    _U2=$(( _p9_cur_sc + 3 ))
     [[ $_U1 -le $(( USER_ID + 3 )) ]] && { _U1=$(( USER_ID + 4 )); _U2=$(( USER_ID + 5 )); }
     # Make room for the test users — wait until the node reports the new count
     # so that user-IDs _U1/_U2 are within range before we create their configs
@@ -128,10 +143,5 @@ phase9_cli_fallback() {
 
     # Cleanup test users: disconnect PPPoE first (clears ppp_bool) so the node
     # can honour remove_hsi_config's "PPPoE must be inactive" guard next run.
-    fastrg_grpc disconnect_hsi "${_U1}" >/dev/null 2>&1 || true
-    fastrg_grpc disconnect_hsi "${_U2}" >/dev/null 2>&1 || true
-    sleep 4
-    fastrg_grpc remove_config "${_U1}" >/dev/null 2>&1 || true
-    fastrg_grpc remove_config "${_U2}" >/dev/null 2>&1 || true
-    [[ -n "${_P9_ORIG_SUB_COUNT:-}" ]] && fastrg_grpc set_subscriber_count "${_P9_ORIG_SUB_COUNT}" >/dev/null 2>&1 || true
+    _cleanup_phase9_cli_fallback
 }
