@@ -21,11 +21,19 @@
 #include <rte_atomic.h>
 #include <rte_memcpy.h>
 #include <rte_hash_crc.h>
+#include <rte_hash.h>
+#include <rte_ring.h>
+#include <rte_rcu_qsbr.h>
 
 #include "pppd.h"
 #include "tcp_conntrack.h"
 
 #define NAT_ENTRY_TIMEOUT_SEC 10
+
+/* Slots examined per amortized/emergency GC scan call. Bounded so the
+ * inline hot-path cost stays small; the nat_gc_ccb_counter persists 
+ * across calls, so successive calls cover the whole pool. */
+#define NAT_GC_SCAN_CHUNK 512
 
 #define MAX_L4_PORT_NUM 0xffff
 #define SYS_MAX_PORT 1000
@@ -64,28 +72,220 @@ static inline int nat_entry_is_expired(addr_table_t *entry)
 }
 
 /**
- * @fn compute_nat_table_index
- * 
- * @brief Compute NAT table index by using nat_port(calculated in 
- *        compute_initial_nat_port), dst_ip, dst_port
- *        Table index is SEPARATE from NAT port - this enables true port reuse
- * 
- * @param nat_port 
- *        NAT port calculated in compute_initial_nat_port() in network byte order
- * @param dst_ip
- *        Destination IP in network byte order
- * @param dst_port
- *        Destination port in network byte order
- * 
- * @return Hash value in range 0 to MAX_NAT_ENTRIES - 1
+ * @brief Reverse-direction NAT key: identifies a mapping from the WAN side.
+ *        (nat_port, dst_ip, dst_port) — dst included so the same nat_port can
+ *        be reused toward different destinations (true port reuse).
+ *        8 bytes, naturally packed (no padding) — required, rte_hash compares
+ *        raw key bytes.
  */
-static inline U32 compute_nat_table_index(U16 nat_port, U32 dst_ip, U16 dst_port)
+typedef struct nat_reverse_key {
+    U32 dst_ip;   /* remote IP, network byte order */
+    U16 nat_port; /* our SNAT port, network byte order */
+    U16 dst_port; /* remote port, network byte order */
+} nat_reverse_key_t;
+
+/**
+ * @fn nat_reverse_hash_free_cb
+ *
+ * @brief RCU defer-queue callback invoked by rte_hash once all data-plane
+ *        readers have passed a quiescent state after a key deletion: only
+ *        then is it safe to mark the pool slot FREE and recycle its index,
+ *        because no reader can still hold a pointer to the entry.
+ *
+ * @param p
+ *      ppp_ccb_t of the owning subscriber (rcu cfg key_data_ptr)
+ * @param key_data
+ *      Pool slot index stored as the hash value (cast via uintptr_t)
+ */
+static inline void nat_reverse_hash_free_cb(void *p, void *key_data)
 {
-    U32 hash;
-    hash = rte_hash_crc_4byte((U32)rte_be_to_cpu_16(nat_port), 0);
-    hash = rte_hash_crc_4byte(dst_ip, hash);
-    hash = rte_hash_crc_4byte((U32)dst_port, hash);
-    return hash % MAX_NAT_ENTRIES;
+    ppp_ccb_t *ppp_ccb = (ppp_ccb_t *)p;
+    U32 idx = (U32)(uintptr_t)key_data;
+
+    rte_atomic16_set(&ppp_ccb->addr_table[idx].is_fill, NAT_ENTRY_FREE);
+    rte_ring_enqueue(ppp_ccb->nat_free_ring, (void *)(uintptr_t)idx);
+}
+
+/**
+ * @fn nat_table_reset
+ *
+ * @brief Flush all NAT state of a subscriber: empty the reverse hash and
+ *        refill the free-list with every pool index.  Control-plane only
+ *        (subscriber re-init), must not race data-plane traffic for this sub.
+ *
+ * @param ppp_ccb
+ *      Subscriber control block
+ */
+static inline void nat_table_reset(ppp_ccb_t *ppp_ccb)
+{
+    rte_hash_reset(ppp_ccb->nat_reverse_hash);
+    rte_ring_reset(ppp_ccb->nat_free_ring);
+    for(U32 i=0; i<MAX_NAT_ENTRIES; i++) {
+        rte_atomic16_set(&ppp_ccb->addr_table[i].is_fill, NAT_ENTRY_FREE);
+        rte_ring_enqueue(ppp_ccb->nat_free_ring, (void *)(uintptr_t)i);
+    }
+    ppp_ccb->nat_gc_counter = 0;
+}
+
+/**
+ * @fn nat_table_init
+ *
+ * @brief Create-once (find-existing on re-create, mirroring arp_pq naming
+ *        rules) the per-subscriber reverse hash + free-list ring, attach the
+ *        shared QSBR RCU for deferred slot reclaim, and fill the free-list.
+ *
+ * @param ppp_ccb
+ *      Subscriber control block
+ * @param ccb_id
+ *      Subscriber index, used for unique DPDK object naming
+ * @param rcu
+ *      QSBR variable shared with the data-plane lcores (ppp_ccb_rcu)
+ *
+ * @return SUCCESS / ERROR
+ */
+static inline STATUS nat_table_init(ppp_ccb_t *ppp_ccb, U16 ccb_id, struct rte_rcu_qsbr *rcu)
+{
+    char name[RTE_RING_NAMESIZE];
+
+    snprintf(name, sizeof(name), "nat_reverse_%u", ccb_id);
+    ppp_ccb->nat_reverse_hash = rte_hash_find_existing(name);
+    if (ppp_ccb->nat_reverse_hash == NULL) {
+        struct rte_hash_parameters params = {
+            .name = name,
+            .entries = MAX_NAT_ENTRIES,
+            .key_len = sizeof(nat_reverse_key_t),
+            .hash_func = rte_hash_crc,
+            .hash_func_init_val = 0,
+            .socket_id = (int)rte_socket_id(),
+            .extra_flag = RTE_HASH_EXTRA_FLAGS_RW_CONCURRENCY_LF |
+                          RTE_HASH_EXTRA_FLAGS_MULTI_WRITER_ADD,
+        };
+        ppp_ccb->nat_reverse_hash = rte_hash_create(&params);
+        if (ppp_ccb->nat_reverse_hash == NULL)
+            return ERROR;
+        struct rte_hash_rcu_config rcu_cfg = {
+            .v = rcu,
+            .mode = RTE_HASH_QSBR_MODE_DQ,
+            .key_data_ptr = ppp_ccb,
+            .free_key_data_func = nat_reverse_hash_free_cb,
+        };
+        if (rte_hash_rcu_qsbr_add(ppp_ccb->nat_reverse_hash, &rcu_cfg) != 0) {
+            rte_hash_free(ppp_ccb->nat_reverse_hash);
+            ppp_ccb->nat_reverse_hash = NULL;
+            return ERROR;
+        }
+    }
+
+    snprintf(name, sizeof(name), "nat_free_%u", ccb_id);
+    ppp_ccb->nat_free_ring = rte_ring_lookup(name);
+    if (ppp_ccb->nat_free_ring == NULL) {
+        ppp_ccb->nat_free_ring = rte_ring_create(name, MAX_NAT_ENTRIES,
+            (int)rte_socket_id(), RING_F_EXACT_SZ);
+        if (ppp_ccb->nat_free_ring == NULL) {
+            rte_hash_free(ppp_ccb->nat_reverse_hash);
+            ppp_ccb->nat_reverse_hash = NULL;
+            return ERROR;
+        }
+    }
+
+    nat_table_reset(ppp_ccb);
+    return SUCCESS;
+}
+
+/**
+ * @fn nat_table_destroy
+ *
+ * @brief Free the per-subscriber reverse hash + free-list ring (subscriber
+ *        removal / init rollback).  Idempotent.
+ *
+ * @param ppp_ccb
+ *      Subscriber control block
+ */
+static inline void nat_table_destroy(ppp_ccb_t *ppp_ccb)
+{
+    if (ppp_ccb->nat_reverse_hash != NULL) {
+        rte_hash_free(ppp_ccb->nat_reverse_hash);
+        ppp_ccb->nat_reverse_hash = NULL;
+    }
+    if (ppp_ccb->nat_free_ring != NULL) {
+        rte_ring_free(ppp_ccb->nat_free_ring);
+        ppp_ccb->nat_free_ring = NULL;
+    }
+}
+
+/**
+ * @fn nat_gc_scan_by_ccb
+ *
+ * @brief Amortized garbage collection: scan up to max_slots pool slots from
+ *        the per-subscriber cursor and delete the reverse-hash key of every
+ *        expired READY entry.  Slot indices flow back to the free-list via
+ *        the RCU defer-queue callback once readers are quiescent.  Restores
+ *        the self-cleaning property the old probe-walk eviction provided.
+ *        Safe from any lcore (hash is multi-writer; duplicate deletes of the
+ *        same key just return ENOENT).
+ *
+ * @param ppp_ccb
+ *      Subscriber control block
+ * @param max_slots
+ *      Upper bound of slots to examine in this call
+ *
+ * @return
+ *      Number of expired entries whose keys were deleted
+ */
+static inline U32 nat_gc_scan_by_ccb(ppp_ccb_t *ppp_ccb, U32 max_slots)
+{
+    U32 start = __atomic_fetch_add(&ppp_ccb->nat_gc_counter, max_slots, __ATOMIC_RELAXED);
+    U32 reclaimed = 0;
+
+    for(U32 n=0; n<max_slots; n++) {
+        addr_table_t *entry = &ppp_ccb->addr_table[(start + n) % MAX_NAT_ENTRIES];
+
+        if (rte_atomic16_read(&entry->is_fill) != NAT_ENTRY_READY)
+            continue;
+        if (!nat_entry_is_expired(entry))
+            continue;
+        nat_reverse_key_t key = {
+            .dst_ip = entry->dst_ip,
+            .nat_port = entry->nat_port,
+            .dst_port = entry->dst_port,
+        };
+        if (rte_hash_del_key(ppp_ccb->nat_reverse_hash, &key) >= 0)
+            reclaimed++;
+    }
+    return reclaimed;
+}
+
+/**
+ * @fn nat_slot_alloc
+ *
+ * @brief Pop a free pool slot index.  On exhaustion, run an emergency GC
+ *        chunk plus an explicit defer-queue reclaim and retry once — under
+ *        sustained flow churn expired entries are the slots we get back.
+ *
+ * @param ppp_ccb
+ *        Subscriber control block
+ * @param idx
+ *        [out] Allocated pool slot index
+ *
+ * @return SUCCESS, or ERROR if the pool is truly exhausted by live flows
+ */
+static inline STATUS nat_slot_alloc(ppp_ccb_t *ppp_ccb, U32 *idx)
+{
+    void *obj;
+
+    if (likely(rte_ring_dequeue(ppp_ccb->nat_free_ring, &obj) == 0)) {
+        *idx = (U32)(uintptr_t)obj;
+        return SUCCESS;
+    }
+
+    nat_gc_scan_by_ccb(ppp_ccb, NAT_GC_SCAN_CHUNK);
+    unsigned int freed = 0, pending = 0, available = 0;
+    rte_hash_rcu_qsbr_dq_reclaim(ppp_ccb->nat_reverse_hash, &freed, &pending, &available);
+    if (rte_ring_dequeue(ppp_ccb->nat_free_ring, &obj) == 0) {
+        *idx = (U32)(uintptr_t)obj;
+        return SUCCESS;
+    }
+    return ERROR;
 }
 
 /**
@@ -164,150 +364,130 @@ static inline int nat_entry_same_flow(addr_table_t *entry, U16 nat_port,
 
 /**
  * @fn nat_learning_port_reuse
- * 
- * @brief NAT learning with TRUE port reuse support
- * 
- * Key insight: table_idx and nat_port are INDEPENDENT
- * - nat_port: the actual port number used in SNAT (can be reused for different dsts)
- * - table_idx: just a hash bucket in the table (for storage only)
- * 
- * Port reuse logic:
- * - Same (nat_port, dst_ip, dst_port) from different sources = CONFLICT, try next nat_port
- * - Same nat_port with different dst = OK, port reuse achieved!
- * 
+ *
+ * @brief NAT learning with TRUE port reuse support, O(1) per candidate port.
+ *
+ * Port reuse logic (unchanged from the probing implementation):
+ * - Same (nat_port, dst_ip, dst_port) from a different source = CONFLICT, try next nat_port
+ * - Same nat_port with different dst = OK, port reuse achieved
+ *
+ * Each candidate port costs one lock-free rev_hash lookup instead of a probe
+ * walk.  The common per-packet case (flow already learned) is a single lookup
+ * + expiry refresh, fully lock-free.  Only the new-flow miss path takes the
+ * per-subscriber insert lock (double-checked) — rte_hash_add_key_data on an
+ * existing key would silently REPLACE its data, so two lcores racing the same
+ * key must be serialized to avoid leaking a slot and mis-binding a flow.
+ *
+ * @param ppp_ccb
+ *      Subscriber control block (owns pool, rev hash, free-list, port-fwd table)
  * @param eth_hdr
- *        Pointer to Ethernet header (for copying MAC address)
+ *      Pointer to Ethernet header (for copying MAC address)
  * @param src_ip
- *        Source IP in network byte order
+ *      Source IP in network byte order
  * @param dst_ip
- *        Destination IP in network byte order
+ *      Destination IP in network byte order
  * @param src_port
- *        Source port in network byte order
+ *      Source port in network byte order
  * @param dst_port
- *        Destination port in network byte order
- * @param addr_table
- *        NAT address table
- * @param port_fwd_table
- *        Port forwarding table (direct-indexed by port number).
- *        If a candidate nat_port is reserved by a port-forward rule,
- *        it will be skipped to avoid conflict.
- * 
- * @return Allocated nat_port in network byte order, or 0 if all ports exhausted
+ *      Destination port in network byte order
+ * @param out_entry
+ *      [out, may be NULL] The learned/refreshed pool entry, so callers
+ *      (TCP conntrack) need not look it up again
+ *
+ * @return
+ *      Allocated nat_port in network byte order, or 0 if all ports exhausted
  */
-static inline U16 nat_learning_port_reuse(struct rte_ether_hdr *eth_hdr,
-    U32 src_ip, U32 dst_ip, U16 src_port, U16 dst_port,
-    addr_table_t addr_table[], port_fwd_entry_t port_fwd_table[])
+static inline U16 nat_learning_port_reuse(ppp_ccb_t *ppp_ccb, struct rte_ether_hdr *eth_hdr,
+    U32 src_ip, U32 dst_ip, U16 src_port, U16 dst_port, addr_table_t **out_entry)
 {
     U16 nat_port = compute_initial_nat_port(src_ip, src_port);
     U16 start_nat_port = nat_port;
 
     do {
-        /* Skip ports reserved by static port forwarding rules */
         U32 nat_port_host = rte_be_to_cpu_16(nat_port);
-        if (rte_atomic16_read(&port_fwd_table[nat_port_host].is_active) == 1)
+        void *data;
+
+        /* Skip ports reserved by static port forwarding rules */
+        if (rte_atomic16_read(&ppp_ccb->port_fwd_table[nat_port_host].is_active) == 1)
             goto next_nat_port;
 
-        /* Compute table index for this (nat_port, dst_ip, dst_port) combination */
-        U32 table_idx = compute_nat_table_index(nat_port, 
-            dst_ip, dst_port);
-        U32 start_idx = table_idx;
+        nat_reverse_key_t key = { .dst_ip = dst_ip, .nat_port = nat_port, .dst_port = dst_port };
 
-        do {
-            addr_table_t *entry = &addr_table[table_idx];
-            int16_t entry_state = rte_atomic16_read(&entry->is_fill);
+        /* Lock-free fast path: existing mapping for this (port, dst)? */
+        if (rte_hash_lookup_data(ppp_ccb->nat_reverse_hash, &key, &data) >= 0) {
+            addr_table_t *entry = &ppp_ccb->addr_table[(U32)(uintptr_t)data];
 
-            /* Case 1: Empty slot - can use this nat_port */
-            if (entry_state == NAT_ENTRY_FREE) {
-                if (rte_atomic16_cmpset((volatile uint16_t *)&entry->is_fill, 
-                        NAT_ENTRY_FREE, NAT_ENTRY_FILLING)) {
-                    rte_ether_addr_copy(&eth_hdr->src_addr, &entry->mac_addr);
-                    entry->src_ip = src_ip;
-                    entry->dst_ip = dst_ip;
-                    entry->src_port = src_port;
-                    entry->dst_port = dst_port;
-                    entry->nat_port = nat_port;
-                    entry->tcp_state = TCP_CONNTRACK_NONE;
-                    entry->tcp_fin_flags = 0;
-                    entry->max_seq_end_lan = 0;
-                    entry->max_seq_end_wan = 0;
-                    entry->max_ack_lan     = 0;
-                    entry->max_ack_wan     = 0;
-                    entry->max_win_lan     = 0;
-                    entry->max_win_wan     = 0;
-                    rte_atomic64_set(&entry->expire_at, nat_expiry_cycles());
-
-                    rte_atomic_thread_fence(rte_memory_order_release);
-                    rte_atomic16_set(&entry->is_fill, NAT_ENTRY_READY);
-
-                    return entry->nat_port;
-                }
-                /* This slot is being filled by another CPU, continue to check again */
-                continue;
+            /* Same flow already exists — refresh and done (LAN side is
+             * trusted: no expiry check, traffic just revives the mapping) */
+            if (nat_entry_same_flow(entry, nat_port, src_ip, src_port, dst_ip, dst_port)) {
+                rte_atomic64_set(&entry->expire_at, nat_expiry_cycles());
+                if (out_entry != NULL)
+                    *out_entry = entry;
+                return nat_port;
             }
+            /* Different source, still alive: genuine conflict → next port */
+            if (!nat_entry_is_expired(entry))
+                goto next_nat_port;
+            /* Expired mapping of someone else: evict (slot recycles via RCU)
+             * and fall through to insert a fresh entry for us */
+            rte_hash_del_key(ppp_ccb->nat_reverse_hash, &key);
+        }
 
-            /* Case 1.5: Entry is being filled - skip it */
-            if (entry_state == NAT_ENTRY_FILLING) {
-                table_idx++;
-                if (table_idx >= MAX_NAT_ENTRIES)
-                    table_idx = 0;
-                continue;
+        /* Miss (or just evicted): insert under the per-sub lock, re-checking
+         * the key so two lcores can't double-add it (add would replace) */
+        rte_spinlock_lock(&ppp_ccb->nat_insert_lock);
+        if (rte_hash_lookup_data(ppp_ccb->nat_reverse_hash, &key, &data) >= 0) {
+            addr_table_t *entry = &ppp_ccb->addr_table[(U32)(uintptr_t)data];
+
+            rte_spinlock_unlock(&ppp_ccb->nat_insert_lock);
+            if (nat_entry_same_flow(entry, nat_port, src_ip, src_port, dst_ip, dst_port)) {
+                rte_atomic64_set(&entry->expire_at, nat_expiry_cycles());
+                if (out_entry != NULL)
+                    *out_entry = entry;
+                return nat_port;
             }
+            goto next_nat_port; /* raced: someone else owns this key now */
+        }
 
-            /* Case 2: Entry is READY - safe to read */
-            if (entry_state == NAT_ENTRY_READY) {
-                /* Same flow already exists - refresh expiry and return */
-                if (nat_entry_same_flow(entry, nat_port, src_ip, src_port, dst_ip, dst_port)) {
-                    rte_atomic64_set(&entry->expire_at, nat_expiry_cycles());
-                    return entry->nat_port;
-                }
+        U32 idx;
+        if (nat_slot_alloc(ppp_ccb, &idx) != SUCCESS) {
+            rte_spinlock_unlock(&ppp_ccb->nat_insert_lock);
+            return 0; /* pool exhausted by live flows */
+        }
 
-                /* Entry is expired - try to evict and reuse this slot */
-                if (nat_entry_is_expired(entry)) {
-                    if (rte_atomic16_cmpset((volatile uint16_t *)&entry->is_fill,
-                            NAT_ENTRY_READY, NAT_ENTRY_FILLING)) {
-                        if (nat_entry_is_expired(entry)) {
-                            /* Still expired after CAS: evict and reuse */
-                            rte_ether_addr_copy(&eth_hdr->src_addr, &entry->mac_addr);
-                            entry->src_ip = src_ip;
-                            entry->dst_ip = dst_ip;
-                            entry->src_port = src_port;
-                            entry->dst_port = dst_port;
-                            entry->nat_port = nat_port;
-                            entry->tcp_state = TCP_CONNTRACK_NONE;
-                            entry->tcp_fin_flags = 0;
-                            entry->max_seq_end_lan = 0;
-                            entry->max_seq_end_wan = 0;
-                            entry->max_ack_lan     = 0;
-                            entry->max_ack_wan     = 0;
-                            entry->max_win_lan     = 0;
-                            entry->max_win_wan     = 0;
-                            rte_atomic64_set(&entry->expire_at, nat_expiry_cycles());
-                            rte_atomic_thread_fence(rte_memory_order_release);
-                            rte_atomic16_set(&entry->is_fill, NAT_ENTRY_READY);
-                            return entry->nat_port;
-                        }
-                        /* Entry was refreshed between our check and CAS: restore it */
-                        rte_atomic16_set(&entry->is_fill, NAT_ENTRY_READY);
-                    }
-                    /* CAS failed or entry restored: advance to next slot */
-                    table_idx++;
-                    if (table_idx >= MAX_NAT_ENTRIES)
-                        table_idx = 0;
-                    continue;
-                }
+        addr_table_t *entry = &ppp_ccb->addr_table[idx];
+        rte_ether_addr_copy(&eth_hdr->src_addr, &entry->mac_addr);
+        entry->src_ip = src_ip;
+        entry->dst_ip = dst_ip;
+        entry->src_port = src_port;
+        entry->dst_port = dst_port;
+        entry->nat_port = nat_port;
+        entry->tcp_state = TCP_CONNTRACK_NONE;
+        entry->tcp_fin_flags = 0;
+        entry->max_seq_end_lan = 0;
+        entry->max_seq_end_wan = 0;
+        entry->max_ack_lan     = 0;
+        entry->max_ack_wan     = 0;
+        entry->max_win_lan     = 0;
+        entry->max_win_wan     = 0;
+        rte_atomic64_set(&entry->expire_at, nat_expiry_cycles());
+        rte_atomic_thread_fence(rte_memory_order_release);
+        rte_atomic16_set(&entry->is_fill, NAT_ENTRY_READY);
 
-                /* Active conflict: same (nat_port, dst_ip, dst_port), different source */
-                if (nat_entry_matches_key(entry, nat_port, dst_ip, dst_port))
-                    break;
-            }
+        if (rte_hash_add_key_data(ppp_ccb->nat_reverse_hash, &key,
+                (void *)(uintptr_t)idx) < 0) {
+            /* Hash ENOSPC: give the never-published slot straight back */
+            rte_atomic16_set(&entry->is_fill, NAT_ENTRY_FREE);
+            rte_ring_enqueue(ppp_ccb->nat_free_ring, (void *)(uintptr_t)idx);
+            rte_spinlock_unlock(&ppp_ccb->nat_insert_lock);
+            goto next_nat_port;
+        }
+        rte_spinlock_unlock(&ppp_ccb->nat_insert_lock);
 
-            /* Case 3: Hash collision (active entry, different key) - try next slot */
-            table_idx++;
-            if (table_idx >= MAX_NAT_ENTRIES)
-                table_idx = 0;
-        } while (table_idx != start_idx);
+        if (out_entry != NULL)
+            *out_entry = entry;
+        return nat_port;
 
-        /* If we found a conflict or table is full for this nat_port, try next nat_port */
 next_nat_port:
         nat_port_host = rte_be_to_cpu_16(nat_port);
         nat_port_host++;
@@ -339,46 +519,30 @@ next_nat_port:
  * @return Pointer to matching address table entry, or NULL if not found
  */
 static inline addr_table_t *nat_reverse_lookup(U16 nat_port, U32 remote_ip, U16 remote_port,
-    addr_table_t addr_table[])
+    ppp_ccb_t *ppp_ccb)
 {
-    U32 table_idx = compute_nat_table_index(nat_port, remote_ip, remote_port);
-    U32 start_idx = table_idx;
+    nat_reverse_key_t key = { .dst_ip = remote_ip, .nat_port = nat_port, .dst_port = remote_port };
+    void *data;
 
-    do {
-        addr_table_t *entry = &addr_table[table_idx];
+    /* O(1) lock-free lookup — a miss is a miss, no table walk (kills the
+     * port-scan full-scan DoS the probing implementation had) */
+    if (rte_hash_lookup_data(ppp_ccb->nat_reverse_hash, &key, &data) < 0)
+        return NULL;
 
-        /* Skip non-ready entries */
-        if (rte_atomic16_read(&entry->is_fill) != NAT_ENTRY_READY) {
-            table_idx++;
-            if (table_idx >= MAX_NAT_ENTRIES)
-                table_idx = 0;
-            continue;
-        }
+    addr_table_t *entry = &ppp_ccb->addr_table[(U32)(uintptr_t)data];
 
-        /* Entry is ready - safe to read */
-        rte_atomic_thread_fence(rte_memory_order_acquire);
+    rte_atomic_thread_fence(rte_memory_order_acquire);
 
-        /* Evict expired entries encountered during the walk */
-        if (nat_entry_is_expired(entry)) {
-                rte_atomic16_cmpset((volatile uint16_t *)&entry->is_fill,
-                    NAT_ENTRY_READY, NAT_ENTRY_FREE);
-            table_idx++;
-            if (table_idx >= MAX_NAT_ENTRIES)
-                table_idx = 0;
-            continue;
-        }
+    /* WAN side is untrusted: an expired mapping is a miss — inbound traffic
+     * must not revive it (would hold the UDP injection window open forever).
+     * Delete our own key; the slot recycles via the RCU defer queue. */
+    if (nat_entry_is_expired(entry)) {
+        rte_hash_del_key(ppp_ccb->nat_reverse_hash, &key);
+        return NULL;
+    }
 
-        if (nat_entry_matches_key(entry, nat_port, remote_ip, remote_port)) {
-            rte_atomic64_set(&entry->expire_at, nat_expiry_cycles());
-            return entry;
-        }
-
-        table_idx++;
-        if (table_idx >= MAX_NAT_ENTRIES)
-            table_idx = 0;
-    } while (table_idx != start_idx);
-
-    return NULL;
+    rte_atomic64_set(&entry->expire_at, nat_expiry_cycles());
+    return entry;
 }
 
 /**
@@ -399,14 +563,12 @@ static inline addr_table_t *nat_reverse_lookup(U16 nat_port, U32 remote_ip, U16 
  * 
  * @return NAT port in network byte order, or 0 if all ports exhausted
  */
-static inline U16 nat_icmp_learning(struct rte_ether_hdr *eth_hdr, 
-    struct rte_ipv4_hdr *ip_hdr, struct rte_icmp_hdr *icmphdr, 
-    addr_table_t addr_table[], port_fwd_entry_t port_fwd_table[])
+static inline U16 nat_icmp_learning(ppp_ccb_t *ppp_ccb, struct rte_ether_hdr *eth_hdr,
+    struct rte_ipv4_hdr *ip_hdr, struct rte_icmp_hdr *icmphdr)
 {
-    return nat_learning_port_reuse(eth_hdr,
+    return nat_learning_port_reuse(ppp_ccb, eth_hdr,
         ip_hdr->src_addr, ip_hdr->dst_addr,
-        icmphdr->icmp_ident, icmphdr->icmp_type,
-        addr_table, port_fwd_table);
+        icmphdr->icmp_ident, icmphdr->icmp_type, NULL);
 }
 
 /**
@@ -427,14 +589,12 @@ static inline U16 nat_icmp_learning(struct rte_ether_hdr *eth_hdr,
  * 
  * @return NAT port in network byte order, or 0 if all ports exhausted
  */
-static inline U16 nat_udp_learning(struct rte_ether_hdr *eth_hdr, 
-    struct rte_ipv4_hdr *ip_hdr, struct rte_udp_hdr *udphdr, 
-    addr_table_t addr_table[], port_fwd_entry_t port_fwd_table[])
+static inline U16 nat_udp_learning(ppp_ccb_t *ppp_ccb, struct rte_ether_hdr *eth_hdr,
+    struct rte_ipv4_hdr *ip_hdr, struct rte_udp_hdr *udphdr)
 {
-    return nat_learning_port_reuse(eth_hdr,
+    return nat_learning_port_reuse(ppp_ccb, eth_hdr,
         ip_hdr->src_addr, ip_hdr->dst_addr,
-        udphdr->src_port, udphdr->dst_port,
-        addr_table, port_fwd_table);
+        udphdr->src_port, udphdr->dst_port, NULL);
 }
 
 /**
@@ -455,39 +615,24 @@ static inline U16 nat_udp_learning(struct rte_ether_hdr *eth_hdr,
  * 
  * @return NAT port in network byte order, or 0 if all ports exhausted
  */
-static inline U16 nat_tcp_learning(struct rte_ether_hdr *eth_hdr, 
-    struct rte_ipv4_hdr *ip_hdr, struct rte_tcp_hdr *tcphdr, 
-    addr_table_t addr_table[], port_fwd_entry_t port_fwd_table[])
+static inline U16 nat_tcp_learning(ppp_ccb_t *ppp_ccb, struct rte_ether_hdr *eth_hdr,
+    struct rte_ipv4_hdr *ip_hdr, struct rte_tcp_hdr *tcphdr)
 {
-    U16 nat_port = nat_learning_port_reuse(eth_hdr,
+    addr_table_t *entry = NULL;
+    U16 nat_port = nat_learning_port_reuse(ppp_ccb, eth_hdr,
         ip_hdr->src_addr, ip_hdr->dst_addr,
-        tcphdr->src_port, tcphdr->dst_port,
-        addr_table, port_fwd_table);
+        tcphdr->src_port, tcphdr->dst_port, &entry);
 
-    if (nat_port != 0) {
-        /* Find the entry and run the TCP conntrack FSM (LAN direction) */
-        U32 table_idx = compute_nat_table_index(nat_port,
-            ip_hdr->dst_addr, tcphdr->dst_port);
-        U32 start_idx = table_idx;
-        do {
-            addr_table_t *entry = &addr_table[table_idx];
-            if (rte_atomic16_read(&entry->is_fill) == NAT_ENTRY_READY &&
-                    nat_entry_matches_key(entry, nat_port,
-                        ip_hdr->dst_addr, tcphdr->dst_port)) {
-                /* LAN→WAN: trusted, no seq validation; just run FSM and update
-                 * the LAN-direction baseline so WAN→LAN can be checked. */
-                tcp_conntrack_fsm(entry, tcphdr->tcp_flags, FALSE);
-                U16 ip_hdr_len  = (ip_hdr->version_ihl & 0x0F) * 4;
-                U16 tcp_hdr_len = ((tcphdr->data_off >> 4) & 0x0F) * 4;
-                U16 payload_len = rte_be_to_cpu_16(ip_hdr->total_length) -
-                                  ip_hdr_len - tcp_hdr_len;
-                tcp_conntrack_seq_update(entry, tcphdr, payload_len, FALSE);
-                break;
-            }
-            table_idx++;
-            if (table_idx >= MAX_NAT_ENTRIES)
-                table_idx = 0;
-        } while (table_idx != start_idx);
+    if (nat_port != 0 && entry != NULL) {
+        /* LAN→WAN: trusted, no seq validation; just run FSM and update
+         * the LAN-direction baseline so WAN→LAN can be checked.  The entry
+         * comes straight from learning — no second lookup needed. */
+        tcp_conntrack_fsm(entry, tcphdr->tcp_flags, FALSE);
+        U16 ip_hdr_len  = (ip_hdr->version_ihl & 0x0F) * 4;
+        U16 tcp_hdr_len = ((tcphdr->data_off >> 4) & 0x0F) * 4;
+        U16 payload_len = rte_be_to_cpu_16(ip_hdr->total_length) -
+                          ip_hdr_len - tcp_hdr_len;
+        tcp_conntrack_seq_update(entry, tcphdr, payload_len, FALSE);
     }
     return nat_port;
 }

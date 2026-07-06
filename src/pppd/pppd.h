@@ -17,6 +17,7 @@
 #include <rte_memory.h>
 #include <rte_ether.h>
 #include <rte_rcu_qsbr.h>
+#include <rte_spinlock.h>
 
 #include "header.h"
 #include "../fastrg.h"
@@ -26,7 +27,10 @@
 
 #define MULTICAST_TAG           4001
 #define TOTAL_SOCK_PORT	        65536
-#define MAX_NAT_ENTRIES         TOTAL_SOCK_PORT << 2
+/* Parenthesized: the unparenthesized form made "hash % MAX_NAT_ENTRIES" parse
+ * as "(hash % 65536) << 2" (% binds tighter than <<), so every computed index
+ * was a multiple of 4 and hashing quality suffered 4x clustering. */
+#define MAX_NAT_ENTRIES         (TOTAL_SOCK_PORT << 2)
 #define PORT_FWD_TABLE_SIZE     TOTAL_SOCK_PORT  /* direct-indexed by eport (0..65535) */
 
 #define PPPoE_CMD_DISABLE       0
@@ -102,7 +106,12 @@ typedef struct {
     rte_atomic16_t        dp_start_bool;     /* hsi data plane starting boolean flag */
     rte_atomic16_t        redial_pending;    /* desire=connect arrived mid-teardown; redial once down */
     BOOL                  ppp_processing;    /* boolean flag for checking ppp is disconnecting */
-    addr_table_t          addr_table[MAX_NAT_ENTRIES]; /* hsi nat addr table */
+    addr_table_t          addr_table[MAX_NAT_ENTRIES]; /* hsi nat entry pool (slots referenced by nat_reverse_hash) */
+    struct rte_hash       *nat_reverse_hash;     /* (nat_port,dst_ip,dst_port) → addr_table slot idx, O(1) both directions */
+    struct rte_ring       *nat_free_ring;    /* free-list of addr_table slot indices (MPMC) */
+    U32                   nat_gc_counter;    /* amortized expired-slot scan position (approximate, racy by design) */
+    rte_spinlock_t        nat_insert_lock;   /* serializes miss-path inserts only (double-checked); per-packet
+                                              * same-flow refresh stays lock-free via LF hash lookup */
     port_fwd_entry_t      port_fwd_table[PORT_FWD_TABLE_SIZE]; /* SNAT port forwarding, direct-indexed by eport */
     mac_table_entry_t     *mac_table;        /* per-subscriber LAN host MAC table (255^3 entries) */
     arp_pending_queue_t   arp_pq;            /* ARP pending queue for unresolved port-fwd destinations */

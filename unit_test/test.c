@@ -2,6 +2,7 @@
 
 #include <common.h>
 
+#include <rte_eal.h>
 #include <rte_rcu_qsbr.h>
 
 #include "../src/fastrg.h"
@@ -115,6 +116,15 @@ int main()
         printf("Set stack size to unlimited\n");
 
     signal(SIGCHLD, SIG_IGN);
+
+    /* Minimal EAL so DPDK objects (rte_hash / rte_ring, used by the NAT
+     * suite) can be created without hugepages. */
+    char *eal_argv[] = {"unit-tester", "--no-huge", "--iova-mode=va", "-m", "256",
+        "-l", "0", "--log-level=lib.eal:error"};
+    if (rte_eal_init(8, eal_argv) < 0) {
+        puts("rte_eal_init failed");
+        return 1;
+    }
 
     puts("====================start unit tests====================\n");
     FastRG_t *fastrg_ccb = init_ccb(1);

@@ -337,6 +337,37 @@ static inline U16 rx_prefetch_prologue(struct rte_mbuf **pkt, U16 nb_rx)
     return k;
 }
 
+/* Round-robin subscriber cursor shared by all data lcores doing idle NAT GC;
+ * relaxed atomics -- approximate fairness is all that is needed. */
+static U32 nat_gc_ccb_counter;
+
+/**
+ * @fn nat_gc_idle_tick_by_ccb
+ *
+ * @brief Idle-time NAT garbage collection: called by data-plane RX loops on
+ *        an empty poll (nb_rx == 0), picks the next subscriber round-robin
+ *        and scans one bounded chunk of its NAT pool for expired entries.
+ *        Zombie flows (never looked up again) are otherwise unreachable now
+ *        that slot allocation is free-list based -- this restores the
+ *        self-cleaning the old probe-walk eviction provided, at zero cost to
+ *        bursts that carry packets.
+ *
+ * @param fastrg_ccb
+ *        FastRG control block
+ */
+static inline void nat_gc_idle_tick_by_ccb(FastRG_t *fastrg_ccb)
+{
+    U16 user_count = fastrg_ccb->user_count;
+
+    if (unlikely(user_count == 0))
+        return;
+    U16 ccb_id = (U16)(__atomic_fetch_add(&nat_gc_ccb_counter, 1, __ATOMIC_RELAXED) % user_count);
+    ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
+    if (ppp_ccb == NULL || ppp_ccb->nat_reverse_hash == NULL)
+        return;
+    nat_gc_scan_by_ccb(ppp_ccb, NAT_GC_SCAN_CHUNK);
+}
+
 /**
  * wan_ctrl_rx - WAN port queue 0 handler.
  *
@@ -505,6 +536,8 @@ int wan_data_rx(void *arg)
         uint64_t _t0 = rte_rdtsc();
         nb_rx = rte_eth_rx_burst(WAN_PORT, rx_q, pkt, BURST_SIZE);
         fastrg_rcu_dp_quiescent(fastrg_ccb);
+        if (nb_rx == 0)
+            nat_gc_idle_tick_by_ccb(fastrg_ccb);
         U16 pf_k = rx_prefetch_prologue(pkt, nb_rx);
         for(int i=0; i<nb_rx; i++) {
             if (i + pf_k < nb_rx)
@@ -854,6 +887,8 @@ int lan_data_rx(void *arg)
         uint64_t _t0 = rte_rdtsc();
         nb_rx = rte_eth_rx_burst(LAN_PORT, rx_q, rx_pkt, BURST_SIZE);
         fastrg_rcu_dp_quiescent(fastrg_ccb);
+        if (nb_rx == 0)
+            nat_gc_idle_tick_by_ccb(fastrg_ccb);
         U16 pf_k = rx_prefetch_prologue(rx_pkt, nb_rx);
         for(int i=0; i<nb_rx; i++) {
             if (i + pf_k < nb_rx)
@@ -1049,6 +1084,8 @@ int wan_dist_rx(void *arg)
         uint64_t _t0 = rte_rdtsc();
         nb_rx = rte_eth_rx_burst(WAN_PORT, rx_q, pkt, BURST_SIZE);
         dist_n = 0;
+        if (nb_rx == 0)
+            nat_gc_idle_tick_by_ccb(fastrg_ccb);
         U16 pf_k = rx_prefetch_prologue(pkt, nb_rx);
         for(int i=0; i<nb_rx; i++) {
             if (i + pf_k < nb_rx)
@@ -1307,6 +1344,8 @@ int lan_dist_rx(void *arg)
         uint64_t _t0 = rte_rdtsc();
         nb_rx = rte_eth_rx_burst(LAN_PORT, rx_q, rx_pkt, BURST_SIZE);
         dist_n = 0;
+        if (nb_rx == 0)
+            nat_gc_idle_tick_by_ccb(fastrg_ccb);
         U16 pf_k = rx_prefetch_prologue(rx_pkt, nb_rx);
         for(int i=0; i<nb_rx; i++) {
             if (i + pf_k < nb_rx)
@@ -1485,8 +1524,7 @@ int lan_dist_rx(void *arg)
                     U32 icmp_new_cksum;
                     U16 ori_ident = icmphdr->icmp_ident;
 
-                    new_port_id = nat_icmp_learning(eth_hdr, ip_hdr, icmphdr,
-                        ppp_ccb->addr_table, ppp_ccb->port_fwd_table);
+                    new_port_id = nat_icmp_learning(ppp_ccb, eth_hdr, ip_hdr, icmphdr);
                     if (unlikely(new_port_id == 0)) {
                         drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                         continue;
