@@ -85,6 +85,21 @@ typedef struct nat_reverse_key {
 } nat_reverse_key_t;
 
 /**
+ * @brief Forward-direction NAT key: identifies a flow from the LAN side by
+ *        its 5-tuple, so an established flow's outbound packets hit their
+ *        mapping in one lookup instead of re-walking the candidate-port
+ *        sequence.  Protocol-blind, matching nat_entry_same_flow().
+ *        12 bytes, naturally packed (no padding) — required, rte_hash
+ *        compares raw key bytes.
+ */
+typedef struct nat_forward_key {
+    U32 src_ip;   /* LAN host IP, network byte order */
+    U32 dst_ip;   /* remote IP, network byte order */
+    U16 src_port; /* LAN host port, network byte order */
+    U16 dst_port; /* remote port, network byte order */
+} nat_forward_key_t;
+
+/**
  * @fn nat_reverse_hash_free_cb
  *
  * @brief RCU defer-queue callback invoked by rte_hash once all data-plane
@@ -109,7 +124,7 @@ static inline void nat_reverse_hash_free_cb(void *p, void *key_data)
 /**
  * @fn nat_table_reset
  *
- * @brief Flush all NAT state of a subscriber: empty the reverse hash and
+ * @brief Flush all NAT state of a subscriber: empty both hashes and
  *        refill the free-list with every pool index.  Control-plane only
  *        (subscriber re-init), must not race data-plane traffic for this sub.
  *
@@ -118,7 +133,25 @@ static inline void nat_reverse_hash_free_cb(void *p, void *key_data)
  */
 static inline void nat_table_reset(ppp_ccb_t *ppp_ccb)
 {
+    unsigned int freed, pending, avail;
+
+    /* Drain both defer queues before rebuilding: a deferred free surviving
+     * the reset would fire later and push its (now re-issued) slot index
+     * into the refilled free ring — two flows sharing one entry — and the
+     * same staleness corrupts the hashes' internal key-slot allocators.
+     * Terminates: data lcores report quiescent every poll loop even when
+     * idle, and at first init the queues are simply empty. */
+    do {
+        freed = pending = avail = 0;
+        rte_hash_rcu_qsbr_dq_reclaim(ppp_ccb->nat_reverse_hash, &freed, &pending, &avail);
+    } while (pending != 0);
+    do {
+        freed = pending = avail = 0;
+        rte_hash_rcu_qsbr_dq_reclaim(ppp_ccb->nat_forward_hash, &freed, &pending, &avail);
+    } while (pending != 0);
+
     rte_hash_reset(ppp_ccb->nat_reverse_hash);
+    rte_hash_reset(ppp_ccb->nat_forward_hash);
     rte_ring_reset(ppp_ccb->nat_free_ring);
     for(U32 i=0; i<MAX_NAT_ENTRIES; i++) {
         rte_atomic16_set(&ppp_ccb->addr_table[i].is_fill, NAT_ENTRY_FREE);
@@ -131,8 +164,11 @@ static inline void nat_table_reset(ppp_ccb_t *ppp_ccb)
  * @fn nat_table_init
  *
  * @brief Create-once (find-existing on re-create, mirroring arp_pq naming
- *        rules) the per-subscriber reverse hash + free-list ring, attach the
- *        shared QSBR RCU for deferred slot reclaim, and fill the free-list.
+ *        rules) the per-subscriber reverse + forward hashes and free-list
+ *        ring, attach the shared QSBR RCU for deferred reclaim, and fill the
+ *        free-list.  Pool slot recycling is owned solely by the reverse
+ *        hash's dq callback; the forward hash rides the same RCU only for
+ *        its internal key-slot recycling (NULL data callback).
  *
  * @param ppp_ccb
  *      Subscriber control block
@@ -176,12 +212,49 @@ static inline STATUS nat_table_init(ppp_ccb_t *ppp_ccb, U16 ccb_id, struct rte_r
         }
     }
 
+    snprintf(name, sizeof(name), "nat_forward_%u", ccb_id);
+    ppp_ccb->nat_forward_hash = rte_hash_find_existing(name);
+    if (ppp_ccb->nat_forward_hash == NULL) {
+        struct rte_hash_parameters params = {
+            .name = name,
+            .entries = MAX_NAT_ENTRIES,
+            .key_len = sizeof(nat_forward_key_t),
+            .hash_func = rte_hash_crc,
+            .hash_func_init_val = 0,
+            .socket_id = (int)rte_socket_id(),
+            .extra_flag = RTE_HASH_EXTRA_FLAGS_RW_CONCURRENCY_LF |
+                          RTE_HASH_EXTRA_FLAGS_MULTI_WRITER_ADD,
+        };
+        ppp_ccb->nat_forward_hash = rte_hash_create(&params);
+        if (ppp_ccb->nat_forward_hash == NULL) {
+            rte_hash_free(ppp_ccb->nat_reverse_hash);
+            ppp_ccb->nat_reverse_hash = NULL;
+            return ERROR;
+        }
+        struct rte_hash_rcu_config rcu_cfg = {
+            .v = rcu,
+            .mode = RTE_HASH_QSBR_MODE_DQ,
+            /* No data callback: slot reclaim belongs to the reverse hash;
+             * this only defers the hash's internal key-slot recycling. */
+            .free_key_data_func = NULL,
+        };
+        if (rte_hash_rcu_qsbr_add(ppp_ccb->nat_forward_hash, &rcu_cfg) != 0) {
+            rte_hash_free(ppp_ccb->nat_forward_hash);
+            ppp_ccb->nat_forward_hash = NULL;
+            rte_hash_free(ppp_ccb->nat_reverse_hash);
+            ppp_ccb->nat_reverse_hash = NULL;
+            return ERROR;
+        }
+    }
+
     snprintf(name, sizeof(name), "nat_free_%u", ccb_id);
     ppp_ccb->nat_free_ring = rte_ring_lookup(name);
     if (ppp_ccb->nat_free_ring == NULL) {
         ppp_ccb->nat_free_ring = rte_ring_create(name, MAX_NAT_ENTRIES,
             (int)rte_socket_id(), RING_F_EXACT_SZ);
         if (ppp_ccb->nat_free_ring == NULL) {
+            rte_hash_free(ppp_ccb->nat_forward_hash);
+            ppp_ccb->nat_forward_hash = NULL;
             rte_hash_free(ppp_ccb->nat_reverse_hash);
             ppp_ccb->nat_reverse_hash = NULL;
             return ERROR;
@@ -195,7 +268,7 @@ static inline STATUS nat_table_init(ppp_ccb_t *ppp_ccb, U16 ccb_id, struct rte_r
 /**
  * @fn nat_table_destroy
  *
- * @brief Free the per-subscriber reverse hash + free-list ring (subscriber
+ * @brief Free the per-subscriber hashes + free-list ring (subscriber
  *        removal / init rollback).  Idempotent.
  *
  * @param ppp_ccb
@@ -207,6 +280,10 @@ static inline void nat_table_destroy(ppp_ccb_t *ppp_ccb)
         rte_hash_free(ppp_ccb->nat_reverse_hash);
         ppp_ccb->nat_reverse_hash = NULL;
     }
+    if (ppp_ccb->nat_forward_hash != NULL) {
+        rte_hash_free(ppp_ccb->nat_forward_hash);
+        ppp_ccb->nat_forward_hash = NULL;
+    }
     if (ppp_ccb->nat_free_ring != NULL) {
         rte_ring_free(ppp_ccb->nat_free_ring);
         ppp_ccb->nat_free_ring = NULL;
@@ -214,15 +291,50 @@ static inline void nat_table_destroy(ppp_ccb_t *ppp_ccb)
 }
 
 /**
+ * @fn nat_entry_del_keys
+ *
+ * @brief Unlink a READY entry from both hashes: forward key first, then
+ *        reverse.  The order is the safety invariant — deleting the reverse
+ *        key is what schedules the pool slot for RCU reclaim, so by the time
+ *        the slot can recycle no forward key may still reference it.  Safe
+ *        from any lcore; racing deleters are fine (duplicate deletes just
+ *        return ENOENT, only the reverse-delete winner accounts the reclaim).
+ *
+ * @param ppp_ccb
+ *        Subscriber control block
+ * @param entry
+ *        READY entry to unlink (its fields provide both keys)
+ *
+ * @return 1 if this caller won the reverse-key delete, 0 otherwise
+ */
+static inline int nat_entry_del_keys(ppp_ccb_t *ppp_ccb, addr_table_t *entry)
+{
+    nat_forward_key_t fkey = {
+        .src_ip = entry->src_ip,
+        .dst_ip = entry->dst_ip,
+        .src_port = entry->src_port,
+        .dst_port = entry->dst_port,
+    };
+    nat_reverse_key_t rkey = {
+        .dst_ip = entry->dst_ip,
+        .nat_port = entry->nat_port,
+        .dst_port = entry->dst_port,
+    };
+
+    rte_hash_del_key(ppp_ccb->nat_forward_hash, &fkey);
+    return rte_hash_del_key(ppp_ccb->nat_reverse_hash, &rkey) >= 0;
+}
+
+/**
  * @fn nat_gc_scan_by_ccb
  *
  * @brief Amortized garbage collection: scan up to max_slots pool slots from
- *        the per-subscriber cursor and delete the reverse-hash key of every
- *        expired READY entry.  Slot indices flow back to the free-list via
- *        the RCU defer-queue callback once readers are quiescent.  Restores
- *        the self-cleaning property the old probe-walk eviction provided.
- *        Safe from any lcore (hash is multi-writer; duplicate deletes of the
- *        same key just return ENOENT).
+ *        the per-subscriber cursor and unlink every expired READY entry from
+ *        both hashes.  Slot indices flow back to the free-list via the RCU
+ *        defer-queue callback once readers are quiescent.  Restores the
+ *        self-cleaning property the old probe-walk eviction provided.
+ *        Safe from any lcore (hashes are multi-writer; duplicate deletes of
+ *        the same key just return ENOENT).
  *
  * @param ppp_ccb
  *      Subscriber control block
@@ -244,12 +356,7 @@ static inline U32 nat_gc_scan_by_ccb(ppp_ccb_t *ppp_ccb, U32 max_slots)
             continue;
         if (!nat_entry_is_expired(entry))
             continue;
-        nat_reverse_key_t key = {
-            .dst_ip = entry->dst_ip,
-            .nat_port = entry->nat_port,
-            .dst_port = entry->dst_port,
-        };
-        if (rte_hash_del_key(ppp_ccb->nat_reverse_hash, &key) >= 0)
+        if (nat_entry_del_keys(ppp_ccb, entry))
             reclaimed++;
     }
     return reclaimed;
@@ -309,30 +416,6 @@ static inline U16 compute_initial_nat_port(U32 src_ip, U16 src_port)
 }
 
 /**
- * @fn nat_entry_matches_key
- * 
- * @brief Check if NAT entry matches key
- * 
- * @param entry
- *       Pointer to NAT entry
- * @param nat_port
- *       NAT port in network byte order
- * @param dst_ip
- *       Destination IP in network byte order
- * @param dst_port
- *       Destination port in network byte order
- * 
- * @return 1 if matches, 0 otherwise
- */
-static inline int nat_entry_matches_key(addr_table_t *entry, 
-    U16 nat_port, U32 dst_ip, U16 dst_port)
-{
-    return (entry->nat_port == nat_port &&
-            entry->dst_ip == dst_ip && 
-            entry->dst_port == dst_port);
-}
-
-/**
  * @fn nat_entry_same_flow
  * 
  * @brief Check if entry is for the same flow (exact 5-tuple match)
@@ -365,18 +448,25 @@ static inline int nat_entry_same_flow(addr_table_t *entry, U16 nat_port,
 /**
  * @fn nat_learning_port_reuse
  *
- * @brief NAT learning with TRUE port reuse support, O(1) per candidate port.
+ * @brief NAT learning with TRUE port reuse support.
  *
- * Port reuse logic (unchanged from the probing implementation):
+ * Per-packet fast path: one lock-free forward-hash lookup on the 5-tuple —
+ * an established flow hits its mapping directly, with no initial-port
+ * recomputation and no candidate-port walk (a flow that skipped N conflicted
+ * ports at creation no longer re-pays those N lookups on every packet).
+ *
+ * Only a forward miss (genuinely new flow, or a transient GC race) enters
+ * the candidate-port walk.  Port reuse logic there is unchanged from the
+ * probing implementation:
  * - Same (nat_port, dst_ip, dst_port) from a different source = CONFLICT, try next nat_port
  * - Same nat_port with different dst = OK, port reuse achieved
  *
- * Each candidate port costs one lock-free rev_hash lookup instead of a probe
- * walk.  The common per-packet case (flow already learned) is a single lookup
- * + expiry refresh, fully lock-free.  Only the new-flow miss path takes the
- * per-subscriber insert lock (double-checked) — rte_hash_add_key_data on an
- * existing key would silently REPLACE its data, so two lcores racing the same
- * key must be serialized to avoid leaking a slot and mis-binding a flow.
+ * The new-flow insert takes the per-subscriber lock and double-checks both
+ * hashes (rte_hash_add_key_data on an existing key would silently REPLACE
+ * its data): forward for "someone just learned this flow", reverse for
+ * "someone just took this port".  Keys are inserted reverse-first so a
+ * failed forward add can unpublish via the reverse key (whose RCU dq owns
+ * slot reclaim); deletions run forward-first for the mirror invariant.
  *
  * @param ppp_ccb
  *      Subscriber control block (owns pool, rev hash, free-list, port-fwd table)
@@ -400,6 +490,22 @@ static inline int nat_entry_same_flow(addr_table_t *entry, U16 nat_port,
 static inline U16 nat_learning_port_reuse(ppp_ccb_t *ppp_ccb, struct rte_ether_hdr *eth_hdr,
     U32 src_ip, U32 dst_ip, U16 src_port, U16 dst_port, addr_table_t **out_entry)
 {
+    nat_forward_key_t fkey = { .src_ip = src_ip, .dst_ip = dst_ip,
+        .src_port = src_port, .dst_port = dst_port };
+    void *fdata;
+
+    /* Per-packet fast path: established flow, one lock-free lookup (LAN side
+     * is trusted: no expiry check, traffic just revives the mapping) */
+    if (likely(rte_hash_lookup_data(ppp_ccb->nat_forward_hash, &fkey, &fdata) >= 0)) {
+        addr_table_t *entry = &ppp_ccb->addr_table[(U32)(uintptr_t)fdata];
+
+        rte_atomic_thread_fence(rte_memory_order_acquire);
+        rte_atomic64_set(&entry->expire_at, nat_expiry_cycles());
+        if (out_entry != NULL)
+            *out_entry = entry;
+        return entry->nat_port;
+    }
+
     U16 nat_port = compute_initial_nat_port(src_ip, src_port);
     U16 start_nat_port = nat_port;
 
@@ -428,14 +534,24 @@ static inline U16 nat_learning_port_reuse(ppp_ccb_t *ppp_ccb, struct rte_ether_h
             /* Different source, still alive: genuine conflict → next port */
             if (!nat_entry_is_expired(entry))
                 goto next_nat_port;
-            /* Expired mapping of someone else: evict (slot recycles via RCU)
-             * and fall through to insert a fresh entry for us */
-            rte_hash_del_key(ppp_ccb->nat_reverse_hash, &key);
+            /* Expired mapping of someone else: evict both keys (slot
+             * recycles via RCU) and fall through to insert fresh for us */
+            nat_entry_del_keys(ppp_ccb, entry);
         }
 
         /* Miss (or just evicted): insert under the per-sub lock, re-checking
-         * the key so two lcores can't double-add it (add would replace) */
+         * both hashes so two lcores can't double-add (add would replace) */
         rte_spinlock_lock(&ppp_ccb->nat_insert_lock);
+        if (rte_hash_lookup_data(ppp_ccb->nat_forward_hash, &fkey, &fdata) >= 0) {
+            /* Raced: another lcore just learned this very flow */
+            addr_table_t *entry = &ppp_ccb->addr_table[(U32)(uintptr_t)fdata];
+
+            rte_spinlock_unlock(&ppp_ccb->nat_insert_lock);
+            rte_atomic64_set(&entry->expire_at, nat_expiry_cycles());
+            if (out_entry != NULL)
+                *out_entry = entry;
+            return entry->nat_port;
+        }
         if (rte_hash_lookup_data(ppp_ccb->nat_reverse_hash, &key, &data) >= 0) {
             addr_table_t *entry = &ppp_ccb->addr_table[(U32)(uintptr_t)data];
 
@@ -482,6 +598,16 @@ static inline U16 nat_learning_port_reuse(ppp_ccb_t *ppp_ccb, struct rte_ether_h
             rte_spinlock_unlock(&ppp_ccb->nat_insert_lock);
             goto next_nat_port;
         }
+        if (rte_hash_add_key_data(ppp_ccb->nat_forward_hash, &fkey,
+                (void *)(uintptr_t)idx) < 0) {
+            /* Forward ENOSPC: unpublish via the reverse key — a reader may
+             * already hold the entry, so the slot must recycle through the
+             * RCU dq, not go straight back.  A different port would not
+             * help (fkey has no port in it), so fail the flow. */
+            rte_hash_del_key(ppp_ccb->nat_reverse_hash, &key);
+            rte_spinlock_unlock(&ppp_ccb->nat_insert_lock);
+            return 0;
+        }
         rte_spinlock_unlock(&ppp_ccb->nat_insert_lock);
 
         if (out_entry != NULL)
@@ -513,9 +639,9 @@ next_nat_port:
  *        Remote source IP in network byte order
  * @param remote_port
  *        Remote source port in network byte order
- * @param addr_table
- *        NAT address table
- * 
+ * @param ppp_ccb
+ *        Subscriber control block (owns pool + hashes)
+ *
  * @return Pointer to matching address table entry, or NULL if not found
  */
 static inline addr_table_t *nat_reverse_lookup(U16 nat_port, U32 remote_ip, U16 remote_port,
@@ -535,9 +661,9 @@ static inline addr_table_t *nat_reverse_lookup(U16 nat_port, U32 remote_ip, U16 
 
     /* WAN side is untrusted: an expired mapping is a miss — inbound traffic
      * must not revive it (would hold the UDP injection window open forever).
-     * Delete our own key; the slot recycles via the RCU defer queue. */
+     * Unlink both keys; the slot recycles via the RCU defer queue. */
     if (nat_entry_is_expired(entry)) {
-        rte_hash_del_key(ppp_ccb->nat_reverse_hash, &key);
+        nat_entry_del_keys(ppp_ccb, entry);
         return NULL;
     }
 
@@ -549,18 +675,16 @@ static inline addr_table_t *nat_reverse_lookup(U16 nat_port, U32 remote_ip, U16 
  * @fn nat_icmp_learning
  * 
  * @brief NAT learning for ICMP packets
- * 
+ *
+ * @param ppp_ccb
+ *        Subscriber control block (owns pool + hashes + port-fwd table)
  * @param eth_hdr
  *        Pointer to Ethernet header
  * @param ip_hdr
  *        Pointer to IPv4 header
  * @param icmphdr
  *        Pointer to ICMP header
- * @param addr_table
- *        NAT address table
- * @param port_fwd_table
- *        Port forwarding table for reserved-port check
- * 
+ *
  * @return NAT port in network byte order, or 0 if all ports exhausted
  */
 static inline U16 nat_icmp_learning(ppp_ccb_t *ppp_ccb, struct rte_ether_hdr *eth_hdr,
@@ -575,18 +699,16 @@ static inline U16 nat_icmp_learning(ppp_ccb_t *ppp_ccb, struct rte_ether_hdr *et
  * @fn nat_udp_learning
  * 
  * @brief NAT learning for UDP packets
- * 
+ *
+ * @param ppp_ccb
+ *        Subscriber control block (owns pool + hashes + port-fwd table)
  * @param eth_hdr
  *        Pointer to Ethernet header
  * @param ip_hdr
  *        Pointer to IPv4 header
  * @param udphdr
  *        Pointer to UDP header
- * @param addr_table
- *        NAT address table
- * @param port_fwd_table
- *        Port forwarding table for reserved-port check
- * 
+ *
  * @return NAT port in network byte order, or 0 if all ports exhausted
  */
 static inline U16 nat_udp_learning(ppp_ccb_t *ppp_ccb, struct rte_ether_hdr *eth_hdr,
@@ -601,18 +723,16 @@ static inline U16 nat_udp_learning(ppp_ccb_t *ppp_ccb, struct rte_ether_hdr *eth
  * @fn nat_tcp_learning
  * 
  * @brief NAT learning for TCP packets with connection tracking
- * 
+ *
+ * @param ppp_ccb
+ *        Subscriber control block (owns pool + hashes + port-fwd table)
  * @param eth_hdr
  *        Pointer to Ethernet header
  * @param ip_hdr
  *        Pointer to IPv4 header
  * @param tcphdr
  *        Pointer to TCP header
- * @param addr_table
- *        NAT address table
- * @param port_fwd_table
- *        Port forwarding table for reserved-port check
- * 
+ *
  * @return NAT port in network byte order, or 0 if all ports exhausted
  */
 static inline U16 nat_tcp_learning(ppp_ccb_t *ppp_ccb, struct rte_ether_hdr *eth_hdr,
