@@ -20,6 +20,7 @@
 #include <rte_rcu_qsbr.h>
 
 #include "pppd.h"
+#include "nat.h"
 #include "fsm.h"
 #include "codec.h"
 #include "../dp.h"
@@ -157,10 +158,13 @@ STATUS ppp_init_config_by_user(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb, U16 ccb
     ppp_ccb->auth_method = PAP_PROTOCOL;
     ppp_ccb->magic_num = rte_cpu_to_be_32((rand() % 0xFFFFFFFE) + 1);
     ppp_ccb->identifier = 0x0;
-    for(int j=0; j<TOTAL_SOCK_PORT; j++) {
+    /* Bound was TOTAL_SOCK_PORT before — only the first quarter of the pool
+     * got initialized (benign only because ccbs come zeroed from the mempool). */
+    for(int j=0; j<MAX_NAT_ENTRIES; j++) {
         rte_atomic16_init(&ppp_ccb->addr_table[j].is_fill);
         rte_atomic64_init(&ppp_ccb->addr_table[j].expire_at);
     }
+    rte_spinlock_init(&ppp_ccb->nat_insert_lock);
     memset(ppp_ccb->PPP_dst_mac.addr_bytes, 0, ETH_ALEN);
     rte_timer_init(&(ppp_ccb->pppoe));
     rte_timer_init(&(ppp_ccb->ppp));
@@ -194,6 +198,17 @@ STATUS ppp_init_config_by_user(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb, U16 ccb
         }
     } else {
         arp_pending_flush(fastrg_ccb->arp_pending_mp, &ppp_ccb->arp_pq);
+    }
+
+    /* NAT reverse hash + free-list: create once, flush on re-init */
+    if (ppp_ccb->nat_reverse_hash == NULL) {
+        if (nat_table_init(ppp_ccb, ccb_id, fastrg_ccb->ppp_ccb_rcu) != SUCCESS) {
+            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG,
+                "NAT rev hash/ring creation failed for ccb %u", ccb_id);
+            goto err;
+        }
+    } else {
+        nat_table_reset(ppp_ccb);
     }
 
     if (ppp_ccb->ppp_user_acc != NULL)
@@ -234,6 +249,7 @@ err:
     rte_atomic16_set(&ppp_ccb->vlan_id, 0);
     mac_table_free(ppp_ccb->mac_table);
     arp_pending_cleanup_queue(&ppp_ccb->arp_pq, fastrg_ccb->arp_pending_mp);
+    nat_table_destroy(ppp_ccb);
     ppp_ccb->mac_table = NULL;
     if (ppp_ccb->ppp_user_acc != NULL) {
         fastrg_mfree(ppp_ccb->ppp_user_acc);
@@ -265,6 +281,7 @@ STATUS pppd_allocate_ccbs(FastRG_t *fastrg_ccb, U16 start_id, U16 count, ppp_ccb
             for(U16 j=start_id; j<ccb_id; j++) {
                 mac_table_free(array[j]->mac_table);
                 arp_pending_cleanup_queue(&array[j]->arp_pq, fastrg_ccb->arp_pending_mp);
+                nat_table_destroy(array[j]);
                 rte_mempool_put(fastrg_ccb->ppp_ccb_mp, array[j]);
                 array[j] = NULL;
             }
@@ -280,6 +297,7 @@ STATUS pppd_allocate_ccbs(FastRG_t *fastrg_ccb, U16 start_id, U16 count, ppp_ccb
             for(U16 j=start_id; j<=ccb_id; j++) {
                 mac_table_free(array[j]->mac_table);
                 arp_pending_cleanup_queue(&array[j]->arp_pq, fastrg_ccb->arp_pending_mp);
+                nat_table_destroy(array[j]);
                 rte_mempool_put(fastrg_ccb->ppp_ccb_mp, array[j]);
                 array[j] = NULL;
             }
@@ -467,6 +485,7 @@ STATUS pppd_remove_ccb(FastRG_t *fastrg_ccb, U16 remove_ccb_count, U16 old_ccb_c
             mac_table_free(ppp_ccb->mac_table);
             ppp_ccb->mac_table = NULL;
         }
+        nat_table_destroy(ppp_ccb);
         rte_mempool_put(fastrg_ccb->ppp_ccb_mp, old_array[ccb_id]);
         old_array[ccb_id] = NULL;
     }

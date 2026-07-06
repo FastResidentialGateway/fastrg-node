@@ -143,7 +143,7 @@ static int encaps_udp(FastRG_t *fastrg_ccb, struct rte_mbuf **single_pkt,
 
         /* for nat */
         udphdr = (struct rte_udp_hdr *)(ip_hdr + 1);
-        new_port_id = nat_udp_learning(eth_hdr, ip_hdr, udphdr, ppp_ccb->addr_table, ppp_ccb->port_fwd_table);
+        new_port_id = nat_udp_learning(ppp_ccb, eth_hdr, ip_hdr, udphdr);
         if (unlikely(new_port_id == 0)) {
             drop_packet(fastrg_ccb, *single_pkt, LAN_PORT, ccb_id);
             return 0;
@@ -249,7 +249,7 @@ static int encaps_tcp(FastRG_t *fastrg_ccb, struct rte_mbuf **single_pkt,
 
         /* for nat */
         tcphdr = (struct rte_tcp_hdr *)(ip_hdr + 1);
-        new_port_id = nat_tcp_learning(eth_hdr, ip_hdr, tcphdr, ppp_ccb->addr_table, ppp_ccb->port_fwd_table);
+        new_port_id = nat_tcp_learning(ppp_ccb, eth_hdr, ip_hdr, tcphdr);
         if (unlikely(new_port_id == 0)) {
             drop_packet(fastrg_ccb, *single_pkt, LAN_PORT, ccb_id);
             return 0;
@@ -284,8 +284,7 @@ static int encaps_icmp(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt,
     U32 icmp_new_cksum;
     U16 ori_ident = icmphdr->icmp_ident;
 
-    new_port_id = nat_icmp_learning(eth_hdr, ip_hdr, icmphdr, 
-        ppp_ccb->addr_table, ppp_ccb->port_fwd_table);
+    new_port_id = nat_icmp_learning(ppp_ccb, eth_hdr, ip_hdr, icmphdr);
     if (unlikely(new_port_id == 0)) {
         drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
         return new_pkt_num;
@@ -320,7 +319,7 @@ static int decaps_udp(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt,
 
     udphdr = (struct rte_udp_hdr *)(ip_hdr + 1);
     addr_table_t *entry = nat_reverse_lookup(udphdr->dst_port, ip_hdr->src_addr, 
-        udphdr->src_port, ppp_ccb->addr_table);
+        udphdr->src_port, ppp_ccb);
     if (unlikely(entry == NULL)) {
         /* Fallback: check port forwarding table */
         U32 fwd_dip;
@@ -382,7 +381,7 @@ static int decaps_tcp(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt,
 
     tcphdr = (struct rte_tcp_hdr *)(ip_hdr + 1);
     addr_table_t *entry = nat_reverse_lookup(tcphdr->dst_port, ip_hdr->src_addr, 
-        tcphdr->src_port, ppp_ccb->addr_table);
+        tcphdr->src_port, ppp_ccb);
     if (unlikely(entry == NULL)) {
         /* Fallback: check port forwarding table */
         U32 fwd_dip;
@@ -471,7 +470,7 @@ static int decaps_icmp(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt,
         return 0;
     }
     addr_table_t *entry = nat_reverse_lookup(icmphdr->icmp_ident,
-        ip_hdr->src_addr, ICMP_ECHO_REQUEST, ppp_ccb->addr_table);
+        ip_hdr->src_addr, ICMP_ECHO_REQUEST, ppp_ccb);
     if (entry == NULL) {
         drop_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
         return 0;
