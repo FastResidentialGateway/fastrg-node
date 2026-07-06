@@ -7,6 +7,8 @@
   Designed by THE on Apr 15, 2026
 /\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\*/
 
+#include <string.h>
+
 #include <rte_atomic.h>
 #include <rte_byteorder.h>
 
@@ -216,40 +218,75 @@ static tcp_conntrack_state_tbl_t tcp_conntrack_tbl[] = {
     { TCP_CONNTRACK_INVLD, 0, 0, { NULL } },
 };
 
+/* Both enums are contiguous 0-based, so the sentinels double as the counts
+ * and (state, event) can index a 2-D array directly. */
+#define TCP_NSTATE TCP_CONNTRACK_INVLD /* 10 */
+#define TCP_NEVENT TCP_EV_INVLD        /*  6 */
+
+/* (state, event) → tcp_conntrack_tbl row index; -1 = no transition defined */
+static int8_t tcp_fsm_idx[TCP_NSTATE][TCP_NEVENT];
+
+/* Whether a state has at least one table row.  Preserves the former "state
+ * not found in table → ERROR" contract: a state stripped of all its rows
+ * must keep failing loudly instead of degrading to silent ignore.
+ * Static storage → already zero-initialized to all-FALSE (unlike tcp_fsm_idx,
+ * whose empty value is -1 and therefore needs the explicit memset). */
+static BOOL tcp_state_has_rows[TCP_NSTATE];
+
+/**
+ * @fn tcp_conntrack_build_index
+ *
+ * @brief Build the O(1) (state, event) → row index from tcp_conntrack_tbl,
+ *        which stays the single source of truth.  Runs before main() via GCC
+ *        constructor (the table is compile-time static-initialized, so it is
+ *        ready).  First matching row wins, mirroring the former linear-scan
+ *        semantics, and rows no longer need to be grouped by state.
+ */
+static void __attribute__((constructor)) tcp_conntrack_build_index(void)
+{
+    memset(tcp_fsm_idx, -1, sizeof(tcp_fsm_idx));
+    for(int i=0; tcp_conntrack_tbl[i].state != TCP_CONNTRACK_INVLD; i++) {
+        U8 s = tcp_conntrack_tbl[i].state;
+        U8 e = tcp_conntrack_tbl[i].event;
+
+        if (s < TCP_NSTATE && e < TCP_NEVENT) {
+            tcp_state_has_rows[s] = TRUE;
+            if (tcp_fsm_idx[s][e] < 0)
+                tcp_fsm_idx[s][e] = (int8_t)i;
+        }
+    }
+}
+
 STATUS tcp_conntrack_fsm(struct addr_table *entry, U8 tcp_flags, BOOL is_reply)
 {
     addr_table_t *e = (addr_table_t *)entry;
     tcp_conntrack_event_t event = tcp_flags_to_event(tcp_flags, is_reply);
-    int i;
 
     if (event == TCP_EV_INVLD)
         return SUCCESS;
 
-    /* Find matched state */
-    for(i=0; tcp_conntrack_tbl[i].state != TCP_CONNTRACK_INVLD; i++)
-        if (tcp_conntrack_tbl[i].state == e->tcp_state)
-            break;
-
-    if (tcp_conntrack_tbl[i].state == TCP_CONNTRACK_INVLD)
+    /* Out-of-range (corrupted) state */
+    if (e->tcp_state >= TCP_NSTATE)
         return ERROR;
 
-    /* Find matched event within that state */
-    for(; tcp_conntrack_tbl[i].state == e->tcp_state; i++)
-        if (tcp_conntrack_tbl[i].event == (U8)event)
-            break;
+    int8_t idx = tcp_fsm_idx[e->tcp_state][event];
 
-    /* No matching event for current state — ignore */
-    if (tcp_conntrack_tbl[i].state != e->tcp_state)
-        return SUCCESS;
+    /* No transition defined for (state, event): ignore if the state has any
+     * table row at all; a state with no rows keeps the former "state not
+     * found in table" ERROR contract. */
+    if (idx < 0)
+        return tcp_state_has_rows[e->tcp_state] ? SUCCESS : ERROR;
+
+    const tcp_conntrack_state_tbl_t *t = &tcp_conntrack_tbl[idx];
 
     /* State transition */
-    e->tcp_state = tcp_conntrack_tbl[i].next_state;
+    e->tcp_state = t->next_state;
 
     /* Execute NULL-terminated handler chain.  A handler may further mutate
      * tcp_state (e.g. tcp_act_mid_stream_ack promotes MID_STREAM→ESTABLISHED on
-     * WAN-side ACK), so we log the final state after handlers run. */
-    for(int j=0; tcp_conntrack_tbl[i].hdl[j]; j++) {
-        if ((*tcp_conntrack_tbl[i].hdl[j])(entry, is_reply) == ERROR)
+     * WAN-side ACK). */
+    for(int j=0; j<4 && t->hdl[j]; j++) {
+        if ((*t->hdl[j])(entry, is_reply) == ERROR)
             return ERROR;
     }
 

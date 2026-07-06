@@ -272,11 +272,10 @@ static inline void tcp_conntrack_seq_update(addr_table_t *e, struct rte_tcp_hdr 
  * @fn tcp_conntrack_fsm
  *
  * @brief TCP connection tracking finite state machine.
- *        Table-driven lookup:
- *        1. Scan table for matching current state
- *        2. Within that state, scan for matching event
- *        3. Transition to next_state
- *        4. Execute action handler chain
+ *        Table-driven, O(1) dispatch:
+ *        1. Look up (state, event) in the constructor-built row index
+ *        2. Transition to next_state
+ *        3. Execute action handler chain
  *
  * @param entry
  *        Pointer to NAT address table entry
