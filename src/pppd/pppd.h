@@ -63,7 +63,10 @@ typedef struct addr_table {
     U8                    tcp_state; // TCP conntrack state (tcp_conntrack_state_t), 0 = NONE
     U8                    tcp_fin_flags; // bitmask: bit0 = LAN FIN, bit1 = WAN FIN
     rte_atomic16_t        is_fill;   // is this entry filled or not
-    rte_atomic64_t        expire_at; // absolute TSC timestamp when entry expires
+    U64                   *expire_slot; // -> ppp_ccb nat_expire_at[own idx]; bound at init, read-only after.
+                                        // The structure-of-arrays (SoA) split keeps the GC scan off entry cache
+                                        // lines; the back-pointer lets tcp_conntrack handlers reach the slot
+                                        // without knowing ppp_ccb.
     /* TCP seq/ack window tracking (host order).  Used by tcp_conntrack_seq_valid
      * to drop blind injection from WAN side; LAN→WAN only updates these fields. */
     U32                   max_seq_end_lan; // highest (seq + payload + SYN/FIN) seen from LAN
@@ -73,6 +76,52 @@ typedef struct addr_table {
     U16                   max_win_lan;     // last advertised window from LAN (no scaling)
     U16                   max_win_wan;     // same from WAN
 }__rte_cache_aligned addr_table_t;
+
+/* Coalescing threshold for expire refreshes.  NAT/conntrack timeouts are
+ * seconds-granular, so a refresh that would move the deadline by less than
+ * this is skipped — per-packet writes collapse to one write per flow per
+ * second and the shared expire cache lines stay in MESI Shared state. */
+#define NAT_EXPIRE_COALESCE_SEC 1
+
+/**
+ * @fn nat_expire_set
+ *
+ * @brief Unconditionally (re)arm an entry's expiry deadline.  For state
+ *        transitions and fresh entries — a shortened deadline (e.g. TCP
+ *        ESTABLISHED -> FIN_WAIT) must take effect immediately.
+ *
+ * @param slot
+ *        Entry's expire slot (addr_table_t.expire_slot)
+ * @param target
+ *        Absolute TSC deadline
+ */
+static inline void nat_expire_set(U64 *slot, U64 target)
+{
+    __atomic_store_n(slot, target, __ATOMIC_RELAXED);
+}
+
+/**
+ * @fn nat_expire_refresh
+ *
+ * @brief Extend an entry's expiry deadline with write coalescing: only
+ *        store when the new deadline is more than NAT_EXPIRE_COALESCE_SEC
+ *        ahead of the current one.  Never shortens — same-state refreshes
+ *        only ever push the deadline out, and a longer stored deadline
+ *        (e.g. TCP ESTABLISHED 7200s vs the NAT-level 10s refresh) simply
+ *        wins.
+ *
+ * @param slot
+ *        Entry's expire slot (addr_table_t.expire_slot)
+ * @param target
+ *        Absolute TSC deadline to extend to
+ */
+static inline void nat_expire_refresh(U64 *slot, U64 target)
+{
+    U64 cur = __atomic_load_n(slot, __ATOMIC_RELAXED);
+
+    if (target > cur + (U64)NAT_EXPIRE_COALESCE_SEC * fastrg_get_cycles_in_sec())
+        __atomic_store_n(slot, target, __ATOMIC_RELAXED);
+}
 
 /**
  * @brief hsi control block structure
@@ -107,6 +156,10 @@ typedef struct {
     rte_atomic16_t        redial_pending;    /* desire=connect arrived mid-teardown; redial once down */
     BOOL                  ppp_processing;    /* boolean flag for checking ppp is disconnecting */
     addr_table_t          addr_table[MAX_NAT_ENTRIES]; /* hsi nat entry pool (slots referenced by both nat hashes) */
+    U64                   nat_expire_at[MAX_NAT_ENTRIES]; /* structure-of-arrays (SoA) expiry deadline time, parallel to addr_table (8/cache line
+                                                           * so the GC scan walks 8x denser than entry lines); 0 = slot free */
+    U64                   nat_enospc;        /* learning failures: ports exhausted / pool dry / hash full (RELAXED add) */
+    U64                   nat_gc_reclaimed;  /* entries reclaimed by GC scans (RELAXED add) */
     struct rte_hash       *nat_reverse_hash;  /* (nat_port,dst_ip,dst_port) → addr_table slot idx (WAN→LAN);
                                                * owns slot reclaim via its RCU dq callback */
     struct rte_hash       *nat_forward_hash;  /* 5-tuple → addr_table slot idx (LAN→WAN established-flow fast path) */

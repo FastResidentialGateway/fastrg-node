@@ -114,13 +114,15 @@ static void test_learning_same_flow_refresh(void)
     addr_table_t *e1 = NULL, *e2 = NULL;
 
     U16 p1 = nat_learning_port_reuse(&test_ccb, &eth, src_ip, dst_ip, src_port, dst_port, &e1);
-    rte_atomic64_set(&e1->expire_at, (S64)(rte_atomic64_read(&e1->expire_at) - 1000));
-    U64 before = (U64)rte_atomic64_read(&e1->expire_at);
+    /* Wind back past the 1s coalescing threshold so the refresh must fire */
+    nat_expire_set(e1->expire_slot,
+        __atomic_load_n(e1->expire_slot, __ATOMIC_RELAXED) - 2 * fastrg_get_cycles_in_sec());
+    U64 before = __atomic_load_n(e1->expire_slot, __ATOMIC_RELAXED);
     U16 p2 = nat_learning_port_reuse(&test_ccb, &eth, src_ip, dst_ip, src_port, dst_port, &e2);
 
     TEST_ASSERT(p1 == p2, "same flow gets the same nat_port", NULL);
     TEST_ASSERT(e1 == e2, "same flow maps to the same entry", NULL);
-    TEST_ASSERT((U64)rte_atomic64_read(&e2->expire_at) > before,
+    TEST_ASSERT(__atomic_load_n(e2->expire_slot, __ATOMIC_RELAXED) > before,
         "expire_at refreshed on same-flow hit", NULL);
     TEST_ASSERT(rte_ring_count(test_ccb.nat_free_ring) == MAX_NAT_ENTRIES - 1,
         "no extra slot consumed on refresh", NULL);
@@ -223,7 +225,7 @@ static void test_reverse_expired_is_miss(void)
 
     U16 nat_port = nat_learning_port_reuse(&test_ccb, &eth, src_ip, dst_ip,
         src_port, dst_port, &learned);
-    rte_atomic64_set(&learned->expire_at, 1); /* long past */
+    nat_expire_set(learned->expire_slot, 1); /* long past */
 
     addr_table_t *hit = nat_reverse_lookup(nat_port, dst_ip, dst_port, &test_ccb);
     TEST_ASSERT(hit == NULL, "expired mapping treated as miss (WAN untrusted)", NULL);
@@ -292,7 +294,7 @@ static void test_gc_scan_reclaims_zombies(void)
         ports[i] = nat_learning_port_reuse(&test_ccb, &eth,
             rte_cpu_to_be_32(0xC0A80100 + i), dst_ip,
             rte_cpu_to_be_16(57000 + i), dst_port, &entries[i]);
-        rte_atomic64_set(&entries[i]->expire_at, 1); /* zombie: expired, never queried */
+        nat_expire_set(entries[i]->expire_slot, 1); /* zombie: expired, never queried */
     }
 
     U32 reclaimed = nat_gc_scan_by_ccb(&test_ccb, MAX_NAT_ENTRIES);
@@ -361,7 +363,7 @@ static void test_evict_clears_forward_key(void)
     addr_table_t *e1 = NULL, *e2 = NULL, *e3 = NULL;
 
     U16 p1 = nat_learning_port_reuse(&test_ccb, &eth, src1, dst_ip, sp1, dst_port, &e1);
-    rte_atomic64_set(&e1->expire_at, 1); /* A expires */
+    nat_expire_set(e1->expire_slot, 1); /* A expires */
 
     /* B collides with A's (nat_port, dst) key → eviction path, B takes A's
      * port.  A single source IP only covers ~64% of the port range with its
@@ -416,7 +418,7 @@ static void test_gc_clears_forward_key(void)
 
     U16 p1 = nat_learning_port_reuse(&test_ccb, &eth, src_ip, dst_ip,
         src_port, dst_port, &e1);
-    rte_atomic64_set(&e1->expire_at, 1); /* zombie */
+    nat_expire_set(e1->expire_slot, 1); /* zombie */
     TEST_ASSERT(nat_gc_scan_by_ccb(&test_ccb, MAX_NAT_ENTRIES) == 1,
         "gc reclaimed the zombie", NULL);
 
@@ -434,6 +436,67 @@ static void test_gc_clears_forward_key(void)
     nat_quiesce_reclaim();
     TEST_ASSERT(rte_ring_count(test_ccb.nat_free_ring) == MAX_NAT_ENTRIES - 1,
         "zombie slot recycled, exactly the live flow's slot in use", NULL);
+}
+
+static void test_expire_refresh_coalescing(void)
+{
+    printf("\nTesting NAT-level refresh write-coalescing:\n");
+    printf("===========================================\n\n");
+
+    nat_env_reset();
+    struct rte_ether_hdr eth = {0};
+    U32 src_ip = rte_cpu_to_be_32(0xC0A80071), dst_ip = rte_cpu_to_be_32(0x08080808);
+    U16 src_port = rte_cpu_to_be_16(61000), dst_port = rte_cpu_to_be_16(443);
+    addr_table_t *e1 = NULL;
+
+    nat_learning_port_reuse(&test_ccb, &eth, src_ip, dst_ip, src_port, dst_port, &e1);
+    U64 stored = __atomic_load_n(e1->expire_slot, __ATOMIC_RELAXED);
+
+    /* Immediate re-learning: deadline moved by microseconds only → the
+     * coalescing guard must skip the store */
+    nat_learning_port_reuse(&test_ccb, &eth, src_ip, dst_ip, src_port, dst_port, NULL);
+    TEST_ASSERT(__atomic_load_n(e1->expire_slot, __ATOMIC_RELAXED) == stored,
+        "same-flow refresh within threshold coalesces (no store)", NULL);
+
+    /* Drift the deadline back 2s → refresh must fire */
+    nat_expire_set(e1->expire_slot, stored - 2 * fastrg_get_cycles_in_sec());
+    nat_learning_port_reuse(&test_ccb, &eth, src_ip, dst_ip, src_port, dst_port, NULL);
+    TEST_ASSERT(__atomic_load_n(e1->expire_slot, __ATOMIC_RELAXED) > stored - fastrg_get_cycles_in_sec(),
+        "stale deadline refreshed past the threshold", NULL);
+}
+
+static void test_stats_counters(void)
+{
+    printf("\nTesting NAT health counters:\n");
+    printf("============================\n\n");
+
+    nat_env_reset();
+    struct rte_ether_hdr eth = {0};
+
+    TEST_ASSERT(test_ccb.nat_enospc == 0 && test_ccb.nat_gc_reclaimed == 0,
+        "counters zeroed by reset", NULL);
+
+    /* Every port reserved → learning fails and accounts one ENOSPC */
+    for (U32 p = 0; p < PORT_FWD_TABLE_SIZE; p++)
+        rte_atomic16_set(&test_ccb.port_fwd_table[p].is_active, 1);
+    U16 nat_port = nat_learning_port_reuse(&test_ccb, &eth,
+        rte_cpu_to_be_32(0xC0A80072), rte_cpu_to_be_32(0x08080808),
+        rte_cpu_to_be_16(62000), rte_cpu_to_be_16(443), NULL);
+    TEST_ASSERT(nat_port == 0 && test_ccb.nat_enospc == 1,
+        "failed learning increments nat_enospc",
+        "enospc=%" PRIu64, test_ccb.nat_enospc);
+    memset(test_ccb.port_fwd_table, 0, sizeof(test_ccb.port_fwd_table));
+
+    /* One zombie reclaimed by GC → accounted */
+    addr_table_t *e1 = NULL;
+    nat_learning_port_reuse(&test_ccb, &eth,
+        rte_cpu_to_be_32(0xC0A80072), rte_cpu_to_be_32(0x08080808),
+        rte_cpu_to_be_16(62000), rte_cpu_to_be_16(443), &e1);
+    nat_expire_set(e1->expire_slot, 1);
+    nat_gc_scan_by_ccb(&test_ccb, MAX_NAT_ENTRIES);
+    TEST_ASSERT(test_ccb.nat_gc_reclaimed == 1,
+        "gc reclaim increments nat_gc_reclaimed",
+        "reclaimed=%" PRIu64, test_ccb.nat_gc_reclaimed);
 }
 
 void test_nat(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
@@ -461,6 +524,8 @@ void test_nat(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_udp_tcp_icmp_wrappers();
     test_evict_clears_forward_key();
     test_gc_clears_forward_key();
+    test_expire_refresh_coalescing();
+    test_stats_counters();
 
     printf("\n");
     printf("╔════════════════════════════════════════════════════════════╗\n");

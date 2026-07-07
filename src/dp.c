@@ -344,13 +344,15 @@ static U32 nat_gc_ccb_counter;
 /**
  * @fn nat_gc_idle_tick_by_ccb
  *
- * @brief Idle-time NAT garbage collection: called by data-plane RX loops on
- *        an empty poll (nb_rx == 0), picks the next subscriber round-robin
- *        and scans one bounded chunk of its NAT pool for expired entries.
- *        Zombie flows (never looked up again) are otherwise unreachable now
- *        that slot allocation is free-list based -- this restores the
- *        self-cleaning the old probe-walk eviction provided, at zero cost to
- *        bursts that carry packets.
+ * @brief Amortized NAT garbage collection: called by data-plane RX loops
+ *        after a burst with idle headroom (nb_rx < BURST_SIZE), or forced
+ *        every NAT_GC_FORCE_PERIOD consecutive full bursts so sustained
+ *        line rate cannot starve reclaim.  Picks the next subscriber
+ *        round-robin and scans one bounded chunk of its NAT pool for
+ *        expired entries.  Zombie flows (never looked up again) are
+ *        otherwise unreachable now that slot allocation is free-list based
+ *        -- this restores the self-cleaning the old probe-walk eviction
+ *        provided, at near-zero cost to saturated bursts.
  *
  * @param fastrg_ccb
  *        FastRG control block
@@ -521,6 +523,7 @@ int wan_data_rx(void *arg)
     U16                  ccb_id;
     U16                  pppoe_len = sizeof(pppoe_header_t) + sizeof(ppp_payload_t);
     int                  pkt_num;
+    U32                  nat_gc_backpressure = 0;
     char                 thread_name[32];
 
     snprintf(thread_name, sizeof(thread_name), "fastrg_wan_data_%u", rx_q);
@@ -536,8 +539,6 @@ int wan_data_rx(void *arg)
         uint64_t _t0 = rte_rdtsc();
         nb_rx = rte_eth_rx_burst(WAN_PORT, rx_q, pkt, BURST_SIZE);
         fastrg_rcu_dp_quiescent(fastrg_ccb);
-        if (nb_rx == 0)
-            nat_gc_idle_tick_by_ccb(fastrg_ccb);
         U16 pf_k = rx_prefetch_prologue(pkt, nb_rx);
         for(int i=0; i<nb_rx; i++) {
             if (i + pf_k < nb_rx)
@@ -614,6 +615,14 @@ int wan_data_rx(void *arg)
                 }
             }
             total_tx = 0;
+        }
+        /* GC after the burst is fully processed (never ahead of packets):
+         * any idle headroom (non-full burst) affords a chunk, and the
+         * backpressure counter forces one every NAT_GC_FORCE_PERIOD polls
+         * so sustained line rate cannot starve reclaim. */
+        if (nb_rx < BURST_SIZE || ++nat_gc_backpressure >= NAT_GC_FORCE_PERIOD) {
+            nat_gc_backpressure = 0;
+            nat_gc_idle_tick_by_ccb(fastrg_ccb);
         }
         uint64_t _elapsed = rte_rdtsc() - _t0;
         fastrg_ccb->lcore_usage[rte_lcore_id()].total_cycles += _elapsed;
@@ -883,12 +892,11 @@ int lan_data_rx(void *arg)
     fastrg_ccb->lcore_usage[rte_lcore_id()].role = "lan_data";
     fastrg_rcu_dp_register(fastrg_ccb);
     struct rte_mbuf *rx_pkt[BURST_SIZE];
+    U32 nat_gc_backpressure = 0;
     while(likely(rte_atomic16_read(&stop_flag) == 0)) {
         uint64_t _t0 = rte_rdtsc();
         nb_rx = rte_eth_rx_burst(LAN_PORT, rx_q, rx_pkt, BURST_SIZE);
         fastrg_rcu_dp_quiescent(fastrg_ccb);
-        if (nb_rx == 0)
-            nat_gc_idle_tick_by_ccb(fastrg_ccb);
         U16 pf_k = rx_prefetch_prologue(rx_pkt, nb_rx);
         for(int i=0; i<nb_rx; i++) {
             if (i + pf_k < nb_rx)
@@ -1036,6 +1044,11 @@ int lan_data_rx(void *arg)
             }
             total_wan_tx = 0;
         }
+        /* GC after the burst is fully processed — see wan_data_rx */
+        if (nb_rx < BURST_SIZE || ++nat_gc_backpressure >= NAT_GC_FORCE_PERIOD) {
+            nat_gc_backpressure = 0;
+            nat_gc_idle_tick_by_ccb(fastrg_ccb);
+        }
         uint64_t _elapsed = rte_rdtsc() - _t0;
         fastrg_ccb->lcore_usage[rte_lcore_id()].total_cycles += _elapsed;
         if (nb_rx > 0)
@@ -1080,12 +1093,11 @@ int wan_dist_rx(void *arg)
         rte_pause();
 
     fastrg_ccb->lcore_usage[rte_lcore_id()].role = "wan_dist_rx";
+    U32 nat_gc_backpressure = 0;
     while(likely(rte_atomic16_read(&stop_flag) == 0)) {
         uint64_t _t0 = rte_rdtsc();
         nb_rx = rte_eth_rx_burst(WAN_PORT, rx_q, pkt, BURST_SIZE);
         dist_n = 0;
-        if (nb_rx == 0)
-            nat_gc_idle_tick_by_ccb(fastrg_ccb);
         U16 pf_k = rx_prefetch_prologue(pkt, nb_rx);
         for(int i=0; i<nb_rx; i++) {
             if (i + pf_k < nb_rx)
@@ -1206,6 +1218,11 @@ int wan_dist_rx(void *arg)
         }
         /* Reclaim worker-returned mbufs (already TX'd/freed by workers) */
         rte_distributor_returned_pkts(dist, ret_pkt, BURST_SIZE);
+        /* GC after the burst is fully processed — see wan_data_rx */
+        if (nb_rx < BURST_SIZE || ++nat_gc_backpressure >= NAT_GC_FORCE_PERIOD) {
+            nat_gc_backpressure = 0;
+            nat_gc_idle_tick_by_ccb(fastrg_ccb);
+        }
         uint64_t _elapsed = rte_rdtsc() - _t0;
         fastrg_ccb->lcore_usage[rte_lcore_id()].total_cycles += _elapsed;
         if (nb_rx > 0)
@@ -1340,12 +1357,11 @@ int lan_dist_rx(void *arg)
 
     fastrg_ccb->lcore_usage[rte_lcore_id()].role = "lan_dist_rx";
     struct rte_mbuf *rx_pkt[BURST_SIZE];
+    U32 nat_gc_backpressure = 0;
     while(likely(rte_atomic16_read(&stop_flag) == 0)) {
         uint64_t _t0 = rte_rdtsc();
         nb_rx = rte_eth_rx_burst(LAN_PORT, rx_q, rx_pkt, BURST_SIZE);
         dist_n = 0;
-        if (nb_rx == 0)
-            nat_gc_idle_tick_by_ccb(fastrg_ccb);
         U16 pf_k = rx_prefetch_prologue(rx_pkt, nb_rx);
         for(int i=0; i<nb_rx; i++) {
             if (i + pf_k < nb_rx)
@@ -1651,6 +1667,11 @@ int lan_dist_rx(void *arg)
         }
         /* Reclaim worker-returned mbufs (already TX'd/freed by workers) */
         rte_distributor_returned_pkts(dist, ret_pkt, BURST_SIZE);
+        /* GC after the burst is fully processed — see wan_data_rx */
+        if (nb_rx < BURST_SIZE || ++nat_gc_backpressure >= NAT_GC_FORCE_PERIOD) {
+            nat_gc_backpressure = 0;
+            nat_gc_idle_tick_by_ccb(fastrg_ccb);
+        }
         uint64_t _elapsed = rte_rdtsc() - _t0;
         fastrg_ccb->lcore_usage[rte_lcore_id()].total_cycles += _elapsed;
         if (nb_rx > 0)
