@@ -41,6 +41,10 @@ static void nat_env_init_once(void)
 static void nat_env_reset(void)
 {
     nat_env_init_once();
+    /* The test thread is reader 0 and holds no entry pointers here; report
+     * quiescent so nat_table_reset() can drain leftover deferred frees from
+     * the previous test (its drain loop would otherwise wait on us). */
+    rte_rcu_qsbr_quiescent(test_rcu, 0);
     nat_table_reset(&test_ccb);
     memset(test_ccb.port_fwd_table, 0, sizeof(test_ccb.port_fwd_table));
 }
@@ -343,6 +347,95 @@ static void test_udp_tcp_icmp_wrappers(void)
     TEST_ASSERT(ipn != 0, "ICMP wrapper learns", NULL);
 }
 
+static void test_evict_clears_forward_key(void)
+{
+    printf("\nTesting evict unlinks the forward key too:\n");
+    printf("==========================================\n\n");
+
+    nat_env_reset();
+    struct rte_ether_hdr eth = {0};
+    U32 dst_ip = rte_cpu_to_be_32(0x08080808);
+    U16 dst_port = rte_cpu_to_be_16(443);
+    U32 src1 = rte_cpu_to_be_32(0xC0A8006E);
+    U16 sp1 = rte_cpu_to_be_16(59000);
+    addr_table_t *e1 = NULL, *e2 = NULL, *e3 = NULL;
+
+    U16 p1 = nat_learning_port_reuse(&test_ccb, &eth, src1, dst_ip, sp1, dst_port, &e1);
+    rte_atomic64_set(&e1->expire_at, 1); /* A expires */
+
+    /* B collides with A's (nat_port, dst) key → eviction path, B takes A's
+     * port.  A single source IP only covers ~64% of the port range with its
+     * 65535 hash draws, so search across several source IPs — deterministic
+     * (pure hash of constants), practically guaranteed to find one. */
+    U32 src2 = 0;
+    U16 sp2 = 0;
+    for (U32 ip_off = 0; ip_off < 64 && sp2 == 0; ip_off++) {
+        U32 cand = rte_cpu_to_be_32(0xC0A80200 + ip_off);
+        for (U32 p = 1; p < TOTAL_SOCK_PORT; p++) {
+            if (compute_initial_nat_port(cand, rte_cpu_to_be_16((U16)p)) == p1) {
+                src2 = cand;
+                sp2 = rte_cpu_to_be_16((U16)p);
+                break;
+            }
+        }
+    }
+    TEST_ASSERT(sp2 != 0, "found colliding source for evict test", NULL);
+
+    U16 p2 = nat_learning_port_reuse(&test_ccb, &eth, src2, dst_ip, sp2, dst_port, &e2);
+    TEST_ASSERT(p2 == p1, "expired entry evicted, its port taken over", NULL);
+
+    /* A's flow returns.  If eviction had leaked A's forward key, the fast
+     * path would revive A's old entry and A would believe it still owns p1
+     * — while inbound p1 now belongs to B (mis-bound NAT).  Correct dual
+     * delete forces a forward miss → conflict walk → fresh port. */
+    U16 p3 = nat_learning_port_reuse(&test_ccb, &eth, src1, dst_ip, sp1, dst_port, &e3);
+    TEST_ASSERT(p3 != 0 && p3 != p1,
+        "returning flow re-learns on a fresh port, not the stolen one",
+        "p1=%u p3=%u", rte_be_to_cpu_16(p1), rte_be_to_cpu_16(p3));
+    TEST_ASSERT(e3->src_ip == src1 && e3->src_port == sp1,
+        "fresh entry belongs to the returning flow", NULL);
+
+    addr_table_t *rb = nat_reverse_lookup(p1, dst_ip, dst_port, &test_ccb);
+    TEST_ASSERT(rb != NULL && rb->src_ip == src2,
+        "inbound on the contested port reaches B only", NULL);
+    addr_table_t *ra = nat_reverse_lookup(p3, dst_ip, dst_port, &test_ccb);
+    TEST_ASSERT(ra != NULL && ra->src_ip == src1,
+        "inbound on the fresh port reaches A", NULL);
+}
+
+static void test_gc_clears_forward_key(void)
+{
+    printf("\nTesting GC unlinks the forward key too:\n");
+    printf("=======================================\n\n");
+
+    nat_env_reset();
+    struct rte_ether_hdr eth = {0};
+    U32 src_ip = rte_cpu_to_be_32(0xC0A80070), dst_ip = rte_cpu_to_be_32(0x08080808);
+    U16 src_port = rte_cpu_to_be_16(60000), dst_port = rte_cpu_to_be_16(443);
+    addr_table_t *e1 = NULL, *e2 = NULL;
+
+    U16 p1 = nat_learning_port_reuse(&test_ccb, &eth, src_ip, dst_ip,
+        src_port, dst_port, &e1);
+    rte_atomic64_set(&e1->expire_at, 1); /* zombie */
+    TEST_ASSERT(nat_gc_scan_by_ccb(&test_ccb, MAX_NAT_ENTRIES) == 1,
+        "gc reclaimed the zombie", NULL);
+
+    /* Relearn the same 5-tuple before RCU reclaim (harshest window).  A
+     * leaked forward key would fast-path into the dead slot and skip
+     * re-inserting the reverse key — inbound would blackhole.  Correct
+     * dual delete forces a full re-learn that restores reverse reachability. */
+    U16 p2 = nat_learning_port_reuse(&test_ccb, &eth, src_ip, dst_ip,
+        src_port, dst_port, &e2);
+    TEST_ASSERT(p2 != 0, "flow re-learns after gc", NULL);
+    addr_table_t *rv = nat_reverse_lookup(p2, dst_ip, dst_port, &test_ccb);
+    TEST_ASSERT(rv == e2 && rv->src_ip == src_ip,
+        "re-learned mapping reachable from the WAN side again", NULL);
+
+    nat_quiesce_reclaim();
+    TEST_ASSERT(rte_ring_count(test_ccb.nat_free_ring) == MAX_NAT_ENTRIES - 1,
+        "zombie slot recycled, exactly the live flow's slot in use", NULL);
+}
+
 void test_nat(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 {
     (void)fastrg_ccb;
@@ -366,6 +459,8 @@ void test_nat(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_all_ports_reserved_returns_zero();
     test_gc_scan_reclaims_zombies();
     test_udp_tcp_icmp_wrappers();
+    test_evict_clears_forward_key();
+    test_gc_clears_forward_key();
 
     printf("\n");
     printf("╔════════════════════════════════════════════════════════════╗\n");

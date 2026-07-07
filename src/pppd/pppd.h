@@ -106,8 +106,10 @@ typedef struct {
     rte_atomic16_t        dp_start_bool;     /* hsi data plane starting boolean flag */
     rte_atomic16_t        redial_pending;    /* desire=connect arrived mid-teardown; redial once down */
     BOOL                  ppp_processing;    /* boolean flag for checking ppp is disconnecting */
-    addr_table_t          addr_table[MAX_NAT_ENTRIES]; /* hsi nat entry pool (slots referenced by nat_reverse_hash) */
-    struct rte_hash       *nat_reverse_hash;     /* (nat_port,dst_ip,dst_port) → addr_table slot idx, O(1) both directions */
+    addr_table_t          addr_table[MAX_NAT_ENTRIES]; /* hsi nat entry pool (slots referenced by both nat hashes) */
+    struct rte_hash       *nat_reverse_hash;  /* (nat_port,dst_ip,dst_port) → addr_table slot idx (WAN→LAN);
+                                               * owns slot reclaim via its RCU dq callback */
+    struct rte_hash       *nat_forward_hash;  /* 5-tuple → addr_table slot idx (LAN→WAN established-flow fast path) */
     struct rte_ring       *nat_free_ring;    /* free-list of addr_table slot indices (MPMC) */
     U32                   nat_gc_counter;    /* amortized expired-slot scan position (approximate, racy by design) */
     rte_spinlock_t        nat_insert_lock;   /* serializes miss-path inserts only (double-checked); per-packet
