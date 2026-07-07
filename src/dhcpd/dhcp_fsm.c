@@ -66,7 +66,7 @@ tDHCP_STATE_TBL  dhcp_fsm_tbl[] = {
 STATUS dhcp_fsm(dhcp_ccb_t *dhcp_ccb, U32 lan_user_id, S16 event)
 {	
     int      i;
-    BOOL     retval;
+    STATUS   retval;
     char     str1[30], str2[30];
     FastRG_t *fastrg_ccb = dhcp_ccb->fastrg_ccb;
 

@@ -731,7 +731,7 @@ S16 dhcp_decode(dhcp_ccb_t *dhcp_ccb,
                     if ((requested_ip & dhcp_ccb->subnet_mask) == 
                             (dhcp_ccb->dhcp_server_ip & dhcp_ccb->subnet_mask)) {
                         if (is_client_in_pool(dhcp_ccb, &eth_hdr->src_addr, *cur_tmp_pool_index))
-                        event = E_DECLINE;
+                            event = E_DECLINE;
                     } else {
                         FastRG_LOG(WARN, dhcp_ccb->fastrg_ccb->fp, 
                             (U8 *)dhcp_ccb, DHCPLOGMSG,
