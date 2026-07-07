@@ -49,6 +49,7 @@ struct per_user_row {
 struct ppp_row {
     uint32_t user_id;
     uint64_t rxp, rxb, txp, txb;
+    uint64_t nat_used, nat_enospc, nat_gc_reclaimed;
 };
 struct dhcp_row {
     uint32_t user_id;
@@ -234,6 +235,12 @@ int metrics_build(lighthttp_buf_t *out, const char **content_type, void *arg)
                 ppp[i].rxb = sum.rx_bytes;
                 ppp[i].txp = sum.tx_packets;
                 ppp[i].txb = sum.tx_bytes;
+                /* NAT pool health: fill is a live gauge derived from the
+                 * free ring; the counters are RELAXED single-word reads. */
+                if (c->nat_free_ring != NULL)
+                    ppp[i].nat_used = MAX_NAT_ENTRIES - rte_ring_count(c->nat_free_ring);
+                ppp[i].nat_enospc = __atomic_load_n(&c->nat_enospc, __ATOMIC_RELAXED);
+                ppp[i].nat_gc_reclaimed = __atomic_load_n(&c->nat_gc_reclaimed, __ATOMIC_RELAXED);
             }
         }
     }
@@ -426,6 +433,23 @@ int metrics_build(lighthttp_buf_t *out, const char **content_type, void *arg)
             uint64_t v = *(uint64_t *)((char *)&ppp[i] + ppp_metrics[m].off);
             lighthttp_buf_appendf(out, "%s{node_uuid=\"%s\",user_id=\"%u\"} %" PRIu64 "\n",
                 ppp_metrics[m].name, uuid, (unsigned)ppp[i].user_id, v);
+        }
+    }
+
+    /* ---- per-user NAT pool health ---- */
+    static const struct row_metric nat_metrics[] = {
+        {"fastrg_node_per_user_nat_entries_used", "Live NAT mappings held by this subscriber (pool fill).", offsetof(struct ppp_row, nat_used)},
+        {"fastrg_node_per_user_nat_alloc_fail_total", "NAT learning failures: ports exhausted, pool dry or hash full.", offsetof(struct ppp_row, nat_enospc)},
+        {"fastrg_node_per_user_nat_gc_reclaimed_total", "Expired NAT mappings reclaimed by the amortized GC.", offsetof(struct ppp_row, nat_gc_reclaimed)},
+    };
+    for(size_t m=0; m<sizeof(nat_metrics)/sizeof(nat_metrics[0]); m++) {
+        emit_header(out, nat_metrics[m].name, "gauge", nat_metrics[m].help);
+        if (ppp == NULL)
+            continue;
+        for(U16 i=0; i<user_count; i++) {
+            uint64_t v = *(uint64_t *)((char *)&ppp[i] + nat_metrics[m].off);
+            lighthttp_buf_appendf(out, "%s{node_uuid=\"%s\",user_id=\"%u\"} %" PRIu64 "\n",
+                nat_metrics[m].name, uuid, (unsigned)ppp[i].user_id, v);
         }
     }
 

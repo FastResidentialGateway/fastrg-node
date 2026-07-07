@@ -28,7 +28,7 @@
 static STATUS tcp_act_timeout_syn_sent(struct addr_table *entry, BOOL is_reply)
 {
     (void)is_reply;
-    rte_atomic64_set(&((addr_table_t *)entry)->expire_at,
+    nat_expire_set(((addr_table_t *)entry)->expire_slot,
         fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_SYN_SENT * fastrg_get_cycles_in_sec());
     return SUCCESS;
 }
@@ -36,7 +36,7 @@ static STATUS tcp_act_timeout_syn_sent(struct addr_table *entry, BOOL is_reply)
 static STATUS tcp_act_timeout_syn_recv(struct addr_table *entry, BOOL is_reply)
 {
     (void)is_reply;
-    rte_atomic64_set(&((addr_table_t *)entry)->expire_at,
+    nat_expire_set(((addr_table_t *)entry)->expire_slot,
         fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_SYN_RECV * fastrg_get_cycles_in_sec());
     return SUCCESS;
 }
@@ -44,7 +44,19 @@ static STATUS tcp_act_timeout_syn_recv(struct addr_table *entry, BOOL is_reply)
 static STATUS tcp_act_timeout_established(struct addr_table *entry, BOOL is_reply)
 {
     (void)is_reply;
-    rte_atomic64_set(&((addr_table_t *)entry)->expire_at,
+    nat_expire_set(((addr_table_t *)entry)->expire_slot,
+        fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_ESTABLISHED * fastrg_get_cycles_in_sec());
+    return SUCCESS;
+}
+
+/* Same deadline as tcp_act_timeout_established but write-coalesced: the
+ * (ESTABLISHED, ACK) row fires on EVERY data packet of an established flow,
+ * so an unconditional store would dirty the shared expire cache line per
+ * packet.  Transitions INTO established keep the unconditional setter. */
+static STATUS tcp_act_refresh_established(struct addr_table *entry, BOOL is_reply)
+{
+    (void)is_reply;
+    nat_expire_refresh(((addr_table_t *)entry)->expire_slot,
         fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_ESTABLISHED * fastrg_get_cycles_in_sec());
     return SUCCESS;
 }
@@ -52,7 +64,7 @@ static STATUS tcp_act_timeout_established(struct addr_table *entry, BOOL is_repl
 static STATUS tcp_act_timeout_fin_wait(struct addr_table *entry, BOOL is_reply)
 {
     (void)is_reply;
-    rte_atomic64_set(&((addr_table_t *)entry)->expire_at,
+    nat_expire_set(((addr_table_t *)entry)->expire_slot,
         fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_FIN_WAIT * fastrg_get_cycles_in_sec());
     return SUCCESS;
 }
@@ -60,7 +72,7 @@ static STATUS tcp_act_timeout_fin_wait(struct addr_table *entry, BOOL is_reply)
 static STATUS tcp_act_timeout_close_wait(struct addr_table *entry, BOOL is_reply)
 {
     (void)is_reply;
-    rte_atomic64_set(&((addr_table_t *)entry)->expire_at,
+    nat_expire_set(((addr_table_t *)entry)->expire_slot,
         fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_CLOSE_WAIT * fastrg_get_cycles_in_sec());
     return SUCCESS;
 }
@@ -68,7 +80,7 @@ static STATUS tcp_act_timeout_close_wait(struct addr_table *entry, BOOL is_reply
 static STATUS tcp_act_timeout_last_ack(struct addr_table *entry, BOOL is_reply)
 {
     (void)is_reply;
-    rte_atomic64_set(&((addr_table_t *)entry)->expire_at,
+    nat_expire_set(((addr_table_t *)entry)->expire_slot,
         fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_LAST_ACK * fastrg_get_cycles_in_sec());
     return SUCCESS;
 }
@@ -76,7 +88,7 @@ static STATUS tcp_act_timeout_last_ack(struct addr_table *entry, BOOL is_reply)
 static STATUS tcp_act_timeout_time_wait(struct addr_table *entry, BOOL is_reply)
 {
     (void)is_reply;
-    rte_atomic64_set(&((addr_table_t *)entry)->expire_at,
+    nat_expire_set(((addr_table_t *)entry)->expire_slot,
         fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_TIME_WAIT * fastrg_get_cycles_in_sec());
     return SUCCESS;
 }
@@ -84,7 +96,7 @@ static STATUS tcp_act_timeout_time_wait(struct addr_table *entry, BOOL is_reply)
 static STATUS tcp_act_timeout_close(struct addr_table *entry, BOOL is_reply)
 {
     (void)is_reply;
-    rte_atomic64_set(&((addr_table_t *)entry)->expire_at,
+    nat_expire_set(((addr_table_t *)entry)->expire_slot,
         fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_CLOSE * fastrg_get_cycles_in_sec());
     return SUCCESS;
 }
@@ -92,7 +104,7 @@ static STATUS tcp_act_timeout_close(struct addr_table *entry, BOOL is_reply)
 static STATUS tcp_act_timeout_mid_stream(struct addr_table *entry, BOOL is_reply)
 {
     (void)is_reply;
-    rte_atomic64_set(&((addr_table_t *)entry)->expire_at,
+    nat_expire_set(((addr_table_t *)entry)->expire_slot,
         fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_MID_STREAM * fastrg_get_cycles_in_sec());
     return SUCCESS;
 }
@@ -106,10 +118,10 @@ static STATUS tcp_act_mid_stream_ack(struct addr_table *entry, BOOL is_reply)
 
     if (is_reply) {
         e->tcp_state = TCP_CONNTRACK_ESTABLISHED;
-        rte_atomic64_set(&e->expire_at,
+        nat_expire_set(e->expire_slot,
             fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_ESTABLISHED * fastrg_get_cycles_in_sec());
     } else {
-        rte_atomic64_set(&e->expire_at,
+        nat_expire_refresh(e->expire_slot,
             fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_MID_STREAM * fastrg_get_cycles_in_sec());
     }
     return SUCCESS;
@@ -182,7 +194,7 @@ static tcp_conntrack_state_tbl_t tcp_conntrack_tbl[] = {
      * the server didn't receive our final ACK and is resending its SYN-ACK; stay in
      * ESTABLISHED and just refresh the timeout — do NOT regress to SYN_RECV, which
      * would cause state oscillation every time the server retransmits. */
-    { TCP_CONNTRACK_ESTABLISHED, TCP_EV_ACK,       TCP_CONNTRACK_ESTABLISHED,   { tcp_act_timeout_established,  NULL } },
+    { TCP_CONNTRACK_ESTABLISHED, TCP_EV_ACK,       TCP_CONNTRACK_ESTABLISHED,   { tcp_act_refresh_established,  NULL } },
     { TCP_CONNTRACK_ESTABLISHED, TCP_EV_SYN,       TCP_CONNTRACK_SYN_SENT,      { tcp_act_reset_fin_flags, tcp_act_timeout_syn_sent, NULL } },
     { TCP_CONNTRACK_ESTABLISHED, TCP_EV_SYN_ACK,   TCP_CONNTRACK_ESTABLISHED,   { tcp_act_timeout_established, NULL } },
     { TCP_CONNTRACK_ESTABLISHED, TCP_EV_FIN_LAN,   TCP_CONNTRACK_FIN_WAIT,      { tcp_act_set_fin_lan, tcp_act_timeout_fin_wait,   NULL } },

@@ -159,10 +159,11 @@ STATUS ppp_init_config_by_user(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb, U16 ccb
     ppp_ccb->magic_num = rte_cpu_to_be_32((rand() % 0xFFFFFFFE) + 1);
     ppp_ccb->identifier = 0x0;
     /* Bound was TOTAL_SOCK_PORT before — only the first quarter of the pool
-     * got initialized (benign only because ccbs come zeroed from the mempool). */
+     * got initialized (benign only because ccbs come zeroed from the mempool).
+     * expire deadlines live in the SoA array; nat_table_reset() zeroes them
+     * and binds each entry's expire_slot. */
     for(int j=0; j<MAX_NAT_ENTRIES; j++) {
         rte_atomic16_init(&ppp_ccb->addr_table[j].is_fill);
-        rte_atomic64_init(&ppp_ccb->addr_table[j].expire_at);
     }
     rte_spinlock_init(&ppp_ccb->nat_insert_lock);
     memset(ppp_ccb->PPP_dst_mac.addr_bytes, 0, ETH_ALEN);

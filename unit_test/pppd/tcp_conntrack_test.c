@@ -14,14 +14,18 @@
 static int test_count = 0;
 static int pass_count = 0;
 
-/* Helper: create a zeroed addr_table_t entry in READY state */
+/* Helper: create a zeroed addr_table_t entry in READY state.  Entries are
+ * stack-allocated one at a time, so one file-scope expire slot stands in
+ * for the per-subscriber SoA deadline array. */
+static U64 test_expire_slot;
 static void init_entry(addr_table_t *entry, U8 initial_state)
 {
     memset(entry, 0, sizeof(*entry));
     entry->tcp_state = initial_state;
     entry->tcp_fin_flags = 0;
+    entry->expire_slot = &test_expire_slot;
     rte_atomic16_set(&entry->is_fill, NAT_ENTRY_READY);
-    rte_atomic64_set(&entry->expire_at,
+    nat_expire_set(entry->expire_slot,
         fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_NONE * fastrg_get_cycles_in_sec());
 }
 
@@ -84,7 +88,7 @@ static void test_timeout_values(void)
     init_entry(&entry, TCP_CONNTRACK_NONE);
     before = fastrg_get_cur_cycles();
     tcp_conntrack_fsm(&entry, RTE_TCP_SYN_FLAG, FALSE);
-    TEST_ASSERT(expire_at_approx(before, rte_atomic64_read(&entry.expire_at), TCP_TIMEOUT_SYN_SENT),
+    TEST_ASSERT(expire_at_approx(before, __atomic_load_n(entry.expire_slot, __ATOMIC_RELAXED), TCP_TIMEOUT_SYN_SENT),
         "SYN_SENT timeout",
         "expire_at not set to ~%d seconds", TCP_TIMEOUT_SYN_SENT);
 
@@ -92,7 +96,7 @@ static void test_timeout_values(void)
     init_entry(&entry, TCP_CONNTRACK_SYN_RECV);
     before = fastrg_get_cur_cycles();
     tcp_conntrack_fsm(&entry, RTE_TCP_ACK_FLAG, FALSE);
-    TEST_ASSERT(expire_at_approx(before, rte_atomic64_read(&entry.expire_at), TCP_TIMEOUT_ESTABLISHED),
+    TEST_ASSERT(expire_at_approx(before, __atomic_load_n(entry.expire_slot, __ATOMIC_RELAXED), TCP_TIMEOUT_ESTABLISHED),
         "ESTABLISHED timeout",
         "expire_at not set to ~%d seconds", TCP_TIMEOUT_ESTABLISHED);
 
@@ -100,7 +104,7 @@ static void test_timeout_values(void)
     init_entry(&entry, TCP_CONNTRACK_ESTABLISHED);
     before = fastrg_get_cur_cycles();
     tcp_conntrack_fsm(&entry, RTE_TCP_RST_FLAG, FALSE);
-    TEST_ASSERT(expire_at_approx(before, rte_atomic64_read(&entry.expire_at), TCP_TIMEOUT_CLOSE),
+    TEST_ASSERT(expire_at_approx(before, __atomic_load_n(entry.expire_slot, __ATOMIC_RELAXED), TCP_TIMEOUT_CLOSE),
         "CLOSE timeout after RST",
         "expire_at not set to ~%d seconds", TCP_TIMEOUT_CLOSE);
 
@@ -108,7 +112,7 @@ static void test_timeout_values(void)
     init_entry(&entry, TCP_CONNTRACK_ESTABLISHED);
     before = fastrg_get_cur_cycles();
     tcp_conntrack_fsm(&entry, RTE_TCP_FIN_FLAG, FALSE);
-    TEST_ASSERT(expire_at_approx(before, rte_atomic64_read(&entry.expire_at), TCP_TIMEOUT_FIN_WAIT),
+    TEST_ASSERT(expire_at_approx(before, __atomic_load_n(entry.expire_slot, __ATOMIC_RELAXED), TCP_TIMEOUT_FIN_WAIT),
         "FIN_WAIT timeout",
         "expire_at not set to ~%d seconds", TCP_TIMEOUT_FIN_WAIT);
 
@@ -116,7 +120,7 @@ static void test_timeout_values(void)
     init_entry(&entry, TCP_CONNTRACK_ESTABLISHED);
     before = fastrg_get_cur_cycles();
     tcp_conntrack_fsm(&entry, RTE_TCP_FIN_FLAG, TRUE);
-    TEST_ASSERT(expire_at_approx(before, rte_atomic64_read(&entry.expire_at), TCP_TIMEOUT_CLOSE_WAIT),
+    TEST_ASSERT(expire_at_approx(before, __atomic_load_n(entry.expire_slot, __ATOMIC_RELAXED), TCP_TIMEOUT_CLOSE_WAIT),
         "CLOSE_WAIT timeout",
         "expire_at not set to ~%d seconds", TCP_TIMEOUT_CLOSE_WAIT);
 }
@@ -331,7 +335,7 @@ static void test_syn_retransmit(void)
     addr_table_t entry;
     init_entry(&entry, TCP_CONNTRACK_SYN_SENT);
     /* simulate a partially elapsed timeout (5 seconds remaining) */
-    rte_atomic64_set(&entry.expire_at,
+    nat_expire_set(entry.expire_slot,
         fastrg_get_cur_cycles() + 5ULL * fastrg_get_cycles_in_sec());
 
     U64 before = fastrg_get_cur_cycles();
@@ -339,7 +343,7 @@ static void test_syn_retransmit(void)
     TEST_ASSERT(entry.tcp_state == TCP_CONNTRACK_SYN_SENT,
         "SYN retransmit stays SYN_SENT",
         "expected SYN_SENT(%d), got %d", TCP_CONNTRACK_SYN_SENT, entry.tcp_state);
-    TEST_ASSERT(expire_at_approx(before, rte_atomic64_read(&entry.expire_at), TCP_TIMEOUT_SYN_SENT),
+    TEST_ASSERT(expire_at_approx(before, __atomic_load_n(entry.expire_slot, __ATOMIC_RELAXED), TCP_TIMEOUT_SYN_SENT),
         "SYN retransmit refreshes timeout",
         "expire_at not reset to ~%d seconds", TCP_TIMEOUT_SYN_SENT);
 }
@@ -398,7 +402,7 @@ static void test_close_new_connection(void)
     TEST_ASSERT(entry.tcp_fin_flags == 0,
         "CLOSE + SYN clears fin_flags",
         "expected 0, got %d", entry.tcp_fin_flags);
-    TEST_ASSERT(expire_at_approx(before, rte_atomic64_read(&entry.expire_at), TCP_TIMEOUT_SYN_SENT),
+    TEST_ASSERT(expire_at_approx(before, __atomic_load_n(entry.expire_slot, __ATOMIC_RELAXED), TCP_TIMEOUT_SYN_SENT),
         "CLOSE + SYN sets SYN_SENT timeout",
         "expire_at not set to ~%d seconds", TCP_TIMEOUT_SYN_SENT);
 
@@ -438,7 +442,7 @@ static void test_time_wait_new_connection(void)
     TEST_ASSERT(entry.tcp_fin_flags == 0,
         "TIME_WAIT + SYN clears fin_flags",
         "expected 0, got %d", entry.tcp_fin_flags);
-    TEST_ASSERT(expire_at_approx(before, rte_atomic64_read(&entry.expire_at), TCP_TIMEOUT_SYN_SENT),
+    TEST_ASSERT(expire_at_approx(before, __atomic_load_n(entry.expire_slot, __ATOMIC_RELAXED), TCP_TIMEOUT_SYN_SENT),
         "TIME_WAIT + SYN sets SYN_SENT timeout",
         "expire_at not set to ~%d seconds", TCP_TIMEOUT_SYN_SENT);
 }
@@ -466,7 +470,7 @@ static void test_established_port_reuse(void)
     TEST_ASSERT(entry.tcp_fin_flags == 0,
         "ESTABLISHED + SYN clears fin_flags",
         "expected 0, got %d", entry.tcp_fin_flags);
-    TEST_ASSERT(expire_at_approx(before, rte_atomic64_read(&entry.expire_at), TCP_TIMEOUT_SYN_SENT),
+    TEST_ASSERT(expire_at_approx(before, __atomic_load_n(entry.expire_slot, __ATOMIC_RELAXED), TCP_TIMEOUT_SYN_SENT),
         "ESTABLISHED + SYN sets SYN_SENT timeout",
         "expire_at not set to ~%d seconds", TCP_TIMEOUT_SYN_SENT);
 
@@ -482,7 +486,7 @@ static void test_established_port_reuse(void)
         "ESTABLISHED + SYN_ACK does not touch fin_flags",
         "expected 0x%02X, got 0x%02X",
         TCP_FIN_FLAG_LAN | TCP_FIN_FLAG_WAN, entry.tcp_fin_flags);
-    TEST_ASSERT(expire_at_approx(before, rte_atomic64_read(&entry.expire_at), TCP_TIMEOUT_ESTABLISHED),
+    TEST_ASSERT(expire_at_approx(before, __atomic_load_n(entry.expire_slot, __ATOMIC_RELAXED), TCP_TIMEOUT_ESTABLISHED),
         "ESTABLISHED + SYN_ACK refreshes ESTABLISHED timeout",
         "expire_at not set to ~%d seconds", TCP_TIMEOUT_ESTABLISHED);
 }
@@ -618,7 +622,7 @@ static void test_mid_stream_pickup(void)
     TEST_ASSERT(entry.tcp_state == TCP_CONNTRACK_MID_STREAM,
         "NONE + ACK (LAN side) → MID_STREAM",
         "expected MID_STREAM(%d), got %d", TCP_CONNTRACK_MID_STREAM, entry.tcp_state);
-    TEST_ASSERT(expire_at_approx(before, rte_atomic64_read(&entry.expire_at), TCP_TIMEOUT_MID_STREAM),
+    TEST_ASSERT(expire_at_approx(before, __atomic_load_n(entry.expire_slot, __ATOMIC_RELAXED), TCP_TIMEOUT_MID_STREAM),
         "NONE + ACK sets MID_STREAM timeout (60s)",
         "expire_at not set to ~%d seconds", TCP_TIMEOUT_MID_STREAM);
 }
@@ -640,7 +644,7 @@ static void test_mid_stream_promotion(void)
     TEST_ASSERT(entry.tcp_state == TCP_CONNTRACK_ESTABLISHED,
         "MID_STREAM + ACK (WAN side) → ESTABLISHED",
         "expected ESTABLISHED(%d), got %d", TCP_CONNTRACK_ESTABLISHED, entry.tcp_state);
-    TEST_ASSERT(expire_at_approx(before, rte_atomic64_read(&entry.expire_at), TCP_TIMEOUT_ESTABLISHED),
+    TEST_ASSERT(expire_at_approx(before, __atomic_load_n(entry.expire_slot, __ATOMIC_RELAXED), TCP_TIMEOUT_ESTABLISHED),
         "MID_STREAM promotion grants ESTABLISHED timeout (7200s)",
         "expire_at not set to ~%d seconds", TCP_TIMEOUT_ESTABLISHED);
 }
@@ -678,7 +682,7 @@ static void test_mid_stream_no_promote_on_lan_ack(void)
     addr_table_t entry;
     init_entry(&entry, TCP_CONNTRACK_MID_STREAM);
     /* Drift the timer forward so we can confirm a refresh actually happened. */
-    rte_atomic64_set(&entry.expire_at,
+    nat_expire_set(entry.expire_slot,
         fastrg_get_cur_cycles() + 5ULL * fastrg_get_cycles_in_sec());
 
     U64 before = fastrg_get_cur_cycles();
@@ -686,9 +690,49 @@ static void test_mid_stream_no_promote_on_lan_ack(void)
     TEST_ASSERT(entry.tcp_state == TCP_CONNTRACK_MID_STREAM,
         "MID_STREAM + ACK (LAN side) stays MID_STREAM (no promotion)",
         "expected MID_STREAM(%d), got %d", TCP_CONNTRACK_MID_STREAM, entry.tcp_state);
-    TEST_ASSERT(expire_at_approx(before, rte_atomic64_read(&entry.expire_at), TCP_TIMEOUT_MID_STREAM),
+    TEST_ASSERT(expire_at_approx(before, __atomic_load_n(entry.expire_slot, __ATOMIC_RELAXED), TCP_TIMEOUT_MID_STREAM),
         "MID_STREAM + ACK (LAN side) refreshes 60s timeout",
         "expire_at not refreshed to ~%d seconds", TCP_TIMEOUT_MID_STREAM);
+}
+
+/**
+ * Test 18b: ESTABLISHED + ACK refresh is write-coalesced
+ * A fresh deadline (within the 1s threshold) must NOT be rewritten; a stale
+ * one (drifted past the threshold) must be. Shortening transitions stay
+ * immediate regardless of the stored deadline.
+ */
+static void test_established_refresh_coalesced(void)
+{
+    printf("\nTesting ESTABLISHED refresh write-coalescing:\n");
+    printf("=============================================\n\n");
+
+    addr_table_t entry;
+    init_entry(&entry, TCP_CONNTRACK_ESTABLISHED);
+
+    /* Fresh deadline → the per-packet ACK refresh skips the store */
+    U64 fresh = fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_ESTABLISHED * fastrg_get_cycles_in_sec();
+    nat_expire_set(entry.expire_slot, fresh);
+    tcp_conntrack_fsm(&entry, RTE_TCP_ACK_FLAG, FALSE);
+    TEST_ASSERT(__atomic_load_n(entry.expire_slot, __ATOMIC_RELAXED) == fresh,
+        "ACK on a fresh deadline coalesces (no store)", NULL);
+
+    /* Deadline drifted 2s past the threshold → refresh must fire */
+    nat_expire_set(entry.expire_slot, fresh - 2 * fastrg_get_cycles_in_sec());
+    U64 before = fastrg_get_cur_cycles();
+    tcp_conntrack_fsm(&entry, RTE_TCP_ACK_FLAG, FALSE);
+    TEST_ASSERT(expire_at_approx(before, __atomic_load_n(entry.expire_slot, __ATOMIC_RELAXED), TCP_TIMEOUT_ESTABLISHED),
+        "ACK on a stale deadline refreshes (~7200s)",
+        "expire_at not refreshed to ~%d seconds", TCP_TIMEOUT_ESTABLISHED);
+
+    /* Shortening transition (ESTABLISHED → FIN_WAIT) is immediate even
+     * though the stored deadline is far in the future */
+    before = fastrg_get_cur_cycles();
+    tcp_conntrack_fsm(&entry, RTE_TCP_FIN_FLAG, FALSE);
+    TEST_ASSERT(entry.tcp_state == TCP_CONNTRACK_FIN_WAIT,
+        "FIN → FIN_WAIT", NULL);
+    TEST_ASSERT(expire_at_approx(before, __atomic_load_n(entry.expire_slot, __ATOMIC_RELAXED), TCP_TIMEOUT_FIN_WAIT),
+        "shortening transition sets the deadline unconditionally (~120s)",
+        "expire_at not shortened to ~%d seconds", TCP_TIMEOUT_FIN_WAIT);
 }
 
 /**
@@ -892,6 +936,7 @@ void test_tcp_conntrack(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_mid_stream_promotion();
     test_mid_stream_promotion_on_psh_ack();
     test_mid_stream_no_promote_on_lan_ack();
+    test_established_refresh_coalesced();
     test_mid_stream_other_transitions();
     test_seq_window_validation();
     test_seq_update();

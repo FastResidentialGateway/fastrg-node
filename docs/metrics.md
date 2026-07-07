@@ -152,6 +152,14 @@ Labels: `node_uuid`, `nic_index`. Traffic that did not map to a known subscriber
 | `fastrg_node_per_pppoe_session_tx_packets_total` | gauge |
 | `fastrg_node_per_pppoe_session_tx_bytes_total` | gauge |
 
+### Per-subscriber NAT pool health — labels: `node_uuid`, `user_id`
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `fastrg_node_per_user_nat_entries_used` | gauge | Live NAT mappings held by this subscriber (pool fill, out of 262144). |
+| `fastrg_node_per_user_nat_alloc_fail_total` | gauge | NAT learning failures: ports exhausted, entry pool dry or hash full. A non-zero rate means new flows are being dropped. Resets on subscriber re-init as well as node restart. |
+| `fastrg_node_per_user_nat_gc_reclaimed_total` | gauge | Expired NAT mappings reclaimed by the amortized data-lcore GC. Resets on subscriber re-init as well as node restart. |
+
 ## 6. DHCP
 
 ### Per-subscriber leases — labels: `node_uuid`, `user_id` (emitted only for configured pools)

@@ -35,6 +35,12 @@
  * across calls, so successive calls cover the whole pool. */
 #define NAT_GC_SCAN_CHUNK 512
 
+/* Forced-minimum GC: after this many consecutive full-burst polls with no
+ * idle headroom, a data lcore runs one GC chunk anyway, so sustained
+ * line-rate traffic cannot starve zombie reclaim entirely.  Worst-case
+ * overhead: one 512-slot SoA scan per 1024 x 32 packets (~1.5%). */
+#define NAT_GC_FORCE_PERIOD 1024
+
 #define MAX_L4_PORT_NUM 0xffff
 #define SYS_MAX_PORT 1000
 #define NAT_PORT_RANGE (TOTAL_SOCK_PORT - SYS_MAX_PORT)
@@ -68,7 +74,7 @@ static inline U64 nat_expiry_cycles(void)
  */
 static inline int nat_entry_is_expired(addr_table_t *entry)
 {
-    return fastrg_get_cur_cycles() > (U64)rte_atomic64_read(&entry->expire_at);
+    return fastrg_get_cur_cycles() > __atomic_load_n(entry->expire_slot, __ATOMIC_RELAXED);
 }
 
 /**
@@ -117,6 +123,9 @@ static inline void nat_reverse_hash_free_cb(void *p, void *key_data)
     ppp_ccb_t *ppp_ccb = (ppp_ccb_t *)p;
     U32 idx = (U32)(uintptr_t)key_data;
 
+    /* Zero the SoA deadline first so the GC scan skips this slot without
+     * ever touching its entry cache line again */
+    __atomic_store_n(&ppp_ccb->nat_expire_at[idx], 0, __ATOMIC_RELAXED);
     rte_atomic16_set(&ppp_ccb->addr_table[idx].is_fill, NAT_ENTRY_FREE);
     rte_ring_enqueue(ppp_ccb->nat_free_ring, (void *)(uintptr_t)idx);
 }
@@ -154,10 +163,14 @@ static inline void nat_table_reset(ppp_ccb_t *ppp_ccb)
     rte_hash_reset(ppp_ccb->nat_forward_hash);
     rte_ring_reset(ppp_ccb->nat_free_ring);
     for(U32 i=0; i<MAX_NAT_ENTRIES; i++) {
+        ppp_ccb->addr_table[i].expire_slot = &ppp_ccb->nat_expire_at[i];
+        ppp_ccb->nat_expire_at[i] = 0;
         rte_atomic16_set(&ppp_ccb->addr_table[i].is_fill, NAT_ENTRY_FREE);
         rte_ring_enqueue(ppp_ccb->nat_free_ring, (void *)(uintptr_t)i);
     }
     ppp_ccb->nat_gc_counter = 0;
+    ppp_ccb->nat_enospc = 0;
+    ppp_ccb->nat_gc_reclaimed = 0;
 }
 
 /**
@@ -349,16 +362,26 @@ static inline U32 nat_gc_scan_by_ccb(ppp_ccb_t *ppp_ccb, U32 max_slots)
     U32 start = __atomic_fetch_add(&ppp_ccb->nat_gc_counter, max_slots, __ATOMIC_RELAXED);
     U32 reclaimed = 0;
 
-    for(U32 n=0; n<max_slots; n++) {
-        addr_table_t *entry = &ppp_ccb->addr_table[(start + n) % MAX_NAT_ENTRIES];
+    U64 now = fastrg_get_cur_cycles();
 
-        if (rte_atomic16_read(&entry->is_fill) != NAT_ENTRY_READY)
+    for(U32 n=0; n<max_slots; n++) {
+        U32 idx = (start + n) % MAX_NAT_ENTRIES;
+
+        /* Hot loop reads only the SoA deadline array — 8 slots per cache
+         * line, sequential, prefetcher-friendly; 0 = free slot.  The 64B
+         * entry line is touched only for actual expired hits. */
+        U64 deadline = __atomic_load_n(&ppp_ccb->nat_expire_at[idx], __ATOMIC_RELAXED);
+        if (deadline == 0 || deadline > now)
             continue;
-        if (!nat_entry_is_expired(entry))
+
+        addr_table_t *entry = &ppp_ccb->addr_table[idx];
+        if (rte_atomic16_read(&entry->is_fill) != NAT_ENTRY_READY)
             continue;
         if (nat_entry_del_keys(ppp_ccb, entry))
             reclaimed++;
     }
+    if (reclaimed > 0)
+        __atomic_fetch_add(&ppp_ccb->nat_gc_reclaimed, (U64)reclaimed, __ATOMIC_RELAXED);
     return reclaimed;
 }
 
@@ -500,7 +523,7 @@ static inline U16 nat_learning_port_reuse(ppp_ccb_t *ppp_ccb, struct rte_ether_h
         addr_table_t *entry = &ppp_ccb->addr_table[(U32)(uintptr_t)fdata];
 
         rte_atomic_thread_fence(rte_memory_order_acquire);
-        rte_atomic64_set(&entry->expire_at, nat_expiry_cycles());
+        nat_expire_refresh(entry->expire_slot, nat_expiry_cycles());
         if (out_entry != NULL)
             *out_entry = entry;
         return entry->nat_port;
@@ -526,7 +549,7 @@ static inline U16 nat_learning_port_reuse(ppp_ccb_t *ppp_ccb, struct rte_ether_h
             /* Same flow already exists — refresh and done (LAN side is
              * trusted: no expiry check, traffic just revives the mapping) */
             if (nat_entry_same_flow(entry, nat_port, src_ip, src_port, dst_ip, dst_port)) {
-                rte_atomic64_set(&entry->expire_at, nat_expiry_cycles());
+                nat_expire_refresh(entry->expire_slot, nat_expiry_cycles());
                 if (out_entry != NULL)
                     *out_entry = entry;
                 return nat_port;
@@ -547,7 +570,7 @@ static inline U16 nat_learning_port_reuse(ppp_ccb_t *ppp_ccb, struct rte_ether_h
             addr_table_t *entry = &ppp_ccb->addr_table[(U32)(uintptr_t)fdata];
 
             rte_spinlock_unlock(&ppp_ccb->nat_insert_lock);
-            rte_atomic64_set(&entry->expire_at, nat_expiry_cycles());
+            nat_expire_refresh(entry->expire_slot, nat_expiry_cycles());
             if (out_entry != NULL)
                 *out_entry = entry;
             return entry->nat_port;
@@ -557,7 +580,7 @@ static inline U16 nat_learning_port_reuse(ppp_ccb_t *ppp_ccb, struct rte_ether_h
 
             rte_spinlock_unlock(&ppp_ccb->nat_insert_lock);
             if (nat_entry_same_flow(entry, nat_port, src_ip, src_port, dst_ip, dst_port)) {
-                rte_atomic64_set(&entry->expire_at, nat_expiry_cycles());
+                nat_expire_refresh(entry->expire_slot, nat_expiry_cycles());
                 if (out_entry != NULL)
                     *out_entry = entry;
                 return nat_port;
@@ -568,6 +591,7 @@ static inline U16 nat_learning_port_reuse(ppp_ccb_t *ppp_ccb, struct rte_ether_h
         U32 idx;
         if (nat_slot_alloc(ppp_ccb, &idx) != SUCCESS) {
             rte_spinlock_unlock(&ppp_ccb->nat_insert_lock);
+            __atomic_fetch_add(&ppp_ccb->nat_enospc, 1, __ATOMIC_RELAXED);
             return 0; /* pool exhausted by live flows */
         }
 
@@ -586,7 +610,7 @@ static inline U16 nat_learning_port_reuse(ppp_ccb_t *ppp_ccb, struct rte_ether_h
         entry->max_ack_wan     = 0;
         entry->max_win_lan     = 0;
         entry->max_win_wan     = 0;
-        rte_atomic64_set(&entry->expire_at, nat_expiry_cycles());
+        nat_expire_set(entry->expire_slot, nat_expiry_cycles());
         rte_atomic_thread_fence(rte_memory_order_release);
         rte_atomic16_set(&entry->is_fill, NAT_ENTRY_READY);
 
@@ -606,6 +630,7 @@ static inline U16 nat_learning_port_reuse(ppp_ccb_t *ppp_ccb, struct rte_ether_h
              * help (fkey has no port in it), so fail the flow. */
             rte_hash_del_key(ppp_ccb->nat_reverse_hash, &key);
             rte_spinlock_unlock(&ppp_ccb->nat_insert_lock);
+            __atomic_fetch_add(&ppp_ccb->nat_enospc, 1, __ATOMIC_RELAXED);
             return 0;
         }
         rte_spinlock_unlock(&ppp_ccb->nat_insert_lock);
@@ -624,6 +649,7 @@ next_nat_port:
     } while (nat_port != start_nat_port);
 
     /* All NAT ports exhausted */
+    __atomic_fetch_add(&ppp_ccb->nat_enospc, 1, __ATOMIC_RELAXED);
     return 0;
 }
 
@@ -667,7 +693,7 @@ static inline addr_table_t *nat_reverse_lookup(U16 nat_port, U32 remote_ip, U16 
         return NULL;
     }
 
-    rte_atomic64_set(&entry->expire_at, nat_expiry_cycles());
+    nat_expire_refresh(entry->expire_slot, nat_expiry_cycles());
     return entry;
 }
 
