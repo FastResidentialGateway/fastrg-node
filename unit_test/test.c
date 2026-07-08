@@ -191,6 +191,10 @@ int main()
     test_dns_cache(fastrg_ccb, &total_tests, &total_pass);
     puts("ok!");
 
+    puts("====================test dnsd/dns_static.c====================");
+    test_dns_static(fastrg_ccb, &total_tests, &total_pass);
+    puts("ok!");
+
     puts("====================test dnsd/dnsd.c====================");
     test_dnsd(fastrg_ccb, &total_tests, &total_pass);
     puts("ok!");
