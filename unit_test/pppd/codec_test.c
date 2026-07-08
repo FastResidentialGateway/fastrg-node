@@ -1034,6 +1034,103 @@ void test_build_proto_reject(FastRG_t *fastrg_ccb)
         "build_proto_reject MTU truncated info first byte", "expected 0xAB, got 0x%02x", buffer[32]);
 }
 
+void test_build_code_reject(FastRG_t *fastrg_ccb)
+{
+    printf("\nTesting build_code_reject function:\n");
+    printf("=========================================\n\n");
+
+    U8  buffer[1600] = {0};
+    U16 mulen         = 0;
+    U8  lcp_opts[]    = {0xDE, 0xAD};
+    U8  big_opts[116];
+
+    ppp_ccb_t s_ppp_ccb = {
+        .user_num  = 1,
+        .vlan_id   = {.cnt = 2},
+        .PPP_dst_mac = (struct rte_ether_addr){
+            .addr_bytes = {0x74, 0x4d, 0x28, 0x8d, 0x00, 0x31},
+        },
+        .session_id  = htons(0x000a),
+        .fastrg_ccb  = fastrg_ccb,
+    };
+
+    /* Test 1: unknown LCP code — Code-Reject rides on LCP, copies the packet */
+    printf("Test 1: \"%s\"\n", "build_code_reject() LCP unknown code");
+    s_ppp_ccb.cp = 0;
+    s_ppp_ccb.ppp_phase[0].ppp_hdr = (ppp_header_t){.code = 0x0E, .identifier = 0x42, .length = htons(6)};
+    s_ppp_ccb.ppp_phase[0].ppp_options = (ppp_options_t *)lcp_opts;
+    TEST_ASSERT(build_code_reject(buffer, &s_ppp_ccb, &mulen) == SUCCESS,
+        "build_code_reject LCP returns SUCCESS", "");
+    /* overhead = eth(14) + vlan(4) + pppoe(6) + ppp_payload(2) + ppp_hdr(4) = 30; + rejected pkt(6) = 36 */
+    TEST_ASSERT(mulen == 36, "build_code_reject LCP mulen", "expected 36, got %u", mulen);
+    TEST_ASSERT(memcmp(buffer, s_ppp_ccb.PPP_dst_mac.addr_bytes, 6) == 0,
+        "build_code_reject LCP dst MAC", "dst MAC mismatch");
+    TEST_ASSERT(*(U16 *)(buffer + 16) == htons(ETH_P_PPP_SES),
+        "build_code_reject LCP next_proto", "expected 0x8864, got 0x%04x", ntohs(*(U16 *)(buffer + 16)));
+    TEST_ASSERT(*(U16 *)(buffer + 20) == htons(0x000a),
+        "build_code_reject LCP session_id", "expected 0x000a, got 0x%04x", ntohs(*(U16 *)(buffer + 20)));
+    /* pppoe_len = ppp_payload(2) + ppp_hdr(4) + rejected pkt(6) = 12 */
+    TEST_ASSERT(*(U16 *)(buffer + 22) == htons(12),
+        "build_code_reject LCP pppoe length", "expected 12, got %u", ntohs(*(U16 *)(buffer + 22)));
+    TEST_ASSERT(*(U16 *)(buffer + 24) == htons(LCP_PROTOCOL),
+        "build_code_reject LCP ppp protocol", "expected LCP 0xc021, got 0x%04x", ntohs(*(U16 *)(buffer + 24)));
+    TEST_ASSERT(buffer[26] == CODE_REJECT,
+        "build_code_reject LCP ppp code", "expected CODE_REJECT 0x07, got 0x%02x", buffer[26]);
+    /* ppp_len = ppp_hdr(4) + rejected pkt(6) = 10 */
+    TEST_ASSERT(*(U16 *)(buffer + 28) == htons(10),
+        "build_code_reject LCP ppp length", "expected 10, got %u", ntohs(*(U16 *)(buffer + 28)));
+    U8 expected_rej[] = {0x0E, 0x42, 0x00, 0x06, 0xDE, 0xAD};
+    TEST_ASSERT(memcmp(buffer + 30, expected_rej, sizeof(expected_rej)) == 0,
+        "build_code_reject LCP rejected packet copied", "rejected packet bytes mismatch");
+
+    /* Test 2: unknown IPCP code — Code-Reject rides on IPCP */
+    printf("Test 2: \"%s\"\n", "build_code_reject() IPCP unknown code");
+    memset(buffer, 0, sizeof(buffer));
+    mulen = 0;
+    s_ppp_ccb.cp = 1;
+    s_ppp_ccb.ppp_phase[1].ppp_hdr = (ppp_header_t){.code = 0x0D, .identifier = 0x11, .length = htons(4)};
+    s_ppp_ccb.ppp_phase[1].ppp_options = NULL;
+    TEST_ASSERT(build_code_reject(buffer, &s_ppp_ccb, &mulen) == SUCCESS,
+        "build_code_reject IPCP returns SUCCESS", "");
+    TEST_ASSERT(mulen == 34, "build_code_reject IPCP mulen", "expected 34, got %u", mulen);
+    TEST_ASSERT(*(U16 *)(buffer + 24) == htons(IPCP_PROTOCOL),
+        "build_code_reject IPCP ppp protocol", "expected IPCP 0x8021, got 0x%04x", ntohs(*(U16 *)(buffer + 24)));
+    TEST_ASSERT(buffer[26] == CODE_REJECT,
+        "build_code_reject IPCP ppp code", "expected CODE_REJECT 0x07, got 0x%02x", buffer[26]);
+    U8 expected_ipcp_rej[] = {0x0D, 0x11, 0x00, 0x04};
+    TEST_ASSERT(memcmp(buffer + 30, expected_ipcp_rej, sizeof(expected_ipcp_rej)) == 0,
+        "build_code_reject IPCP rejected packet copied", "rejected packet bytes mismatch");
+
+    /* Test 3: truncation — rejected packet longer than PPP_MSG_BUF_LEN - 30 is clamped */
+    printf("Test 3: \"%s\"\n", "build_code_reject() truncation to PPP_MSG_BUF_LEN");
+    memset(big_opts, 0xAB, sizeof(big_opts));
+    memset(buffer, 0, sizeof(buffer));
+    mulen = 0;
+    s_ppp_ccb.cp = 0;
+    s_ppp_ccb.ppp_phase[0].ppp_hdr = (ppp_header_t){.code = 0x0E, .identifier = 0x43, .length = htons(120)};
+    s_ppp_ccb.ppp_phase[0].ppp_options = (ppp_options_t *)big_opts;
+    TEST_ASSERT(build_code_reject(buffer, &s_ppp_ccb, &mulen) == SUCCESS,
+        "build_code_reject truncated returns SUCCESS", "");
+    /* max_rej = PPP_MSG_BUF_LEN(128) - 30 = 98; mulen = 30 + 98 = 128 */
+    TEST_ASSERT(mulen == PPP_MSG_BUF_LEN, "build_code_reject truncated mulen",
+        "expected %u (PPP_MSG_BUF_LEN), got %u", PPP_MSG_BUF_LEN, mulen);
+    /* ppp_len = 4 + 98 = 102 */
+    TEST_ASSERT(*(U16 *)(buffer + 28) == htons(102),
+        "build_code_reject truncated ppp length", "expected 102, got %u", ntohs(*(U16 *)(buffer + 28)));
+    /* inner Length field of the copied packet keeps its original value per RFC 1661 §5.6 */
+    TEST_ASSERT(*(U16 *)(buffer + 32) == htons(120),
+        "build_code_reject truncated inner length preserved", "expected 120, got %u", ntohs(*(U16 *)(buffer + 32)));
+    TEST_ASSERT(buffer[PPP_MSG_BUF_LEN - 1] == 0xAB && buffer[PPP_MSG_BUF_LEN] == 0x00,
+        "build_code_reject truncated copy stops at buffer end", "copy overran PPP_MSG_BUF_LEN");
+
+    /* Test 4: stashed packet shorter than a PPP header → ERROR, nothing to reject */
+    printf("Test 4: \"%s\"\n", "build_code_reject() bogus stashed length");
+    mulen = 0;
+    s_ppp_ccb.ppp_phase[0].ppp_hdr = (ppp_header_t){.code = 0x0E, .identifier = 0x44, .length = htons(2)};
+    TEST_ASSERT(build_code_reject(buffer, &s_ppp_ccb, &mulen) == ERROR,
+        "build_code_reject short packet returns ERROR", "");
+}
+
 void test_ppp_codec(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 {
     printf("\n");
@@ -1057,6 +1154,7 @@ void test_ppp_codec(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_build_auth_request_pap(fastrg_ccb);
     test_build_auth_ack_pap(fastrg_ccb);
     test_build_proto_reject(fastrg_ccb);
+    test_build_code_reject(fastrg_ccb);
 
     printf("\n");
     printf("╔════════════════════════════════════════════════════════════╗\n");

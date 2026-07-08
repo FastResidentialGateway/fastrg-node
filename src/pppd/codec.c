@@ -863,12 +863,69 @@ void build_terminate_request(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb)
     FastRG_LOG(DBG, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " terminate request built.", s_ppp_ccb->user_num);
 }
 
-STATUS build_code_reject(__attribute__((unused)) unsigned char *buffer, ppp_ccb_t *s_ppp_ccb, __attribute__((unused)) U16 *mulen)
+STATUS build_code_reject(unsigned char *buffer, ppp_ccb_t *s_ppp_ccb, U16 *mulen)
 {
-    FastRG_t *fastrg_ccb = s_ppp_ccb->fastrg_ccb;
+    FastRG_t             *fastrg_ccb   = s_ppp_ccb->fastrg_ccb;
+    struct rte_ether_hdr *eth_hdr      = (struct rte_ether_hdr *)buffer;
+    vlan_header_t        *vlan_header  = (vlan_header_t *)(eth_hdr + 1);
+    pppoe_header_t       *pppoe_header = (pppoe_header_t *)(vlan_header + 1);
+    ppp_payload_t        *ppp_payload  = (ppp_payload_t *)(pppoe_header + 1);
+    ppp_header_t         *ppp_hdr      = (ppp_header_t *)(ppp_payload + 1);
+    U8                   *rej_pkt      = (U8 *)(ppp_hdr + 1);
+    ppp_header_t         *rejected_hdr = &s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].ppp_hdr;
+    ppp_options_t        *rejected_opt = s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].ppp_options;
+    U16                   rejected_len = rte_be_to_cpu_16(rejected_hdr->length);
 
-    /* TODO: support code reject */
-    FastRG_LOG(DBG, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "build code reject is called.");
+    if (rejected_len < sizeof(ppp_header_t)) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+            "User %" PRIu16 " Code-Reject: rejected packet length %u too short.",
+            s_ppp_ccb->user_num, rejected_len);
+        return ERROR;
+    }
+
+    /* L2 / VLAN / PPPoE — mirror build_proto_reject. */
+    rte_ether_addr_copy(&fastrg_ccb->nic_info.hsi_wan_src_mac, &eth_hdr->src_addr);
+    rte_ether_addr_copy(&s_ppp_ccb->PPP_dst_mac, &eth_hdr->dst_addr);
+    eth_hdr->ether_type = rte_cpu_to_be_16(VLAN);
+
+    vlan_header->tci_union.tci_struct.priority = 0;
+    vlan_header->tci_union.tci_struct.DEI      = 0;
+    vlan_header->tci_union.tci_struct.vlan_id  = rte_atomic16_read(&s_ppp_ccb->vlan_id);
+    vlan_header->next_proto                    = rte_cpu_to_be_16(ETH_P_PPP_SES);
+    vlan_header->tci_union.tci_value           = rte_cpu_to_be_16(vlan_header->tci_union.tci_value);
+
+    pppoe_header->ver_type   = VER_TYPE;
+    pppoe_header->code       = 0;
+    pppoe_header->session_id = s_ppp_ccb->session_id;
+
+    /* Code-Reject rides on the protocol whose Code field was unknown. */
+    ppp_payload->ppp_protocol = rte_cpu_to_be_16(s_ppp_ccb->cp == 1 ? IPCP_PROTOCOL : LCP_PROTOCOL);
+    ppp_hdr->code             = CODE_REJECT;
+    ppp_hdr->identifier       = ((rand() % 254) + 1);
+
+    /* Rejected-Packet = copy of the offending packet from its Code field on
+     * (RFC 1661 §5.6), truncated so the whole frame fits the caller's
+     * PPP_MSG_BUF_LEN reply buffer. The copied packet keeps its original
+     * inner Length field even when truncated, per the RFC. */
+    U16 overhead = sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) +
+                   sizeof(pppoe_header_t)       + sizeof(ppp_payload_t) +
+                   sizeof(ppp_header_t);
+    U16 max_rej  = PPP_MSG_BUF_LEN - overhead;
+    U16 copy_len = RTE_MIN(rejected_len, max_rej);
+    rte_memcpy(rej_pkt, rejected_hdr, sizeof(ppp_header_t));
+    if (copy_len > sizeof(ppp_header_t) && rejected_opt != NULL)
+        rte_memcpy(rej_pkt + sizeof(ppp_header_t), rejected_opt, copy_len - sizeof(ppp_header_t));
+
+    U16 ppp_len   = sizeof(ppp_header_t) + copy_len;
+    U16 pppoe_len = ppp_len + sizeof(ppp_payload_t);
+    ppp_hdr->length      = rte_cpu_to_be_16(ppp_len);
+    pppoe_header->length = rte_cpu_to_be_16(pppoe_len);
+    *mulen = pppoe_len + sizeof(struct rte_ether_hdr) +
+             sizeof(vlan_header_t) + sizeof(pppoe_header_t);
+
+    FastRG_LOG(DBG, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+        "User %" PRIu16 " Code-Reject built for code 0x%02x (rej_pkt=%u).",
+        s_ppp_ccb->user_num, rejected_hdr->code, copy_len);
 
     return SUCCESS;
 }
