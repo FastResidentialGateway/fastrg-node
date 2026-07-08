@@ -4,8 +4,12 @@
 #include <common.h>
 
 #include <rte_atomic.h>
+#include <rte_lcore.h>
+#include <rte_mbuf.h>
+#include <rte_mempool.h>
 
 #include "../../src/fastrg.h"
+#include "../../src/init.h"
 #include "../../src/pppd/codec.h"
 #include "../../src/protocol.h"
 #include "../test_helper.h"
@@ -1131,6 +1135,216 @@ void test_build_code_reject(FastRG_t *fastrg_ccb)
         "build_code_reject short packet returns ERROR", "");
 }
 
+/* ==================== PPP_decode_frame decode-path tests ==================== */
+
+/* ppp_ccb_t embeds the 16MB NAT slot pool — keep the decode fixture static
+ * instead of burning a stack frame per case. */
+static ppp_ccb_t decode_ccb;
+static struct per_ccb_stats decode_wan_stats;
+
+/**
+ * @fn decode_env_init
+ *
+ * @brief one-time fixture for PPP_decode_frame tests: back wan_ctrl_tx with a
+ *      real mempool (the unconfigured WAN port falls through to DPDK's dummy
+ *      tx burst, so the frame is counted then dropped) and hang an observable
+ *      per-subscriber stats row for ccb 0 on this lcore
+ * @param fastrg_ccb
+ *      mock FastRG control block from the test runner
+ * @return
+ *      void
+ */
+static void decode_env_init(FastRG_t *fastrg_ccb)
+{
+    if (direct_pool[0] == NULL) {
+        direct_pool[0] = rte_pktmbuf_pool_create("codec_decode_pool", 32, 0, 0,
+            RTE_MBUF_DEFAULT_BUF_SIZE, (int)rte_socket_id());
+    }
+
+    /* The mock FastRG_t is malloc'd, so the per-lcore stats grid is garbage —
+     * wipe it and install one WAN row. The persistent-RCU flag makes the
+     * stats getter skip the (unset) stats qsbr on this lcore. */
+    memset(fastrg_ccb->per_subscriber_stats, 0,
+        sizeof(fastrg_ccb->per_subscriber_stats));
+    fastrg_ccb->per_subscriber_stats[rte_lcore_id()][WAN_PORT] = &decode_wan_stats;
+    fastrg_rcu_persistent[rte_lcore_id()] = TRUE;
+}
+
+static void decode_ccb_reset(FastRG_t *fastrg_ccb, U8 phase)
+{
+    memset(&decode_ccb, 0, sizeof(decode_ccb));
+    decode_ccb.fastrg_ccb = fastrg_ccb;
+    decode_ccb.user_num = 1;
+    rte_atomic16_set(&decode_ccb.vlan_id, 2);
+    decode_ccb.session_id = rte_cpu_to_be_16(0x000a);
+    decode_ccb.phase = phase;
+    decode_ccb.PPP_dst_mac = (struct rte_ether_addr){
+        .addr_bytes = {0x74, 0x4d, 0x28, 0x8d, 0x00, 0x31}
+    };
+}
+
+/**
+ * @fn build_session_frame
+ *
+ * @brief craft an eth/vlan/PPPoE-session frame carrying one PPP header
+ * @param buf
+ *      output buffer (must hold 30 + info_len bytes)
+ * @param ppp_proto
+ *      PPP protocol number in host order (e.g. IPV6CP_PROTOCOL)
+ * @param code
+ *      PPP header code field
+ * @param ppp_hdr_len
+ *      value for the PPP header length field, host order (may deliberately
+ *      disagree with the real payload for malformed-frame tests)
+ * @param info_len
+ *      bytes of zero payload appended after the PPP header
+ * @return
+ *      total frame length
+ */
+static U16 build_session_frame(U8 *buf, U16 ppp_proto, U8 code,
+    U16 ppp_hdr_len, U16 info_len)
+{
+    struct rte_ether_hdr *eth_hdr = (struct rte_ether_hdr *)buf;
+    vlan_header_t *vlan_hdr = (vlan_header_t *)(eth_hdr + 1);
+    pppoe_header_t *pppoe_hdr = (pppoe_header_t *)(vlan_hdr + 1);
+    ppp_payload_t *ppp_payload = (ppp_payload_t *)(pppoe_hdr + 1);
+    ppp_header_t *ppp_hdr = (ppp_header_t *)(ppp_payload + 1);
+
+    memset(buf, 0, sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) +
+        sizeof(pppoe_header_t) + sizeof(ppp_payload_t) +
+        sizeof(ppp_header_t) + info_len);
+    eth_hdr->ether_type = rte_cpu_to_be_16(VLAN);
+    vlan_hdr->tci_union.tci_value = rte_cpu_to_be_16(0x0002);
+    vlan_hdr->next_proto = rte_cpu_to_be_16(ETH_P_PPP_SES);
+    pppoe_hdr->ver_type = VER_TYPE;
+    pppoe_hdr->code = SESSION_DATA;
+    pppoe_hdr->session_id = rte_cpu_to_be_16(0x000a);
+    pppoe_hdr->length = rte_cpu_to_be_16(sizeof(ppp_payload_t) +
+        sizeof(ppp_header_t) + info_len);
+    ppp_payload->ppp_protocol = rte_cpu_to_be_16(ppp_proto);
+    ppp_hdr->code = code;
+    ppp_hdr->identifier = 1;
+    ppp_hdr->length = rte_cpu_to_be_16(ppp_hdr_len);
+
+    return sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) +
+        sizeof(pppoe_header_t) + sizeof(ppp_payload_t) +
+        sizeof(ppp_header_t) + info_len;
+}
+
+void test_ppp_decode_frame(FastRG_t *fastrg_ccb)
+{
+    printf("\nTesting PPP_decode_frame function:\n");
+    printf("=========================================\n\n");
+
+    U8 frame[128];
+    U16 event = 0;
+    U16 frame_len;
+
+    decode_env_init(fastrg_ccb);
+    memset(&decode_wan_stats, 0, sizeof(decode_wan_stats));
+
+    /* Test 1: unsupported IPV6CP must be answered with Protocol-Reject */
+    printf("Test 1: \"%s\"\n", "IPV6CP replied with Protocol-Reject");
+    decode_ccb_reset(fastrg_ccb, DATA_PHASE);
+    frame_len = build_session_frame(frame, IPV6CP_PROTOCOL, CONFIG_REQUEST,
+        sizeof(ppp_header_t) + 4, 4);
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == ERROR,
+        "IPV6CP frame short-circuits with ERROR (stateless reply)", NULL);
+    TEST_ASSERT(decode_wan_stats.tx_packets == 1,
+        "Protocol-Reject was handed to wan_ctrl_tx for IPV6CP",
+        "tx_packets=%" PRIu64, decode_wan_stats.tx_packets);
+
+    /* Test 2: unsupported MPLSCP takes the same Protocol-Reject path */
+    printf("Test 2: \"%s\"\n", "MPLSCP replied with Protocol-Reject");
+    decode_ccb_reset(fastrg_ccb, DATA_PHASE);
+    frame_len = build_session_frame(frame, MPLSCP_PROTOCOL, CONFIG_REQUEST,
+        sizeof(ppp_header_t), 0);
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == ERROR,
+        "MPLSCP frame short-circuits with ERROR (stateless reply)", NULL);
+    TEST_ASSERT(decode_wan_stats.tx_packets == 2,
+        "Protocol-Reject was handed to wan_ctrl_tx for MPLSCP",
+        "tx_packets=%" PRIu64, decode_wan_stats.tx_packets);
+
+    /* Test 3: unknown PPP protocol is dropped without any reply */
+    printf("Test 3: \"%s\"\n", "unknown PPP protocol dropped silently");
+    decode_ccb_reset(fastrg_ccb, DATA_PHASE);
+    frame_len = build_session_frame(frame, 0x9999, CONFIG_REQUEST,
+        sizeof(ppp_header_t), 0);
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == ERROR,
+        "unknown PPP protocol returns ERROR", NULL);
+    TEST_ASSERT(decode_wan_stats.tx_packets == 2,
+        "no reply is sent for an unknown PPP protocol",
+        "tx_packets=%" PRIu64, decode_wan_stats.tx_packets);
+
+    /* Test 4: PPP header length below the 4-byte minimum is rejected */
+    printf("Test 4: \"%s\"\n", "malformed PPP header length rejected");
+    decode_ccb_reset(fastrg_ccb, DATA_PHASE);
+    frame_len = build_session_frame(frame, LCP_PROTOCOL, CONFIG_REQUEST,
+        sizeof(ppp_header_t) - 2, 0);
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == ERROR,
+        "PPP header length < sizeof(ppp_header_t) returns ERROR", NULL);
+
+    /* Test 5: frames above ETH_JUMBO are rejected before any parsing */
+    printf("Test 5: \"%s\"\n", "oversized frame rejected");
+    static U8 jumbo_frame[ETH_JUMBO + 8];
+    decode_ccb_reset(fastrg_ccb, DATA_PHASE);
+    memset(jumbo_frame, 0, sizeof(jumbo_frame));
+    TEST_ASSERT(PPP_decode_frame(jumbo_frame, ETH_JUMBO + 1, &event, &decode_ccb) == ERROR,
+        "frame larger than ETH_JUMBO returns ERROR", NULL);
+
+    /* Test 6: NCP/auth phase guards */
+    printf("Test 6: \"%s\"\n", "phase guards for IPCP and PAP");
+    decode_ccb_reset(fastrg_ccb, LCP_PHASE);
+    frame_len = build_session_frame(frame, IPCP_PROTOCOL, CONFIG_REQUEST,
+        sizeof(ppp_header_t), 0);
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == ERROR,
+        "IPCP frame outside IPCP_PHASE returns ERROR", NULL);
+    codec_cleanup_ppp_ccb(&decode_ccb);
+
+    decode_ccb_reset(fastrg_ccb, LCP_PHASE);
+    frame_len = build_session_frame(frame, PAP_PROTOCOL, PAP_ACK,
+        sizeof(ppp_header_t), 0);
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == ERROR,
+        "PAP frame outside AUTH_PHASE returns ERROR", NULL);
+
+    /* Test 7: auth results accepted in AUTH_PHASE */
+    printf("Test 7: \"%s\"\n", "auth results in AUTH_PHASE");
+    decode_ccb_reset(fastrg_ccb, AUTH_PHASE);
+    frame_len = build_session_frame(frame, PAP_PROTOCOL, PAP_ACK,
+        sizeof(ppp_header_t), 0);
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == SUCCESS,
+        "PAP ACK in AUTH_PHASE returns SUCCESS", NULL);
+
+    decode_ccb_reset(fastrg_ccb, AUTH_PHASE);
+    frame_len = build_session_frame(frame, CHAP_PROTOCOL, CHAP_SUCCESS,
+        sizeof(ppp_header_t), 0);
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == SUCCESS,
+        "CHAP Success in AUTH_PHASE returns SUCCESS", NULL);
+    TEST_ASSERT(decode_ccb.phase == IPCP_PHASE,
+        "CHAP Success advances the session to IPCP_PHASE",
+        "got phase %u", decode_ccb.phase);
+
+    decode_ccb_reset(fastrg_ccb, AUTH_PHASE);
+    frame_len = build_session_frame(frame, CHAP_PROTOCOL, CHAP_FAILURE,
+        sizeof(ppp_header_t), 0);
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == SUCCESS,
+        "CHAP Failure in AUTH_PHASE returns SUCCESS", NULL);
+    TEST_ASSERT(decode_ccb.phase == LCP_PHASE,
+        "CHAP Failure drops the session back to LCP_PHASE",
+        "got phase %u", decode_ccb.phase);
+
+    /* Test 8: discovery frames never reach PPP payload parsing */
+    printf("Test 8: \"%s\"\n", "discovery frame short-circuits");
+    decode_ccb_reset(fastrg_ccb, PPPOE_PHASE);
+    frame_len = build_session_frame(frame, LCP_PROTOCOL, CONFIG_REQUEST,
+        sizeof(ppp_header_t), 0);
+    vlan_header_t *vlan_hdr = (vlan_header_t *)(frame + sizeof(struct rte_ether_hdr));
+    vlan_hdr->next_proto = rte_cpu_to_be_16(ETH_P_PPP_DIS);
+    ((pppoe_header_t *)(vlan_hdr + 1))->code = PADM;
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == ERROR,
+        "PPPoE discovery frame (PADM) returns ERROR by design", NULL);
+}
+
 void test_ppp_codec(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 {
     printf("\n");
@@ -1155,6 +1369,7 @@ void test_ppp_codec(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_build_auth_ack_pap(fastrg_ccb);
     test_build_proto_reject(fastrg_ccb);
     test_build_code_reject(fastrg_ccb);
+    test_ppp_decode_frame(fastrg_ccb);
 
     printf("\n");
     printf("╔════════════════════════════════════════════════════════════╗\n");
