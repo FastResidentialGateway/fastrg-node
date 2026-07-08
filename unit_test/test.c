@@ -159,6 +159,10 @@ int main()
     test_avl_tree(fastrg_ccb, &total_tests, &total_pass);
     puts("ok!");
 
+    puts("====================test mac_table.c====================");
+    test_mac_table(fastrg_ccb, &total_tests, &total_pass);
+    puts("ok!");
+
     puts("====================test pppd/nat.h====================");
     test_nat(fastrg_ccb, &total_tests, &total_pass);
     puts("ok!");
