@@ -147,6 +147,10 @@ int main()
     test_dhcp_codec(fastrg_ccb, &total_tests, &total_pass);
     puts("ok!");
 
+    puts("====================test dhcpd/dhcp_fsm.c====================");
+    test_dhcp_fsm(fastrg_ccb, &total_tests, &total_pass);
+    puts("ok!");
+
     puts("====================test utils.c====================");
     test_utils(fastrg_ccb, &total_tests, &total_pass);
     puts("ok!");
