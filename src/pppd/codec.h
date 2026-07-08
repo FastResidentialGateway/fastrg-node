@@ -108,6 +108,26 @@ void build_config_nak_rej(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb);
  */
 void build_terminate_ack(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb);
 
+/**
+ * @fn build_code_reject
+ *
+ * @brief Build a Code-Reject (RFC 1661 §5.6) for the offending packet stashed
+ *        in ppp_phase[cp] by PPP_decode_frame when the Code field is unknown.
+ *        Sent within the same protocol (LCP or IPCP) the bad packet arrived on.
+ *
+ * @param buffer
+ *      Frame buffer to fill (eth + vlan + pppoe + cp + body); at least
+ *      PPP_MSG_BUF_LEN bytes — the Rejected-Packet copy is truncated to fit.
+ * @param s_ppp_ccb
+ *      Subscriber control block — supplies MAC / VLAN / session and the
+ *      stashed rejected packet (ppp_phase[cp].ppp_hdr / .ppp_options).
+ * @param mulen
+ *      [out] Total bytes written into buffer.
+ *
+ * @return
+ *      SUCCESS, or ERROR if the stashed packet length is shorter than a PPP
+ *      header (nothing valid to reject).
+ */
 STATUS build_code_reject(U8 *buffer, ppp_ccb_t *s_ppp_ccb, U16 *mulen);
 
 /**
