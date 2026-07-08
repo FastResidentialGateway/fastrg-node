@@ -204,6 +204,119 @@ static void test_dns_build_response_servfail(void)
         "got %u", get_rcode(&msg));
 }
 
+/* ============ dns_parse_name wire-format hardening tests ============ */
+
+static void test_dns_parse_name_compression(void)
+{
+    printf("\nTesting dns_parse_name valid compression:\n");
+    printf("=========================================\n\n");
+
+    /* header padding (12B) + "example.com" at 12 + "www" + pointer to 12 */
+    U8 pkt[64] = {0};
+    int off = 12;
+    pkt[off++] = 7; memcpy(pkt + off, "example", 7); off += 7;
+    pkt[off++] = 3; memcpy(pkt + off, "com", 3); off += 3;
+    pkt[off++] = 0;
+    U16 www_off = off;
+    pkt[off++] = 3; memcpy(pkt + off, "www", 3); off += 3;
+    pkt[off++] = 0xC0; pkt[off++] = 0x0C;
+
+    char name[DNS_MAX_DOMAIN_LEN + 1];
+    U16 consumed = dns_parse_name(pkt, off, www_off, name, sizeof(name));
+    TEST_ASSERT(consumed == 6,
+        "pointer name consumes only its own wire bytes (label + 2B pointer)",
+        "expected 6, got %u", consumed);
+    TEST_ASSERT(strcmp(name, "www.example.com") == 0,
+        "compression pointer expands to the full domain", "got '%s'", name);
+
+    /* root name: single zero byte */
+    U8 root_pkt[16] = {0};
+    consumed = dns_parse_name(root_pkt, sizeof(root_pkt), 12, name, sizeof(name));
+    TEST_ASSERT(consumed == 1 && name[0] == '\0',
+        "root name (lone 0x00) consumes 1 byte and yields empty name",
+        "consumed=%u name='%s'", consumed, name);
+}
+
+static void test_dns_parse_name_malicious(void)
+{
+    printf("\nTesting dns_parse_name malicious input:\n");
+    printf("=========================================\n\n");
+
+    char name[DNS_MAX_DOMAIN_LEN + 1];
+    U8 pkt[64] = {0};
+
+    /* self-pointing compression pointer: infinite loop without the guard */
+    pkt[12] = 0xC0; pkt[13] = 0x0C;
+    TEST_ASSERT(dns_parse_name(pkt, 32, 12, name, sizeof(name)) == 0,
+        "self-pointing pointer rejected (loop guard)", NULL);
+
+    /* two pointers chasing each other */
+    memset(pkt, 0, sizeof(pkt));
+    pkt[12] = 0xC0; pkt[13] = 0x0E;
+    pkt[14] = 0xC0; pkt[15] = 0x0C;
+    TEST_ASSERT(dns_parse_name(pkt, 32, 12, name, sizeof(name)) == 0,
+        "mutually-looping pointers rejected", NULL);
+
+    /* pointer target beyond packet end */
+    memset(pkt, 0, sizeof(pkt));
+    pkt[12] = 0xC0; pkt[13] = 0xFF;
+    TEST_ASSERT(dns_parse_name(pkt, 32, 12, name, sizeof(name)) == 0,
+        "pointer past pkt_len rejected", NULL);
+
+    /* pointer truncated at the last byte of the packet */
+    memset(pkt, 0, sizeof(pkt));
+    pkt[12] = 0xC0;
+    TEST_ASSERT(dns_parse_name(pkt, 13, 12, name, sizeof(name)) == 0,
+        "truncated 1-byte pointer rejected", NULL);
+
+    /* label length 64 — above DNS_MAX_LABEL_LEN but not a pointer tag */
+    memset(pkt, 0, sizeof(pkt));
+    pkt[12] = 0x40;
+    TEST_ASSERT(dns_parse_name(pkt, 32, 12, name, sizeof(name)) == 0,
+        "label length > 63 rejected", NULL);
+
+    /* label runs past the end of the packet */
+    memset(pkt, 0, sizeof(pkt));
+    pkt[12] = 10; memcpy(pkt + 13, "ab", 2);
+    TEST_ASSERT(dns_parse_name(pkt, 15, 12, name, sizeof(name)) == 0,
+        "label overrunning pkt_len rejected", NULL);
+
+    /* parsed name longer than the caller's buffer */
+    memset(pkt, 0, sizeof(pkt));
+    pkt[12] = 10; memcpy(pkt + 13, "aaaaaaaaaa", 10); pkt[23] = 0;
+    TEST_ASSERT(dns_parse_name(pkt, 32, 12, name, 8) == 0,
+        "name overflowing name_buf rejected", NULL);
+}
+
+static void test_dns_parse_query_malicious(void)
+{
+    printf("\nTesting dns_parse_query/response with malicious names:\n");
+    printf("=========================================\n\n");
+
+    dns_message_t msg;
+    U8 buf[128];
+
+    /* full query whose qname is a self-pointing pointer */
+    int len = build_test_query(buf, sizeof(buf), 0x4444);
+    buf[12] = 0xC0; buf[13] = 0x0C;
+    TEST_ASSERT(dns_parse_query(buf, len, &msg) != 0,
+        "query with looping qname pointer rejected", NULL);
+
+    /* query whose name runs to the end of the buffer: no terminator, no qtype */
+    len = build_test_query(buf, sizeof(buf), 0x4545);
+    TEST_ASSERT(dns_parse_query(buf, 12 + 12, &msg) != 0,
+        "query truncated inside the qname rejected", NULL);
+
+    /* valid response, then poison the answer's name pointer into a self-loop.
+     * build_test_response puts the answer name pointer right after the
+     * question section (12B header + 13B qname + 4B qtype/qclass = 29). */
+    len = build_test_response(buf, sizeof(buf), 0x4646, htonl(0x01020304), 60);
+    TEST_ASSERT(len > 0, "build_test_response succeeds", NULL);
+    buf[29] = 0xC0; buf[30] = 29;
+    TEST_ASSERT(dns_parse_response(buf, len, &msg) != 0,
+        "response with looping answer-name pointer rejected", NULL);
+}
+
 void test_dns_codec(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 {
     printf("\n");
@@ -220,6 +333,9 @@ void test_dns_codec(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_dns_build_response_a();
     test_dns_build_response_nxdomain();
     test_dns_build_response_servfail();
+    test_dns_parse_name_compression();
+    test_dns_parse_name_malicious();
+    test_dns_parse_query_malicious();
 
     printf("\n");
     printf("╔════════════════════════════════════════════════════════════╗\n");
