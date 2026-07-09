@@ -910,6 +910,176 @@ static void test_seq_update(void)
         "WAN-side update leaves LAN-side fields alone", NULL);
 }
 
+/**
+ * Test 22: seq/ack tracking across the 0xFFFFFFFF → 0 wrap boundary.
+ * The existing seq tests only exercise deltas inside the 16 MB slack far from
+ * the wrap point; these pin the wrap-aware signed-compare behaviour itself.
+ */
+static void test_seq_wraparound(void)
+{
+    printf("\nTesting seq/ack wraparound behaviour:\n");
+    printf("======================================\n\n");
+
+    addr_table_t entry;
+    struct rte_tcp_hdr th;
+
+    /* seq_update: baseline just below wrap, new seq_end lands past 0 —
+     * signed delta is small-positive, so the max must advance across wrap */
+    init_entry(&entry, TCP_CONNTRACK_ESTABLISHED);
+    entry.max_seq_end_lan = 0xFFFFFF00;
+    entry.max_ack_lan     = 0xFFFFFFFE;
+    th = build_tcp_hdr(0xFFFFFFF0, 0x00000002, 65535, RTE_TCP_ACK_FLAG);
+    tcp_conntrack_seq_update(&entry, &th, 0x20, FALSE);
+    TEST_ASSERT(entry.max_seq_end_lan == 0x00000010,
+        "max_seq_end advances across the wrap boundary",
+        "expected 0x10, got 0x%x", entry.max_seq_end_lan);
+    TEST_ASSERT(entry.max_ack_lan == 0x00000002,
+        "max_ack advances across the wrap boundary",
+        "expected 0x2, got 0x%x", entry.max_ack_lan);
+
+    /* Monotonicity across wrap: with the baseline now past 0, a stale
+     * pre-wrap seq (huge unsigned, negative signed delta) must NOT win */
+    th = build_tcp_hdr(0xFFFFF000, 0xFFFFF000, 65535, RTE_TCP_ACK_FLAG);
+    tcp_conntrack_seq_update(&entry, &th, 10, FALSE);
+    TEST_ASSERT(entry.max_seq_end_lan == 0x00000010,
+        "stale pre-wrap seq does not roll the max back",
+        "expected 0x10, got 0x%x", entry.max_seq_end_lan);
+    TEST_ASSERT(entry.max_ack_lan == 0x00000002,
+        "stale pre-wrap ack does not roll the max back",
+        "expected 0x2, got 0x%x", entry.max_ack_lan);
+
+    /* Zero-field seeding with high ISN: an ISN >= 2^31 looks "older than
+     * zero" under signed math, so the explicit ==0 seed guard must fire */
+    init_entry(&entry, TCP_CONNTRACK_NONE);
+    th = build_tcp_hdr(0x90000000, 0, 65535, RTE_TCP_SYN_FLAG);
+    tcp_conntrack_seq_update(&entry, &th, 0, FALSE);
+    TEST_ASSERT(entry.max_seq_end_lan == 0x90000001,
+        "high ISN (>= 2^31) seeds a zero baseline",
+        "expected 0x90000001, got 0x%x", entry.max_seq_end_lan);
+
+    /* seq_valid: inbound seq just past the wrap while peer_max_ack sits just
+     * below it — unsigned distance is ~4G but signed delta is tiny: accept */
+    init_entry(&entry, TCP_CONNTRACK_ESTABLISHED);
+    entry.max_seq_end_lan = 0xFFFFFF00;
+    entry.max_ack_lan     = 0xFFFFFF00;
+    entry.max_seq_end_wan = 0xFFFFFE00;
+    entry.max_ack_wan     = 0xFFFFFE00;
+    th = build_tcp_hdr(0x00000100, 0xFFFFFEF0, 65535, RTE_TCP_ACK_FLAG);
+    TEST_ASSERT(tcp_conntrack_seq_valid(&entry, &th, TRUE) == TRUE,
+        "in-window seq just past the wrap is accepted",
+        "wrapped seq inside slack must pass");
+
+    /* seq 16 MB+ past the wrap point is still out of window */
+    th = build_tcp_hdr(0x01000200, 0xFFFFFEF0, 65535, RTE_TCP_ACK_FLAG);
+    TEST_ASSERT(tcp_conntrack_seq_valid(&entry, &th, TRUE) == FALSE,
+        "seq >16MB past the wrap is dropped",
+        "slack must apply across wrap too");
+
+    /* ack across the wrap: peer sent up to just below wrap, inbound ack just
+     * past 0 — small positive signed delta within the 0xFFFF ack slack */
+    th = build_tcp_hdr(0x00000100, 0x00000010, 65535, RTE_TCP_ACK_FLAG);
+    TEST_ASSERT(tcp_conntrack_seq_valid(&entry, &th, TRUE) == TRUE,
+        "ack just past the wrap is accepted",
+        "wrapped ack inside slack must pass");
+
+    /* ack too far past the wrap (beyond 0xFFFF over peer_max_seqend) drops */
+    th = build_tcp_hdr(0x00000100, 0x00020000, 65535, RTE_TCP_ACK_FLAG);
+    TEST_ASSERT(tcp_conntrack_seq_valid(&entry, &th, TRUE) == FALSE,
+        "ack too far past the wrap is dropped",
+        "ack slack must apply across wrap too");
+}
+
+/**
+ * Test 23: exhaustive (state, event) scan of the constructor-built FSM
+ * dispatch index.  Mirrors tcp_conntrack_tbl as an expected-next-state
+ * matrix and verifies every one of the 10x6 combinations behaves per the
+ * table: defined rows transition, undefined rows keep the state and return
+ * SUCCESS (every state has at least one row, so none may hit the
+ * no-rows ERROR contract).
+ */
+static void test_fsm_index_full_scan(void)
+{
+    printf("\nTesting FSM index full (state x event) scan:\n");
+    printf("=============================================\n\n");
+
+    /* STAY = no transition defined for the combo: state must not change */
+    #define STAY 0xFF
+    /* expected[state][event], events ordered SYN, SYN_ACK, ACK, FIN_LAN, FIN_WAN, RST.
+     * ACK rows assume LAN direction (is_reply=FALSE); the WAN-side MID_STREAM
+     * promotion is handler-driven and covered by the promotion tests above. */
+    static const U8 expected[TCP_CONNTRACK_INVLD][TCP_EV_INVLD] = {
+        [TCP_CONNTRACK_NONE] = {
+            TCP_CONNTRACK_SYN_SENT, TCP_CONNTRACK_SYN_RECV, TCP_CONNTRACK_MID_STREAM,
+            TCP_CONNTRACK_FIN_WAIT, TCP_CONNTRACK_CLOSE_WAIT, TCP_CONNTRACK_CLOSE },
+        [TCP_CONNTRACK_SYN_SENT] = {
+            TCP_CONNTRACK_SYN_SENT, TCP_CONNTRACK_SYN_RECV, STAY,
+            STAY, STAY, TCP_CONNTRACK_CLOSE },
+        [TCP_CONNTRACK_SYN_RECV] = {
+            STAY, TCP_CONNTRACK_SYN_RECV, TCP_CONNTRACK_ESTABLISHED,
+            TCP_CONNTRACK_FIN_WAIT, TCP_CONNTRACK_FIN_WAIT, TCP_CONNTRACK_CLOSE },
+        [TCP_CONNTRACK_ESTABLISHED] = {
+            TCP_CONNTRACK_SYN_SENT, TCP_CONNTRACK_ESTABLISHED, TCP_CONNTRACK_ESTABLISHED,
+            TCP_CONNTRACK_FIN_WAIT, TCP_CONNTRACK_CLOSE_WAIT, TCP_CONNTRACK_CLOSE },
+        [TCP_CONNTRACK_FIN_WAIT] = {
+            STAY, STAY, TCP_CONNTRACK_FIN_WAIT,
+            TCP_CONNTRACK_FIN_WAIT, TCP_CONNTRACK_TIME_WAIT, TCP_CONNTRACK_CLOSE },
+        [TCP_CONNTRACK_CLOSE_WAIT] = {
+            STAY, STAY, TCP_CONNTRACK_CLOSE_WAIT,
+            TCP_CONNTRACK_LAST_ACK, STAY, TCP_CONNTRACK_CLOSE },
+        [TCP_CONNTRACK_LAST_ACK] = {
+            STAY, STAY, TCP_CONNTRACK_TIME_WAIT,
+            STAY, STAY, TCP_CONNTRACK_CLOSE },
+        [TCP_CONNTRACK_TIME_WAIT] = {
+            TCP_CONNTRACK_SYN_SENT, STAY, TCP_CONNTRACK_TIME_WAIT,
+            STAY, STAY, TCP_CONNTRACK_CLOSE },
+        [TCP_CONNTRACK_CLOSE] = {
+            TCP_CONNTRACK_SYN_SENT, STAY, STAY,
+            STAY, STAY, TCP_CONNTRACK_CLOSE },
+        [TCP_CONNTRACK_MID_STREAM] = {
+            TCP_CONNTRACK_SYN_SENT, TCP_CONNTRACK_MID_STREAM, TCP_CONNTRACK_MID_STREAM,
+            TCP_CONNTRACK_FIN_WAIT, TCP_CONNTRACK_CLOSE_WAIT, TCP_CONNTRACK_CLOSE },
+    };
+    /* event → (tcp_flags, is_reply) that tcp_flags_to_event maps back to it */
+    static const struct { U8 flags; BOOL is_reply; } ev_input[TCP_EV_INVLD] = {
+        [TCP_EV_SYN]     = { RTE_TCP_SYN_FLAG, FALSE },
+        [TCP_EV_SYN_ACK] = { RTE_TCP_SYN_FLAG | RTE_TCP_ACK_FLAG, FALSE },
+        [TCP_EV_ACK]     = { RTE_TCP_ACK_FLAG, FALSE },
+        [TCP_EV_FIN_LAN] = { RTE_TCP_FIN_FLAG, FALSE },
+        [TCP_EV_FIN_WAN] = { RTE_TCP_FIN_FLAG, TRUE },
+        [TCP_EV_RST]     = { RTE_TCP_RST_FLAG, FALSE },
+    };
+
+    addr_table_t entry;
+    int retval_fails = 0;
+
+    for(U8 s=0; s<TCP_CONNTRACK_INVLD; s++) {
+        int state_fails = 0;
+        U8 first_bad_event = 0, first_bad_state = 0;
+
+        for(U8 ev=0; ev<TCP_EV_INVLD; ev++) {
+            init_entry(&entry, s);
+            STATUS ret = tcp_conntrack_fsm(&entry,
+                ev_input[ev].flags, ev_input[ev].is_reply);
+            U8 want = (expected[s][ev] == STAY) ? s : expected[s][ev];
+
+            if (ret != SUCCESS)
+                retval_fails++;
+            if (entry.tcp_state != want && state_fails++ == 0) {
+                first_bad_event = ev;
+                first_bad_state = entry.tcp_state;
+            }
+        }
+        TEST_ASSERT(state_fails == 0,
+            tcp_conntrack_state2str(s),
+            "%d/%d events mismatched; first: event %u → state %u",
+            state_fails, TCP_EV_INVLD, first_bad_event, first_bad_state);
+    }
+    TEST_ASSERT(retval_fails == 0,
+        "every (state, event) combo returns SUCCESS (all states have rows)",
+        "%d combos returned non-SUCCESS", retval_fails);
+    #undef STAY
+}
+
 void test_tcp_conntrack(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 {
     (void)fastrg_ccb;
@@ -940,6 +1110,8 @@ void test_tcp_conntrack(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_mid_stream_other_transitions();
     test_seq_window_validation();
     test_seq_update();
+    test_seq_wraparound();
+    test_fsm_index_full_scan();
 
     *total_tests += test_count;
     *total_pass += pass_count;
