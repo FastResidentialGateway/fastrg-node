@@ -499,6 +499,204 @@ static void test_stats_counters(void)
         "reclaimed=%" PRIu64, test_ccb.nat_gc_reclaimed);
 }
 
+static void test_pool_dry_enospc(void)
+{
+    printf("\nTesting pool-dry enospc (free ring exhausted):\n");
+    printf("==============================================\n\n");
+
+    nat_env_reset();
+    struct rte_ether_hdr eth = {0};
+    U32 dst_ip = rte_cpu_to_be_32(0x08080808);
+    U16 dst_port = rte_cpu_to_be_16(443);
+    addr_table_t *ea = NULL;
+
+    /* One real flow A, then expire it — gives the emergency GC inside
+     * nat_slot_alloc something to find. */
+    U16 pa = nat_learning_port_reuse(&test_ccb, &eth,
+        rte_cpu_to_be_32(0xC0A80080), dst_ip, rte_cpu_to_be_16(40100), dst_port, &ea);
+    TEST_ASSERT(pa != 0, "flow A learned", NULL);
+    nat_expire_set(ea->expire_slot, 1);
+
+    /* Simulate exhaustion by live flows: drain every remaining free slot.
+     * (Consuming them via 262k real learns proves nothing extra — per-learn
+     * slot consumption is already asserted in test_learning_basic.) */
+    void *obj;
+    U32 drained = 0;
+    while (rte_ring_dequeue(test_ccb.nat_free_ring, &obj) == 0)
+        drained++;
+    TEST_ASSERT(drained == MAX_NAT_ENTRIES - 1,
+        "drained all remaining free slots", "drained=%u", drained);
+
+    /* New flow B: slot alloc fails, emergency GC fires (deletes A's keys)
+     * but the slot can only come back through the RCU defer queue — which
+     * this thread hasn't quiesced through yet — so learning must fail and
+     * account one enospc. */
+    U64 enospc_before = test_ccb.nat_enospc;
+    U16 pb = nat_learning_port_reuse(&test_ccb, &eth,
+        rte_cpu_to_be_32(0xC0A80081), dst_ip, rte_cpu_to_be_16(40101), dst_port, NULL);
+    TEST_ASSERT(pb == 0, "learning fails when the pool is dry", NULL);
+    TEST_ASSERT(test_ccb.nat_enospc == enospc_before + 1,
+        "pool-dry failure increments nat_enospc",
+        "enospc=%" PRIu64, test_ccb.nat_enospc);
+    TEST_ASSERT(test_ccb.nat_gc_reclaimed >= 1,
+        "emergency GC ran and reclaimed the expired flow's keys", NULL);
+    TEST_ASSERT(nat_reverse_lookup(pa, dst_ip, dst_port, &test_ccb) == NULL,
+        "expired flow A unlinked by the emergency GC", NULL);
+
+    /* Recovery: once readers quiesce and the defer queue drains, A's slot
+     * returns and the same flow B learns successfully. */
+    nat_quiesce_reclaim();
+    TEST_ASSERT(rte_ring_count(test_ccb.nat_free_ring) == 1,
+        "A's slot back in the free ring after RCU reclaim", NULL);
+    pb = nat_learning_port_reuse(&test_ccb, &eth,
+        rte_cpu_to_be_32(0xC0A80081), dst_ip, rte_cpu_to_be_16(40101), dst_port, NULL);
+    TEST_ASSERT(pb != 0, "flow B learns after a slot is reclaimed", NULL);
+    TEST_ASSERT(test_ccb.nat_enospc == enospc_before + 1,
+        "successful retry adds no enospc", NULL);
+}
+
+/* Small hand-built fixture for the hash-ENOSPC paths.  The real hashes
+ * (262144 entries, cuckoo, multi-writer) have no deterministic fill-to-fail
+ * point, so build tiny single-writer hashes (key slots = entries exactly)
+ * around the same nat_learning_port_reuse code path.  No RCU attached:
+ * slot recycling isn't under test here, key-add failure handling is. */
+static ppp_ccb_t small_ccb;
+#define SMALL_POOL_SLOTS 64
+
+static STATUS small_env_init(U32 reverse_entries, U32 forward_entries)
+{
+    static int small_gen; /* unique DPDK object names per call */
+    char name[RTE_RING_NAMESIZE];
+
+    memset(&small_ccb, 0, sizeof(small_ccb));
+    rte_spinlock_init(&small_ccb.nat_insert_lock);
+    small_gen++;
+
+    struct rte_hash_parameters params = {
+        .key_len = sizeof(nat_reverse_key_t),
+        .hash_func = rte_hash_crc,
+        .hash_func_init_val = 0,
+        .socket_id = (int)rte_socket_id(),
+    };
+    snprintf(name, sizeof(name), "nat_small_rev_%d", small_gen);
+    params.name = name;
+    params.entries = reverse_entries;
+    small_ccb.nat_reverse_hash = rte_hash_create(&params);
+
+    snprintf(name, sizeof(name), "nat_small_fwd_%d", small_gen);
+    params.name = name;
+    params.entries = forward_entries;
+    params.key_len = sizeof(nat_forward_key_t);
+    small_ccb.nat_forward_hash = rte_hash_create(&params);
+
+    snprintf(name, sizeof(name), "nat_small_free_%d", small_gen);
+    small_ccb.nat_free_ring = rte_ring_create(name, SMALL_POOL_SLOTS,
+        (int)rte_socket_id(), RING_F_EXACT_SZ);
+
+    if (small_ccb.nat_reverse_hash == NULL || small_ccb.nat_forward_hash == NULL ||
+        small_ccb.nat_free_ring == NULL)
+        return ERROR;
+
+    for (U32 i = 0; i < SMALL_POOL_SLOTS; i++) {
+        small_ccb.addr_table[i].expire_slot = &small_ccb.nat_expire_at[i];
+        rte_ring_enqueue(small_ccb.nat_free_ring, (void *)(uintptr_t)i);
+    }
+    return SUCCESS;
+}
+
+static void small_env_destroy(void)
+{
+    nat_table_destroy(&small_ccb);
+}
+
+/* Fill the small fixture with n distinct-destination flows (same source →
+ * same nat_port reused, one pool slot + one key in each hash per flow). */
+static U32 small_fill_flows(struct rte_ether_hdr *eth, U32 n)
+{
+    U32 ok = 0;
+    for (U32 i = 0; i < n; i++) {
+        if (nat_learning_port_reuse(&small_ccb, eth,
+                rte_cpu_to_be_32(0x0A000001), rte_cpu_to_be_32(0x08080000 + i),
+                rte_cpu_to_be_16(40200), rte_cpu_to_be_16(443), NULL) != 0)
+            ok++;
+    }
+    return ok;
+}
+
+static void test_reverse_hash_full_enospc(void)
+{
+    printf("\nTesting reverse-hash-full enospc:\n");
+    printf("=================================\n\n");
+
+    struct rte_ether_hdr eth = {0};
+    TEST_ASSERT(small_env_init(8, SMALL_POOL_SLOTS) == SUCCESS,
+        "small fixture created (reverse=8)", NULL);
+
+    TEST_ASSERT(small_fill_flows(&eth, 8) == 8,
+        "8 flows fill the reverse hash exactly", NULL);
+    U32 ring_before = rte_ring_count(small_ccb.nat_free_ring);
+
+    /* 9th flow: every candidate port's reverse add hits ENOSPC; the
+     * never-published slot must go straight back to the ring each time,
+     * and after the full port wrap the flow fails with one enospc. */
+    U16 p = nat_learning_port_reuse(&small_ccb, &eth,
+        rte_cpu_to_be_32(0x0A000001), rte_cpu_to_be_32(0x08080000 + 8),
+        rte_cpu_to_be_16(40200), rte_cpu_to_be_16(443), NULL);
+    TEST_ASSERT(p == 0, "learning fails when the reverse hash is full", NULL);
+    TEST_ASSERT(small_ccb.nat_enospc == 1,
+        "reverse-hash-full failure increments nat_enospc",
+        "enospc=%" PRIu64, small_ccb.nat_enospc);
+    TEST_ASSERT(rte_ring_count(small_ccb.nat_free_ring) == ring_before,
+        "no slot leaked across the failed port walk",
+        "before=%u after=%u", ring_before, rte_ring_count(small_ccb.nat_free_ring));
+    TEST_ASSERT(rte_hash_count(small_ccb.nat_forward_hash) == 8,
+        "no forward-key pollution from the failed flow",
+        "count=%u", rte_hash_count(small_ccb.nat_forward_hash));
+
+    small_env_destroy();
+}
+
+static void test_forward_hash_full_enospc(void)
+{
+    printf("\nTesting forward-hash-full enospc:\n");
+    printf("=================================\n\n");
+
+    struct rte_ether_hdr eth = {0};
+    TEST_ASSERT(small_env_init(1024, 8) == SUCCESS,
+        "small fixture created (forward=8)", NULL);
+
+    TEST_ASSERT(small_fill_flows(&eth, 8) == 8,
+        "8 flows fill the forward hash exactly", NULL);
+    U32 ring_before = rte_ring_count(small_ccb.nat_free_ring);
+
+    /* 9th flow: reverse add succeeds (room left), forward add hits ENOSPC →
+     * the reverse key must be unpublished and the flow fails immediately
+     * (a different port wouldn't help — the forward key has no port in it). */
+    U16 p = nat_learning_port_reuse(&small_ccb, &eth,
+        rte_cpu_to_be_32(0x0A000001), rte_cpu_to_be_32(0x08080000 + 8),
+        rte_cpu_to_be_16(40200), rte_cpu_to_be_16(443), NULL);
+    TEST_ASSERT(p == 0, "learning fails when the forward hash is full", NULL);
+    TEST_ASSERT(small_ccb.nat_enospc == 1,
+        "forward-hash-full failure increments nat_enospc",
+        "enospc=%" PRIu64, small_ccb.nat_enospc);
+    TEST_ASSERT(rte_hash_count(small_ccb.nat_reverse_hash) == 8,
+        "reverse key of the failed flow was unpublished",
+        "count=%u", rte_hash_count(small_ccb.nat_reverse_hash));
+    /* Without the reverse key, the WAN side must not reach the dead slot */
+    U16 pa = compute_initial_nat_port(rte_cpu_to_be_32(0x0A000001), rte_cpu_to_be_16(40200));
+    TEST_ASSERT(nat_reverse_lookup(pa, rte_cpu_to_be_32(0x08080000 + 8),
+        rte_cpu_to_be_16(443), &small_ccb) == NULL,
+        "failed flow unreachable from the WAN side", NULL);
+    /* The slot travels through deferred reclaim in production (RCU dq owns
+     * it after the reverse key was published) — it must NOT be pushed
+     * straight back to the free ring. */
+    TEST_ASSERT(rte_ring_count(small_ccb.nat_free_ring) == ring_before - 1,
+        "slot of the failed flow goes to deferred reclaim, not the ring",
+        "before=%u after=%u", ring_before, rte_ring_count(small_ccb.nat_free_ring));
+
+    small_env_destroy();
+}
+
 void test_nat(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 {
     (void)fastrg_ccb;
@@ -526,6 +724,9 @@ void test_nat(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_gc_clears_forward_key();
     test_expire_refresh_coalescing();
     test_stats_counters();
+    test_pool_dry_enospc();
+    test_reverse_hash_full_enospc();
+    test_forward_hash_full_enospc();
 
     printf("\n");
     printf("╔════════════════════════════════════════════════════════════╗\n");
