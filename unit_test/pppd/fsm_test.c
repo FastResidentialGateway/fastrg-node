@@ -492,6 +492,118 @@ void test_fsm_stopped_open_event(FastRG_t *fastrg_ccb)
 }
 
 // ============================================================================
+// Test cases: exhaustive table scan (secondary transitions)
+// ============================================================================
+
+/**
+ * Test 25: exhaustive (cp, state, event) scan of both PPP FSM tables.
+ * Mirrors ppp_fsm_tbl_lcp / ppp_fsm_tbl_ncp as an expected-next-state matrix
+ * and drives PPP_FSM through every combination — this pins all the secondary
+ * transitions the targeted tests above don't touch (STOPPED / STOPPING /
+ * CLOSING rows, echo events, unknown code, good/bad code-protocol-reject,
+ * timeout counter positive/expired).  Under UNIT_TEST action handlers are
+ * compiled out, so next_state and the return value are the observable
+ * contract.  Undefined (state, event) combos must return SUCCESS and leave
+ * the state unchanged.  The two tables differ only in handler chains, not in
+ * next_state, so one matrix serves both cp values.
+ */
+static void test_fsm_full_table_scan(FastRG_t *fastrg_ccb)
+{
+    printf("\nTest 25: \"Exhaustive LCP+NCP (state x event) table scan\"\n");
+    printf("=========================================\n\n");
+
+    #define STAY 0xFF /* no transition defined: state must not change */
+    /* expected[state][event], event order per PPP_EVENT_TYPE (E_UNKNOWN
+     * included last — a log-only event that must never move the FSM) */
+    static const U8 expected[S_INVLD][E_UNKNOWN + 1] = {
+        /*                UP              DOWN         OPEN            CLOSE      TPOS            TEXP       GOOD_CR         BAD_CR          ACK             NAK_REJ         TERM_REQ        TERM_ACK        UNK_CODE   GOOD_REJ        BAD_REJ     ECHO_REQ  ECHO_REP  E_UNKNOWN */
+        [S_INIT]         = { S_CLOSED,       STAY,        S_STARTING,     S_INIT,    STAY,           STAY,      STAY,           STAY,           STAY,           STAY,           STAY,           STAY,           STAY,      STAY,           STAY,       STAY,     STAY,     STAY },
+        [S_STARTING]     = { S_REQUEST_SENT, STAY,        S_STARTING,     S_INIT,    STAY,           STAY,      STAY,           STAY,           STAY,           STAY,           STAY,           STAY,           STAY,      STAY,           STAY,       STAY,     STAY,     STAY },
+        [S_CLOSED]       = { S_CLOSED,       S_INIT,      S_REQUEST_SENT, S_CLOSED,  STAY,           STAY,      S_CLOSED,       S_CLOSED,       S_CLOSED,       S_CLOSED,       S_CLOSED,       S_CLOSED,       S_CLOSED,  S_CLOSED,       S_CLOSED,   S_CLOSED, S_CLOSED, STAY },
+        [S_STOPPED]      = { STAY,           S_STARTING,  S_STOPPED,      S_CLOSED,  STAY,           STAY,      S_ACK_SENT,     S_REQUEST_SENT, S_STOPPED,      S_STOPPED,      S_STOPPED,      S_STOPPED,      S_STOPPED, S_STOPPED,      S_STOPPED,  S_STOPPED, S_STOPPED, STAY },
+        [S_CLOSING]      = { STAY,           S_INIT,      S_STOPPING,     S_CLOSING, S_CLOSING,      S_CLOSED,  S_CLOSING,      S_CLOSING,      S_CLOSING,      S_CLOSING,      S_CLOSING,      S_CLOSED,       S_CLOSING, S_CLOSING,      S_CLOSED,   S_CLOSING, S_CLOSING, STAY },
+        [S_STOPPING]     = { STAY,           S_STARTING,  S_STOPPING,     S_CLOSING, S_STOPPING,     S_STOPPED, S_STOPPING,     S_STOPPING,     S_STOPPING,     S_STOPPING,     S_STOPPING,     S_STOPPED,      S_STOPPING, S_STOPPING,    S_STOPPED,  S_STOPPING, S_STOPPING, STAY },
+        [S_REQUEST_SENT] = { STAY,           S_STARTING,  S_REQUEST_SENT, S_CLOSING, S_REQUEST_SENT, S_STOPPED, S_ACK_SENT,     S_REQUEST_SENT, S_ACK_RECEIVED, S_REQUEST_SENT, S_REQUEST_SENT, S_REQUEST_SENT, S_REQUEST_SENT, S_REQUEST_SENT, S_STOPPED, S_REQUEST_SENT, S_REQUEST_SENT, STAY },
+        [S_ACK_RECEIVED] = { STAY,           S_STARTING,  S_ACK_RECEIVED, S_CLOSING, S_REQUEST_SENT, S_STOPPED, S_OPENED,       S_ACK_RECEIVED, S_REQUEST_SENT, S_REQUEST_SENT, S_REQUEST_SENT, S_REQUEST_SENT, S_ACK_RECEIVED, S_REQUEST_SENT, S_STOPPED, S_ACK_RECEIVED, S_ACK_RECEIVED, STAY },
+        [S_ACK_SENT]     = { STAY,           S_STARTING,  S_ACK_SENT,     S_CLOSING, S_ACK_SENT,     S_STOPPED, S_ACK_SENT,     S_REQUEST_SENT, S_OPENED,       S_ACK_SENT,     S_REQUEST_SENT, S_ACK_SENT,     S_ACK_SENT, S_ACK_SENT,    S_STOPPED,  S_ACK_SENT, S_ACK_SENT, STAY },
+        [S_OPENED]       = { STAY,           S_STARTING,  S_OPENED,       S_CLOSING, STAY,           STAY,      S_ACK_SENT,     S_REQUEST_SENT, S_REQUEST_SENT, S_REQUEST_SENT, S_STOPPING,     S_REQUEST_SENT, S_OPENED,  S_OPENED,       S_STOPPING, S_OPENED, S_OPENED, STAY },
+    };
+
+    struct rte_timer timer = {0};
+    int retval_fails = 0;
+
+    for(U8 cp=0; cp<=1; cp++) {
+        for(U8 s=0; s<S_INVLD; s++) {
+            int state_fails = 0;
+            U16 first_bad_event = 0;
+            U8 first_bad_state = 0;
+            char label[64];
+
+            for(U16 ev=0; ev<=E_UNKNOWN; ev++) {
+                ppp_ccb_t *ccb = create_test_ppp_ccb(fastrg_ccb, cp, s);
+                STATUS ret = PPP_FSM(&timer, ccb, ev);
+                U8 want = (expected[s][ev] == STAY) ? s : expected[s][ev];
+
+                if (ret != SUCCESS)
+                    retval_fails++;
+                if (ccb->ppp_phase[cp].state != want && state_fails++ == 0) {
+                    first_bad_event = ev;
+                    first_bad_state = ccb->ppp_phase[cp].state;
+                }
+                free_test_ppp_ccb(ccb);
+            }
+            snprintf(label, sizeof(label), "%s state %u all events",
+                cp == 0 ? "LCP" : "NCP", s);
+            TEST_ASSERT(state_fails == 0, label,
+                "%d/%d events mismatched; first: event %u -> state %u",
+                state_fails, E_UNKNOWN + 1, first_bad_event, first_bad_state);
+        }
+    }
+    TEST_ASSERT(retval_fails == 0,
+        "every (cp, state, event) combo returns SUCCESS",
+        "%d combos returned non-SUCCESS", retval_fails);
+    #undef STAY
+}
+
+/**
+ * Test 26: timer_counter (the retransmit budget) is reset to 10 ONLY by
+ * transitions that carry an action chain — the reset sits inside PPP_FSM's
+ * handler loop, so a row with `{ 0 }` handlers must leave the counter
+ * untouched.  Test 18 already covers the positive half; this adds the
+ * negative half so two future refactors get caught: hoisting the reset out
+ * of the loop (unconditional reset per dispatch → the retransmit budget
+ * never runs out, retransmission never gives up) and moving it inside the
+ * `#ifndef UNIT_TEST` block (silently changes what unit tests can observe).
+ */
+static void test_fsm_timer_counter_reset_requires_handler(FastRG_t *fastrg_ccb)
+{
+    printf("\nTest 26: \"retransmit budget reset is bound to action rows\"\n");
+    printf("=========================================\n\n");
+
+    struct rte_timer timer = {0};
+
+    /* STOPPING + E_RECV_TERMINATE_ACK → STOPPED has handlers → counter reset */
+    ppp_ccb_t *ccb = create_test_ppp_ccb(fastrg_ccb, 0, S_STOPPING);
+    ccb->ppp_phase[0].timer_counter = 7;
+    PPP_FSM(&timer, ccb, E_RECV_TERMINATE_ACK);
+    TEST_ASSERT(ccb->ppp_phase[0].state == S_STOPPED &&
+        ccb->ppp_phase[0].timer_counter == 10,
+        "handler row resets timer_counter to 10",
+        "state=%u counter=%u", ccb->ppp_phase[0].state, ccb->ppp_phase[0].timer_counter);
+    free_test_ppp_ccb(ccb);
+
+    /* REQUEST_SENT + E_RECV_TERMINATE_ACK stays with no handlers → untouched */
+    ccb = create_test_ppp_ccb(fastrg_ccb, 0, S_REQUEST_SENT);
+    ccb->ppp_phase[0].timer_counter = 7;
+    PPP_FSM(&timer, ccb, E_RECV_TERMINATE_ACK);
+    TEST_ASSERT(ccb->ppp_phase[0].state == S_REQUEST_SENT &&
+        ccb->ppp_phase[0].timer_counter == 7,
+        "handler-less row leaves timer_counter alone",
+        "state=%u counter=%u", ccb->ppp_phase[0].state, ccb->ppp_phase[0].timer_counter);
+    free_test_ppp_ccb(ccb);
+}
+
+// ============================================================================
 // Main test function
 // ============================================================================
 
@@ -534,6 +646,9 @@ void test_ppp_fsm(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_fsm_user_num_zero(fastrg_ccb);
     test_fsm_max_cp_value(fastrg_ccb);
     test_fsm_stopped_open_event(fastrg_ccb);
+
+    test_fsm_full_table_scan(fastrg_ccb);
+    test_fsm_timer_counter_reset_requires_handler(fastrg_ccb);
 
     printf("\n");
     printf("╔════════════════════════════════════════════════════════════╗\n");
