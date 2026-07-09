@@ -318,8 +318,31 @@ void arp_pending_drain(struct rte_mempool *mp, arp_pending_queue_t *q,
 void arp_pending_flush(struct rte_mempool *mp, arp_pending_queue_t *q);
 
 /**
+ * @fn encode_arp_request
+ *
+ * @brief Encode a broadcast ARP request frame (eth + vlan + arp) into a
+ * caller-supplied buffer. Pure codec — no mbuf/NIC involvement, so it is
+ * unit-testable without DPDK device or mempool state.
+ *
+ * @param buf
+ *      Output buffer, at least 46 bytes
+ * @param src_mac
+ *      Our LAN MAC address
+ * @param src_ip
+ *      Our gateway IP (network byte order)
+ * @param target_ip
+ *      IP to resolve (network byte order)
+ * @param vlan_id
+ *      Subscriber VLAN tag (host byte order)
+ * @return
+ *      Number of bytes written (46)
+ */
+U16 encode_arp_request(U8 *buf, const struct rte_ether_addr *src_mac, U32 src_ip,
+    U32 target_ip, U16 vlan_id);
+
+/**
  * @fn send_arp_request
- * 
+ *
  * @brief Build and TX an ARP request on the LAN port.
  *
  * @param src_mac
