@@ -209,6 +209,40 @@ void arp_pending_flush(struct rte_mempool *mp, arp_pending_queue_t *q)
 /*  ARP request generation                                            */
 /* ------------------------------------------------------------------ */
 
+U16 encode_arp_request(U8 *buf, const struct rte_ether_addr *src_mac, U32 src_ip,
+    U32 target_ip, U16 vlan_id)
+{
+    /* --- Ethernet header --- */
+    struct rte_ether_hdr *eth = (struct rte_ether_hdr *)buf;
+    memset(eth->dst_addr.addr_bytes, 0xFF, RTE_ETHER_ADDR_LEN); /* broadcast */
+    rte_ether_addr_copy(src_mac, &eth->src_addr);
+    eth->ether_type = rte_cpu_to_be_16(VLAN);
+
+    /* --- VLAN header --- */
+    vlan_header_t *vhdr = (vlan_header_t *)(eth + 1);
+    vhdr->tci_union.tci_value = rte_cpu_to_be_16(vlan_id);
+    vhdr->next_proto = rte_cpu_to_be_16(FRAME_TYPE_ARP);
+
+    /* --- ARP header --- */
+    struct rte_arp_hdr *arp = (struct rte_arp_hdr *)(vhdr + 1);
+    arp->arp_hardware = rte_cpu_to_be_16(RTE_ARP_HRD_ETHER);
+    arp->arp_protocol = rte_cpu_to_be_16(FRAME_TYPE_IP);
+    arp->arp_hlen     = RTE_ETHER_ADDR_LEN;
+    arp->arp_plen     = 4;
+    arp->arp_opcode   = rte_cpu_to_be_16(RTE_ARP_OP_REQUEST);
+
+    /* sender = us (gateway) */
+    rte_ether_addr_copy(src_mac, &arp->arp_data.arp_sha);
+    arp->arp_data.arp_sip = src_ip;
+
+    /* target = the LAN host we want to resolve */
+    memset(arp->arp_data.arp_tha.addr_bytes, 0, RTE_ETHER_ADDR_LEN);
+    arp->arp_data.arp_tip = target_ip;
+
+    return sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t)
+        + sizeof(struct rte_arp_hdr);
+}
+
 STATUS send_arp_request(const struct rte_ether_addr *src_mac, U32 src_ip,
     U32 target_ip, U16 vlan_id, U16 tx_q)
 {
@@ -235,32 +269,7 @@ STATUS send_arp_request(const struct rte_ether_addr *src_mac, U32 src_ip,
         return ERROR;
     }
 
-    /* --- Ethernet header --- */
-    struct rte_ether_hdr *eth = (struct rte_ether_hdr *)pkt;
-    memset(eth->dst_addr.addr_bytes, 0xFF, RTE_ETHER_ADDR_LEN); /* broadcast */
-    rte_ether_addr_copy(src_mac, &eth->src_addr);
-    eth->ether_type = rte_cpu_to_be_16(VLAN);
-
-    /* --- VLAN header --- */
-    vlan_header_t *vhdr = (vlan_header_t *)(eth + 1);
-    vhdr->tci_union.tci_value = rte_cpu_to_be_16(vlan_id);
-    vhdr->next_proto = rte_cpu_to_be_16(FRAME_TYPE_ARP);
-
-    /* --- ARP header --- */
-    struct rte_arp_hdr *arp = (struct rte_arp_hdr *)(vhdr + 1);
-    arp->arp_hardware = rte_cpu_to_be_16(RTE_ARP_HRD_ETHER);
-    arp->arp_protocol = rte_cpu_to_be_16(FRAME_TYPE_IP);
-    arp->arp_hlen     = RTE_ETHER_ADDR_LEN;
-    arp->arp_plen     = 4;
-    arp->arp_opcode   = rte_cpu_to_be_16(RTE_ARP_OP_REQUEST);
-
-    /* sender = us (gateway) */
-    rte_ether_addr_copy(src_mac, &arp->arp_data.arp_sha);
-    arp->arp_data.arp_sip = src_ip;
-
-    /* target = the LAN host we want to resolve */
-    memset(arp->arp_data.arp_tha.addr_bytes, 0, RTE_ETHER_ADDR_LEN);
-    arp->arp_data.arp_tip = target_ip;
+    encode_arp_request((U8 *)pkt, src_mac, src_ip, target_ip, vlan_id);
 
     rte_eth_tx_burst(LAN_PORT, tx_q, &m, 1);
     return SUCCESS;

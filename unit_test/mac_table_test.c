@@ -1,5 +1,4 @@
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <arpa/inet.h>
 
@@ -10,8 +9,10 @@
 #include <rte_mempool.h>
 #include <rte_ring.h>
 
+#include <rte_arp.h>
+
 #include "../src/mac_table.h"
-#include "../src/init.h"
+#include "../src/protocol.h"
 #include "../src/fastrg.h"
 #include "test_helper.h"
 
@@ -237,26 +238,50 @@ static void test_arp_pending_queue(void)
     arp_pending_cleanup_pool(NULL);
 }
 
-static void test_send_arp_request(FastRG_t *fastrg_ccb)
+static void test_encode_arp_request(FastRG_t *fastrg_ccb)
 {
-    printf("\nTesting send_arp_request:\n");
+    printf("\nTesting encode_arp_request:\n");
     printf("=========================================\n\n");
 
-    struct rte_mempool *saved = direct_pool[LAN_PORT];
+    U8 buf[64];
+    memset(buf, 0xEE, sizeof(buf)); /* poison to catch over-writes */
+    U32 src_ip    = htonl(0x0A010101);
+    U32 target_ip = htonl(0x0A010203);
+    const struct rte_ether_addr *src_mac = &fastrg_ccb->nic_info.hsi_lan_mac;
 
-    direct_pool[LAN_PORT] = NULL;
-    TEST_ASSERT(send_arp_request(&fastrg_ccb->nic_info.hsi_lan_mac,
-        htonl(0x0A010101), htonl(0x0A010203), 3, 0) == ERROR,
-        "send_arp_request fails without a pool", "");
+    U16 len = encode_arp_request(buf, src_mac, src_ip, target_ip, 3);
+    /* eth(14) + vlan(4) + arp(28) = 46 */
+    TEST_ASSERT(len == 46, "frame length is 46 (eth+vlan+arp)", "got %u", len);
 
-    direct_pool[LAN_PORT] = mac_test_pool;
-    /* TX goes to an unconfigured port — DPDK's dummy queue accepts and
-     * drops the frame, so SUCCESS here means the packet was fully built. */
-    TEST_ASSERT(send_arp_request(&fastrg_ccb->nic_info.hsi_lan_mac,
-        htonl(0x0A010101), htonl(0x0A010203), 3, 0) == SUCCESS,
-        "send_arp_request builds and sends", "");
+    U8 bcast[RTE_ETHER_ADDR_LEN] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    TEST_ASSERT(memcmp(buf, bcast, RTE_ETHER_ADDR_LEN) == 0,
+        "dst MAC is broadcast", "");
+    TEST_ASSERT(memcmp(buf + 6, src_mac->addr_bytes, RTE_ETHER_ADDR_LEN) == 0,
+        "src MAC copied", "");
+    TEST_ASSERT(*(U16 *)(buf + 12) == htons(VLAN),
+        "ether_type is 802.1Q", "got 0x%04x", ntohs(*(U16 *)(buf + 12)));
+    TEST_ASSERT(*(U16 *)(buf + 14) == htons(0x0003),
+        "vlan TCI carries vlan 3", "got 0x%04x", ntohs(*(U16 *)(buf + 14)));
+    TEST_ASSERT(*(U16 *)(buf + 16) == htons(FRAME_TYPE_ARP),
+        "vlan next_proto is ARP", "got 0x%04x", ntohs(*(U16 *)(buf + 16)));
 
-    direct_pool[LAN_PORT] = saved;
+    struct rte_arp_hdr *arp = (struct rte_arp_hdr *)(buf + 18);
+    TEST_ASSERT(arp->arp_hardware == htons(RTE_ARP_HRD_ETHER),
+        "hardware type is ethernet", "got 0x%04x", ntohs(arp->arp_hardware));
+    TEST_ASSERT(arp->arp_protocol == htons(FRAME_TYPE_IP),
+        "protocol type is IPv4", "got 0x%04x", ntohs(arp->arp_protocol));
+    TEST_ASSERT(arp->arp_hlen == RTE_ETHER_ADDR_LEN && arp->arp_plen == 4,
+        "hlen/plen are 6/4", "got %u/%u", arp->arp_hlen, arp->arp_plen);
+    TEST_ASSERT(arp->arp_opcode == htons(RTE_ARP_OP_REQUEST),
+        "opcode is REQUEST", "got 0x%04x", ntohs(arp->arp_opcode));
+    TEST_ASSERT(memcmp(arp->arp_data.arp_sha.addr_bytes, src_mac->addr_bytes,
+        RTE_ETHER_ADDR_LEN) == 0, "sender MAC is ours", "");
+    TEST_ASSERT(arp->arp_data.arp_sip == src_ip, "sender IP is gateway IP", "");
+    U8 zero_mac[RTE_ETHER_ADDR_LEN] = {0};
+    TEST_ASSERT(memcmp(arp->arp_data.arp_tha.addr_bytes, zero_mac,
+        RTE_ETHER_ADDR_LEN) == 0, "target MAC is zeroed", "");
+    TEST_ASSERT(arp->arp_data.arp_tip == target_ip, "target IP is resolve target", "");
+    TEST_ASSERT(buf[46] == 0xEE, "encoder writes exactly 46 bytes", "");
 }
 
 void test_mac_table(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
@@ -276,7 +301,7 @@ void test_mac_table(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_ip_to_mac_idx();
     test_mac_learn_lookup();
     test_arp_pending_queue();
-    test_send_arp_request(fastrg_ccb);
+    test_encode_arp_request(fastrg_ccb);
 
     printf("\n");
     printf("╔════════════════════════════════════════════════════════════╗\n");
