@@ -401,6 +401,336 @@ void test_build_dhcp_nak(FastRG_t *fastrg_ccb)
     printf("  All build_dhcp_nak tests passed!\n");
 }
 
+/* ==================== dhcp_decode decode-path tests ==================== */
+
+/*
+ * Shared fixture for dhcp_decode tests: a full LAN-side DHCP packet
+ * (eth + VLAN + IPv4 + UDP + DHCP header) in a stack buffer, plus the
+ * dhcp_ccb / per_lan_user / 1-entry IP pool dhcp_decode operates on.
+ * Each test writes its own options right after the DHCP header and calls
+ * dhcp_decode_ctx_apply, which sets dgram_len from the option length (that is
+ * what dhcp_decode derives its option-walk bound from).
+ */
+typedef struct dhcp_decode_ctx {
+    U8 buf[2048];
+    struct rte_ether_hdr *eth_hdr;
+    vlan_header_t *vlan_hdr;
+    struct rte_ipv4_hdr *ip_hdr;
+    struct rte_udp_hdr *udp_hdr;
+    dhcp_hdr_t *dhcp_hdr;
+    dhcp_ccb_t dhcp_ccb;
+    dhcp_ccb_per_lan_user_t per_lan_user;
+    dhcp_ccb_per_lan_user_t pool_user;
+    dhcp_ccb_per_lan_user_t *pool_array[1];
+    int cur_tmp_pool_index;
+} dhcp_decode_ctx_t;
+
+static void dhcp_decode_ctx_init(dhcp_decode_ctx_t *f, FastRG_t *fastrg_ccb)
+{
+    memset(f, 0, sizeof(*f));
+
+    f->eth_hdr = (struct rte_ether_hdr *)f->buf;
+    f->eth_hdr->src_addr = (struct rte_ether_addr){
+        .addr_bytes = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF}};
+    f->eth_hdr->ether_type = rte_cpu_to_be_16(VLAN);
+
+    f->vlan_hdr = (vlan_header_t *)(f->eth_hdr + 1);
+    f->vlan_hdr->tci_union.tci_value = rte_cpu_to_be_16(0x0064);
+    f->vlan_hdr->next_proto = rte_cpu_to_be_16(ETH_P_IP);
+
+    f->ip_hdr = (struct rte_ipv4_hdr *)(f->vlan_hdr + 1);
+    f->ip_hdr->version_ihl = 0x45;
+    f->ip_hdr->time_to_live = 64;
+    f->ip_hdr->next_proto_id = IPPROTO_UDP;
+
+    f->udp_hdr = (struct rte_udp_hdr *)(f->ip_hdr + 1);
+    f->udp_hdr->src_port = rte_cpu_to_be_16(DHCP_CLIENT_PORT);
+    f->udp_hdr->dst_port = rte_cpu_to_be_16(DHCP_SERVER_PORT);
+
+    f->dhcp_hdr = (dhcp_hdr_t *)(f->udp_hdr + 1);
+    f->dhcp_hdr->msg_type = BOOT_REQUEST;
+    f->dhcp_hdr->hwr_type = 1;
+    f->dhcp_hdr->hwr_addr_len = 6;
+    f->dhcp_hdr->transaction_id = rte_cpu_to_be_32(0x12345678);
+    f->dhcp_hdr->mac_addr = f->eth_hdr->src_addr;
+    f->dhcp_hdr->magic_cookie = rte_cpu_to_be_32(DHCP_MAGIC_COOKIE);
+
+    f->pool_user.ip_pool.ip_addr = rte_cpu_to_be_32(0xC0A80264); /* 192.168.2.100 */
+    f->pool_array[0] = &f->pool_user;
+
+    f->dhcp_ccb.dhcp_server_ip = rte_cpu_to_be_32(0xC0A80201); /* 192.168.2.1 */
+    f->dhcp_ccb.subnet_mask = rte_cpu_to_be_32(0xFFFFFF00);
+    f->dhcp_ccb.per_lan_user_pool = f->pool_array;
+    f->dhcp_ccb.per_lan_user_pool_len = 1;
+    f->dhcp_ccb.fastrg_ccb = fastrg_ccb;
+
+    f->per_lan_user.dhcp_ccb = &f->dhcp_ccb;
+    rte_timer_init(&f->per_lan_user.lan_user_info.timer);
+}
+
+static S16 dhcp_decode_ctx_apply(dhcp_decode_ctx_t *f, const U8 *opts, U16 opt_len)
+{
+    memcpy((U8 *)(f->dhcp_hdr + 1), opts, opt_len);
+    f->udp_hdr->dgram_len = rte_cpu_to_be_16(
+        sizeof(struct rte_udp_hdr) + sizeof(dhcp_hdr_t) + opt_len);
+    return dhcp_decode(&f->dhcp_ccb, &f->per_lan_user, &f->cur_tmp_pool_index,
+        f->eth_hdr, f->vlan_hdr, f->ip_hdr, f->udp_hdr);
+}
+
+void test_dhcp_decode(FastRG_t *fastrg_ccb)
+{
+    printf("\nTesting dhcp_decode function:\n");
+    printf("=========================================\n\n");
+
+    dhcp_decode_ctx_t fix;
+    S16 event;
+
+    printf("Test 1: \"invalid magic cookie rejected\"\n");
+    dhcp_decode_ctx_init(&fix, fastrg_ccb);
+    fix.dhcp_hdr->magic_cookie = rte_cpu_to_be_32(0xDEADBEEF);
+    const U8 opts_discover[] = {DHCP_MSG_TYPE, 1, DHCP_DISCOVER, DHCP_END};
+    event = dhcp_decode_ctx_apply(&fix, opts_discover, sizeof(opts_discover));
+    TEST_ASSERT(event == ERROR, "bad magic cookie returns ERROR", "got %d", event);
+
+    printf("Test 2: \"DISCOVER decoded to E_DISCOVER\"\n");
+    dhcp_decode_ctx_init(&fix, fastrg_ccb);
+    event = dhcp_decode_ctx_apply(&fix, opts_discover, sizeof(opts_discover));
+    TEST_ASSERT(event == E_DISCOVER, "DISCOVER returns E_DISCOVER", "got %d", event);
+
+    printf("Test 3: \"malformed option overrunning dgram_len rejected\"\n");
+    dhcp_decode_ctx_init(&fix, fastrg_ccb);
+    /* option claims 200 bytes of value but dgram only carries 4 option bytes */
+    const U8 opts_overrun[] = {DHCP_MSG_TYPE, 200, DHCP_DISCOVER, DHCP_END};
+    event = dhcp_decode_ctx_apply(&fix, opts_overrun, sizeof(opts_overrun));
+    TEST_ASSERT(event == ERROR, "overrunning option len returns ERROR", "got %d", event);
+
+    printf("Test 4: \"ISP ID option (60) short-circuits to 0\"\n");
+    dhcp_decode_ctx_init(&fix, fastrg_ccb);
+    const U8 opts_isp[] = {DHCP_ISP_ID, 3, 'i', 's', 'p',
+        DHCP_MSG_TYPE, 1, DHCP_DISCOVER, DHCP_END};
+    event = dhcp_decode_ctx_apply(&fix, opts_isp, sizeof(opts_isp));
+    TEST_ASSERT(event == 0, "ISP ID option returns 0 (no FSM event)", "got %d", event);
+
+    printf("Test 5: \"INFORM decoded to E_INFORM\"\n");
+    dhcp_decode_ctx_init(&fix, fastrg_ccb);
+    const U8 opts_inform[] = {DHCP_MSG_TYPE, 1, DHCP_INFORM, DHCP_END};
+    event = dhcp_decode_ctx_apply(&fix, opts_inform, sizeof(opts_inform));
+    TEST_ASSERT(event == E_INFORM, "INFORM returns E_INFORM", "got %d", event);
+
+    printf("Test 6: \"RELEASE decoded to E_RELEASE and claims pool slot\"\n");
+    dhcp_decode_ctx_init(&fix, fastrg_ccb);
+    const U8 opts_release[] = {DHCP_MSG_TYPE, 1, DHCP_RELEASE, DHCP_END};
+    event = dhcp_decode_ctx_apply(&fix, opts_release, sizeof(opts_release));
+    TEST_ASSERT(event == E_RELEASE, "RELEASE returns E_RELEASE", "got %d", event);
+    TEST_ASSERT(rte_is_same_ether_addr(&fix.per_lan_user.ip_pool.mac_addr,
+        &fix.eth_hdr->src_addr),
+        "RELEASE bound client MAC to the pool entry", NULL);
+
+    printf("Test 7: \"valid DECLINE (server-id + in-subnet IP, client in pool)\"\n");
+    dhcp_decode_ctx_init(&fix, fastrg_ccb);
+    fix.pool_user.ip_pool.used = TRUE; /* is_client_in_pool must find the client */
+    U8 opts_decline[] = {DHCP_MSG_TYPE, 1, DHCP_DECLINE,
+        DHCP_SERVER_ID, 4, 0, 0, 0, 0,
+        DHCP_REQUEST_IP, 4, 0, 0, 0, 0, DHCP_END};
+    memcpy(&opts_decline[5], &fix.dhcp_ccb.dhcp_server_ip, 4);
+    memcpy(&opts_decline[11], &fix.pool_user.ip_pool.ip_addr, 4);
+    event = dhcp_decode_ctx_apply(&fix, opts_decline, sizeof(opts_decline));
+    TEST_ASSERT(event == E_DECLINE, "valid DECLINE returns E_DECLINE", "got %d", event);
+
+    printf("Test 8: \"DECLINE without server-id ignored\"\n");
+    dhcp_decode_ctx_init(&fix, fastrg_ccb);
+    fix.pool_user.ip_pool.used = TRUE;
+    U8 opts_decline_no_sid[] = {DHCP_MSG_TYPE, 1, DHCP_DECLINE,
+        DHCP_REQUEST_IP, 4, 0, 0, 0, 0, DHCP_END};
+    memcpy(&opts_decline_no_sid[5], &fix.pool_user.ip_pool.ip_addr, 4);
+    event = dhcp_decode_ctx_apply(&fix, opts_decline_no_sid, sizeof(opts_decline_no_sid));
+    TEST_ASSERT(event == -1, "DECLINE without server-id yields no event", "got %d", event);
+
+    printf("Test 9: \"DECLINE for IP outside subnet ignored\"\n");
+    dhcp_decode_ctx_init(&fix, fastrg_ccb);
+    fix.pool_user.ip_pool.used = TRUE;
+    U8 opts_decline_bad_ip[] = {DHCP_MSG_TYPE, 1, DHCP_DECLINE,
+        DHCP_SERVER_ID, 4, 0, 0, 0, 0,
+        DHCP_REQUEST_IP, 4, 10, 0, 0, 1, DHCP_END};
+    memcpy(&opts_decline_bad_ip[5], &fix.dhcp_ccb.dhcp_server_ip, 4);
+    event = dhcp_decode_ctx_apply(&fix, opts_decline_bad_ip, sizeof(opts_decline_bad_ip));
+    TEST_ASSERT(event == -1, "out-of-subnet DECLINE yields no event", "got %d", event);
+
+    printf("Test 10: \"SELECTING REQUEST with Option 50 in subnet (Option 55 skipped)\"\n");
+    dhcp_decode_ctx_init(&fix, fastrg_ccb);
+    U8 opts_req_sel[] = {DHCP_MSG_TYPE, 1, DHCP_REQUEST,
+        DHCP_CLIENT_ID, 7, DHCP_HW_TYPE_ETHERNET, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF,
+        DHCP_REQUEST_IP, 4, 0, 0, 0, 0,
+        DHCP_PARAMETER_LIST, 4, DHCP_SUBNET_MASK, DHCP_ROUTER, DHCP_DNS, DHCP_LEASE_TIME,
+        DHCP_END};
+    memcpy(&opts_req_sel[14], &fix.pool_user.ip_pool.ip_addr, 4);
+    event = dhcp_decode_ctx_apply(&fix, opts_req_sel, sizeof(opts_req_sel));
+    TEST_ASSERT(event == E_GOOD_REQUEST, "selecting REQUEST returns E_GOOD_REQUEST",
+        "got %d", event);
+    TEST_ASSERT(fix.dhcp_hdr->ur_client_ip == fix.pool_user.ip_pool.ip_addr,
+        "yiaddr set to the requested IP (Option 50)",
+        "got 0x%08x", rte_be_to_cpu_32(fix.dhcp_hdr->ur_client_ip));
+
+    printf("Test 11: \"SELECTING REQUEST with Option 50 outside subnet\"\n");
+    dhcp_decode_ctx_init(&fix, fastrg_ccb);
+    U8 opts_req_bad_ip[] = {DHCP_MSG_TYPE, 1, DHCP_REQUEST,
+        DHCP_REQUEST_IP, 4, 10, 0, 0, 1, DHCP_END};
+    event = dhcp_decode_ctx_apply(&fix, opts_req_bad_ip, sizeof(opts_req_bad_ip));
+    TEST_ASSERT(event == E_BAD_REQUEST, "out-of-subnet Option 50 returns E_BAD_REQUEST",
+        "got %d", event);
+
+    printf("Test 12: \"SELECTING REQUEST with malformed Option 50 length\"\n");
+    dhcp_decode_ctx_init(&fix, fastrg_ccb);
+    const U8 opts_req_short_50[] = {DHCP_MSG_TYPE, 1, DHCP_REQUEST,
+        DHCP_REQUEST_IP, 2, 0xC0, 0xA8, DHCP_END};
+    event = dhcp_decode_ctx_apply(&fix, opts_req_short_50, sizeof(opts_req_short_50));
+    TEST_ASSERT(event == -1, "malformed Option 50 length yields no event", "got %d", event);
+
+    printf("Test 13: \"SELECTING REQUEST with malformed Client ID (Option 61)\"\n");
+    dhcp_decode_ctx_init(&fix, fastrg_ccb);
+    const U8 opts_req_short_61[] = {DHCP_MSG_TYPE, 1, DHCP_REQUEST,
+        DHCP_CLIENT_ID, 3, DHCP_HW_TYPE_ETHERNET, 0xAA, 0xBB, DHCP_END};
+    event = dhcp_decode_ctx_apply(&fix, opts_req_short_61, sizeof(opts_req_short_61));
+    TEST_ASSERT(event == -1, "too-short Client ID yields no event", "got %d", event);
+
+    printf("Test 14: \"SELECTING REQUEST with non-Ethernet Client ID hardware type\"\n");
+    dhcp_decode_ctx_init(&fix, fastrg_ccb);
+    const U8 opts_req_bad_hw[] = {DHCP_MSG_TYPE, 1, DHCP_REQUEST,
+        DHCP_CLIENT_ID, 7, 0x06, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, DHCP_END};
+    event = dhcp_decode_ctx_apply(&fix, opts_req_bad_hw, sizeof(opts_req_bad_hw));
+    TEST_ASSERT(event == -1, "non-Ethernet Client ID hw type yields no event",
+        "got %d", event);
+
+    printf("Test 15: \"SELECTING REQUEST with wrong server-id\"\n");
+    dhcp_decode_ctx_init(&fix, fastrg_ccb);
+    U8 opts_req_wrong_sid[] = {DHCP_MSG_TYPE, 1, DHCP_REQUEST,
+        DHCP_SERVER_ID, 4, 0xC0, 0xA8, 0x02, 0xFE, DHCP_END};
+    event = dhcp_decode_ctx_apply(&fix, opts_req_wrong_sid, sizeof(opts_req_wrong_sid));
+    TEST_ASSERT(event == -1, "REQUEST for another server yields no event", "got %d", event);
+
+    printf("Test 16: \"renewal REQUEST (ciaddr set, unicast, matching server-id)\"\n");
+    dhcp_decode_ctx_init(&fix, fastrg_ccb);
+    U32 leased_ip = rte_cpu_to_be_32(0xC0A80264);
+    fix.dhcp_hdr->client_ip = leased_ip;
+    fix.ip_hdr->dst_addr = fix.dhcp_ccb.dhcp_server_ip; /* unicast = renewal */
+    U8 opts_req_renew[] = {DHCP_MSG_TYPE, 1, DHCP_REQUEST,
+        DHCP_SERVER_ID, 4, 0, 0, 0, 0, DHCP_END};
+    memcpy(&opts_req_renew[5], &fix.dhcp_ccb.dhcp_server_ip, 4);
+    event = dhcp_decode_ctx_apply(&fix, opts_req_renew, sizeof(opts_req_renew));
+    TEST_ASSERT(event == E_GOOD_REQUEST, "renewal REQUEST returns E_GOOD_REQUEST",
+        "got %d", event);
+    TEST_ASSERT(fix.dhcp_hdr->ur_client_ip == leased_ip,
+        "yiaddr carries the renewed lease IP",
+        "got 0x%08x", rte_be_to_cpu_32(fix.dhcp_hdr->ur_client_ip));
+    TEST_ASSERT(fix.dhcp_hdr->client_ip == 0, "ciaddr zeroed for the ACK",
+        "got 0x%08x", rte_be_to_cpu_32(fix.dhcp_hdr->client_ip));
+    TEST_ASSERT(fix.per_lan_user.lan_user_info.timeout_secs == LEASE_TIMEOUT,
+        "lease timeout re-armed to LEASE_TIMEOUT",
+        "got %u", fix.per_lan_user.lan_user_info.timeout_secs);
+
+    printf("Test 17: \"renewal REQUEST with ciaddr outside subnet\"\n");
+    dhcp_decode_ctx_init(&fix, fastrg_ccb);
+    fix.dhcp_hdr->client_ip = rte_cpu_to_be_32(0x0A000001); /* 10.0.0.1 */
+    fix.ip_hdr->dst_addr = fix.dhcp_ccb.dhcp_server_ip;
+    event = dhcp_decode_ctx_apply(&fix, opts_req_renew, sizeof(opts_req_renew));
+    TEST_ASSERT(event == E_BAD_REQUEST, "out-of-subnet ciaddr returns E_BAD_REQUEST",
+        "got %d", event);
+
+    printf("  All dhcp_decode tests done.\n");
+}
+
+/* ==================== build_dhcp_ack_inform tests ==================== */
+
+void test_build_dhcp_ack_inform(FastRG_t *fastrg_ccb)
+{
+    printf("\nTesting build_dhcp_ack_inform function:\n");
+    printf("=========================================\n\n");
+
+    dhcp_decode_ctx_t fix;
+    dhcp_decode_ctx_init(&fix, fastrg_ccb);
+
+    /* an INFORM client already owns its IP: ciaddr set, no lease wanted */
+    U32 client_ip = rte_cpu_to_be_32(0xC0A802AE); /* 192.168.2.174 */
+    fix.dhcp_hdr->client_ip = client_ip;
+    fix.dhcp_ccb.eth_hdr = fix.eth_hdr;
+    fix.dhcp_ccb.vlan_hdr = fix.vlan_hdr;
+    fix.dhcp_ccb.ip_hdr = fix.ip_hdr;
+    fix.dhcp_ccb.udp_hdr = fix.udp_hdr;
+    fix.per_lan_user.dhcp_hdr = fix.dhcp_hdr;
+
+    struct rte_ether_addr client_mac = fix.eth_hdr->src_addr;
+    struct rte_ether_addr lan_mac = {
+        .addr_bytes = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66}};
+
+    printf("Test 1: \"build_dhcp_ack_inform() result\"\n");
+    STATUS result = build_dhcp_ack_inform(&fix.per_lan_user, &lan_mac);
+    TEST_ASSERT(result == SUCCESS, "build_dhcp_ack_inform returned SUCCESS",
+        "got %d", result);
+    TEST_ASSERT(fix.dhcp_hdr->msg_type == BOOT_REPLY, "DHCP message type is BOOT_REPLY",
+        "got %d", fix.dhcp_hdr->msg_type);
+    TEST_ASSERT(fix.dhcp_hdr->ur_client_ip == 0, "yiaddr is 0 (INFORM assigns no lease)",
+        "got 0x%08x", rte_be_to_cpu_32(fix.dhcp_hdr->ur_client_ip));
+    TEST_ASSERT(fix.ip_hdr->dst_addr == client_ip, "IP dst is the client's own address",
+        "got 0x%08x", rte_be_to_cpu_32(fix.ip_hdr->dst_addr));
+    TEST_ASSERT(fix.ip_hdr->src_addr == fix.dhcp_ccb.dhcp_server_ip,
+        "IP src is the DHCP server address",
+        "got 0x%08x", rte_be_to_cpu_32(fix.ip_hdr->src_addr));
+    TEST_ASSERT(fix.udp_hdr->src_port == rte_cpu_to_be_16(DHCP_SERVER_PORT) &&
+        fix.udp_hdr->dst_port == rte_cpu_to_be_16(DHCP_CLIENT_PORT),
+        "UDP ports are 67 -> 68", "got %u -> %u",
+        rte_be_to_cpu_16(fix.udp_hdr->src_port), rte_be_to_cpu_16(fix.udp_hdr->dst_port));
+    TEST_ASSERT(rte_is_same_ether_addr(&fix.eth_hdr->dst_addr, &client_mac),
+        "Ethernet dst is the client MAC", NULL);
+    TEST_ASSERT(rte_is_same_ether_addr(&fix.eth_hdr->src_addr, &lan_mac),
+        "Ethernet src is the LAN MAC", NULL);
+
+    printf("Test 2: \"ACK(INFORM) option sequence\"\n");
+    dhcp_opt_t *opt = (dhcp_opt_t *)(fix.dhcp_hdr + 1);
+    TEST_ASSERT(opt->opt_type == DHCP_MSG_TYPE && opt->len == 1 &&
+        opt->val[0] == DHCP_ACK,
+        "option 53 is DHCP_ACK", "type=%u len=%u val=%u",
+        opt->opt_type, opt->len, opt->val[0]);
+
+    opt = (dhcp_opt_t *)((U8 *)(opt + 1) + opt->len);
+    TEST_ASSERT(opt->opt_type == DHCP_SERVER_ID && opt->len == 4 &&
+        memcmp(opt->val, &fix.dhcp_ccb.dhcp_server_ip, 4) == 0,
+        "option 54 carries the server IP", "type=%u len=%u", opt->opt_type, opt->len);
+
+    opt = (dhcp_opt_t *)((U8 *)(opt + 1) + opt->len);
+    TEST_ASSERT(opt->opt_type == DHCP_SUBNET_MASK && opt->len == 4 &&
+        memcmp(opt->val, &fix.dhcp_ccb.subnet_mask, 4) == 0,
+        "option 1 carries the subnet mask", "type=%u len=%u", opt->opt_type, opt->len);
+
+    opt = (dhcp_opt_t *)((U8 *)(opt + 1) + opt->len);
+    TEST_ASSERT(opt->opt_type == DHCP_ROUTER && opt->len == 4 &&
+        memcmp(opt->val, &fix.dhcp_ccb.dhcp_server_ip, 4) == 0,
+        "option 3 carries the gateway (server IP)", "type=%u len=%u",
+        opt->opt_type, opt->len);
+
+    opt = (dhcp_opt_t *)((U8 *)(opt + 1) + opt->len);
+    const U8 expected_dns[8] = {8, 8, 8, 8, 1, 1, 1, 1}; /* UNIT_TEST stub DNS pair */
+    TEST_ASSERT(opt->opt_type == DHCP_DNS && opt->len == 8 &&
+        memcmp(opt->val, expected_dns, 8) == 0,
+        "option 6 carries both DNS servers", "type=%u len=%u", opt->opt_type, opt->len);
+
+    opt = (dhcp_opt_t *)((U8 *)(opt + 1) + opt->len);
+    TEST_ASSERT(*(U8 *)opt == DHCP_END, "options terminated with END",
+        "got %u", *(U8 *)opt);
+
+    printf("Test 3: \"ACK(INFORM) length fields\"\n");
+    U16 opt_bytes = 3 + 6 + 6 + 6 + 10 + 1;
+    U16 expect_dgram = sizeof(struct rte_udp_hdr) + sizeof(dhcp_hdr_t) + opt_bytes;
+    TEST_ASSERT(fix.udp_hdr->dgram_len == rte_cpu_to_be_16(expect_dgram),
+        "UDP dgram_len covers header + DHCP + options",
+        "expect %u got %u", expect_dgram, rte_be_to_cpu_16(fix.udp_hdr->dgram_len));
+    TEST_ASSERT(fix.ip_hdr->total_length ==
+        rte_cpu_to_be_16(sizeof(struct rte_ipv4_hdr) + expect_dgram),
+        "IP total_length covers IP + UDP payload",
+        "got %u", rte_be_to_cpu_16(fix.ip_hdr->total_length));
+
+    printf("  All build_dhcp_ack_inform tests done.\n");
+}
+
 void test_dhcp_codec(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 {
     printf("\n");
@@ -414,6 +744,8 @@ void test_dhcp_codec(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_build_dhcp_offer(fastrg_ccb);
     test_build_dhcp_ack(fastrg_ccb);
     test_build_dhcp_nak(fastrg_ccb);
+    test_dhcp_decode(fastrg_ccb);
+    test_build_dhcp_ack_inform(fastrg_ccb);
 
     printf("\n");
     printf("╔════════════════════════════════════════════════════════════╗\n");
