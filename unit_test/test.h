@@ -5,6 +5,7 @@
 
 void test_dhcp_codec(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass);
 void test_dhcp_fsm(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass);
+void test_dhcpd(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass);
 void test_ppp_codec(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass);
 void test_ppp_fsm(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass);
 void test_avl_tree(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass);
