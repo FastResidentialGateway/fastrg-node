@@ -410,7 +410,8 @@ source "${_E2E_PHASES_DIR}/phase13_pdump.sh"
 source "${_E2E_PHASES_DIR}/phase14_stress_test.sh"
 source "${_E2E_PHASES_DIR}/phase15_metrics_route.sh"
 source "${_E2E_PHASES_DIR}/phase16_rcu_concurrency.sh"
-source "${_E2E_PHASES_DIR}/phase17_summary.sh"
+source "${_E2E_PHASES_DIR}/phase17_etcd_offline_queue.sh"
+source "${_E2E_PHASES_DIR}/phase18_summary.sh"
 
 # ---------------------------------------------------------------------------
 # Cleanup — kill fastrg only if the script started it
@@ -424,6 +425,7 @@ cleanup_fastrg() {
     _cleanup_phase9_cli_fallback 2>/dev/null || true
     _cleanup_phase12_rollback 2>/dev/null || true
     _cleanup_phase16_rcu_concurrency 2>/dev/null || true
+    _cleanup_phase17_etcd_offline_queue 2>/dev/null || true
 
     if [[ "${_FASTRG_STARTED_BY_SCRIPT:-0}" -eq 1 ]]; then
         info "Stopping fastrg (started by this script)..."
@@ -491,7 +493,8 @@ main() {
     phase14_stress_test
     phase15_metrics_route
     phase16_rcu_concurrency
-    phase17_summary || true
+    phase17_etcd_offline_queue
+    phase18_summary || true
 }
 
 main "$@"
