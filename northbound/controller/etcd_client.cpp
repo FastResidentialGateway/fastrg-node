@@ -420,6 +420,14 @@ public:
         if (!reconnect_running_) {
             reconnect_running_ = true;
 
+            // Entering reconnect means etcd is unreachable NOW. The watchdog
+            // (the only other writer of this flag) is stopped below and stays
+            // down until reconnection succeeds, so without this store the flag
+            // would hold a stale `true` for the whole outage — keeping the
+            // node gRPC SDN guard closed and the offline config queue
+            // unreachable exactly when it is needed.
+            etcd_reachable_ = false;
+
             // Only signal the watchdog to stop; never join it here. Joining is
             // done by stop_watch() (shutdown) or start_watchdog() (next cycle).
             // This keeps trigger_reconnect() safe to call from the watchdog
@@ -490,13 +498,22 @@ public:
                     if (!watch_running_ || !reconnect_running_) {
                         break;
                     }
-                    
+
+                    // Same flush-then-sync order as the watchdog tick: push
+                    // queued local (CLI-originated) intent to etcd first, so
+                    // the reconcile below sees it instead of overriding it.
+                    flush_config_queue();
+
                     // Sync state with etcd after reconnection
                     sync_state_with_etcd();
                     
                     // Recreate watchers
                     if (create_watchers() == ETCD_SUCCESS) {
                         FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "Watchers recreated successfully after reconnection");
+                        // Mark reachable immediately instead of waiting up to a
+                        // full watchdog tick, so the SDN guard closes again as
+                        // soon as etcd is actually back.
+                        etcd_reachable_ = true;
                         reconnect_running_ = false;
                         break;
                     } else {
