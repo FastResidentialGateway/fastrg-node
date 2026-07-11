@@ -143,6 +143,10 @@ int main()
     test_ppp_fsm(fastrg_ccb, &total_tests, &total_pass);
     puts("ok!");
 
+    puts("====================test pppd/pppd.c====================");
+    test_pppd(fastrg_ccb, &total_tests, &total_pass);
+    puts("ok!");
+
     puts("====================test dhcpd/dhcp_codec.c====================");
     test_dhcp_codec(fastrg_ccb, &total_tests, &total_pass);
     puts("ok!");
