@@ -2,7 +2,17 @@ FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update -y && apt-get install -y git ca-certificates && apt-get clean
+RUN apt-get update -y && apt-get install -y git ca-certificates curl && apt-get clean
+
+ARG ETCD_VERSION=v3.5.0
+ARG ETCD_SHA256=864baa0437f8368e0713d44b83afe21dce1fb4ee7dae4ca0f9dd5f0df22d01c4
+RUN curl -fsSL -o /tmp/etcd.tar.gz \
+        "https://github.com/etcd-io/etcd/releases/download/${ETCD_VERSION}/etcd-${ETCD_VERSION}-linux-amd64.tar.gz" && \
+    echo "${ETCD_SHA256}  /tmp/etcd.tar.gz" | sha256sum -c - && \
+    tar -xzf /tmp/etcd.tar.gz -C /tmp && \
+    install -m 0755 "/tmp/etcd-${ETCD_VERSION}-linux-amd64/etcd" /usr/local/bin/etcd && \
+    install -m 0755 "/tmp/etcd-${ETCD_VERSION}-linux-amd64/etcdctl" /usr/local/bin/etcdctl && \
+    rm -rf /tmp/etcd.tar.gz "/tmp/etcd-${ETCD_VERSION}-linux-amd64"
 
 ARG FASTRG_REF=master
 RUN git clone --branch "${FASTRG_REF}" --recurse-submodules \
