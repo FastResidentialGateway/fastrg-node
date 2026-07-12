@@ -54,8 +54,8 @@ _cleanup_phase17_etcd_offline_queue() {
         _p17_unblock_etcd
     fi
     if [[ -n "${_P17_UID:-}" ]] && [[ -n "${NODE_UUID:-}" ]]; then
-        ssh_node "ETCDCTL_API=3 etcdctl --endpoints=${ETCD_ENDPOINT} del configs/${NODE_UUID}/hsi/${_P17_UID}" \
-            >/dev/null 2>&1 || true
+        info "Cleanup(phase17): removing user ${_P17_UID} config with verification..."
+        remove_hsi_config_verified "${_P17_UID}" || true
     fi
     if [[ -n "${_P17_ORIG_SC:-}" ]]; then
         fastrg_grpc set_subscriber_count "${_P17_ORIG_SC}" >/dev/null 2>&1 || true

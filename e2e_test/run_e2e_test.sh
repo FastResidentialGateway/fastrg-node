@@ -371,6 +371,43 @@ etcdctl_get_value() {
     ssh_node "ETCDCTL_API=3 etcdctl --endpoints=${ETCD_ENDPOINT} get --print-value-only $*"
 }
 
+# Remove an HSI config through the normal gRPC path, verify the etcd key is
+# gone, and fall back to a direct etcd delete when the gRPC cleanup is lost.
+# Cleanup callers should append `|| true`: a failure is deliberately loud but
+# must not abort the EXIT trap or the remaining cleanup work.
+remove_hsi_config_verified() {
+    local _uid="$1"
+    local _key="configs/${NODE_UUID}/hsi/${_uid}"
+    local _remaining=""
+    local _summary=""
+    local _i
+
+    fastrg_grpc remove_config "${_uid}" >/dev/null 2>&1 || true
+    for _i in $(seq 1 5); do
+        _remaining=$(etcdctl_get_value "${_key}" 2>/dev/null || true)
+        if [[ -z "$_remaining" ]]; then
+            info "Cleanup: verified ${_key} is absent."
+            return 0
+        fi
+        sleep 1
+    done
+
+    warn "Cleanup: ${_key} still exists after RemoveConfig; deleting it directly from etcd."
+    ssh_node "ETCDCTL_API=3 etcdctl --endpoints=${ETCD_ENDPOINT} del ${_key}" >/dev/null 2>&1 || true
+    _remaining=$(etcdctl_get_value "${_key}" 2>/dev/null || true)
+    if [[ -z "$_remaining" ]]; then
+        info "Cleanup: verified direct etcd delete removed ${_key}."
+        return 0
+    fi
+
+    _summary=$(printf '%s' "$_remaining" | jq -c \
+        '{user_id:(.config.user_id // null),vlan_id:(.config.vlan_id // null),updatedAt:(.metadata.updatedAt // null)}' \
+        2>/dev/null || true)
+    [[ -z "$_summary" ]] && _summary=$(printf '%s' "$_remaining" | tr '\n' ' ' | cut -c 1-200 || true)
+    warn "Cleanup FAILED: ${_key} remains after direct etcd delete; value=${_summary:-<unavailable>}"
+    return 1
+}
+
 # ---------------------------------------------------------------------------
 # fastrg_grpc — call FastRG gRPC server directly via Python3 client
 # Returns JSON on stdout; empty string on error.
@@ -431,6 +468,20 @@ cleanup_fastrg() {
         info "Stopping fastrg (started by this script)..."
         ssh_node "pkill -x fastrg 2>/dev/null || true" || true
         info "fastrg stopped."
+
+        # A config-apply failure emitted while phase17 removes its offline
+        # test user can race with controller rollback and resurrect an older
+        # SSOT record after the first verified delete. Once the node is down,
+        # temporarily make that user ID valid, delete it through the
+        # controller, then restore the canonical count without another node
+        # apply-failure event re-creating the key.
+        if [[ -n "${_P17_UID:-}" ]] && [[ -n "${_P17_ORIG_SC:-}" ]]; then
+            local _p17_post_stop_count=$(( _P17_UID + 1 ))
+            info "Cleanup(phase17): clearing post-stop controller residue for user ${_P17_UID}..."
+            fastrg_grpc set_subscriber_count "${_p17_post_stop_count}" >/dev/null 2>&1 || true
+            remove_hsi_config_verified "${_P17_UID}" || true
+            fastrg_grpc set_subscriber_count "${_P17_ORIG_SC}" >/dev/null 2>&1 || true
+        fi
     fi
 
     # Kill dpdk-bras on the BRAS endpoint if this script launched it.

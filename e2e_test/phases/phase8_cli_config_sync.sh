@@ -24,17 +24,26 @@
 _cleanup_phase9_user() {
     [[ -z "${NODE_UUID:-}" ]] && return
     [[ -z "${_P9_USER_ID:-}" ]] && return
-    local _chk
-    _chk=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/${_P9_USER_ID}" 2>/dev/null || true)
-    if [[ -n "$_chk" ]]; then
-        info "Cleanup(phase8): removing user ${_P9_USER_ID} config (RemoveConfig gRPC)..."
-        fastrg_grpc remove_config "${_P9_USER_ID}" >/dev/null 2>&1 || true
-        sleep 1
-    fi
+    info "Cleanup(phase8): removing user ${_P9_USER_ID} config with verification..."
+    remove_hsi_config_verified "${_P9_USER_ID}" || true
     if [[ -n "${_P9_ORIG_SUB_COUNT:-}" ]]; then
         info "Cleanup(phase8): restoring subscriber count to ${_P9_ORIG_SUB_COUNT}..."
         fastrg_grpc set_subscriber_count "${_P9_ORIG_SUB_COUNT}" >/dev/null 2>&1 || true
+        local _count_ok=0
+        local _count_json _count_now _i
+        for _i in $(seq 1 5); do
+            _count_json=$(fastrg_grpc get_system_info 2>/dev/null || true)
+            _count_now=$(printf '%s' "$_count_json" | jq -r '.num_users // empty' 2>/dev/null || true)
+            if [[ "$_count_now" == "$_P9_ORIG_SUB_COUNT" ]]; then
+                _count_ok=1
+                break
+            fi
+            sleep 1
+        done
+        [[ $_count_ok -eq 0 ]] && \
+            warn "Cleanup(phase8): subscriber count restore not observed (wanted ${_P9_ORIG_SUB_COUNT}, got ${_count_now:-empty})."
     fi
+    return 0
 }
 
 # Helper: read .config.desire_status for a user from etcd. Empty on error.
