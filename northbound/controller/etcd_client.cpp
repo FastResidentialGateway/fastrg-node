@@ -7,6 +7,7 @@
 #include <etcd/Watcher.hpp>
 #include <etcd/Response.hpp>
 #include <etcd/v3/action_constants.hpp>
+#include <etcd/v3/Transaction.hpp>
 #include <json/json.h>
 #include <memory>
 #include <string>
@@ -880,10 +881,16 @@ public:
                 std::string new_value(out_value);
                 free(out_value);
 
-                // 3. Conditional write: CAS on revision, or create-if-absent
-                etcd::Response write_resp = exists
-                    ? client_->modify_if(key, new_value, mod_revision).get()
-                    : client_->add(key, new_value).get();
+                // 3. Conditional write: CAS on revision, or atomically create-if-absent
+                etcd::Response write_resp = [&]() {
+                    if (exists)
+                        return client_->modify_if(key, new_value, mod_revision).get();
+
+                    etcdv3::Transaction txn;
+                    txn.add_compare_create(key, 0);
+                    txn.add_success_put(key, new_value);
+                    return client_->txn(txn).get();
+                }();
 
                 if (write_resp.error_code() == 0) {
                     if (out_revision) *out_revision = write_resp.index();

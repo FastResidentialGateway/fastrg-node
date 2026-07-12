@@ -1064,47 +1064,47 @@ void build_auth_ack_pap(unsigned char *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb)
     FastRG_LOG(DBG, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " pap ack built.", s_ppp_ccb->user_num);
 }
 
-/* TODO: not yet well tested */
 void build_auth_response_chap(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb, ppp_chap_data_t *ppp_chap_data)
 {
-    FastRG_t *fastrg_ccb = s_ppp_ccb->fastrg_ccb;
-    U8 chap_hash[16];
-    U8 *buf_ptr = buffer;
-    ppp_chap_data_t new_ppp_chap_data;
+    FastRG_t             *fastrg_ccb = s_ppp_ccb->fastrg_ccb;
+    struct rte_ether_hdr *eth_hdr = (struct rte_ether_hdr *)buffer;
+    vlan_header_t        *vlan_header = (vlan_header_t *)(eth_hdr + 1);
+    pppoe_header_t       *pppoe_header = (pppoe_header_t *)(vlan_header + 1);
+    ppp_payload_t        *ppp_payload = (ppp_payload_t *)(pppoe_header + 1);
+    ppp_header_t         *ppp_hdr = (ppp_header_t *)(ppp_payload + 1);
+    U8                   *chap_data = (U8 *)(ppp_hdr + 1);
+    U8                    chap_hash[16];
+    U16                   name_len = strlen((const char *)s_ppp_ccb->ppp_user_acc);
+    U16                   ppp_len = sizeof(ppp_header_t) + sizeof(U8) + sizeof(chap_hash) + name_len;
     struct rte_ether_addr tmp_mac;
-
-    MD5_CTX  context;
+    MD5_CTX                context;
 
     MD5Init(&context);
     MD5Update(&context, &s_ppp_ccb->ppp_phase[0].ppp_hdr.identifier, 1);
     MD5Update(&context, s_ppp_ccb->ppp_passwd, strlen((const char *)s_ppp_ccb->ppp_passwd));
     MD5Update(&context, ppp_chap_data->val, ppp_chap_data->val_size);
     MD5Final(chap_hash, &context);
-    new_ppp_chap_data.val_size = 16;
-    new_ppp_chap_data.val = chap_hash;
-    new_ppp_chap_data.name = s_ppp_ccb->ppp_user_acc;
 
     rte_ether_addr_copy(&s_ppp_ccb->eth_hdr.src_addr, &tmp_mac);
     rte_ether_addr_copy(&s_ppp_ccb->eth_hdr.dst_addr, &s_ppp_ccb->eth_hdr.src_addr);
     rte_ether_addr_copy(&tmp_mac, &s_ppp_ccb->eth_hdr.dst_addr);
 
-    *(struct rte_ether_hdr *)buf_ptr = s_ppp_ccb->eth_hdr;
-    buf_ptr += sizeof(struct rte_ether_hdr);
-    *(vlan_header_t *)buf_ptr = s_ppp_ccb->vlan_header;
-    buf_ptr += sizeof(vlan_header_t);
-    *(pppoe_header_t *)buf_ptr = s_ppp_ccb->pppoe_header;
-    buf_ptr += sizeof(pppoe_header_t);
-    *(ppp_payload_t *)buf_ptr = s_ppp_ccb->ppp_phase[0].ppp_payload;
-    buf_ptr += sizeof(ppp_payload_t);
-    s_ppp_ccb->ppp_phase[0].ppp_hdr.code = CHAP_RESPONSE;
-    s_ppp_ccb->ppp_phase[0].ppp_hdr.length = sizeof(ppp_header_t) + 1 + 16 + strlen((const char *)new_ppp_chap_data.name);
-    *(ppp_header_t *)buf_ptr = s_ppp_ccb->ppp_phase[0].ppp_hdr;
-    buf_ptr += sizeof(ppp_header_t);
-    ((ppp_chap_data_t *)buf_ptr)->val_size = new_ppp_chap_data.val_size;
-    memcpy(((ppp_chap_data_t *)buf_ptr)->val, new_ppp_chap_data.val, new_ppp_chap_data.val_size);
-    memcpy(((ppp_chap_data_t *)buf_ptr)->name, new_ppp_chap_data.name, strlen((const char *)new_ppp_chap_data.name));
-    buf_ptr += 1 + 16 + strlen((const char *)new_ppp_chap_data.name);
-    *mulen = buf_ptr - buffer;
+    *eth_hdr = s_ppp_ccb->eth_hdr;
+    *vlan_header = s_ppp_ccb->vlan_header;
+    *pppoe_header = s_ppp_ccb->pppoe_header;
+    *ppp_payload = s_ppp_ccb->ppp_phase[0].ppp_payload;
+    ppp_payload->ppp_protocol = rte_cpu_to_be_16(CHAP_PROTOCOL);
+    *ppp_hdr = s_ppp_ccb->ppp_phase[0].ppp_hdr;
+    ppp_hdr->code = CHAP_RESPONSE;
+    ppp_hdr->length = rte_cpu_to_be_16(ppp_len);
+    pppoe_header->length = rte_cpu_to_be_16(sizeof(ppp_payload_t) + ppp_len);
+
+    chap_data[0] = sizeof(chap_hash);
+    rte_memcpy(chap_data + sizeof(U8), chap_hash, sizeof(chap_hash));
+    rte_memcpy(chap_data + sizeof(U8) + sizeof(chap_hash), s_ppp_ccb->ppp_user_acc, name_len);
+
+    *mulen = sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) + sizeof(pppoe_header_t) +
+             sizeof(ppp_payload_t) + ppp_len;
 
     FastRG_LOG(DBG, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " chap response built.", s_ppp_ccb->user_num);
 }
@@ -1357,10 +1357,24 @@ STATUS decode_ppp(ppp_payload_t *ppp_payload, U16 *event, ppp_ccb_t *s_ppp_ccb)
     } else if (ppp_payload->ppp_protocol == rte_cpu_to_be_16(CHAP_PROTOCOL)) {
         if (s_ppp_ccb->phase != AUTH_PHASE)
             return ERROR;
-        ppp_chap_data_t *ppp_chap_data = (ppp_chap_data_t *)(ppp_hdr + 1);
         if (ppp_hdr->code == CHAP_CHALLENGE) {
             U8 buffer[PPP_MSG_BUF_LEN];
             U16 mulen;
+            U16 chap_data_len = ppp_hdr_len - sizeof(ppp_header_t);
+            U8 *chap_data = (U8 *)(ppp_hdr + 1);
+            ppp_chap_data_t ppp_chap_data;
+
+            if (chap_data_len < sizeof(U8) || chap_data[0] > chap_data_len - sizeof(U8)) {
+                FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+                    "User %" PRIu16 " recv invalid CHAP challenge length %u with value size %u.",
+                    s_ppp_ccb->user_num, ppp_hdr_len, chap_data_len == 0 ? 0 : chap_data[0]);
+                return ERROR;
+            }
+
+            ppp_chap_data.val_size = chap_data[0];
+            ppp_chap_data.val = chap_data + sizeof(U8);
+            ppp_chap_data.name = ppp_chap_data.val + ppp_chap_data.val_size;
+
             ppp_ccb_t *tmp_s_ppp_ccb = fastrg_malloc(ppp_ccb_t, sizeof(ppp_ccb_t), 0);
             if (tmp_s_ppp_ccb == NULL) {
                 FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "fastrg_malloc error.");
@@ -1369,6 +1383,8 @@ STATUS decode_ppp(ppp_payload_t *ppp_payload, U16 *event, ppp_ccb_t *s_ppp_ccb)
             memset(tmp_s_ppp_ccb, 0, sizeof(ppp_ccb_t));
 
             s_ppp_ccb->phase = AUTH_PHASE;
+            tmp_s_ppp_ccb->fastrg_ccb = fastrg_ccb;
+            tmp_s_ppp_ccb->user_num = s_ppp_ccb->user_num;
             tmp_s_ppp_ccb->eth_hdr = s_ppp_ccb->eth_hdr;
             tmp_s_ppp_ccb->vlan_header = s_ppp_ccb->vlan_header;
             tmp_s_ppp_ccb->pppoe_header = s_ppp_ccb->pppoe_header;
@@ -1377,8 +1393,10 @@ STATUS decode_ppp(ppp_payload_t *ppp_payload, U16 *event, ppp_ccb_t *s_ppp_ccb)
             tmp_s_ppp_ccb->ppp_phase[0].ppp_options = NULL;
             tmp_s_ppp_ccb->cp = 0;
             tmp_s_ppp_ccb->session_id = s_ppp_ccb->session_id;
+            tmp_s_ppp_ccb->ppp_user_acc = s_ppp_ccb->ppp_user_acc;
+            tmp_s_ppp_ccb->ppp_passwd = s_ppp_ccb->ppp_passwd;
 
-            build_auth_response_chap(buffer, &mulen, tmp_s_ppp_ccb, ppp_chap_data);
+            build_auth_response_chap(buffer, &mulen, tmp_s_ppp_ccb, &ppp_chap_data);
             wan_ctrl_tx(fastrg_ccb, s_ppp_ccb->user_num - 1, buffer, mulen);
             FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " recv chap challenge.", s_ppp_ccb->user_num);
             fastrg_mfree(tmp_s_ppp_ccb);

@@ -945,6 +945,117 @@ void test_build_auth_ack_pap(FastRG_t *fastrg_ccb)
         "build_auth_ack_pap packet content", "packet content mismatch");
 }
 
+void test_build_auth_response_chap(FastRG_t *fastrg_ccb)
+{
+    printf("\nTesting build_auth_response_chap function:\n");
+    printf("=========================================\n\n");
+
+    U8 buffer[80] = {0};
+    U8 challenge[16] = {
+        0x10, 0x21, 0x32, 0x43, 0x54, 0x65, 0x76, 0x87,
+        0x98, 0xa9, 0xba, 0xcb, 0xdc, 0xed, 0xfe, 0x0f
+    };
+    U8 expected_hash[16];
+    U8 expected_dst[] = {0x74, 0x4d, 0x28, 0x8d, 0x00, 0x31};
+    U8 expected_src[] = {0x9c, 0x69, 0xb4, 0x61, 0x16, 0xdd};
+    U16 mulen = 0;
+    MD5_CTX context;
+    ppp_chap_data_t chap_data = {
+        .val_size = sizeof(challenge),
+        .val = challenge,
+        .name = NULL,
+    };
+    ppp_ccb_t s_ppp_ccb = {
+        .ppp_phase = {{
+            .ppp_payload = (ppp_payload_t) {
+                .ppp_protocol = htons(CHAP_PROTOCOL),
+            },
+            .ppp_hdr = (ppp_header_t) {
+                .code = CHAP_CHALLENGE,
+                .identifier = 0x37,
+                .length = htons(sizeof(ppp_header_t) + sizeof(U8) + sizeof(challenge)),
+            },
+        },{},},
+        .user_num = 1,
+        .ppp_user_acc = (U8 *)"user1",
+        .ppp_passwd = (U8 *)"pass1",
+        .eth_hdr = (struct rte_ether_hdr) {
+            .dst_addr = {.addr_bytes = {0x9c, 0x69, 0xb4, 0x61, 0x16, 0xdd}},
+            .src_addr = {.addr_bytes = {0x74, 0x4d, 0x28, 0x8d, 0x00, 0x31}},
+            .ether_type = htons(VLAN),
+        },
+        .vlan_header = (vlan_header_t) {
+            .tci_union.tci_value = htons(2),
+            .next_proto = htons(ETH_P_PPP_SES),
+        },
+        .pppoe_header = (pppoe_header_t) {
+            .ver_type = VER_TYPE,
+            .code = SESSION_DATA,
+            .session_id = htons(0x000a),
+        },
+        .fastrg_ccb = fastrg_ccb,
+    };
+
+    printf("Test 1: \"%s\"\n", "16-byte CHAP challenge response");
+    MD5Init(&context);
+    MD5Update(&context, &s_ppp_ccb.ppp_phase[0].ppp_hdr.identifier, sizeof(U8));
+    MD5Update(&context, (U8 *)"pass1", strlen("pass1"));
+    MD5Update(&context, challenge, sizeof(challenge));
+    MD5Final(expected_hash, &context);
+
+    build_auth_response_chap(buffer, &mulen, &s_ppp_ccb, &chap_data);
+
+    struct rte_ether_hdr *eth_hdr = (struct rte_ether_hdr *)buffer;
+    vlan_header_t *vlan_hdr = (vlan_header_t *)(eth_hdr + 1);
+    pppoe_header_t *pppoe_hdr = (pppoe_header_t *)(vlan_hdr + 1);
+    ppp_payload_t *ppp_payload = (ppp_payload_t *)(pppoe_hdr + 1);
+    ppp_header_t *ppp_hdr = (ppp_header_t *)(ppp_payload + 1);
+    U8 *response_data = (U8 *)(ppp_hdr + 1);
+    U16 expected_ppp_len = sizeof(ppp_header_t) + sizeof(U8) + sizeof(expected_hash) + strlen("user1");
+
+    TEST_ASSERT(memcmp(eth_hdr->dst_addr.addr_bytes, expected_dst, RTE_ETHER_ADDR_LEN) == 0 &&
+        memcmp(eth_hdr->src_addr.addr_bytes, expected_src, RTE_ETHER_ADDR_LEN) == 0,
+        "CHAP response swaps Ethernet addresses", "Ethernet addresses were not swapped");
+    TEST_ASSERT(eth_hdr->ether_type == htons(VLAN) && vlan_hdr->tci_union.tci_value == htons(2) &&
+        vlan_hdr->next_proto == htons(ETH_P_PPP_SES),
+        "CHAP response preserves VLAN fields", "unexpected Ethernet/VLAN fields");
+    TEST_ASSERT(pppoe_hdr->ver_type == VER_TYPE && pppoe_hdr->code == SESSION_DATA &&
+        pppoe_hdr->session_id == htons(0x000a),
+        "CHAP response preserves PPPoE session fields", "unexpected PPPoE session fields");
+    TEST_ASSERT(ppp_payload->ppp_protocol == htons(CHAP_PROTOCOL),
+        "CHAP response protocol", "expected 0x%04x, got 0x%04x", CHAP_PROTOCOL,
+        ntohs(ppp_payload->ppp_protocol));
+    TEST_ASSERT(ppp_hdr->code == CHAP_RESPONSE && ppp_hdr->identifier == 0x37,
+        "CHAP response code and identifier", "code=%u identifier=%u", ppp_hdr->code, ppp_hdr->identifier);
+    TEST_ASSERT(ntohs(ppp_hdr->length) == expected_ppp_len &&
+        ntohs(pppoe_hdr->length) == sizeof(ppp_payload_t) + expected_ppp_len,
+        "CHAP response network-order lengths", "PPP=%u PPPoE=%u", ntohs(ppp_hdr->length),
+        ntohs(pppoe_hdr->length));
+    TEST_ASSERT(response_data[0] == sizeof(expected_hash),
+        "CHAP response value size", "expected %zu, got %u", sizeof(expected_hash), response_data[0]);
+    TEST_ASSERT(memcmp(response_data + sizeof(U8), expected_hash, sizeof(expected_hash)) == 0,
+        "CHAP response MD5 hash", "hash mismatch");
+    TEST_ASSERT(memcmp(response_data + sizeof(U8) + sizeof(expected_hash), "user1", strlen("user1")) == 0,
+        "CHAP response name without NUL", "name mismatch");
+    TEST_ASSERT(mulen == sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) + sizeof(pppoe_header_t) +
+        sizeof(ppp_payload_t) + expected_ppp_len,
+        "CHAP response frame length", "expected %zu, got %u",
+        sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) + sizeof(pppoe_header_t) +
+        sizeof(ppp_payload_t) + expected_ppp_len, mulen);
+
+    printf("Test 2: \"%s\"\n", "8-byte CHAP challenge hashes only its declared value");
+    chap_data.val_size = 8;
+    MD5Init(&context);
+    MD5Update(&context, &s_ppp_ccb.ppp_phase[0].ppp_hdr.identifier, sizeof(U8));
+    MD5Update(&context, (U8 *)"pass1", strlen("pass1"));
+    MD5Update(&context, challenge, chap_data.val_size);
+    MD5Final(expected_hash, &context);
+    build_auth_response_chap(buffer, &mulen, &s_ppp_ccb, &chap_data);
+    response_data = (U8 *)(ppp_hdr + 1);
+    TEST_ASSERT(memcmp(response_data + sizeof(U8), expected_hash, sizeof(expected_hash)) == 0,
+        "CHAP response honors 8-byte challenge length", "hash mismatch");
+}
+
 void test_build_proto_reject(FastRG_t *fastrg_ccb)
 {
     printf("\nTesting build_proto_reject function:\n");
@@ -1345,6 +1456,81 @@ void test_ppp_decode_frame(FastRG_t *fastrg_ccb)
         "PPPoE discovery frame (PADM) returns ERROR by design", NULL);
 }
 
+void test_ppp_decode_frame_chap(FastRG_t *fastrg_ccb)
+{
+    printf("\nTesting PPP_decode_frame CHAP dispatch:\n");
+    printf("=========================================\n\n");
+
+    U8 frame[128];
+    U8 challenge[16] = {
+        0x10, 0x21, 0x32, 0x43, 0x54, 0x65, 0x76, 0x87,
+        0x98, 0xa9, 0xba, 0xcb, 0xdc, 0xed, 0xfe, 0x0f
+    };
+    U16 event = 0;
+    U16 frame_len;
+    U16 chap_info_len = sizeof(U8) + sizeof(challenge);
+
+    decode_env_init(fastrg_ccb);
+    memset(&decode_wan_stats, 0, sizeof(decode_wan_stats));
+
+    printf("Test 1: \"%s\"\n", "valid CHAP Challenge is dispatched and answered");
+    decode_ccb_reset(fastrg_ccb, AUTH_PHASE);
+    decode_ccb.ppp_user_acc = (U8 *)"user1";
+    decode_ccb.ppp_passwd = (U8 *)"pass1";
+    frame_len = build_session_frame(frame, CHAP_PROTOCOL, CHAP_CHALLENGE,
+        sizeof(ppp_header_t) + chap_info_len, chap_info_len);
+    ppp_header_t *ppp_hdr = (ppp_header_t *)(frame + sizeof(struct rte_ether_hdr) +
+        sizeof(vlan_header_t) + sizeof(pppoe_header_t) + sizeof(ppp_payload_t));
+    U8 *chap_data = (U8 *)(ppp_hdr + 1);
+    ppp_hdr->identifier = 0x37;
+    chap_data[0] = sizeof(challenge);
+    rte_memcpy(chap_data + sizeof(U8), challenge, sizeof(challenge));
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == SUCCESS,
+        "valid CHAP Challenge returns SUCCESS", NULL);
+    TEST_ASSERT(decode_wan_stats.tx_packets == 1,
+        "valid CHAP Challenge sends one response", "tx_packets=%" PRIu64, decode_wan_stats.tx_packets);
+
+    printf("Test 2: \"%s\"\n", "malformed CHAP Challenge value size is rejected");
+    decode_ccb_reset(fastrg_ccb, AUTH_PHASE);
+    decode_ccb.ppp_user_acc = (U8 *)"user1";
+    decode_ccb.ppp_passwd = (U8 *)"pass1";
+    frame_len = build_session_frame(frame, CHAP_PROTOCOL, CHAP_CHALLENGE,
+        sizeof(ppp_header_t) + chap_info_len, chap_info_len);
+    ppp_hdr = (ppp_header_t *)(frame + sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) +
+        sizeof(pppoe_header_t) + sizeof(ppp_payload_t));
+    chap_data = (U8 *)(ppp_hdr + 1);
+    chap_data[0] = sizeof(challenge) + 1;
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == ERROR,
+        "malformed CHAP Challenge returns ERROR", NULL);
+    TEST_ASSERT(decode_wan_stats.tx_packets == 1,
+        "malformed CHAP Challenge sends no response", "tx_packets=%" PRIu64, decode_wan_stats.tx_packets);
+
+    printf("Test 3: \"%s\"\n", "CHAP frame outside AUTH_PHASE is rejected");
+    decode_ccb_reset(fastrg_ccb, LCP_PHASE);
+    frame_len = build_session_frame(frame, CHAP_PROTOCOL, CHAP_SUCCESS,
+        sizeof(ppp_header_t), 0);
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == ERROR,
+        "CHAP frame outside AUTH_PHASE returns ERROR", NULL);
+
+    printf("Test 4: \"%s\"\n", "CHAP Success advances AUTH_PHASE to IPCP_PHASE");
+    decode_ccb_reset(fastrg_ccb, AUTH_PHASE);
+    frame_len = build_session_frame(frame, CHAP_PROTOCOL, CHAP_SUCCESS,
+        sizeof(ppp_header_t), 0);
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == SUCCESS,
+        "CHAP Success in AUTH_PHASE returns SUCCESS", NULL);
+    TEST_ASSERT(decode_ccb.phase == IPCP_PHASE,
+        "CHAP Success advances AUTH_PHASE to IPCP_PHASE", "got phase %u", decode_ccb.phase);
+
+    printf("Test 5: \"%s\"\n", "CHAP Failure returns AUTH_PHASE to LCP_PHASE");
+    decode_ccb_reset(fastrg_ccb, AUTH_PHASE);
+    frame_len = build_session_frame(frame, CHAP_PROTOCOL, CHAP_FAILURE,
+        sizeof(ppp_header_t), 0);
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == SUCCESS,
+        "CHAP Failure in AUTH_PHASE returns SUCCESS", NULL);
+    TEST_ASSERT(decode_ccb.phase == LCP_PHASE,
+        "CHAP Failure returns AUTH_PHASE to LCP_PHASE", "got phase %u", decode_ccb.phase);
+}
+
 void test_ppp_codec(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 {
     printf("\n");
@@ -1367,9 +1553,11 @@ void test_ppp_codec(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_build_echo_request(fastrg_ccb);
     test_build_auth_request_pap(fastrg_ccb);
     test_build_auth_ack_pap(fastrg_ccb);
+    test_build_auth_response_chap(fastrg_ccb);
     test_build_proto_reject(fastrg_ccb);
     test_build_code_reject(fastrg_ccb);
     test_ppp_decode_frame(fastrg_ccb);
+    test_ppp_decode_frame_chap(fastrg_ccb);
 
     printf("\n");
     printf("╔════════════════════════════════════════════════════════════╗\n");

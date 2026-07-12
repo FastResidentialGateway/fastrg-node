@@ -11,6 +11,9 @@ echo "📁 Working directory: $SCRIPT_DIR"
 echo "🧪 Starting Controller Tests"
 echo "================================"
 
+TEST_FAILED=0
+ETCD_READY=0
+
 # Function to check if docker is available
 check_docker() {
     if ! command -v docker &> /dev/null; then
@@ -121,6 +124,7 @@ if check_docker; then
     trap 'stop_etcd' EXIT
     
     if start_etcd; then
+        ETCD_READY=1
         echo "Running etcd client test with simulated key changes..."
         if [ -f "./test/test_etcd_client" ]; then
             # Start etcd client test in background
@@ -183,4 +187,26 @@ else
 fi
 
 echo ""
+echo "🔧 Test 4: etcd CAS put test"
+echo "-----------------------------"
+if [ "$ETCD_READY" -eq 1 ]; then
+    if [ -f "./test/test_etcd_cas" ]; then
+        ./test/test_etcd_cas
+        if [ $? -ne 0 ]; then
+            echo "❌ etcd CAS put test failed."
+            TEST_FAILED=1
+        else
+            echo "✅ etcd CAS put test completed!"
+        fi
+    else
+        echo "❌ test_etcd_cas executable not found."
+        TEST_FAILED=1
+    fi
+else
+    echo "❌ etcd CAS put test requires a running etcd server."
+    TEST_FAILED=1
+fi
+
+echo ""
 echo "✅ All tests completed!"
+exit "$TEST_FAILED"
