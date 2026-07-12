@@ -137,6 +137,54 @@ phase0_setup() {
     fi
 
     # ------------------------------------------------------------------
+    # Preflight: remove HSI keys whose user_id is beyond the canonical
+    # subscriber count. Interrupted synthetic-user tests can otherwise leave
+    # a VLAN-conflicting key that poisons controller reconciliation.
+    # ------------------------------------------------------------------
+    info "Preflight: sweeping stray HSI keys before starting test traffic..."
+    local _preflight_count_json _preflight_count _preflight_keys _preflight_key
+    local _preflight_uid _preflight_value _preflight_vlan _preflight_updated _preflight_after
+    local _preflight_found=0
+    _preflight_count_json=$(etcdctl_get_value "user_counts/${NODE_UUID}/" 2>/dev/null || true)
+    _preflight_count=$(printf '%s' "$_preflight_count_json" | \
+        jq -r '.subscriber_count // empty' 2>/dev/null | tr -d '[:space:]' || true)
+    if [[ ! "$_preflight_count" =~ ^[0-9]+$ ]] || [[ "$_preflight_count" -lt 1 ]]; then
+        _preflight_count=2
+        warn "Preflight: subscriber count unavailable; using canonical fixture count ${_preflight_count}."
+    else
+        info "Preflight: canonical subscriber count is ${_preflight_count}."
+    fi
+
+    _preflight_keys=$(ssh_node \
+        "ETCDCTL_API=3 etcdctl --endpoints=${ETCD_ENDPOINT} get --prefix --keys-only configs/${NODE_UUID}/hsi/" \
+        2>/dev/null || true)
+    while IFS= read -r _preflight_key; do
+        [[ -z "$_preflight_key" ]] && continue
+        _preflight_uid="${_preflight_key##*/}"
+        [[ "$_preflight_uid" =~ ^[0-9]+$ ]] || continue
+        [[ "$_preflight_uid" -le "$_preflight_count" ]] && continue
+
+        _preflight_found=1
+        _preflight_value=$(etcdctl_get_value "${_preflight_key}" 2>/dev/null || true)
+        _preflight_vlan=$(printf '%s' "$_preflight_value" | \
+            jq -r '.config.vlan_id // empty' 2>/dev/null || true)
+        _preflight_updated=$(printf '%s' "$_preflight_value" | \
+            jq -r '.metadata.updatedAt // empty' 2>/dev/null || true)
+        warn "Preflight stray HSI: key=${_preflight_key} vlan_id=${_preflight_vlan:-unknown} updatedAt=${_preflight_updated:-unknown}; deleting."
+        ssh_node "ETCDCTL_API=3 etcdctl --endpoints=${ETCD_ENDPOINT} del ${_preflight_key}" \
+            >/dev/null 2>&1 || true
+        _preflight_after=$(etcdctl_get_value "${_preflight_key}" 2>/dev/null || true)
+        if [[ -z "$_preflight_after" ]]; then
+            info "Preflight: verified stray key ${_preflight_key} was removed."
+        else
+            warn "Preflight FAILED: stray key ${_preflight_key} remains after direct etcd delete."
+        fi
+    done <<< "$_preflight_keys"
+    if [[ $_preflight_found -eq 0 ]]; then
+        info "Preflight: no stray HSI keys found."
+    fi
+
+    # ------------------------------------------------------------------
     # Start dpdk-bras on the BRAS endpoint BEFORE the node starts, so the
     # node's PPPoE sessions have a server to dial into on boot. dpdk-bras is
     # the PPPoE/BRAS simulator; it serves VLAN 3 (subscriber 2) and VLAN 5

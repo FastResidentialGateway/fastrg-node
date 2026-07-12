@@ -28,8 +28,8 @@ _cleanup_phase9_cli_fallback() {
     [[ -n "${_U1:-}" ]] && fastrg_grpc disconnect_hsi "${_U1}" >/dev/null 2>&1 || true
     [[ -n "${_U2:-}" ]] && fastrg_grpc disconnect_hsi "${_U2}" >/dev/null 2>&1 || true
     sleep 4
-    [[ -n "${_U1:-}" ]] && fastrg_grpc remove_config "${_U1}" >/dev/null 2>&1 || true
-    [[ -n "${_U2:-}" ]] && fastrg_grpc remove_config "${_U2}" >/dev/null 2>&1 || true
+    [[ -n "${_U1:-}" ]] && remove_hsi_config_verified "${_U1}" || true
+    [[ -n "${_U2:-}" ]] && remove_hsi_config_verified "${_U2}" || true
     [[ -n "${_P9_ORIG_SUB_COUNT:-}" ]] && fastrg_grpc set_subscriber_count "${_P9_ORIG_SUB_COUNT}" >/dev/null 2>&1 || true
 }
 
@@ -82,8 +82,8 @@ phase9_cli_fallback() {
     # Disconnect first so apply_hsi_config's "already enabled" guard doesn't block.
     fastrg_grpc disconnect_hsi "${_U1}" >/dev/null 2>&1 || true
     fastrg_grpc disconnect_hsi "${_U2}" >/dev/null 2>&1 || true
-    fastrg_grpc remove_config "${_U1}" >/dev/null 2>&1 || true
-    fastrg_grpc remove_config "${_U2}" >/dev/null 2>&1 || true
+    remove_hsi_config_verified "${_U1}" || true
+    remove_hsi_config_verified "${_U2}" || true
     sleep 4  # allow PPPoE teardown + etcd reconcile before CREATE events
 
     # ------------------------------------------------------------------
