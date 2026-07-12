@@ -4,6 +4,3 @@
 [submodule "lib/dpdk"]
 	path = lib/dpdk
 	url = git://dpdk.org/dpdk-stable
-[submodule "lib/dpdk-kmods"]
-	path = lib/dpdk-kmods
-	url = https://dpdk.org/git/dpdk-kmods
