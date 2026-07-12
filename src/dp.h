@@ -7,6 +7,11 @@
 #ifndef _DP_H_
 #define _DP_H_
 
+#include <rte_hash_crc.h>
+#include <rte_ip.h>
+#include <rte_udp.h>
+
+#include "dhcpd/dhcpd.h"
 #include "fastrg.h"
 #include "pppd/pppd.h"
 
@@ -111,6 +116,119 @@ static inline void count_tx_packet(FastRG_t *fastrg_ccb, struct rte_mbuf *single
 {
     struct per_ccb_stats *stats = FASTRG_GET_PER_SUBSCRIBER_STATS(fastrg_ccb, port_id, ccb_id); 
     if (likely(stats)) increase_ccb_tx_count(stats, single_pkt->pkt_len); 
+}
+
+static inline STATUS parse_l2_hdr(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt, 
+    U8 port_id)
+{
+    mbuf_priv_t *mbuf_priv = rte_mbuf_to_priv(single_pkt);
+    struct rte_ether_hdr *eth_hdr;
+    vlan_header_t *vlan_header;
+    U16 ccb_id;
+    U16 vlan_id;
+
+    eth_hdr = rte_pktmbuf_mtod(single_pkt, struct rte_ether_hdr *);
+    mbuf_priv->eth_hdr = eth_hdr;
+    if (unlikely(eth_hdr->ether_type != rte_cpu_to_be_16(VLAN)))
+        return ERROR;
+
+    vlan_header = (vlan_header_t *)(rte_pktmbuf_mtod(single_pkt, unsigned char *) + sizeof(struct rte_ether_hdr));
+    mbuf_priv->vlan_hdr = vlan_header;
+
+    vlan_id = rte_be_to_cpu_16(vlan_header->tci_union.tci_value) & 0xFFF;
+    if (unlikely(vlan_id < MIN_VLAN_ID || vlan_id > MAX_VLAN_ID))
+        return ERROR;
+
+    ccb_id = rte_atomic16_read(&fastrg_ccb->vlan_userid_map[vlan_id - 1]);
+    if (unlikely(ccb_id > fastrg_ccb->user_count - 1))
+        return ERROR;
+
+    dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
+
+    mbuf_priv->ccb_id = ccb_id;
+    mbuf_priv->dhcp_server_ip = dhcp_ccb->dhcp_server_ip;
+    mbuf_priv->dhcp_subnet_mask = dhcp_ccb->subnet_mask;
+
+    return SUCCESS;
+}
+
+#define VOD_IP_PREFIX_HOST 10  // 10.0.0.0/24 in host order
+#define VOD_IP_MASK 0x000000FF
+static inline BOOL is_iptv_pkt_need_drop(FastRG_t *fastrg_ccb, vlan_header_t *vlan_hdr)
+{
+    /* We need to detect IGMP and multicast msg here */
+    if (vlan_hdr->next_proto == rte_cpu_to_be_16(FRAME_TYPE_IP)) {
+        struct rte_ipv4_hdr *ip_hdr = (struct rte_ipv4_hdr *)(vlan_hdr + 1);
+        if (ip_hdr->next_proto_id == PROTO_TYPE_UDP) { // use 4001 vlan tag to detect IPTV and VOD packet
+            U16 vlan_id = rte_be_to_cpu_16(vlan_hdr->tci_union.tci_value) & 0xFFF;
+            struct rte_udp_hdr *udp_hdr = (struct rte_udp_hdr *)(ip_hdr + 1);
+            // VOD pkt dst ip is always 10.x.x.x, we compare it in network order
+            if (likely(vlan_id == MULTICAST_TAG || 
+                    ((ip_hdr->dst_addr) & VOD_IP_MASK) == VOD_IP_PREFIX_HOST)) {
+                return FALSE;
+            } else if (rte_be_to_cpu_16(ip_hdr->total_length) >
+                    sizeof(struct rte_udp_hdr) + sizeof(struct rte_ipv4_hdr) && 
+                    udp_hdr->dst_port == rte_be_to_cpu_16(DHCP_CLIENT_PORT)) {
+                return FALSE;
+            } else {
+                return TRUE;
+            }
+        }
+        if (ip_hdr->next_proto_id == IPPROTO_IGMP)
+            return FALSE;
+    }
+    return TRUE;
+}
+
+/**
+ * compute_flow_tag - per-direction 5-tuple hash used as the rte_distributor tag.
+ *
+ * The distributor keeps every packet sharing a tag on a single worker and in
+ * order, so deriving the tag from the direction's stable 5-tuple reproduces the
+ * same per-flow single-owner affinity that hardware RSS provides in
+ * DP_MODE_RSS. Only the low 16 bits matter (the burst distributor masks the tag
+ * to a 15-bit flow id and forces it odd), and CRC32 spreads entropy there.
+ */
+static inline U32 compute_flow_tag(U32 src_ip, U32 dst_ip, U16 src_port,
+    U16 dst_port, U8 proto)
+{
+    U32 h = rte_hash_crc_4byte(src_ip, 0);
+    h = rte_hash_crc_4byte(dst_ip, h);
+    h = rte_hash_crc_4byte(((U32)src_port << 16) | dst_port, h);
+    h = rte_hash_crc_1byte(proto, h);
+    return h;
+}
+
+/**
+ * send2cp - Forward DNS/DHCP/PPPoE packet to control plane via cp_q ring.
+ *
+ * Stores the mbuf pointer directly in the pre-allocated tFastRG_MBX slot
+ * (zero-copy). The control plane is responsible for freeing the mbuf after
+ * processing.
+ */
+static inline void send2cp(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt,
+    fastrg_event_type_t evt_type, U8 port_id)
+{
+    tFastRG_MBX *slot = NULL;
+    U16 ccb_id = ((mbuf_priv_t *)rte_mbuf_to_priv(single_pkt))->ccb_id;
+
+    if (rte_ring_dequeue(fastrg_ccb->free_mail_ring, (void **)&slot) == 0) {
+        slot->mbuf = single_pkt;
+        slot->type = evt_type;
+        slot->len = single_pkt->pkt_len;
+        slot->ccb_id = ccb_id;
+        slot->port_id = port_id;
+        /* cp_q is full: return slot to free_mail_ring */
+        if (rte_ring_enqueue(fastrg_ccb->cp_q, slot) != 0) {
+            rte_ring_enqueue(fastrg_ccb->free_mail_ring, slot);
+            drop_packet(fastrg_ccb, single_pkt, port_id, ccb_id);
+        } else {
+            count_rx_packet(fastrg_ccb, single_pkt, port_id, ccb_id);
+            /* mbuf ownership transferred to control plane — do NOT free here */
+        }
+    } else {
+        drop_packet(fastrg_ccb, single_pkt, port_id, ccb_id);
+    }
 }
 
 /**
