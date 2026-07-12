@@ -14,6 +14,7 @@ void test_utils(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass);
 void test_nat(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass);
 void test_etcd_integration(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass);
 void test_dp_codec(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass);
+void test_dp(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass);
 void test_dbg(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass);
 void test_config(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass);
 void test_northbound(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass);
