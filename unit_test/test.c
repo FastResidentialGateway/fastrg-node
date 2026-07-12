@@ -219,6 +219,10 @@ int main()
     test_lighthttp(fastrg_ccb, &total_tests, &total_pass);
     puts("ok!");
 
+    puts("====================test metrics.c====================");
+    test_metrics(fastrg_ccb, &total_tests, &total_pass);
+    puts("ok!");
+
     printf("\n====================Unit Test Summary====================\n\n");
     printf("╔════════════════════════════════════════════════════════════╗\n");
     printf("║  All Test Summary                                          ║\n");
