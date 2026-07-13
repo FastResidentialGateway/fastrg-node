@@ -49,8 +49,6 @@ typedef struct {
     char dhcp_addr_pool[64];
     char dhcp_subnet[32];
     char dhcp_gateway[32];
-    char dns_primary[32];       /* primary DNS server IP (e.g. "8.8.8.8") */
-    char dns_secondary[32];     /* secondary DNS server IP (e.g. "1.1.1.1") */
     BOOL dns_proxy_enable;      /* per-subscriber DNS proxy enable; defaults to TRUE when absent in etcd */
     BOOL tcp_conntrack_enable;  /* per-subscriber TCP SPI enable; defaults to TRUE when absent in etcd */
     char desire_status[16];     /* "connect"/"disconnect"; empty = disconnect. Only CLI/controller set it. */

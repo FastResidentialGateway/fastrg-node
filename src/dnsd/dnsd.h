@@ -81,8 +81,8 @@ void dns_proxy_cleanup(dns_proxy_state_t *state);
 /**
  * @fn dnsd_check_failover
  *
- * @brief Check DNS failover condition and switch servers if needed.
- *        Called periodically from timer thread.
+ * @brief Check DNS failover timeout and switch servers if needed.
+ *        The query forwarding path calls this when an earlier query is pending.
  * @param state
  *      DNS proxy state
  */

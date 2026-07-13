@@ -58,8 +58,6 @@ message ConfigRequest {
   string dhcp_pool_end = 6;
   string dhcp_subnet_mask = 7;
   string dhcp_gateway = 8;
-  string dns_primary = 9;
-  string dns_secondary = 10;
 }
 
 message ConfigReply { 
