@@ -94,6 +94,7 @@ phase12_rollback() {
     _p13_bad=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/${USER_ID}" 2>/dev/null | \
         jq -c --arg now "$_p13_now" \
             '.config.vlan_id="0" | .config.account_name="e2e_bad_vlan" |
+             .metadata.resourceVersion=(((.metadata.resourceVersion | tonumber) + 1) | tostring) |
              .metadata.updatedAt=$now | .metadata.updatedBy="e2e_rollback_test"' \
         2>/dev/null || true)
     if [[ -z "$_p13_bad" ]]; then

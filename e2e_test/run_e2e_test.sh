@@ -460,7 +460,8 @@ source "${_E2E_PHASES_DIR}/phase16_rcu_concurrency.sh"
 source "${_E2E_PHASES_DIR}/phase17_etcd_offline_queue.sh"
 source "${_E2E_PHASES_DIR}/phase18_dns_cache.sh"
 source "${_E2E_PHASES_DIR}/phase19_node_restart.sh"
-source "${_E2E_PHASES_DIR}/phase20_summary.sh"
+source "${_E2E_PHASES_DIR}/phase20_nat_expiry.sh"
+source "${_E2E_PHASES_DIR}/phase21_summary.sh"
 
 # ---------------------------------------------------------------------------
 # Cleanup — kill fastrg only if the script started it
@@ -468,6 +469,7 @@ source "${_E2E_PHASES_DIR}/phase20_summary.sh"
 cleanup_fastrg() {
     set +eu  # Prevent set -e / set -u from interrupting cleanup, ensure all cleanup steps are executed
 
+    _cleanup_phase20_nat_expiry 2>/dev/null || true
     _cleanup_phase19_node_restart 2>/dev/null || true
 
     # Best-effort: remove new subscriber config if the test left it in etcd
@@ -562,7 +564,8 @@ main() {
     phase17_etcd_offline_queue
     phase18_dns_cache
     phase19_node_restart
-    phase20_summary || true
+    phase20_nat_expiry
+    phase21_summary || true
 }
 
 main "$@"

@@ -62,6 +62,9 @@ phase15_metrics_route() {
         fastrg_nic_link_up
         fastrg_nic_link_flaps_total
         fastrg_nic_info
+        fastrg_node_per_user_nat_entries_used
+        fastrg_node_per_user_nat_alloc_fail_total
+        fastrg_node_per_user_nat_gc_reclaimed_total
     )
     local _m
     for _m in "${_want[@]}"; do

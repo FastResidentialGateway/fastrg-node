@@ -309,6 +309,31 @@ static void test_gc_scan_reclaims_zombies(void)
         "all zombie slots back in the free ring", NULL);
 }
 
+static void test_gc_tick_drains_deferred_slots(void)
+{
+    printf("\nTesting GC tick drains deferred slots after quiescence:\n");
+    printf("=======================================================\n\n");
+
+    nat_env_reset();
+    struct rte_ether_hdr eth = {0};
+    addr_table_t *entry = NULL;
+
+    nat_learning_port_reuse(&test_ccb, &eth,
+        rte_cpu_to_be_32(0xC0A80110), rte_cpu_to_be_32(0x08080808),
+        rte_cpu_to_be_16(57100), rte_cpu_to_be_16(443), &entry);
+    nat_expire_set(entry->expire_slot, 1);
+
+    TEST_ASSERT(nat_gc_scan_by_ccb(&test_ccb, MAX_NAT_ENTRIES) == 1,
+        "first GC tick unlinks the expired mapping", NULL);
+    TEST_ASSERT(rte_ring_count(test_ccb.nat_free_ring) == MAX_NAT_ENTRIES - 1,
+        "slot stays deferred until the reader is quiescent", NULL);
+
+    rte_rcu_qsbr_quiescent(test_rcu, 0);
+    nat_gc_scan_by_ccb(&test_ccb, NAT_GC_SCAN_CHUNK);
+    TEST_ASSERT(rte_ring_count(test_ccb.nat_free_ring) == MAX_NAT_ENTRIES,
+        "next GC tick returns the quiescent slot to the free ring", NULL);
+}
+
 static void test_udp_tcp_icmp_wrappers(void)
 {
     printf("\nTesting protocol learning wrappers:\n");
@@ -719,6 +744,7 @@ void test_nat(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_port_fwd_reserved_skipped();
     test_all_ports_reserved_returns_zero();
     test_gc_scan_reclaims_zombies();
+    test_gc_tick_drains_deferred_slots();
     test_udp_tcp_icmp_wrappers();
     test_evict_clears_forward_key();
     test_gc_clears_forward_key();

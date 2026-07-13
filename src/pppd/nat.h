@@ -361,6 +361,7 @@ static inline U32 nat_gc_scan_by_ccb(ppp_ccb_t *ppp_ccb, U32 max_slots)
 {
     U32 start = __atomic_fetch_add(&ppp_ccb->nat_gc_counter, max_slots, __ATOMIC_RELAXED);
     U32 reclaimed = 0;
+    unsigned int freed = 0, pending = 0, available = 0;
 
     U64 now = fastrg_get_cur_cycles();
 
@@ -382,6 +383,15 @@ static inline U32 nat_gc_scan_by_ccb(ppp_ccb_t *ppp_ccb, U32 max_slots)
     }
     if (reclaimed > 0)
         __atomic_fetch_add(&ppp_ccb->nat_gc_reclaimed, (U64)reclaimed, __ATOMIC_RELAXED);
+
+    /* Deleting a small number of keys does not fill the RCU defer queue, so
+     * its automatic reclaim threshold may never run.  Drain both queues on
+     * every bounded GC tick: after readers report quiescent, the reverse
+     * callback returns pool slots to nat_free_ring and the forward queue
+     * releases its internal hash slots. */
+    rte_hash_rcu_qsbr_dq_reclaim(ppp_ccb->nat_reverse_hash, &freed, &pending, &available);
+    freed = pending = available = 0;
+    rte_hash_rcu_qsbr_dq_reclaim(ppp_ccb->nat_forward_hash, &freed, &pending, &available);
     return reclaimed;
 }
 
