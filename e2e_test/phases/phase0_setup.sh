@@ -3,6 +3,9 @@
 # ---------------------------------------------------------------------------
 # Phase 0 — Prerequisites
 # ---------------------------------------------------------------------------
+_FASTRG_DAEMON="/root/fastrg-node/fastrg"
+_FASTRG_START_CMD="${_FASTRG_DAEMON} -l 1-8 -n 4 -a 0000:07:00.0 -a 0000:08:00.0"
+
 phase0_setup() {
     bold "═══════════════════════════════════════════════════════"
     bold " Phase 0 — Prerequisite Checks"
@@ -237,8 +240,6 @@ phase0_setup() {
     FASTRG_PID=$(ssh_node "pgrep -x fastrg 2>/dev/null || pidof fastrg 2>/dev/null || true" | tr -d '[:space:]')
     if [[ -z "$FASTRG_PID" ]]; then
         warn "fastrg is NOT running — attempting to start..."
-        _FASTRG_DAEMON="/root/fastrg-node/fastrg"
-        _FASTRG_START_CMD="${_FASTRG_DAEMON} -l 1-8 -n 4 -a 0000:07:00.0 -a 0000:08:00.0"
         info "Starting: ${_FASTRG_START_CMD}"
         ssh_node "nohup ${_FASTRG_START_CMD} >/var/log/fastrg.log 2>&1 &"
         _FASTRG_STARTED_BY_SCRIPT=1
