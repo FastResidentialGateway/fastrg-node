@@ -12,6 +12,8 @@ Commands:
     get_user_drop_count <user_id> [port_idx]               - GetFastrgSystemStats, WAN dropped_packets for user
     get_port_fwd_info <user_id>                             - GetPortFwdInfo    → JSON
     get_dns_static <user_id>                                - GetDnsStaticRecords → JSON
+    get_dns_cache <user_id>                                 - GetDnsCache → JSON
+    flush_dns_cache <user_id>                               - FlushDnsCache → JSON
     apply_config <uid> <vlan> <acct> <pw> <start> <end> <subnet> <gw>
                                                             - ApplyConfig → JSON
     remove_config <user_id>                                 - RemoveConfig → JSON
@@ -218,6 +220,23 @@ def get_dns_static(node_addr, user_id):
     }
 
 
+def get_dns_cache(node_addr, user_id):
+    resp = _grpcurl(node_addr, 'GetDnsCache', {'user_id': user_id})
+    return {
+        "user_id":       resp.get('user_id', user_id),
+        "total_entries": resp.get('total_entries', 0),
+        "entries":       resp.get('entries', []),
+    }
+
+
+def flush_dns_cache(node_addr, user_id):
+    resp = _grpcurl(node_addr, 'FlushDnsCache', {'user_id': user_id})
+    return {
+        "status":        resp.get('status', ''),
+        "flushed_count": resp.get('flushed_count', 0),
+    }
+
+
 def apply_config(node_addr, user_id, vlan_id, pppoe_account, pppoe_password,
                  dhcp_pool_start, dhcp_pool_end, dhcp_subnet_mask, dhcp_gateway):
     # Writes go through the controller (SSOT). Create, fall back to update if it
@@ -389,6 +408,18 @@ def main():
                       file=sys.stderr)
                 sys.exit(1)
             result = get_dns_static(opts.node, int(opts.args[0]))
+        elif opts.command == "get_dns_cache":
+            if not opts.args:
+                print(json.dumps({"error": "get_dns_cache requires <user_id>"}),
+                      file=sys.stderr)
+                sys.exit(1)
+            result = get_dns_cache(opts.node, int(opts.args[0]))
+        elif opts.command == "flush_dns_cache":
+            if not opts.args:
+                print(json.dumps({"error": "flush_dns_cache requires <user_id>"}),
+                      file=sys.stderr)
+                sys.exit(1)
+            result = flush_dns_cache(opts.node, int(opts.args[0]))
         elif opts.command == "apply_config":
             if len(opts.args) < 8:
                 print(json.dumps({"error": "apply_config requires <user_id> <vlan_id> <account> <password> "
