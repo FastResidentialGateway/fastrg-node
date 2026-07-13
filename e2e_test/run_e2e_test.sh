@@ -97,6 +97,15 @@ if [[ -z "${_FASTRG_E2E_RELOCATED:-}" ]]; then
             warn "fastrg_grpc_client.py not found at ${_SCRIPT_DIR}/fastrg_grpc_client.py"
         fi
 
+        # Upload deterministic DNS responder used by the cache behaviour phase.
+        if [[ -f "${_SCRIPT_DIR}/dns_responder.py" ]]; then
+            info "Uploading dns_responder.py..."
+            scp $_SSH_OPTS "${_SCRIPT_DIR}/dns_responder.py" \
+                "${_E2E_RUNNER_USER}@${_E2E_RUNNER_HOST}:${_E2E_REMOTE_DIR}/dns_responder.py"
+        else
+            warn "dns_responder.py not found at ${_SCRIPT_DIR}/dns_responder.py"
+        fi
+
         # Upload phase scripts
         if [[ -d "${_SCRIPT_DIR}/phases" ]]; then
             info "Uploading phase scripts..."
@@ -171,6 +180,7 @@ if [[ -z "${_FASTRG_E2E_RELOCATED:-}" ]]; then
         ssh $_SSH_OPTS "${_E2E_RUNNER_USER}@${_E2E_RUNNER_HOST}" \
             "rm -rf ${_E2E_REMOTE_DIR}/run_e2e_test.sh \
                    ${_E2E_REMOTE_DIR}/fastrg_grpc_client.py \
+                   ${_E2E_REMOTE_DIR}/dns_responder.py \
                    ${_E2E_REMOTE_DIR}/fastrg_node.proto \
                    ${_E2E_REMOTE_DIR}/grpcurl \
                    ${_E2E_REMOTE_DIR}/phases 2>/dev/null; \
@@ -448,7 +458,8 @@ source "${_E2E_PHASES_DIR}/phase14_stress_test.sh"
 source "${_E2E_PHASES_DIR}/phase15_metrics_route.sh"
 source "${_E2E_PHASES_DIR}/phase16_rcu_concurrency.sh"
 source "${_E2E_PHASES_DIR}/phase17_etcd_offline_queue.sh"
-source "${_E2E_PHASES_DIR}/phase18_summary.sh"
+source "${_E2E_PHASES_DIR}/phase18_dns_cache.sh"
+source "${_E2E_PHASES_DIR}/phase19_summary.sh"
 
 # ---------------------------------------------------------------------------
 # Cleanup — kill fastrg only if the script started it
@@ -463,6 +474,7 @@ cleanup_fastrg() {
     _cleanup_phase12_rollback 2>/dev/null || true
     _cleanup_phase16_rcu_concurrency 2>/dev/null || true
     _cleanup_phase17_etcd_offline_queue 2>/dev/null || true
+    _cleanup_phase18_dns_cache 2>/dev/null || true
 
     if [[ "${_FASTRG_STARTED_BY_SCRIPT:-0}" -eq 1 ]]; then
         info "Stopping fastrg (started by this script)..."
@@ -545,7 +557,8 @@ main() {
     phase15_metrics_route
     phase16_rcu_concurrency
     phase17_etcd_offline_queue
-    phase18_summary || true
+    phase18_dns_cache
+    phase19_summary || true
 }
 
 main "$@"
