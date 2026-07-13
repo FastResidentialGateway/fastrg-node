@@ -30,8 +30,6 @@ phase2_etcd_config_sync() {
     ETCD_POOL=$(printf '%s' "$HSI_JSON"      | jq -r '.config.dhcp_addr_pool // empty')
     ETCD_SUBNET=$(printf '%s' "$HSI_JSON"    | jq -r '.config.dhcp_subnet // empty')
     ETCD_GATEWAY=$(printf '%s' "$HSI_JSON"   | jq -r '.config.dhcp_gateway // empty')
-    ETCD_DNS_PRI=$(printf '%s' "$HSI_JSON"   | jq -r '.config.dns_primary // empty')
-    ETCD_DNS_SEC=$(printf '%s' "$HSI_JSON"   | jq -r '.config.dns_secondary // empty')
 
     info "  etcd account_name : ${ETCD_ACCOUNT}"
     info "  etcd vlan_id      : ${ETCD_VLAN}"

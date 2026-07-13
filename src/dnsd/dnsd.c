@@ -75,6 +75,19 @@ void dnsd_check_failover(dns_proxy_state_t *state)
     }
 }
 
+static BOOL dnsd_has_pending_query(dns_proxy_state_t *state)
+{
+    U64 now = fastrg_get_cur_cycles();
+    U64 timeout_cycles = (U64)DNS_PENDING_TIMEOUT_SECS * fastrg_get_cycles_in_sec();
+
+    for(int i=0; i<DNS_MAX_PENDING_QUERIES; i++) {
+        if (state->pending[i].active && now - state->pending[i].start_tsc < timeout_cycles)
+            return TRUE;
+    }
+
+    return FALSE;
+}
+
 dns_pending_query_t *find_free_pending(dns_proxy_state_t *state)
 {
     U64 now = fastrg_get_cur_cycles();
@@ -294,6 +307,11 @@ int dnsd_cp_process_lan_udp_query(FastRG_t *fastrg_ccb, U8 *pkt_data, U16 pkt_le
     /* Priority 3: forward to upstream DNS server */
     ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
     if (rte_atomic16_read(&ppp_ccb->dp_start_bool) != (S16)0 && state->active_dns != 0) {
+        /* Only consider failover when an earlier query is still waiting. This
+         * avoids switching on the first query after an idle period. */
+        if (dnsd_has_pending_query(state))
+            dnsd_check_failover(state);
+
         dns_pending_query_t *pending = find_free_pending(state);
         if (pending != NULL) {
             memset(pending, 0, sizeof(*pending));

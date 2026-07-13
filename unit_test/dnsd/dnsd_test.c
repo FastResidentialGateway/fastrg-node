@@ -904,6 +904,51 @@ static void test_udp_query_forwards_upstream_and_tracks_pending(FastRG_t *fastrg
     dns_udp_ctx_cleanup(&c);
 }
 
+static void test_udp_query_failover_requires_pending(FastRG_t *fastrg_ccb)
+{
+    printf("\nTesting dnsd_cp_process_lan_udp_query (pending-gated failover):\n");
+    printf("=========================================\n\n");
+
+    dns_udp_ctx_t c;
+    dns_udp_ctx_init(&c, fastrg_ccb);
+    dns_proxy_state_t *state = &c.dhcp_ccb->dns_state;
+    state->secondary_dns = rte_cpu_to_be_32(0x02020202);
+    rte_atomic16_set(&c.ppp_ccb->dp_start_bool, 1);
+
+    U8 query[DNS_MAX_PACKET_LEN];
+    U16 query_len = build_dns_query(query, "failover.example.com", DNS_TYPE_A, 0x4101);
+    dns_udp_ctx_set_payload(&c, query, query_len);
+    state->last_response_time = fastrg_get_cur_cycles() -
+        (U64)(DNS_FAILOVER_TIMEOUT_SECS + 1) * fastrg_get_cycles_in_sec();
+
+    TEST_ASSERT(dnsd_cp_process_lan_udp_query(fastrg_ccb, c.buf,
+        dns_udp_ctx_frame_len(&c), 0) == 0,
+        "idle query is forwarded upstream", "");
+    TEST_ASSERT(state->active_dns == state->primary_dns,
+        "idle timeout without a prior pending query stays on primary", "");
+
+    dns_udp_packet_init(&c, fastrg_ccb);
+    query_len = build_dns_query(query, "failover.example.com", DNS_TYPE_A, 0x4102);
+    dns_udp_ctx_set_payload(&c, query, query_len);
+    TEST_ASSERT(dnsd_cp_process_lan_udp_query(fastrg_ccb, c.buf,
+        dns_udp_ctx_frame_len(&c), 0) == 0,
+        "query with an outstanding pending query is forwarded", "");
+    TEST_ASSERT(state->active_dns == state->secondary_dns,
+        "timed-out primary switches to secondary when a query is pending", "");
+
+    state->last_response_time = fastrg_get_cur_cycles() -
+        (U64)(DNS_FAILOVER_TIMEOUT_SECS + 1) * fastrg_get_cycles_in_sec();
+    dns_udp_packet_init(&c, fastrg_ccb);
+    query_len = build_dns_query(query, "failover.example.com", DNS_TYPE_A, 0x4103);
+    dns_udp_ctx_set_payload(&c, query, query_len);
+    TEST_ASSERT(dnsd_cp_process_lan_udp_query(fastrg_ccb, c.buf,
+        dns_udp_ctx_frame_len(&c), 0) == 0,
+        "second timed-out query is forwarded", "");
+    TEST_ASSERT(state->active_dns == state->primary_dns,
+        "second timeout switches from secondary back to primary", "");
+    dns_udp_ctx_cleanup(&c);
+}
+
 static void test_udp_query_upstream_unavailable_returns_servfail(FastRG_t *fastrg_ccb)
 {
     printf("\nTesting dnsd_cp_process_lan_udp_query (upstream unavailable):\n");
@@ -1055,6 +1100,7 @@ void test_dnsd(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_udp_query_cache_match_rewrites_id(fastrg_ccb);
     test_udp_query_static_precedes_cache(fastrg_ccb);
     test_udp_query_forwards_upstream_and_tracks_pending(fastrg_ccb);
+    test_udp_query_failover_requires_pending(fastrg_ccb);
     test_udp_query_upstream_unavailable_returns_servfail(fastrg_ccb);
     test_udp_query_pending_full_returns_servfail(fastrg_ccb);
     test_udp_query_upstream_id_increments_and_skips_zero(fastrg_ccb);
