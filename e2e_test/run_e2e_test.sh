@@ -485,7 +485,8 @@ source "${_E2E_PHASES_DIR}/phase21_rpc_coverage.sh"
 source "${_E2E_PHASES_DIR}/phase22_dhcp_lease.sh"
 source "${_E2E_PHASES_DIR}/phase23_hsi_sweep.sh"
 source "${_E2E_PHASES_DIR}/phase24_multi_lan.sh"
-source "${_E2E_PHASES_DIR}/phase25_summary.sh"
+source "${_E2E_PHASES_DIR}/phase25_udp_icmp_traffic.sh"
+source "${_E2E_PHASES_DIR}/phase26_summary.sh"
 
 # ---------------------------------------------------------------------------
 # Cleanup — kill fastrg only if the script started it
@@ -498,6 +499,7 @@ cleanup_fastrg() {
     _cleanup_phase22_dhcp_lease 2>/dev/null || true
     _cleanup_phase23_hsi_sweep 2>/dev/null || true
     _cleanup_phase24_multi_lan 2>/dev/null || true
+    _cleanup_phase25_udp_icmp_traffic 2>/dev/null || true
 
     # Best-effort: remove new subscriber config if the test left it in etcd
     _cleanup_new_subscriber_config 2>/dev/null || true
@@ -596,7 +598,8 @@ main() {
     phase22_dhcp_lease
     phase23_hsi_sweep
     phase24_multi_lan
-    phase25_summary || true
+    phase25_udp_icmp_traffic
+    phase26_summary || true
 }
 
 main "$@"
