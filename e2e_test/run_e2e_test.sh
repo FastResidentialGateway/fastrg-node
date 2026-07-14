@@ -145,6 +145,16 @@ if [[ -z "${_FASTRG_E2E_RELOCATED:-}" ]]; then
             warn "proto not found at ${_PROTO_SRC}"
         fi
 
+        # Upload controller proto for the heartbeat/re-registration phase.
+        _CONTROLLER_PROTO_SRC="${_REPO_ROOT}/northbound/controller/proto/controller.proto"
+        if [[ -f "${_CONTROLLER_PROTO_SRC}" ]]; then
+            info "Uploading controller.proto..."
+            scp $_SSH_OPTS "${_CONTROLLER_PROTO_SRC}" \
+                "${_E2E_RUNNER_USER}@${_E2E_RUNNER_HOST}:${_E2E_REMOTE_DIR}/controller.proto"
+        else
+            warn "proto not found at ${_CONTROLLER_PROTO_SRC}"
+        fi
+
         # Upload grpcurl only when OS+arch match (platform-specific binary)
         _GRPCURL_BIN=$(command -v grpcurl 2>/dev/null || true)
         _local_os=$(uname -s)
@@ -202,6 +212,7 @@ if [[ -z "${_FASTRG_E2E_RELOCATED:-}" ]]; then
                    ${_E2E_REMOTE_DIR}/dhcp_client_sim.py \
                    ${_E2E_REMOTE_DIR}/lan_device_sim.py \
                    ${_E2E_REMOTE_DIR}/fastrg_node.proto \
+                   ${_E2E_REMOTE_DIR}/controller.proto \
                    ${_E2E_REMOTE_DIR}/grpcurl \
                    ${_E2E_REMOTE_DIR}/phases 2>/dev/null; \
              rmdir ${_E2E_REMOTE_DIR} 2>/dev/null || true" 2>/dev/null || true
@@ -486,7 +497,8 @@ source "${_E2E_PHASES_DIR}/phase22_dhcp_lease.sh"
 source "${_E2E_PHASES_DIR}/phase23_hsi_sweep.sh"
 source "${_E2E_PHASES_DIR}/phase24_multi_lan.sh"
 source "${_E2E_PHASES_DIR}/phase25_udp_icmp_traffic.sh"
-source "${_E2E_PHASES_DIR}/phase26_summary.sh"
+source "${_E2E_PHASES_DIR}/phase26_heartbeat_reregister.sh"
+source "${_E2E_PHASES_DIR}/phase27_summary.sh"
 
 # ---------------------------------------------------------------------------
 # Cleanup — kill fastrg only if the script started it
@@ -500,6 +512,7 @@ cleanup_fastrg() {
     _cleanup_phase23_hsi_sweep 2>/dev/null || true
     _cleanup_phase24_multi_lan 2>/dev/null || true
     _cleanup_phase25_udp_icmp_traffic 2>/dev/null || true
+    _cleanup_phase26_heartbeat_reregister 2>/dev/null || true
 
     # Best-effort: remove new subscriber config if the test left it in etcd
     _cleanup_new_subscriber_config 2>/dev/null || true
@@ -599,7 +612,8 @@ main() {
     phase23_hsi_sweep
     phase24_multi_lan
     phase25_udp_icmp_traffic
-    phase26_summary || true
+    phase26_heartbeat_reregister
+    phase27_summary || true
 }
 
 main "$@"
