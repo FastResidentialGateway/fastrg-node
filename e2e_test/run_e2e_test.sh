@@ -461,7 +461,8 @@ source "${_E2E_PHASES_DIR}/phase17_etcd_offline_queue.sh"
 source "${_E2E_PHASES_DIR}/phase18_dns_cache.sh"
 source "${_E2E_PHASES_DIR}/phase19_node_restart.sh"
 source "${_E2E_PHASES_DIR}/phase20_nat_expiry.sh"
-source "${_E2E_PHASES_DIR}/phase21_summary.sh"
+source "${_E2E_PHASES_DIR}/phase21_rpc_coverage.sh"
+source "${_E2E_PHASES_DIR}/phase22_summary.sh"
 
 # ---------------------------------------------------------------------------
 # Cleanup — kill fastrg only if the script started it
@@ -565,7 +566,8 @@ main() {
     phase18_dns_cache
     phase19_node_restart
     phase20_nat_expiry
-    phase21_summary || true
+    phase21_rpc_coverage
+    phase22_summary || true
 }
 
 main "$@"
