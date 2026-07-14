@@ -14,6 +14,9 @@ Commands:
     get_dns_static <user_id>                                - GetDnsStaticRecords → JSON
     get_dns_cache <user_id>                                 - GetDnsCache → JSON
     flush_dns_cache <user_id>                               - FlushDnsCache → JSON
+    get_arp_table <user_id> [max_count]                     - GetArpTable → JSON
+    get_system_xstats                                      - GetFastrgSystemXStats → JSON
+    get_node_status                                        - GetNodeStatus → JSON
     apply_config <uid> <vlan> <acct> <pw> <start> <end> <subnet> <gw>
                                                             - ApplyConfig → JSON
     remove_config <user_id>                                 - RemoveConfig → JSON
@@ -237,6 +240,33 @@ def flush_dns_cache(node_addr, user_id):
     }
 
 
+def get_arp_table(node_addr, user_id, max_count=None):
+    data = {'user_id': int(user_id)}
+    if max_count is not None:
+        data['max_count'] = int(max_count)
+    resp = _grpcurl(node_addr, 'GetArpTable', data)
+    return {
+        "user_id":    resp.get('user_id', user_id),
+        "total_count": resp.get('total_count', 0),
+        "entries":    resp.get('entries', []),
+    }
+
+
+def get_system_xstats(node_addr):
+    resp = _grpcurl(node_addr, 'GetFastrgSystemXStats')
+    return {"nic_xstats": resp.get('nic_xstats', [])}
+
+
+def get_node_status(node_addr):
+    resp = _grpcurl(node_addr, 'GetNodeStatus')
+    return {
+        "node_os_version": resp.get('node_os_version', ''),
+        "node_uptime":    resp.get('node_uptime', 0),
+        "node_ip_info":   resp.get('node_ip_info', ''),
+        "healthy":        resp.get('healthy', False),
+    }
+
+
 def apply_config(node_addr, user_id, vlan_id, pppoe_account, pppoe_password,
                  dhcp_pool_start, dhcp_pool_end, dhcp_subnet_mask, dhcp_gateway):
     # Writes go through the controller (SSOT). Create, fall back to update if it
@@ -420,6 +450,17 @@ def main():
                       file=sys.stderr)
                 sys.exit(1)
             result = flush_dns_cache(opts.node, int(opts.args[0]))
+        elif opts.command == "get_arp_table":
+            if not opts.args:
+                print(json.dumps({"error": "get_arp_table requires <user_id> [max_count]"}),
+                      file=sys.stderr)
+                sys.exit(1)
+            max_count = int(opts.args[1]) if len(opts.args) > 1 else None
+            result = get_arp_table(opts.node, int(opts.args[0]), max_count)
+        elif opts.command == "get_system_xstats":
+            result = get_system_xstats(opts.node)
+        elif opts.command == "get_node_status":
+            result = get_node_status(opts.node)
         elif opts.command == "apply_config":
             if len(opts.args) < 8:
                 print(json.dumps({"error": "apply_config requires <user_id> <vlan_id> <account> <password> "
