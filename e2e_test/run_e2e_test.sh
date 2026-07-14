@@ -115,6 +115,15 @@ if [[ -z "${_FASTRG_E2E_RELOCATED:-}" ]]; then
             warn "dhcp_client_sim.py not found at ${_SCRIPT_DIR}/dhcp_client_sim.py"
         fi
 
+        # Upload the raw-frame virtual LAN device helper used by the multi-device phase.
+        if [[ -f "${_SCRIPT_DIR}/lan_device_sim.py" ]]; then
+            info "Uploading lan_device_sim.py..."
+            scp $_SSH_OPTS "${_SCRIPT_DIR}/lan_device_sim.py" \
+                "${_E2E_RUNNER_USER}@${_E2E_RUNNER_HOST}:${_E2E_REMOTE_DIR}/lan_device_sim.py"
+        else
+            warn "lan_device_sim.py not found at ${_SCRIPT_DIR}/lan_device_sim.py"
+        fi
+
         # Upload phase scripts
         if [[ -d "${_SCRIPT_DIR}/phases" ]]; then
             info "Uploading phase scripts..."
@@ -191,6 +200,7 @@ if [[ -z "${_FASTRG_E2E_RELOCATED:-}" ]]; then
                    ${_E2E_REMOTE_DIR}/fastrg_grpc_client.py \
                    ${_E2E_REMOTE_DIR}/dns_responder.py \
                    ${_E2E_REMOTE_DIR}/dhcp_client_sim.py \
+                   ${_E2E_REMOTE_DIR}/lan_device_sim.py \
                    ${_E2E_REMOTE_DIR}/fastrg_node.proto \
                    ${_E2E_REMOTE_DIR}/grpcurl \
                    ${_E2E_REMOTE_DIR}/phases 2>/dev/null; \
@@ -474,7 +484,8 @@ source "${_E2E_PHASES_DIR}/phase20_nat_expiry.sh"
 source "${_E2E_PHASES_DIR}/phase21_rpc_coverage.sh"
 source "${_E2E_PHASES_DIR}/phase22_dhcp_lease.sh"
 source "${_E2E_PHASES_DIR}/phase23_hsi_sweep.sh"
-source "${_E2E_PHASES_DIR}/phase24_summary.sh"
+source "${_E2E_PHASES_DIR}/phase24_multi_lan.sh"
+source "${_E2E_PHASES_DIR}/phase25_summary.sh"
 
 # ---------------------------------------------------------------------------
 # Cleanup — kill fastrg only if the script started it
@@ -486,6 +497,7 @@ cleanup_fastrg() {
     _cleanup_phase19_node_restart 2>/dev/null || true
     _cleanup_phase22_dhcp_lease 2>/dev/null || true
     _cleanup_phase23_hsi_sweep 2>/dev/null || true
+    _cleanup_phase24_multi_lan 2>/dev/null || true
 
     # Best-effort: remove new subscriber config if the test left it in etcd
     _cleanup_new_subscriber_config 2>/dev/null || true
@@ -583,7 +595,8 @@ main() {
     phase21_rpc_coverage
     phase22_dhcp_lease
     phase23_hsi_sweep
-    phase24_summary || true
+    phase24_multi_lan
+    phase25_summary || true
 }
 
 main "$@"
