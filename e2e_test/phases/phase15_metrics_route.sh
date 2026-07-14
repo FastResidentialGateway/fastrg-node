@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # ---------------------------------------------------------------------------
-# Phase 15 — Prometheus /metrics route (Steps 59-63)
+# Phase 15 — Prometheus /metrics route (Steps 61-65)
 #
 # Verifies the node's built-in lighthttp /metrics endpoint (served by the
 # fastrg metrics thread) is healthy and returns a well-formed Prometheus text
@@ -13,7 +13,7 @@
 # ---------------------------------------------------------------------------
 phase15_metrics_route() {
     bold "═══════════════════════════════════════════════════════"
-    bold " Phase 15 — Prometheus /metrics route (Steps 59-63)"
+    bold " Phase 15 — Prometheus /metrics route (Steps 61-65)"
     bold "═══════════════════════════════════════════════════════"
 
     # Resolve the metrics port from the node config (e.g. "55178" or "0.0.0.0:55178").
@@ -21,15 +21,15 @@ phase15_metrics_route() {
     _mport_raw=$(ssh_node "grep 'MetricsListenPort' /etc/fastrg/config.cfg 2>/dev/null" | awk -F'"' '{print $2}')
     _mport="${_mport_raw##*:}"
     if [[ -z "$_mport" ]]; then
-        skip "Step 59: read MetricsListenPort" "MetricsListenPort not set in /etc/fastrg/config.cfg"
-        skip "Step 60: /metrics returns 200"     "no metrics port"
-        skip "Step 61: expected metric families" "no metrics port"
-        skip "Step 62: well-formed exposition"   "no metrics port"
-        skip "Step 63: unknown path returns 404"  "no metrics port"
+        skip "Step 61: read MetricsListenPort" "MetricsListenPort not set in /etc/fastrg/config.cfg"
+        skip "Step 62: /metrics returns 200"     "no metrics port"
+        skip "Step 63: expected metric families" "no metrics port"
+        skip "Step 64: well-formed exposition"   "no metrics port"
+        skip "Step 65: unknown path returns 404"  "no metrics port"
         return
     fi
     info "Metrics endpoint: ${FASTRG_NODE}:${_mport}/metrics"
-    pass "Step 59: read MetricsListenPort" "port=${_mport}"
+    pass "Step 61: read MetricsListenPort" "port=${_mport}"
 
     # ------------------------------------------------------------------
     # Step 2 — GET /metrics returns HTTP 200 with a body
@@ -40,15 +40,15 @@ phase15_metrics_route() {
     _body=$(ssh_node "cat /tmp/e2e_metrics.txt 2>/dev/null")
 
     if [[ "$_code" != "200" ]]; then
-        fail "Step 60: /metrics returns 200" "got HTTP '${_code}'"
-        skip "Step 61: expected metric families" "/metrics not reachable"
-        skip "Step 62: well-formed exposition"   "/metrics not reachable"
-        skip "Step 63: unknown path returns 404"  "/metrics not reachable"
+        fail "Step 62: /metrics returns 200" "got HTTP '${_code}'"
+        skip "Step 63: expected metric families" "/metrics not reachable"
+        skip "Step 64: well-formed exposition"   "/metrics not reachable"
+        skip "Step 65: unknown path returns 404"  "/metrics not reachable"
         return
     fi
     local _lines
     _lines=$(printf '%s\n' "$_body" | wc -l | xargs)
-    pass "Step 60: /metrics returns 200" "HTTP 200, ${_lines} lines"
+    pass "Step 62: /metrics returns 200" "HTTP 200, ${_lines} lines"
 
     # ------------------------------------------------------------------
     # Step 3 — expected metric families are present
@@ -71,9 +71,9 @@ phase15_metrics_route() {
         printf '%s\n' "$_body" | grep -q "^${_m}{" || _missing="${_missing} ${_m}"
     done
     if [[ -z "$_missing" ]]; then
-        pass "Step 61: expected metric families" "all ${#_want[@]} present"
+        pass "Step 63: expected metric families" "all ${#_want[@]} present"
     else
-        fail "Step 61: expected metric families" "missing:${_missing}"
+        fail "Step 63: expected metric families" "missing:${_missing}"
     fi
 
     # ------------------------------------------------------------------
@@ -83,9 +83,9 @@ phase15_metrics_route() {
     local _dups
     _dups=$(printf '%s\n' "$_body" | grep '^# TYPE ' | sort | uniq -d)
     if [[ -z "$_dups" ]]; then
-        pass "Step 62: well-formed exposition" "no duplicate TYPE lines"
+        pass "Step 64: well-formed exposition" "no duplicate TYPE lines"
     else
-        fail "Step 62: well-formed exposition" "duplicate TYPE: $(printf '%s' "$_dups" | tr '\n' ';')"
+        fail "Step 64: well-formed exposition" "duplicate TYPE: $(printf '%s' "$_dups" | tr '\n' ';')"
     fi
 
     # ------------------------------------------------------------------
@@ -94,8 +94,8 @@ phase15_metrics_route() {
     local _code404
     _code404=$(ssh_node "curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:${_mport}/does-not-exist" 2>/dev/null)
     if [[ "$_code404" == "404" ]]; then
-        pass "Step 63: unknown path returns 404" "HTTP 404"
+        pass "Step 65: unknown path returns 404" "HTTP 404"
     else
-        fail "Step 63: unknown path returns 404" "got HTTP '${_code404}'"
+        fail "Step 65: unknown path returns 404" "got HTTP '${_code404}'"
     fi
 }

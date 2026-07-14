@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # ---------------------------------------------------------------------------
-# Phase 12 — Config-Apply Failure → Controller Rollback (Steps 43-44)
+# Phase 12 — Config-Apply Failure → Controller Rollback (Steps 45-46)
 #
 # Verifies the end-to-end rollback pipeline:
 #   node apply failure → Kafka CONFIG_APPLY_FAIL
@@ -9,8 +9,8 @@
 #   → CAS writes it back to etcd
 #   → node applies the restored config successfully (no infinite loop)
 #
-#   Step 43  existing user: bad config rolled back to last-successful version
-#   Step 44  new user (no DB record): bad key removed from etcd on failure
+#   Step 45  existing user: bad config rolled back to last-successful version
+#   Step 46  new user (no DB record): bad key removed from etcd on failure
 # ---------------------------------------------------------------------------
 
 # Poll etcd until the key's vlan_id matches $1 or $2 max-seconds elapse.
@@ -34,8 +34,8 @@ _p13_wait_etcd_vlan() {
 }
 
 # Helper: this phase deliberately writes an invalid vlan_id=0 config into
-# USER_ID's canonical hsi fixture (Step 43) and a stray never-configured-user
-# key (Step 44) to trigger controller rollback. Both are normally cleaned up
+# USER_ID's canonical hsi fixture (Step 45) and a stray never-configured-user
+# key (Step 46) to trigger controller rollback. Both are normally cleaned up
 # inline once each step's assertions finish, but if the phase dies mid-step
 # (before the controller rolls back / before the inline stray-key delete),
 # the bad state would otherwise survive into the next run. Idempotent —
@@ -65,14 +65,14 @@ _cleanup_phase12_rollback() {
 
 phase12_rollback() {
     bold "═══════════════════════════════════════════════════════"
-    bold " Phase 12 — Config-Apply Failure + Rollback (Steps 43-44)"
+    bold " Phase 12 — Config-Apply Failure + Rollback (Steps 45-46)"
     bold "═══════════════════════════════════════════════════════"
 
     # ------------------------------------------------------------------
-    # Step 43 — existing user: bad config → apply fail → controller
+    # Step 45 — existing user: bad config → apply fail → controller
     #           reads last-successful from DB → CAS restores etcd
     # ------------------------------------------------------------------
-    info "Step 43: trigger apply failure for USER_ID=${USER_ID} and expect rollback..."
+    info "Step 45: trigger apply failure for USER_ID=${USER_ID} and expect rollback..."
 
     # First ensure the controller DB has a recent apply-OK record for USER_ID.
     # A dial+hangup cycle sends a CONFIG_APPLY_OK which seeds hsi_config_current.
@@ -98,8 +98,8 @@ phase12_rollback() {
              .metadata.updatedAt=$now | .metadata.updatedBy="e2e_rollback_test"' \
         2>/dev/null || true)
     if [[ -z "$_p13_bad" ]]; then
-        fail "Step 43: config-apply rollback" "could not construct bad config from etcd"
-        skip "Step 44: new-user rollback (delete)" "prerequisite failed"
+        fail "Step 45: config-apply rollback" "could not construct bad config from etcd"
+        skip "Step 46: new-user rollback (delete)" "prerequisite failed"
         return
     fi
     # Pipe the JSON value via stdin to avoid shell quoting issues with the JSON.
@@ -113,22 +113,22 @@ phase12_rollback() {
         local _rb_acct="${_p43_acct_by%%|*}"
         local _rb_by="${_p43_acct_by##*|}"
         if [[ "$_rb_acct" == "$_p13_cur_acct" ]]; then
-            pass "Step 43: config-apply rollback" \
+            pass "Step 45: config-apply rollback" \
                 "etcd restored to vlan=${_p13_cur_vlan} acct=${_rb_acct} by=${_rb_by}"
         else
-            fail "Step 43: config-apply rollback" \
+            fail "Step 45: config-apply rollback" \
                 "vlan restored but acct mismatch (got=${_rb_acct} want=${_p13_cur_acct})"
         fi
     else
-        fail "Step 43: config-apply rollback" \
+        fail "Step 45: config-apply rollback" \
             "etcd was not restored within 30s (vlan still 0 or controller not rolling back)"
     fi
 
     # ------------------------------------------------------------------
-    # Step 44 — new user with no DB record: bad key should be removed
+    # Step 46 — new user with no DB record: bad key should be removed
     #           (controller cannot restore a prior version → deletes it)
     # ------------------------------------------------------------------
-    info "Step 44: write bad config for a brand-new user (no DB record) — expect key deleted..."
+    info "Step 46: write bad config for a brand-new user (no DB record) — expect key deleted..."
 
     # Pick a user_id one beyond the current subscriber count (guaranteed unconfigured).
     local _sc
@@ -161,22 +161,22 @@ phase12_rollback() {
     done
 
     if [[ $_p44_ok -eq 1 ]]; then
-        pass "Step 44: new-user rollback (delete)" \
+        pass "Step 46: new-user rollback (delete)" \
             "etcd key for new user ${_new_uid} was deleted after apply failure"
     else
         # Some controllers may only rollback existing users; treat as a soft failure.
         local _remaining
         _remaining=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/${_new_uid}" 2>/dev/null | \
             jq -r '.config.account_name // empty' 2>/dev/null || true)
-        fail "Step 44: new-user rollback (delete)" \
+        fail "Step 46: new-user rollback (delete)" \
             "key not removed within 30s (acct=${_remaining}; controller may not delete new-user keys)"
         # Clean up the stray key so it doesn't affect later phases.
         ssh_node "ETCDCTL_API=3 etcdctl --endpoints=${ETCD_ENDPOINT} del configs/${NODE_UUID}/hsi/${_new_uid}" \
             >/dev/null 2>&1 || true
     fi
 
-    # Unconditional cleanup: Step 43 wrote vlan=0 into configs/.../hsi/USER_ID,
-    # and Step 44 may have left a stray key if its own fail-branch delete above
+    # Unconditional cleanup: Step 45 wrote vlan=0 into configs/.../hsi/USER_ID,
+    # and Step 46 may have left a stray key if its own fail-branch delete above
     # didn't run. Either way, force-restore/delete so subsequent phases (diff,
     # kafka, summary) and the NEXT run all see the correct state.
     _cleanup_phase12_rollback

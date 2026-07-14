@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # ---------------------------------------------------------------------------
-# Phase 17 — etcd Offline Config Queue (Steps 66-67)
+# Phase 17 — etcd Offline Config Queue (Steps 68-69)
 #
 # The node's SDN guard normally rejects direct gRPC ApplyConfig calls
 # (FAILED_PRECONDITION) whenever etcd is reachable — see phase9 Step 38.
@@ -9,12 +9,12 @@
 # rule (so the TCP connection fails fast instead of timing out), which flips
 # etcd_reachable_=false on the node's next watchdog tick. It then:
 #
-#   Step 66  while etcd is unreachable, node gRPC ApplyConfig (CLI tier 3) is
+#   Step 68  while etcd is unreachable, node gRPC ApplyConfig (CLI tier 3) is
 #            now ACCEPTED, applies the config locally, and queues it to
 #            /etc/fastrg/config_queue.json for later etcd flush
-#   Step 67  once connectivity is restored, the node's watchdog flushes the
+#   Step 69  once connectivity is restored, the node's watchdog flushes the
 #            queue via cas_put() within one tick — the config lands in etcd
-#            with the values written in Step 66
+#            with the values written in Step 68
 #
 # The watchdog polls etcd reachability every WATCHDOG_CHECK_INTERVAL_SEC
 # (60s, etcd_client.cpp), so this phase budgets up to ~90s to detect "down"
@@ -34,7 +34,7 @@ _p17_block_etcd() {
         _p17_iptables_blocked=1
     else
         _p17_iptables_blocked=0
-        warn "Step 66: failed to install iptables block on node"
+        warn "Step 68: failed to install iptables block on node"
     fi
 }
 
@@ -74,12 +74,12 @@ _p17_apply_config_direct() {
 
 phase17_etcd_offline_queue() {
     bold "═══════════════════════════════════════════════════════"
-    bold " Phase 17 — etcd Offline Config Queue (Steps 66-67)"
+    bold " Phase 17 — etcd Offline Config Queue (Steps 68-69)"
     bold "═══════════════════════════════════════════════════════"
 
     if ! ssh_node "command -v iptables >/dev/null 2>&1"; then
-        skip "Step 66: offline write accepted + queued" "iptables not available on node"
-        skip "Step 67: queued write flushed to etcd on reconnect" "iptables not available on node"
+        skip "Step 68: offline write accepted + queued" "iptables not available on node"
+        skip "Step 69: queued write flushed to etcd on reconnect" "iptables not available on node"
         return
     fi
 
@@ -90,9 +90,9 @@ phase17_etcd_offline_queue() {
     _P17_ETCD_HOST="${ETCD_ENDPOINT%%:*}"
     _P17_ETCD_PORT="${ETCD_ENDPOINT##*:}"
     if [[ -z "$_P17_ETCD_HOST" ]] || [[ -z "$_P17_ETCD_PORT" ]]; then
-        fail "Step 66: offline write accepted + queued" \
+        fail "Step 68: offline write accepted + queued" \
             "could not parse ETCD_ENDPOINT='${ETCD_ENDPOINT:-<empty>}'"
-        skip "Step 67: queued write flushed to etcd on reconnect" "prerequisite failed"
+        skip "Step 69: queued write flushed to etcd on reconnect" "prerequisite failed"
         return
     fi
 
@@ -114,18 +114,18 @@ phase17_etcd_offline_queue() {
         [[ "${_got_sc:-0}" -ge "${_tgt_sc}" ]] && { _sc_ok=1; break; }
     done
     if [[ $_sc_ok -eq 0 ]]; then
-        fail "Step 66: offline write accepted + queued" \
+        fail "Step 68: offline write accepted + queued" \
             "subscriber count did not propagate to ${_tgt_sc} in time — cannot allocate test user ${_P17_UID}"
-        skip "Step 67: queued write flushed to etcd on reconnect" "prerequisite failed"
+        skip "Step 69: queued write flushed to etcd on reconnect" "prerequisite failed"
         _cleanup_phase17_etcd_offline_queue
         return
     fi
 
     # ------------------------------------------------------------------
-    # Step 66 — block node->etcd, wait for the SDN guard to flip, apply
+    # Step 68 — block node->etcd, wait for the SDN guard to flip, apply
     #           directly, confirm local apply + on-disk offline queue entry
     # ------------------------------------------------------------------
-    info "Step 66: blocking node->etcd (${_P17_ETCD_HOST}:${_P17_ETCD_PORT}) and waiting for offline mode..."
+    info "Step 68: blocking node->etcd (${_P17_ETCD_HOST}:${_P17_ETCD_PORT}) and waiting for offline mode..."
     _p17_block_etcd
 
     local _p17_vlan=888
@@ -143,17 +143,17 @@ phase17_etcd_offline_queue() {
     done
 
     if [[ $_p17_accepted -eq 0 ]]; then
-        fail "Step 66: offline write accepted + queued" \
+        fail "Step 68: offline write accepted + queued" \
             "SDN guard never released within 90s; last output: $(printf '%s' "$_p17_last_out" | tr '\n' '|' | tail -c 200)"
-        skip "Step 67: queued write flushed to etcd on reconnect" "prerequisite failed"
+        skip "Step 69: queued write flushed to etcd on reconnect" "prerequisite failed"
         _cleanup_phase17_etcd_offline_queue
         return
     fi
 
     if ! printf '%s' "$_p17_last_out" | grep -qi "Configuration successful\|\"status\""; then
-        fail "Step 66: offline write accepted + queued" \
+        fail "Step 68: offline write accepted + queued" \
             "ApplyConfig accepted but did not report success: $(printf '%s' "$_p17_last_out" | tr '\n' '|' | tail -c 200)"
-        skip "Step 67: queued write flushed to etcd on reconnect" "prerequisite failed"
+        skip "Step 69: queued write flushed to etcd on reconnect" "prerequisite failed"
         _cleanup_phase17_etcd_offline_queue
         return
     fi
@@ -166,7 +166,7 @@ phase17_etcd_offline_queue() {
     _p17_local_vlan=$(printf '%s' "$_p17_hsi" | jq -r '.vlan_id // empty' 2>/dev/null || true)
 
     # Confirm it landed in the on-disk offline queue (direct proof of queueing,
-    # independent of the flush that Step 67 verifies separately).
+    # independent of the flush that Step 69 verifies separately).
     local _p17_queue
     _p17_queue=$(ssh_node "cat /etc/fastrg/config_queue.json 2>/dev/null" || true)
     local _p17_queued
@@ -174,21 +174,21 @@ phase17_etcd_offline_queue() {
         jq -r ".[] | select(.key == \"configs/${NODE_UUID}/hsi/${_P17_UID}\")" 2>/dev/null || true)
 
     if [[ "$_p17_local_vlan" == "$_p17_vlan" ]] && [[ -n "$_p17_queued" ]]; then
-        pass "Step 66: offline write accepted + queued" \
+        pass "Step 68: offline write accepted + queued" \
             "applied locally (vlan=${_p17_local_vlan}) and present in config_queue.json"
     elif [[ "$_p17_local_vlan" == "$_p17_vlan" ]]; then
-        fail "Step 66: offline write accepted + queued" \
+        fail "Step 68: offline write accepted + queued" \
             "applied locally (vlan=${_p17_local_vlan}) but not found in config_queue.json"
     else
-        fail "Step 66: offline write accepted + queued" \
+        fail "Step 68: offline write accepted + queued" \
             "not applied locally (got vlan='${_p17_local_vlan:-none}', want ${_p17_vlan})"
     fi
 
     # ------------------------------------------------------------------
-    # Step 67 — restore connectivity, wait for the watchdog to flush the
+    # Step 69 — restore connectivity, wait for the watchdog to flush the
     #           queue via cas_put(), confirm the config landed in etcd
     # ------------------------------------------------------------------
-    info "Step 67: restoring node->etcd connectivity and waiting for queue flush..."
+    info "Step 69: restoring node->etcd connectivity and waiting for queue flush..."
     _p17_unblock_etcd
 
     local _p67_ok=0
@@ -215,14 +215,14 @@ phase17_etcd_offline_queue() {
         _p67_still_queued=$(printf '%s' "$_p67_queue_after" | \
             jq -r ".[] | select(.key == \"configs/${NODE_UUID}/hsi/${_P17_UID}\")" 2>/dev/null || true)
         if [[ -z "$_p67_still_queued" ]]; then
-            pass "Step 67: queued write flushed to etcd on reconnect" \
+            pass "Step 69: queued write flushed to etcd on reconnect" \
                 "etcd holds vlan=${_p67_etcd_vlan} via CAS flush; queue entry cleared"
         else
-            pass "Step 67: queued write flushed to etcd on reconnect" \
+            pass "Step 69: queued write flushed to etcd on reconnect" \
                 "etcd holds vlan=${_p67_etcd_vlan} (queue file still lists the key — non-fatal)"
         fi
     else
-        fail "Step 67: queued write flushed to etcd on reconnect" \
+        fail "Step 69: queued write flushed to etcd on reconnect" \
             "etcd key not updated within 90s of restoring connectivity (vlan='${_p67_etcd_vlan:-none}')"
     fi
 

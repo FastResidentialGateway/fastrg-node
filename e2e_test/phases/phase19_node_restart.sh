@@ -118,14 +118,14 @@ phase19_node_restart() {
     local _i
 
     bold "═══════════════════════════════════════════════════════"
-    bold " Phase 19 — Node Restart Recovery (Steps 73-76)"
+    bold " Phase 19 — Node Restart Recovery (Steps 75-78)"
     bold "═══════════════════════════════════════════════════════"
 
     # ------------------------------------------------------------------
-    # Step 73 — Snapshot the read-only recovery inputs, then stop the node
-    # gracefully. No etcd write is permitted from this point through Step 76.
+    # Step 75 — Snapshot the read-only recovery inputs, then stop the node
+    # gracefully. No etcd write is permitted from this point through Step 78.
     # ------------------------------------------------------------------
-    info "Step 73: Waiting for users 1 and 2 to be ready before the restart snapshot..."
+    info "Step 75: Waiting for users 1 and 2 to be ready before the restart snapshot..."
     for _i in $(seq 1 30); do
         _hsi_before=$(fastrg_grpc get_hsi_info 2>/dev/null || true)
         _status1_before=$(printf '%s' "$_hsi_before" | \
@@ -190,17 +190,17 @@ phase19_node_restart() {
     fi
 
     if [[ -z "$_step73_issue" ]]; then
-        pass "Step 73: Snapshot + graceful shutdown" \
+        pass "Step 75: Snapshot + graceful shutdown" \
             "users 1/2 Data phase; desire_status=connect; revisions=${_hsi1_rev_before}/${_hsi2_rev_before}/${_count_rev_before}; clean SIGTERM exit"
     else
-        fail "Step 73: Snapshot + graceful shutdown" "${_step73_issue# }"
+        fail "Step 75: Snapshot + graceful shutdown" "${_step73_issue# }"
     fi
 
     # ------------------------------------------------------------------
-    # Step 74 — Cold-start the exact phase0 command and wait for both users
+    # Step 76 — Cold-start the exact phase0 command and wait for both users
     # to recover from the etcd desire_status without any dial/config call.
     # ------------------------------------------------------------------
-    info "Step 74: Cold-starting fastrg and waiting up to 150s for autonomous recovery..."
+    info "Step 76: Cold-starting fastrg and waiting up to 150s for autonomous recovery..."
     if ssh_node "nohup ${_FASTRG_START_CMD} >/var/log/fastrg.log 2>&1 &" >/dev/null 2>&1; then
         _restart_launched=1
     else
@@ -248,14 +248,14 @@ phase19_node_restart() {
     fi
 
     if [[ -z "$_step74_issue" ]]; then
-        pass "Step 74: Cold restart autonomous recovery" \
+        pass "Step 76: Cold restart autonomous recovery" \
             "users 1/2 returned to Data phase with etcd account/vlan, without dial or config writes"
     else
-        fail "Step 74: Cold restart autonomous recovery" "${_step74_issue# }"
+        fail "Step 76: Cold restart autonomous recovery" "${_step74_issue# }"
     fi
 
     # ------------------------------------------------------------------
-    # Step 75 — Verify lazy DNS-static reload and data-plane forwarding.
+    # Step 77 — Verify lazy DNS-static reload and data-plane forwarding.
     # ------------------------------------------------------------------
     if [[ "$USER_ID" == "1" ]]; then
         _gateway="$_hsi1_gateway"
@@ -263,7 +263,7 @@ phase19_node_restart() {
         _gateway="$_hsi2_gateway"
     fi
 
-    info "Step 75: Checking DNS static and ping after restart (gateway=${_gateway:-unknown})..."
+    info "Step 77: Checking DNS static and ping after restart (gateway=${_gateway:-unknown})..."
     if [[ -n "$_gateway" ]]; then
         _dig=$(ssh_lan \
             "timeout 10 dig @${_gateway} +time=3 +tries=1 +short www.fastrg.org A" \
@@ -272,17 +272,17 @@ phase19_node_restart() {
     _ping=$(ssh_lan "timeout 25 ping -c 4 -W 5 www.fastrg.org 2>&1" 2>/dev/null || true)
 
     if [[ "$_dig" == "${WAN_IP}" ]] && printf '%s' "$_ping" | grep -q "from ${WAN_IP}"; then
-        pass "Step 75: Post-restart data plane" \
+        pass "Step 77: Post-restart data plane" \
             "dig @${_gateway}=${WAN_IP}; LAN ping received reply from ${WAN_IP}"
     else
-        fail "Step 75: Post-restart data plane" \
+        fail "Step 77: Post-restart data plane" \
             "dig='${_dig:-empty}' gateway='${_gateway:-empty}'; ping_reply=$(printf '%s' "$_ping" | grep -oE 'from [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
     fi
 
     # ------------------------------------------------------------------
-    # Step 76 — Re-read only: startup must not mutate HSI or count keys.
+    # Step 78 — Re-read only: startup must not mutate HSI or count keys.
     # ------------------------------------------------------------------
-    info "Step 76: Re-reading etcd revisions and system subscriber count..."
+    info "Step 78: Re-reading etcd revisions and system subscriber count..."
     _hsi1_after=$(_p19_etcd_snapshot "$_hsi1_key")
     _hsi2_after=$(_p19_etcd_snapshot "$_hsi2_key")
     _count_after=$(_p19_etcd_snapshot "$_count_key")
@@ -306,9 +306,9 @@ phase19_node_restart() {
         _step76_issue="${_step76_issue} grpc_num_users='${_num_users:-empty}'"
 
     if [[ -z "$_step76_issue" ]]; then
-        pass "Step 76: Startup path keeps etcd read-only" \
+        pass "Step 78: Startup path keeps etcd read-only" \
             "HSI/count revisions unchanged (${_hsi1_rev_after}/${_hsi2_rev_after}/${_count_rev_after}); num_users=2"
     else
-        fail "Step 76: Startup path keeps etcd read-only" "${_step76_issue# }"
+        fail "Step 78: Startup path keeps etcd read-only" "${_step76_issue# }"
     fi
 }
