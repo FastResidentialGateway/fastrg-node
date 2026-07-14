@@ -353,6 +353,7 @@ ssh_node() { ssh $SSH_OPTS "root@${FASTRG_NODE}" "$@"; }
 ssh_lan()  { ssh $SSH_OPTS "root@${LAN_HOST}"    "$@"; }
 ssh_wan()  { ssh $SSH_OPTS "root@${WAN_HOST}"   "$@"; }
 ssh_bras() { ssh $SSH_OPTS "root@${BRAS_HOST}"   "$@"; }
+ssh_controller() { ssh $SSH_OPTS "root@${CONTROLLER_GRPC%:*}" "$@"; }
 
 # ---------------------------------------------------------------------------
 # Test result tracking (indexed arrays — bash 3.2 compatible)
@@ -486,7 +487,8 @@ source "${_E2E_PHASES_DIR}/phase22_dhcp_lease.sh"
 source "${_E2E_PHASES_DIR}/phase23_hsi_sweep.sh"
 source "${_E2E_PHASES_DIR}/phase24_multi_lan.sh"
 source "${_E2E_PHASES_DIR}/phase25_udp_icmp_traffic.sh"
-source "${_E2E_PHASES_DIR}/phase26_summary.sh"
+source "${_E2E_PHASES_DIR}/phase26_heartbeat.sh"
+source "${_E2E_PHASES_DIR}/phase27_summary.sh"
 
 # ---------------------------------------------------------------------------
 # Cleanup — kill fastrg only if the script started it
@@ -494,6 +496,7 @@ source "${_E2E_PHASES_DIR}/phase26_summary.sh"
 cleanup_fastrg() {
     set +eu  # Prevent set -e / set -u from interrupting cleanup, ensure all cleanup steps are executed
 
+    _cleanup_phase26_heartbeat 2>/dev/null || true
     _cleanup_phase20_nat_expiry 2>/dev/null || true
     _cleanup_phase19_node_restart 2>/dev/null || true
     _cleanup_phase22_dhcp_lease 2>/dev/null || true
@@ -599,7 +602,8 @@ main() {
     phase23_hsi_sweep
     phase24_multi_lan
     phase25_udp_icmp_traffic
-    phase26_summary || true
+    phase26_heartbeat
+    phase27_summary || true
 }
 
 main "$@"
