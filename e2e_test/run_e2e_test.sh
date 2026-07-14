@@ -106,6 +106,15 @@ if [[ -z "${_FASTRG_E2E_RELOCATED:-}" ]]; then
             warn "dns_responder.py not found at ${_SCRIPT_DIR}/dns_responder.py"
         fi
 
+        # Upload the raw-packet virtual DHCP client used by the lease lifecycle phase.
+        if [[ -f "${_SCRIPT_DIR}/dhcp_client_sim.py" ]]; then
+            info "Uploading dhcp_client_sim.py..."
+            scp $_SSH_OPTS "${_SCRIPT_DIR}/dhcp_client_sim.py" \
+                "${_E2E_RUNNER_USER}@${_E2E_RUNNER_HOST}:${_E2E_REMOTE_DIR}/dhcp_client_sim.py"
+        else
+            warn "dhcp_client_sim.py not found at ${_SCRIPT_DIR}/dhcp_client_sim.py"
+        fi
+
         # Upload phase scripts
         if [[ -d "${_SCRIPT_DIR}/phases" ]]; then
             info "Uploading phase scripts..."
@@ -181,6 +190,7 @@ if [[ -z "${_FASTRG_E2E_RELOCATED:-}" ]]; then
             "rm -rf ${_E2E_REMOTE_DIR}/run_e2e_test.sh \
                    ${_E2E_REMOTE_DIR}/fastrg_grpc_client.py \
                    ${_E2E_REMOTE_DIR}/dns_responder.py \
+                   ${_E2E_REMOTE_DIR}/dhcp_client_sim.py \
                    ${_E2E_REMOTE_DIR}/fastrg_node.proto \
                    ${_E2E_REMOTE_DIR}/grpcurl \
                    ${_E2E_REMOTE_DIR}/phases 2>/dev/null; \
@@ -462,7 +472,8 @@ source "${_E2E_PHASES_DIR}/phase18_dns_cache.sh"
 source "${_E2E_PHASES_DIR}/phase19_node_restart.sh"
 source "${_E2E_PHASES_DIR}/phase20_nat_expiry.sh"
 source "${_E2E_PHASES_DIR}/phase21_rpc_coverage.sh"
-source "${_E2E_PHASES_DIR}/phase22_summary.sh"
+source "${_E2E_PHASES_DIR}/phase22_dhcp_lease.sh"
+source "${_E2E_PHASES_DIR}/phase23_summary.sh"
 
 # ---------------------------------------------------------------------------
 # Cleanup — kill fastrg only if the script started it
@@ -472,6 +483,7 @@ cleanup_fastrg() {
 
     _cleanup_phase20_nat_expiry 2>/dev/null || true
     _cleanup_phase19_node_restart 2>/dev/null || true
+    _cleanup_phase22_dhcp_lease 2>/dev/null || true
 
     # Best-effort: remove new subscriber config if the test left it in etcd
     _cleanup_new_subscriber_config 2>/dev/null || true
@@ -567,7 +579,8 @@ main() {
     phase19_node_restart
     phase20_nat_expiry
     phase21_rpc_coverage
-    phase22_summary || true
+    phase22_dhcp_lease
+    phase23_summary || true
 }
 
 main "$@"
