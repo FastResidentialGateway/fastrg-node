@@ -473,7 +473,8 @@ source "${_E2E_PHASES_DIR}/phase19_node_restart.sh"
 source "${_E2E_PHASES_DIR}/phase20_nat_expiry.sh"
 source "${_E2E_PHASES_DIR}/phase21_rpc_coverage.sh"
 source "${_E2E_PHASES_DIR}/phase22_dhcp_lease.sh"
-source "${_E2E_PHASES_DIR}/phase23_summary.sh"
+source "${_E2E_PHASES_DIR}/phase23_hsi_sweep.sh"
+source "${_E2E_PHASES_DIR}/phase24_summary.sh"
 
 # ---------------------------------------------------------------------------
 # Cleanup — kill fastrg only if the script started it
@@ -484,6 +485,7 @@ cleanup_fastrg() {
     _cleanup_phase20_nat_expiry 2>/dev/null || true
     _cleanup_phase19_node_restart 2>/dev/null || true
     _cleanup_phase22_dhcp_lease 2>/dev/null || true
+    _cleanup_phase23_hsi_sweep 2>/dev/null || true
 
     # Best-effort: remove new subscriber config if the test left it in etcd
     _cleanup_new_subscriber_config 2>/dev/null || true
@@ -580,7 +582,8 @@ main() {
     phase20_nat_expiry
     phase21_rpc_coverage
     phase22_dhcp_lease
-    phase23_summary || true
+    phase23_hsi_sweep
+    phase24_summary || true
 }
 
 main "$@"
