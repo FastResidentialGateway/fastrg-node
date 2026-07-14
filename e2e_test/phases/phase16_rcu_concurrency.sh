@@ -15,7 +15,7 @@
 # crash. Both steps passing under sustained load confirms reader/writer
 # concurrency is correct.
 # ---------------------------------------------------------------------------
-# Helper: restore the subscriber count churned by the Step 64 loop below +
+# Helper: restore the subscriber count churned by the Step 66 loop below +
 # stop the iperf3 server. Idempotent (set_subscriber_count/pkill both tolerate
 # an already-correct/already-dead target). Called at end of phase16 AND from
 # the cleanup_fastrg EXIT trap.
@@ -41,8 +41,8 @@ phase16_rcu_concurrency() {
     # _cleanup_phase16_rcu_concurrency from outside this function's scope.
     _cnt_orig=$(printf '%s' "$_sys" | jq -r '.num_users // 0' 2>/dev/null || echo 0)
     if [[ "${_cnt_orig:-0}" -le 0 ]]; then
-        skip "Step 64: writer churn under load" "cannot read subscriber count"
-        skip "Step 65: data plane survived load+churn" "cannot read subscriber count"
+        skip "Step 66: writer churn under load" "cannot read subscriber count"
+        skip "Step 67: data plane survived load+churn" "cannot read subscriber count"
         return
     fi
 
@@ -86,10 +86,10 @@ phase16_rcu_concurrency() {
     done
 
     if [[ "$_ok" -eq 1 ]]; then
-        pass "Step 64: writer churn under load" \
+        pass "Step 66: writer churn under load" \
             "${ITERS} SetSubscriberCount reallocs all returned + node responsive while data plane under load"
     else
-        fail "Step 64: writer churn under load" "${_detail}"
+        fail "Step 66: writer churn under load" "${_detail}"
     fi
 
     # 4. Drain iperf3, assert node still alive (readers not starved, no UAF crash)
@@ -100,10 +100,10 @@ phase16_rcu_concurrency() {
     sys3=$(fastrg_grpc get_system_info)
     cnt3=$(printf '%s' "$sys3" | jq -r '.num_users // empty' 2>/dev/null || true)
     if [[ -n "$cnt3" ]]; then
-        pass "Step 65: data plane survived load+churn" \
+        pass "Step 67: data plane survived load+churn" \
             "node responsive after load+churn (num_users=${cnt3}, iperf3=${mbps} Mbps)"
     else
-        fail "Step 65: data plane survived load+churn" "node unresponsive after load+churn"
+        fail "Step 67: data plane survived load+churn" "node unresponsive after load+churn"
     fi
 
     # 5. Cleanup: restore original count + stop iperf3 server

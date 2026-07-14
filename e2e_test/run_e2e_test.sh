@@ -506,6 +506,7 @@ source "${_E2E_PHASES_DIR}/phase27_summary.sh"
 cleanup_fastrg() {
     set +eu  # Prevent set -e / set -u from interrupting cleanup, ensure all cleanup steps are executed
 
+    _cleanup_phase11_kafka_pipeline || true
     _cleanup_phase20_nat_expiry 2>/dev/null || true
     _cleanup_phase19_node_restart 2>/dev/null || true
     _cleanup_phase22_dhcp_lease 2>/dev/null || true

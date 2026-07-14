@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # ---------------------------------------------------------------------------
-# Phase 18 — DNS cache behaviour and upstream failover (Steps 68-72)
+# Phase 18 — DNS cache behaviour and upstream failover (Steps 70-74)
 #
 # Runtime upstream DNS is negotiated through PPP IPCP; the obsolete HSI DNS
 # schema fields have been removed. This phase temporarily restarts dpdk-bras
@@ -191,39 +191,39 @@ phase18_dns_cache() {
     local _ttl_first_count _ttl_second_count _static _failover_start _failover_elapsed
 
     bold "═══════════════════════════════════════════════════════"
-    bold " Phase 18 — DNS Cache Behaviour + Failover (Steps 68-72)"
+    bold " Phase 18 — DNS Cache Behaviour + Failover (Steps 70-74)"
     bold "═══════════════════════════════════════════════════════"
 
     _gw=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/${USER_ID}" 2>/dev/null | \
         jq -r '.config.dhcp_gateway // empty' 2>/dev/null || true)
     if [[ -z "$_gw" ]]; then
-        fail "Step 68: DNS cache fill + GetDnsCache" "subscriber gateway unavailable"
-        fail "Step 69: DNS cache hit with upstream stopped" "phase setup failed"
-        fail "Step 70: DNS TTL expiry refetches upstream" "phase setup failed"
-        fail "Step 71: DNS upstream failover" "phase setup failed"
-        fail "Step 72: DNS phase cleanup + static recovery" "phase setup failed"
+        fail "Step 70: DNS cache fill + GetDnsCache" "subscriber gateway unavailable"
+        fail "Step 71: DNS cache hit with upstream stopped" "phase setup failed"
+        fail "Step 72: DNS TTL expiry refetches upstream" "phase setup failed"
+        fail "Step 73: DNS upstream failover" "phase setup failed"
+        fail "Step 74: DNS phase cleanup + static recovery" "phase setup failed"
         return
     fi
 
     if ! scp $SSH_OPTS "${GRPC_CLIENT_DIR}/dns_responder.py" \
         "root@${WAN_HOST}:${_P18_RESPONDER_REMOTE}" >/dev/null 2>&1 || \
        ! _p18_start_responder 120; then
-        fail "Step 68: DNS cache fill + GetDnsCache" "could not start WAN DNS responder"
-        fail "Step 69: DNS cache hit with upstream stopped" "phase setup failed"
-        fail "Step 70: DNS TTL expiry refetches upstream" "phase setup failed"
-        fail "Step 71: DNS upstream failover" "phase setup failed"
-        fail "Step 72: DNS phase cleanup + static recovery" "phase setup failed"
+        fail "Step 70: DNS cache fill + GetDnsCache" "could not start WAN DNS responder"
+        fail "Step 71: DNS cache hit with upstream stopped" "phase setup failed"
+        fail "Step 72: DNS TTL expiry refetches upstream" "phase setup failed"
+        fail "Step 73: DNS upstream failover" "phase setup failed"
+        fail "Step 74: DNS phase cleanup + static recovery" "phase setup failed"
         _cleanup_phase18_dns_cache
         return
     fi
 
     _P18_BRAS_OVERRIDDEN=1
     if ! _p18_restart_bras "${WAN_IP}" "${_P18_SECONDARY_DNS}" || ! _p18_redial; then
-        fail "Step 68: DNS cache fill + GetDnsCache" "could not negotiate WAN responder as IPCP primary DNS"
-        fail "Step 69: DNS cache hit with upstream stopped" "phase setup failed"
-        fail "Step 70: DNS TTL expiry refetches upstream" "phase setup failed"
-        fail "Step 71: DNS upstream failover" "phase setup failed"
-        fail "Step 72: DNS phase cleanup + static recovery" "phase setup failed"
+        fail "Step 70: DNS cache fill + GetDnsCache" "could not negotiate WAN responder as IPCP primary DNS"
+        fail "Step 71: DNS cache hit with upstream stopped" "phase setup failed"
+        fail "Step 72: DNS TTL expiry refetches upstream" "phase setup failed"
+        fail "Step 73: DNS upstream failover" "phase setup failed"
+        fail "Step 74: DNS phase cleanup + static recovery" "phase setup failed"
         _cleanup_phase18_dns_cache
         return
     fi
@@ -236,9 +236,9 @@ phase18_dns_cache() {
         2>/dev/null || true)
     if [[ "$_dig" == "${_P18_ANSWER}" ]] && [[ "$_entry" == "${_P18_DOMAIN}" ]] && \
        [[ "$(printf '%s' "$_flush" | jq -r '.status // empty' 2>/dev/null || true)" == "ok" ]]; then
-        pass "Step 68: DNS cache fill + GetDnsCache" "answer=${_P18_ANSWER}; cache entry present"
+        pass "Step 70: DNS cache fill + GetDnsCache" "answer=${_P18_ANSWER}; cache entry present"
     else
-        fail "Step 68: DNS cache fill + GetDnsCache" \
+        fail "Step 70: DNS cache fill + GetDnsCache" \
             "dig='${_dig:-empty}' cache_entry='${_entry:-missing}' flush='${_flush:-empty}'"
     fi
 
@@ -247,15 +247,15 @@ phase18_dns_cache() {
     _dig=$(ssh_lan "timeout 10 dig @${_gw} +time=3 +tries=1 +short ${_P18_DOMAIN} A" 2>/dev/null || true)
     _count_after=$(_p18_query_count)
     if [[ "$_dig" == "${_P18_ANSWER}" ]] && [[ "$_count_after" == "$_count_before" ]]; then
-        pass "Step 69: DNS cache hit with upstream stopped" \
+        pass "Step 71: DNS cache hit with upstream stopped" \
             "cached answer returned; upstream count stayed ${_count_before}"
     else
-        fail "Step 69: DNS cache hit with upstream stopped" \
+        fail "Step 71: DNS cache hit with upstream stopped" \
             "dig='${_dig:-empty}' upstream_count=${_count_before:-?}->${_count_after:-?}"
     fi
 
     if ! _p18_start_responder 5; then
-        fail "Step 70: DNS TTL expiry refetches upstream" "could not restart WAN DNS responder"
+        fail "Step 72: DNS TTL expiry refetches upstream" "could not restart WAN DNS responder"
     else
         fastrg_grpc flush_dns_cache "${USER_ID}" >/dev/null 2>&1 || true
         _dig=$(ssh_lan "timeout 10 dig @${_gw} +time=3 +tries=1 +short ${_P18_DOMAIN} A" 2>/dev/null || true)
@@ -265,17 +265,17 @@ phase18_dns_cache() {
         _ttl_second_count=$(_p18_query_count)
         if [[ "$_dig" == "${_P18_ANSWER}" ]] && \
            [[ "${_ttl_second_count:-0}" -eq $(( ${_ttl_first_count:-0} + 1 )) ]]; then
-            pass "Step 70: DNS TTL expiry refetches upstream" \
+            pass "Step 72: DNS TTL expiry refetches upstream" \
                 "upstream count ${_ttl_first_count}->${_ttl_second_count} after 7s"
         else
-            fail "Step 70: DNS TTL expiry refetches upstream" \
+            fail "Step 72: DNS TTL expiry refetches upstream" \
                 "dig='${_dig:-empty}' upstream_count=${_ttl_first_count:-?}->${_ttl_second_count:-?}"
         fi
     fi
 
     fastrg_grpc flush_dns_cache "${USER_ID}" >/dev/null 2>&1 || true
     if ! _p18_add_secondary_dns_alias || ! _p18_start_secondary_responder; then
-        fail "Step 71: DNS upstream failover" \
+        fail "Step 73: DNS upstream failover" \
             "could not configure secondary DNS responder at ${_P18_SECONDARY_DNS}"
     else
         _p18_stop_responder || true
@@ -296,10 +296,10 @@ phase18_dns_cache() {
         _failover_elapsed=$(( $(date +%s) - _failover_start ))
         if [[ "$_dig" == "${_P18_FAILOVER_ANSWER}" ]] && \
            [[ "$_failover_elapsed" -ge "${_P18_FAILOVER_TIMEOUT_SECS}" ]]; then
-            pass "Step 71: DNS upstream failover" \
+            pass "Step 73: DNS upstream failover" \
                 "secondary=${_P18_SECONDARY_DNS} answer=${_P18_FAILOVER_ANSWER} after ${_failover_elapsed}s"
         else
-            fail "Step 71: DNS upstream failover" \
+            fail "Step 73: DNS upstream failover" \
                 "dig='${_dig:-empty}' elapsed=${_failover_elapsed}s secondary=${_P18_SECONDARY_DNS}"
         fi
     fi
@@ -308,10 +308,10 @@ phase18_dns_cache() {
     _static=$(ssh_lan "timeout 10 dig @${_gw} +time=3 +tries=1 +short www.fastrg.org A" 2>/dev/null || true)
     if [[ "$_static" == "${WAN_IP}" ]] && \
        ! ssh_wan "pgrep -f '[f]astrg_dns_responder.py' >/dev/null 2>&1" 2>/dev/null; then
-        pass "Step 72: DNS phase cleanup + static recovery" \
+        pass "Step 74: DNS phase cleanup + static recovery" \
             "static answer=${WAN_IP}; responder absent; BRAS/PPPoE restored"
     else
-        fail "Step 72: DNS phase cleanup + static recovery" \
+        fail "Step 74: DNS phase cleanup + static recovery" \
             "static_answer='${_static:-empty}'; responder or recovery state unexpected"
     fi
 }

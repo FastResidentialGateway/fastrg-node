@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # ---------------------------------------------------------------------------
-# Phase 14 — DNS Reconnect Stress Test (Steps 49-58)
+# Phase 14 — DNS Reconnect Stress Test (Steps 51-60)
 #
-#   Step 49-58  10 rounds of disconnect → reconnect → DNS static verify
+#   Step 51-60  10 rounds of disconnect → reconnect → DNS static verify
 #               Validates that dns_proxy_init + etcd_client_load_dns_records
 #               correctly reload DNS static records after every PPPoE session
 #               re-establishment (1s disconnect interval).
@@ -13,10 +13,10 @@ phase14_stress_test() {
     local STRESS_WAIT=1
 
     bold "═══════════════════════════════════════════════════════"
-    bold " Phase 14 — DNS Reconnect Stress Test (Steps 49-58)"
+    bold " Phase 14 — DNS Reconnect Stress Test (Steps 51-60)"
     bold "═══════════════════════════════════════════════════════"
 
-    local _base_step=49
+    local _base_step=51
 
     _stress_wait_data_phase() {
         local _try
