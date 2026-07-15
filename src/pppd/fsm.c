@@ -739,9 +739,13 @@ STATUS A_this_layer_up(__attribute__((unused)) struct rte_timer *ppp_timer, ppp_
         s_ppp_ccb->echo_miss_count = 0;
         rte_timer_reset(&(s_ppp_ccb->ppp_alive), s_ppp_ccb->ppp_interval*fastrg_get_cycles_in_sec(),
             PERIODICAL, fastrg_ccb->lcore.ctrl_thread, (rte_timer_cb_t)PPP_keepalive_cb, s_ppp_ccb);
-        if (s_ppp_ccb->auth_method == PAP_PROTOCOL)
+        if (s_ppp_ccb->auth_method == PAP_PROTOCOL) {
             build_auth_request_pap(buffer, &mulen, s_ppp_ccb);
-        wan_ctrl_tx(fastrg_ccb, s_ppp_ccb->user_num - 1, buffer, mulen);
+            wan_ctrl_tx(fastrg_ccb, s_ppp_ccb->user_num - 1, buffer, mulen);
+        } else if (s_ppp_ccb->auth_method == CHAP_PROTOCOL)
+            /* CHAP is authenticator-driven: enter AUTH phase and wait for the
+             * server's challenge; nothing is sent at LCP-up. */
+            s_ppp_ccb->phase = AUTH_PHASE;
         FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " LCP connection establish successfully.", s_ppp_ccb->user_num);
         FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " starting Authentication.", s_ppp_ccb->user_num);
     } else if (s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].ppp_payload.ppp_protocol == rte_cpu_to_be_16(IPCP_PROTOCOL)) {
@@ -789,6 +793,13 @@ STATUS A_this_layer_up(__attribute__((unused)) struct rte_timer *ppp_timer, ppp_
 
     return SUCCESS;
 }
+
+#ifdef UNIT_TEST
+STATUS ppp_test_this_layer_up(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb)
+{
+    return A_this_layer_up(ppp_timer, s_ppp_ccb);
+}
+#endif
 
 /***********************************************************************
  * A_this_layer_down

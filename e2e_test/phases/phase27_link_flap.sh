@@ -11,7 +11,10 @@ _P27_WAN_RETURN_ROUTE="192.168.200.128/25"
 _P27_WAN_RETURN_GATEWAY="192.168.201.1"
 _P27_LOG_PATH=""
 _P27_METRICS_PORT=""
+_P27_BRAS_SSH_PID=""
+_P27_PATH_RECOVERY_DETAIL=""
 _p27_needs_session_recovery=0
+_p27_needs_path_recovery=0
 
 _p27_log_line_count() {
     local _path="$1" _count
@@ -106,6 +109,214 @@ _p27_restore_lan() {
     ssh_lan "ip link set '${_P27_LAN_NIC}' up" >/dev/null 2>&1 || true
 }
 
+_p27_start_bras() {
+    local _i
+
+    ssh_bras "cd /root/dpdk-bras && exec ./dpdk-bras -l 0-7 -n 4 -- --pri-dns 192.168.10.1 --drop-pcap ./test.pcap --vlans 3,5 >/var/log/dpdk-bras.log 2>&1" \
+        </dev/null >/dev/null 2>&1 &
+    _P27_BRAS_SSH_PID=$!
+
+    for _i in $(seq 1 12); do
+        sleep 2
+        if ssh_bras "pgrep -x dpdk-bras >/dev/null 2>&1" 2>/dev/null; then
+            sleep 3
+            return 0
+        fi
+    done
+    return 1
+}
+
+_p27_user_phase() {
+    local _uid="$1" _phase
+
+    _phase=$(fastrg_grpc get_hsi_info | \
+        jq -r ".hsi_infos[] | select(.user_id == ${_uid}) | .status" \
+        2>/dev/null || true)
+    printf '%s' "$_phase"
+}
+
+_p27_redial() {
+    local _uid="$1" _i _phase=""
+
+    fastrg_grpc disconnect_hsi "${_uid}" >/dev/null 2>&1 || true
+    for _i in $(seq 1 15); do
+        sleep 2
+        _phase=$(_p27_user_phase "${_uid}" || true)
+        [[ "$_phase" != "Data phase" ]] && break
+    done
+
+    fastrg_grpc connect_hsi "${_uid}" >/dev/null 2>&1 || true
+    for _i in $(seq 1 30); do
+        sleep 2
+        _phase=$(_p27_user_phase "${_uid}" || true)
+        if [[ "$_phase" == "Data phase" ]]; then
+            return 0
+        fi
+    done
+    _P27_PATH_RECOVERY_DETAIL="user ${_uid} last phase='${_phase:-<empty>}'"
+    return 1
+}
+
+_p27_redial_all() {
+    local _uid _failed="" _detail=""
+
+    for _uid in "${SUB_IDS[@]}"; do
+        if ! _p27_redial "${_uid}"; then
+            _detail="$_P27_PATH_RECOVERY_DETAIL"
+            _failed="${_failed}${_failed:+; }${_detail}"
+        fi
+    done
+    if [[ -n "$_failed" ]]; then
+        _P27_PATH_RECOVERY_DETAIL="$_failed"
+        return 1
+    fi
+    return 0
+}
+
+# Short-timeout PPPoE rediscovery probe: one canonical subscriber must reach
+# Data phase within ~20s of connect. A plain ping cannot see a broken BRAS
+# path — it reaches WAN_HOST without crossing the node↔BRAS link.
+_p27_probe_redial() {
+    local _uid="$1" _i _phase=""
+
+    fastrg_grpc disconnect_hsi "${_uid}" >/dev/null 2>&1 || true
+    for _i in $(seq 1 10); do
+        sleep 2
+        _phase=$(_p27_user_phase "${_uid}" || true)
+        [[ "$_phase" != "Data phase" ]] && break
+    done
+    fastrg_grpc connect_hsi "${_uid}" >/dev/null 2>&1 || true
+    for _i in $(seq 1 10); do
+        sleep 2
+        _phase=$(_p27_user_phase "${_uid}" || true)
+        [[ "$_phase" == "Data phase" ]] && return 0
+    done
+    return 1
+}
+
+# VF ids the WAN peer NIC actually reports; empty when the NIC has none.
+_p27_discover_wan_vf_ids() {
+    ssh_wan "ip link show '${WAN_NIC}' 2>/dev/null" 2>/dev/null | \
+        grep -oE '^[[:space:]]+vf [0-9]+' | awk '{print $2}' || true
+}
+
+# PCI devices bound to a DPDK userspace driver on the BRAS host, whatever the
+# driver and addresses are (empty when none are bound).
+_p27_discover_bras_dpdk_pcis() {
+    ssh_bras "for d in vfio-pci igb_uio uio_pci_generic; do \
+        ls /sys/bus/pci/drivers/\$d/ 2>/dev/null; done" 2>/dev/null | \
+        grep -E '^[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-9a-fA-F]$' | \
+        sort -u || true
+}
+
+# Recover the node↔BRAS PPPoE path after the flaps — but only when a probe
+# proves it is actually broken.
+#
+# This procedure makes NO assumption about the environment: it probes first,
+# and every recovery step operates on what it discovers at runtime — the VF
+# list of the flapped peer NIC (may be empty) and whatever devices are bound
+# to a DPDK userspace driver on the BRAS host (may be none). Environments
+# without any of these simply get a plain peer-link bounce + BRAS restart +
+# redial verification; a healthy environment gets nothing at all.
+#
+# Historical note, not a requirement: the fault that motivated this was first
+# reproduced on a bench where the flapped peer NIC happened to be an SR-IOV
+# PF with the BRAS guest's ports on its VFs, and a BRAS restart alone did not
+# recover them. Other benches may fail (or not fail) differently; the probe
+# decides.
+_p27_recover_pppoe_path() {
+    local _i _id _pci _vf_ids="" _pcis="" _vf_disable="" _vf_auto=""
+
+    _P27_PATH_RECOVERY_DETAIL=""
+
+    if _p27_probe_redial "${SUB_IDS[0]}"; then
+        if _p27_redial_all; then
+            _p27_needs_path_recovery=0
+            _p27_needs_session_recovery=0
+            _P27_PATH_RECOVERY_DETAIL="PPPoE path healthy after flap (probe passed, no recovery needed)"
+            return 0
+        fi
+        # Another subscriber cannot dial: fall through into recovery.
+    fi
+
+    info "Phase27: PPPoE rediscovery probe failed; recovering the peer path..."
+
+    # Guest DPDK ports must be closed while their devices are reset.
+    ssh_bras "pkill -TERM -x dpdk-bras 2>/dev/null || true" >/dev/null 2>&1 || true
+    for _i in $(seq 1 30); do
+        if ! ssh_bras "pgrep -x dpdk-bras >/dev/null 2>&1" 2>/dev/null; then
+            break
+        fi
+        sleep 1
+    done
+    if ssh_bras "pgrep -x dpdk-bras >/dev/null 2>&1" 2>/dev/null; then
+        _P27_PATH_RECOVERY_DETAIL="dpdk-bras did not exit after SIGTERM"
+        return 1
+    fi
+
+    # Bounce the peer link. If (and only if) the NIC reports VFs, hold them
+    # disabled across the bounce and restore link-state auto afterwards; with
+    # no VFs this is a plain link bounce.
+    _vf_ids=$(_p27_discover_wan_vf_ids || true)
+    for _id in $_vf_ids; do
+        _vf_disable+="ip link set '${WAN_NIC}' vf ${_id} state disable; "
+        _vf_auto+="ip link set '${WAN_NIC}' vf ${_id} state auto; "
+    done
+    if ! ssh_wan "set -e; \
+        ${_vf_disable} \
+        ip link set '${WAN_NIC}' down; \
+        sleep 2; \
+        ip link set '${WAN_NIC}' up; \
+        ip route replace '${_P27_WAN_RETURN_ROUTE}' via '${_P27_WAN_RETURN_GATEWAY}' dev '${WAN_NIC}'; \
+        carrier=0; \
+        for i in \$(seq 1 30); do \
+            if ip link show '${WAN_NIC}' | grep -q LOWER_UP; then carrier=1; break; fi; \
+            sleep 1; \
+        done; \
+        test \$carrier -eq 1; \
+        ${_vf_auto} true" \
+        >/dev/null 2>&1; then
+        ssh_wan "ip link set '${WAN_NIC}' up 2>/dev/null || true; \
+            ip route replace '${_P27_WAN_RETURN_ROUTE}' via '${_P27_WAN_RETURN_GATEWAY}' dev '${WAN_NIC}' 2>/dev/null || true; \
+            ${_vf_auto} true" \
+            >/dev/null 2>&1 || true
+        _P27_PATH_RECOVERY_DETAIL="peer link bounce failed (vf ids: ${_vf_ids:-none})"
+        return 1
+    fi
+
+    # Reset whatever DPDK-bound devices the BRAS host has before DPDK reopens
+    # them. Devices without FLR support (no writable reset file) are skipped
+    # with a warning instead of failing the recovery.
+    _pcis=$(_p27_discover_bras_dpdk_pcis || true)
+    if [[ -n "$_pcis" ]]; then
+        for _pci in $_pcis; do
+            if ! ssh_bras "test -w /sys/bus/pci/devices/${_pci}/reset && \
+                echo 1 > /sys/bus/pci/devices/${_pci}/reset" >/dev/null 2>&1; then
+                warn "Phase27: PCI reset unsupported or failed for ${_pci}; continuing."
+            fi
+        done
+    else
+        info "Phase27: no DPDK-bound devices found on the BRAS host; skipping device reset."
+    fi
+
+    if ! _p27_start_bras; then
+        _P27_PATH_RECOVERY_DETAIL="dpdk-bras did not restart after path recovery"
+        return 1
+    fi
+
+    # Configuration readback is not enough: explicitly redial every canonical
+    # subscriber and require Data phase, proving discovery crosses the
+    # recovered path before phase28 restarts BRAS in CHAP mode.
+    if ! _p27_redial_all; then
+        return 1
+    fi
+
+    _p27_needs_path_recovery=0
+    _p27_needs_session_recovery=0
+    _P27_PATH_RECOVERY_DETAIL="users ${SUB_IDS[*]} returned to Data phase after path recovery (vf ids: ${_vf_ids:-none}; devices: ${_pcis:-none})"
+    return 0
+}
+
 _p27_arm_wan_watchdog() {
     # The watchdog is deliberately armed before link-down. Even if the runner
     # is interrupted, the WAN peer returns to up within eight seconds, before
@@ -122,6 +333,15 @@ _cleanup_phase27_link_flap() {
 
     _p27_restore_wan
     _p27_restore_lan
+
+    if [[ ${_p27_needs_path_recovery:-0} -eq 1 ]]; then
+        info "Cleanup(phase27): recovering the PPPoE peer path..."
+        if _p27_recover_pppoe_path; then
+            return 0
+        fi
+        warn "Cleanup(phase27): path recovery failed (${_P27_PATH_RECOVERY_DETAIL:-unknown})."
+        return 1
+    fi
 
     if [[ ${_p27_needs_session_recovery:-0} -eq 1 ]]; then
         info "Cleanup(phase27): waiting for PPPoE data-plane recovery..."
@@ -180,6 +400,7 @@ phase27_link_flap() {
         _issue110="failed to set WAN peer ${WAN_NIC} down"
     else
         _p27_needs_session_recovery=1
+        _p27_needs_path_recovery=1
         if ! _p27_wait_link_down 1 14; then
             _step110_ok=0
             _issue110="port 1 did not report link_up=0/speed=0 within 7s (up='${_P27_OBS_UP}' speed='${_P27_OBS_SPEED}')"
@@ -291,10 +512,17 @@ phase27_link_flap() {
         _issue112="${_issue112:+${_issue112}; }disconnect/redial log observed: '$(printf '%s' "$_session_log" | tr '\n' '|' | tail -c 700 || true)'"
     fi
 
+    if [[ $_step112_ok -eq 1 && ${_p27_needs_path_recovery:-0} -eq 1 ]]; then
+        if ! _p27_recover_pppoe_path; then
+            _step112_ok=0
+            _issue112="${_issue112:+${_issue112}; }PPPoE path recovery failed: ${_P27_PATH_RECOVERY_DETAIL:-unknown}"
+        fi
+    fi
+
     if [[ $_step112_ok -eq 1 ]]; then
         _p27_needs_session_recovery=0
         pass "Step 112: preserve session across short WAN flap" \
-            "${WAN_IP} reachable with 0% packet loss; no force-terminate, terminate, or re-spawn log after WAN flap"
+            "${WAN_IP} reachable with 0% packet loss; no automatic session teardown; ${_P27_PATH_RECOVERY_DETAIL}"
     else
         fail "Step 112: preserve session across short WAN flap" "$_issue112"
     fi

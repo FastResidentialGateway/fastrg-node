@@ -1427,22 +1427,34 @@ void test_ppp_decode_frame(FastRG_t *fastrg_ccb)
         "PAP ACK in AUTH_PHASE returns SUCCESS", NULL);
 
     decode_ccb_reset(fastrg_ccb, AUTH_PHASE);
+    decode_ccb.ppp_phase[1].state = S_INIT;
     frame_len = build_session_frame(frame, CHAP_PROTOCOL, CHAP_SUCCESS,
         sizeof(ppp_header_t), 0);
     TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == SUCCESS,
         "CHAP Success in AUTH_PHASE returns SUCCESS", NULL);
-    TEST_ASSERT(decode_ccb.phase == IPCP_PHASE,
-        "CHAP Success advances the session to IPCP_PHASE",
+    TEST_ASSERT(decode_ccb.phase == AUTH_PHASE,
+        "CHAP Success decoder preserves AUTH_PHASE",
         "got phase %u", decode_ccb.phase);
+    TEST_ASSERT(check_auth_result(&decode_ccb) == 1 &&
+        decode_ccb.cp == 1 && decode_ccb.phase == IPCP_PHASE &&
+        decode_ccb.ppp_phase[1].state == S_STARTING,
+        "check_auth_result advances CHAP Success through NCP E_OPEN",
+        "cp=%u phase=%u state=%u", decode_ccb.cp, decode_ccb.phase,
+        decode_ccb.ppp_phase[1].state);
 
     decode_ccb_reset(fastrg_ccb, AUTH_PHASE);
+    decode_ccb.ppp_phase[0].state = S_OPENED;
     frame_len = build_session_frame(frame, CHAP_PROTOCOL, CHAP_FAILURE,
         sizeof(ppp_header_t), 0);
     TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == SUCCESS,
         "CHAP Failure in AUTH_PHASE returns SUCCESS", NULL);
-    TEST_ASSERT(decode_ccb.phase == LCP_PHASE,
-        "CHAP Failure drops the session back to LCP_PHASE",
+    TEST_ASSERT(decode_ccb.phase == AUTH_PHASE,
+        "CHAP Failure decoder preserves AUTH_PHASE",
         "got phase %u", decode_ccb.phase);
+    TEST_ASSERT(check_auth_result(&decode_ccb) == 1 &&
+        decode_ccb.cp == 0 && decode_ccb.ppp_phase[0].state == S_CLOSING,
+        "check_auth_result sends CHAP Failure through LCP E_CLOSE",
+        "cp=%u state=%u", decode_ccb.cp, decode_ccb.ppp_phase[0].state);
 
     /* Test 8: discovery frames never reach PPP payload parsing */
     printf("Test 8: \"%s\"\n", "discovery frame short-circuits");
@@ -1512,23 +1524,148 @@ void test_ppp_decode_frame_chap(FastRG_t *fastrg_ccb)
     TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == ERROR,
         "CHAP frame outside AUTH_PHASE returns ERROR", NULL);
 
-    printf("Test 4: \"%s\"\n", "CHAP Success advances AUTH_PHASE to IPCP_PHASE");
+    printf("Test 4: \"%s\"\n", "CHAP Success is applied by check_auth_result");
     decode_ccb_reset(fastrg_ccb, AUTH_PHASE);
+    decode_ccb.ppp_phase[1].state = S_INIT;
     frame_len = build_session_frame(frame, CHAP_PROTOCOL, CHAP_SUCCESS,
         sizeof(ppp_header_t), 0);
     TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == SUCCESS,
         "CHAP Success in AUTH_PHASE returns SUCCESS", NULL);
-    TEST_ASSERT(decode_ccb.phase == IPCP_PHASE,
-        "CHAP Success advances AUTH_PHASE to IPCP_PHASE", "got phase %u", decode_ccb.phase);
+    TEST_ASSERT(decode_ccb.phase == AUTH_PHASE,
+        "CHAP Success decoder leaves phase transition to check_auth_result", "got phase %u", decode_ccb.phase);
+    TEST_ASSERT(check_auth_result(&decode_ccb) == 1,
+        "check_auth_result consumes CHAP Success", NULL);
+    TEST_ASSERT(decode_ccb.cp == 1 && decode_ccb.phase == IPCP_PHASE,
+        "CHAP Success advances to IPCP control protocol and phase",
+        "cp=%u phase=%u", decode_ccb.cp, decode_ccb.phase);
+    TEST_ASSERT(decode_ccb.ppp_phase[1].state == S_STARTING,
+        "CHAP Success sends E_OPEN to the NCP FSM",
+        "state=%u", decode_ccb.ppp_phase[1].state);
 
-    printf("Test 5: \"%s\"\n", "CHAP Failure returns AUTH_PHASE to LCP_PHASE");
+    printf("Test 5: \"%s\"\n", "CHAP Failure is applied by check_auth_result");
     decode_ccb_reset(fastrg_ccb, AUTH_PHASE);
+    decode_ccb.ppp_phase[0].state = S_OPENED;
     frame_len = build_session_frame(frame, CHAP_PROTOCOL, CHAP_FAILURE,
         sizeof(ppp_header_t), 0);
     TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == SUCCESS,
         "CHAP Failure in AUTH_PHASE returns SUCCESS", NULL);
-    TEST_ASSERT(decode_ccb.phase == LCP_PHASE,
-        "CHAP Failure returns AUTH_PHASE to LCP_PHASE", "got phase %u", decode_ccb.phase);
+    TEST_ASSERT(decode_ccb.phase == AUTH_PHASE,
+        "CHAP Failure decoder leaves phase transition to check_auth_result", "got phase %u", decode_ccb.phase);
+    TEST_ASSERT(check_auth_result(&decode_ccb) == 1,
+        "check_auth_result consumes CHAP Failure", NULL);
+    TEST_ASSERT(decode_ccb.cp == 0 && decode_ccb.ppp_phase[0].state == S_CLOSING,
+        "CHAP Failure sends E_CLOSE to the LCP FSM",
+        "cp=%u state=%u", decode_ccb.cp, decode_ccb.ppp_phase[0].state);
+}
+
+void test_ppp_decode_frame_chap_challenge_phase_guard(FastRG_t *fastrg_ccb)
+{
+    printf("\nTesting CHAP Challenge phase guard:\n");
+    printf("=========================================\n\n");
+
+    U8 frame[128];
+    U8 challenge[16] = {
+        0x10, 0x21, 0x32, 0x43, 0x54, 0x65, 0x76, 0x87,
+        0x98, 0xa9, 0xba, 0xcb, 0xdc, 0xed, 0xfe, 0x0f
+    };
+    U16 event = 0;
+    U16 chap_info_len = sizeof(U8) + sizeof(challenge);
+
+    decode_env_init(fastrg_ccb);
+    memset(&decode_wan_stats, 0, sizeof(decode_wan_stats));
+
+    U16 frame_len = build_session_frame(frame, CHAP_PROTOCOL, CHAP_CHALLENGE,
+        sizeof(ppp_header_t) + chap_info_len, chap_info_len);
+    ppp_header_t *ppp_hdr = (ppp_header_t *)(frame + sizeof(struct rte_ether_hdr) +
+        sizeof(vlan_header_t) + sizeof(pppoe_header_t) + sizeof(ppp_payload_t));
+    U8 *chap_data = (U8 *)(ppp_hdr + 1);
+    ppp_hdr->identifier = 0x37;
+    chap_data[0] = sizeof(challenge);
+    rte_memcpy(chap_data + sizeof(U8), challenge, sizeof(challenge));
+
+    printf("Test 1: \"CHAP Challenge is dropped in LCP_PHASE\"\n");
+    decode_ccb_reset(fastrg_ccb, LCP_PHASE);
+    decode_ccb.ppp_user_acc = (U8 *)"user1";
+    decode_ccb.ppp_passwd = (U8 *)"pass1";
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == ERROR,
+        "CHAP Challenge in LCP_PHASE returns ERROR", NULL);
+    TEST_ASSERT(decode_wan_stats.tx_packets == 0,
+        "CHAP Challenge in LCP_PHASE sends no response",
+        "tx_packets=%" PRIu64, decode_wan_stats.tx_packets);
+
+    printf("Test 2: \"CHAP Challenge is answered in AUTH_PHASE\"\n");
+    decode_ccb_reset(fastrg_ccb, AUTH_PHASE);
+    decode_ccb.ppp_user_acc = (U8 *)"user1";
+    decode_ccb.ppp_passwd = (U8 *)"pass1";
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == SUCCESS,
+        "CHAP Challenge in AUTH_PHASE returns SUCCESS", NULL);
+    TEST_ASSERT(decode_wan_stats.tx_packets == 1,
+        "CHAP Challenge in AUTH_PHASE sends one response",
+        "tx_packets=%" PRIu64, decode_wan_stats.tx_packets);
+}
+
+void test_ppp_decode_config_ack_request_matching(FastRG_t *fastrg_ccb)
+{
+    printf("\nTesting Configure-Ack request matching:\n");
+    printf("=========================================\n\n");
+
+    U8 frame[128] = {0};
+    U16 frame_len = 0;
+    U16 event = E_UNKNOWN;
+    struct rte_timer timer = {0};
+
+    decode_env_init(fastrg_ccb);
+    decode_ccb_reset(fastrg_ccb, LCP_PHASE);
+    decode_ccb.cp = 0;
+    decode_ccb.magic_num = rte_cpu_to_be_32(0x01020304);
+    decode_ccb.ppp_phase[0].state = S_ACK_SENT;
+
+    build_config_request(frame, &frame_len, &decode_ccb);
+    ppp_header_t *ppp_hdr = (ppp_header_t *)(frame + sizeof(struct rte_ether_hdr) +
+        sizeof(vlan_header_t) + sizeof(pppoe_header_t) + sizeof(ppp_payload_t));
+    ppp_hdr->code = CONFIG_ACK;
+
+    printf("Test 1: \"matching LCP Configure-Ack advances negotiation\"\n");
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == SUCCESS,
+        "matching Configure-Ack returns SUCCESS", NULL);
+    TEST_ASSERT(event == E_RECV_CONFIG_ACK,
+        "matching Configure-Ack emits E_RECV_CONFIG_ACK", "event=%u", event);
+    TEST_ASSERT(decode_ccb.config_request_pending[0] == FALSE,
+        "matching Configure-Ack clears the outstanding request", NULL);
+    TEST_ASSERT(PPP_FSM(&timer, &decode_ccb, event) == SUCCESS,
+        "matching Configure-Ack is accepted by the FSM", NULL);
+    TEST_ASSERT(decode_ccb.ppp_phase[0].state == S_OPENED,
+        "matching Configure-Ack advances ACK_SENT to OPENED",
+        "state=%u", decode_ccb.ppp_phase[0].state);
+
+    printf("Test 2: \"stale LCP Configure-Ack is dropped after request completion\"\n");
+    event = E_UNKNOWN;
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == ERROR,
+        "stale Configure-Ack returns ERROR without an FSM event", NULL);
+    TEST_ASSERT(event == E_UNKNOWN,
+        "stale Configure-Ack leaves the event unchanged", "event=%u", event);
+    TEST_ASSERT(decode_ccb.ppp_phase[0].state == S_OPENED,
+        "stale Configure-Ack leaves the FSM state unchanged",
+        "state=%u", decode_ccb.ppp_phase[0].state);
+
+    printf("Test 3: \"mismatched LCP Configure-Ack is dropped while request is pending\"\n");
+    build_config_request(frame, &frame_len, &decode_ccb);
+    ppp_hdr = (ppp_header_t *)(frame + sizeof(struct rte_ether_hdr) +
+        sizeof(vlan_header_t) + sizeof(pppoe_header_t) + sizeof(ppp_payload_t));
+    ppp_hdr->code = CONFIG_ACK;
+    ppp_hdr->identifier--;
+    event = E_UNKNOWN;
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == ERROR,
+        "mismatched Configure-Ack returns ERROR without an FSM event", NULL);
+    TEST_ASSERT(event == E_UNKNOWN,
+        "mismatched Configure-Ack leaves the event unchanged", "event=%u", event);
+    TEST_ASSERT(decode_ccb.config_request_pending[0] == TRUE,
+        "mismatched Configure-Ack preserves the outstanding request", NULL);
+    TEST_ASSERT(decode_ccb.ppp_phase[0].state == S_OPENED,
+        "mismatched Configure-Ack leaves the FSM state unchanged",
+        "state=%u", decode_ccb.ppp_phase[0].state);
+
+    codec_cleanup_ppp_ccb(&decode_ccb);
 }
 
 void test_ppp_codec(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
@@ -1558,6 +1695,8 @@ void test_ppp_codec(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_build_code_reject(fastrg_ccb);
     test_ppp_decode_frame(fastrg_ccb);
     test_ppp_decode_frame_chap(fastrg_ccb);
+    test_ppp_decode_frame_chap_challenge_phase_guard(fastrg_ccb);
+    test_ppp_decode_config_ack_request_matching(fastrg_ccb);
 
     printf("\n");
     printf("╔════════════════════════════════════════════════════════════╗\n");

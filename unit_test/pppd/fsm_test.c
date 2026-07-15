@@ -603,6 +603,29 @@ static void test_fsm_timer_counter_reset_requires_handler(FastRG_t *fastrg_ccb)
     free_test_ppp_ccb(ccb);
 }
 
+/**
+ * Test 27: CHAP is authenticator-driven, so completing LCP must enter the
+ * authentication phase before the server's Challenge arrives.
+ */
+static void test_fsm_chap_lcp_up_enters_auth_phase(FastRG_t *fastrg_ccb)
+{
+    printf("\nTest 27: \"CHAP LCP up enters AUTH phase\"\n");
+    printf("=========================================\n\n");
+
+    struct rte_timer timer = {0};
+    ppp_ccb_t *ccb = create_test_ppp_ccb(fastrg_ccb, 0, S_OPENED);
+    ccb->auth_method = CHAP_PROTOCOL;
+    ccb->phase = LCP_PHASE;
+
+    TEST_ASSERT(ppp_test_this_layer_up(&timer, ccb) == SUCCESS,
+        "CHAP LCP-up action returns SUCCESS", "");
+    TEST_ASSERT(ccb->phase == AUTH_PHASE,
+        "CHAP LCP-up action advances to AUTH_PHASE",
+        "got phase %u", ccb->phase);
+
+    free_test_ppp_ccb(ccb);
+}
+
 // ============================================================================
 // Main test function
 // ============================================================================
@@ -649,6 +672,7 @@ void test_ppp_fsm(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 
     test_fsm_full_table_scan(fastrg_ccb);
     test_fsm_timer_counter_reset_requires_handler(fastrg_ccb);
+    test_fsm_chap_lcp_up_enters_auth_phase(fastrg_ccb);
 
     printf("\n");
     printf("╔════════════════════════════════════════════════════════════╗\n");
