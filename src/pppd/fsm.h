@@ -82,9 +82,7 @@ typedef enum {
 STATUS PPP_FSM(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb, U16 event);
 STATUS A_padi_timer_func(struct rte_timer *tim, ppp_ccb_t *s_ppp_ccb);
 STATUS A_padr_timer_func(struct rte_timer *tim, ppp_ccb_t *s_ppp_ccb);
-#ifdef UNIT_TEST
-STATUS ppp_test_this_layer_up(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
-#endif
+STATUS A_this_layer_up(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
 
 #ifdef __cplusplus
 }

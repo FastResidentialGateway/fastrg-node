@@ -617,7 +617,10 @@ static void test_fsm_chap_lcp_up_enters_auth_phase(FastRG_t *fastrg_ccb)
     ccb->auth_method = CHAP_PROTOCOL;
     ccb->phase = LCP_PHASE;
 
-    TEST_ASSERT(ppp_test_this_layer_up(&timer, ccb) == SUCCESS,
+    /* PPP_FSM skips action handlers under UNIT_TEST (see the #ifndef in its
+     * action loop), so the LCP-up action is called directly; it is exported
+     * in fsm.h alongside the other externally used A_* actions. */
+    TEST_ASSERT(A_this_layer_up(&timer, ccb) == SUCCESS,
         "CHAP LCP-up action returns SUCCESS", "");
     TEST_ASSERT(ccb->phase == AUTH_PHASE,
         "CHAP LCP-up action advances to AUTH_PHASE",

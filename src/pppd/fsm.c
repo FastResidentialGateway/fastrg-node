@@ -39,7 +39,7 @@ static STATUS A_create_up_event(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_cc
 static STATUS A_send_config_ack(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
 static STATUS A_send_config_nak_rej(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
 static STATUS A_send_terminate_request(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
-static STATUS A_this_layer_up(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
+STATUS A_this_layer_up(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
 static STATUS A_this_layer_down(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
 static STATUS A_init_restart_count(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
 static STATUS A_init_restart_config(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
@@ -793,13 +793,6 @@ STATUS A_this_layer_up(__attribute__((unused)) struct rte_timer *ppp_timer, ppp_
 
     return SUCCESS;
 }
-
-#ifdef UNIT_TEST
-STATUS ppp_test_this_layer_up(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb)
-{
-    return A_this_layer_up(ppp_timer, s_ppp_ccb);
-}
-#endif
 
 /***********************************************************************
  * A_this_layer_down
