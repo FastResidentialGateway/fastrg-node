@@ -20,6 +20,10 @@
 static int test_count = 0;
 static int pass_count = 0;
 
+/* FSM actions are file-internal in production; the UNIT_TEST build exposes
+ * them via FSM_ACTION (see fsm.c), and tests declare what they exercise. */
+STATUS A_this_layer_up(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
+
 static ppp_ccb_t* create_test_ppp_ccb(FastRG_t *fastrg_ccb, U8 cp, U8 state) {
     ppp_ccb_t *ccb = (ppp_ccb_t*)calloc(1, sizeof(ppp_ccb_t));
     assert(ccb != NULL);
@@ -618,8 +622,8 @@ static void test_fsm_chap_lcp_up_enters_auth_phase(FastRG_t *fastrg_ccb)
     ccb->phase = LCP_PHASE;
 
     /* PPP_FSM skips action handlers under UNIT_TEST (see the #ifndef in its
-     * action loop), so the LCP-up action is called directly; it is exported
-     * in fsm.h alongside the other externally used A_* actions. */
+     * action loop), so the LCP-up action is called directly via the
+     * FSM_ACTION test seam. */
     TEST_ASSERT(A_this_layer_up(&timer, ccb) == SUCCESS,
         "CHAP LCP-up action returns SUCCESS", "");
     TEST_ASSERT(ccb->phase == AUTH_PHASE,

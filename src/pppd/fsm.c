@@ -29,25 +29,35 @@
 #include "../etcd_integration.h"
 #include "../../northbound/controller/etcd_client.h"
 
-static STATUS A_this_layer_start(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
-static STATUS A_send_config_request(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
-static STATUS A_this_layer_finish(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
-static STATUS A_send_terminate_ack(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
-static STATUS A_send_code_reject(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
-static STATUS A_create_down_event(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
-static STATUS A_create_up_event(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
-static STATUS A_send_config_ack(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
-static STATUS A_send_config_nak_rej(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
-static STATUS A_send_terminate_request(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
-STATUS A_this_layer_up(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
-static STATUS A_this_layer_down(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
-static STATUS A_init_restart_count(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
-static STATUS A_init_restart_config(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
-static STATUS A_init_restart_termin(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
-static STATUS A_send_echo_reply(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
-static STATUS A_zero_restart_count(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
-static STATUS A_send_padt(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
-static STATUS A_create_close_to_lower_layer(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
+/* FSM action handlers are internal to this file in production builds. The
+ * unit-test build makes them externally visible so tests can exercise them
+ * directly — PPP_FSM's action loop is compiled out under UNIT_TEST, so
+ * driving events through the FSM cannot reach them. */
+#ifdef UNIT_TEST
+#define FSM_ACTION
+#else
+#define FSM_ACTION static
+#endif
+
+FSM_ACTION STATUS A_this_layer_start(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
+FSM_ACTION STATUS A_send_config_request(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
+FSM_ACTION STATUS A_this_layer_finish(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
+FSM_ACTION STATUS A_send_terminate_ack(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
+FSM_ACTION STATUS A_send_code_reject(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
+FSM_ACTION STATUS A_create_down_event(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
+FSM_ACTION STATUS A_create_up_event(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
+FSM_ACTION STATUS A_send_config_ack(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
+FSM_ACTION STATUS A_send_config_nak_rej(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
+FSM_ACTION STATUS A_send_terminate_request(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
+FSM_ACTION STATUS A_this_layer_up(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
+FSM_ACTION STATUS A_this_layer_down(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
+FSM_ACTION STATUS A_init_restart_count(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
+FSM_ACTION STATUS A_init_restart_config(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
+FSM_ACTION STATUS A_init_restart_termin(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
+FSM_ACTION STATUS A_send_echo_reply(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
+FSM_ACTION STATUS A_zero_restart_count(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
+FSM_ACTION STATUS A_send_padt(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
+FSM_ACTION STATUS A_create_close_to_lower_layer(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
 
 tPPP_STATE_TBL  ppp_fsm_tbl_lcp[] = { 
 /*//////////////////////////////////////////////////////////////////////////////////
