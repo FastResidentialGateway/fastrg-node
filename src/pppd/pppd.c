@@ -157,8 +157,7 @@ STATUS ppp_init_config_by_user(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb, U16 ccb
     ppp_ccb->is_pap_auth = FALSE;
     ppp_ccb->auth_method = PAP_PROTOCOL;
     ppp_ccb->magic_num = rte_cpu_to_be_32((rand() % 0xFFFFFFFE) + 1);
-    ppp_ccb->identifier = 0x0;
-    memset(ppp_ccb->config_request_identifier, 0, sizeof(ppp_ccb->config_request_identifier));
+    memset(ppp_ccb->identifier, 0, sizeof(ppp_ccb->identifier));
     memset(ppp_ccb->config_request_pending, 0, sizeof(ppp_ccb->config_request_pending));
     /* Bound was TOTAL_SOCK_PORT before — only the first quarter of the pool
      * got initialized (benign only because ccbs come zeroed from the mempool).

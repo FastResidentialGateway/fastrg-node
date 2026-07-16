@@ -195,7 +195,10 @@ void test_build_config_request(FastRG_t *fastrg_ccb)
             .session_id = htons(0x000a),
             .cp = 0,
             .magic_num = htonl(0x01020304),
-            .identifier = 0xfd,
+            /* Per-CP counters: LCP starts at 0xfd, IPCP at 0xfe, so the three
+             * requests below still produce ids 0xfe, 0xff, 0x01 — identical
+             * expected packets, and the IPCP pair still covers wraparound. */
+            .identifier = {0xfd, 0xfe},
             .hsi_ipv4 = 0x0,
             .fastrg_ccb = fastrg_ccb,
         },

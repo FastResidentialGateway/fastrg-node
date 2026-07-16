@@ -236,11 +236,11 @@ STATUS decode_lcp(U16 ppp_hdr_len, U16 *event, struct rte_timer *tim, ppp_ccb_t 
             if (s_ppp_ccb->phase != LCP_PHASE)
                 return ERROR;
             if (s_ppp_ccb->config_request_pending[0] == FALSE ||
-                ppp_hdr->identifier != s_ppp_ccb->config_request_identifier[0]) {
+                ppp_hdr->identifier != s_ppp_ccb->identifier[0]) {
                 FastRG_LOG(DBG, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
                     "User %" PRIu16 " dropped unmatched LCP Configure-Ack id %u (pending %u, expected %u).",
                     s_ppp_ccb->user_num, ppp_hdr->identifier, s_ppp_ccb->config_request_pending[0],
-                    s_ppp_ccb->config_request_identifier[0]);
+                    s_ppp_ccb->identifier[0]);
                 return ERROR;
             }
 
@@ -362,11 +362,11 @@ STATUS decode_ipcp(U16 ppp_hdr_len, U16 *event, struct rte_timer *tim, ppp_ccb_t
             return SUCCESS;
         case CONFIG_ACK :
             if (s_ppp_ccb->config_request_pending[1] == FALSE ||
-                ppp_hdr->identifier != s_ppp_ccb->config_request_identifier[1]) {
+                ppp_hdr->identifier != s_ppp_ccb->identifier[1]) {
                 FastRG_LOG(DBG, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
                     "User %" PRIu16 " dropped unmatched IPCP Configure-Ack id %u (pending %u, expected %u).",
                     s_ppp_ccb->user_num, ppp_hdr->identifier, s_ppp_ccb->config_request_pending[1],
-                    s_ppp_ccb->config_request_identifier[1]);
+                    s_ppp_ccb->identifier[1]);
                 return ERROR;
             }
             s_ppp_ccb->config_request_pending[1] = FALSE;
@@ -591,9 +591,8 @@ void build_config_request(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb)
     pppoe_header->session_id = s_ppp_ccb->session_id; 
 
     ppp_hdr->code = CONFIG_REQUEST;
-    s_ppp_ccb->identifier = (s_ppp_ccb->identifier % UINT8_MAX) + 1;
-    ppp_hdr->identifier = s_ppp_ccb->identifier;
-    s_ppp_ccb->config_request_identifier[s_ppp_ccb->cp] = s_ppp_ccb->identifier;
+    s_ppp_ccb->identifier[s_ppp_ccb->cp] = (s_ppp_ccb->identifier[s_ppp_ccb->cp] % UINT8_MAX) + 1;
+    ppp_hdr->identifier = s_ppp_ccb->identifier[s_ppp_ccb->cp];
     s_ppp_ccb->config_request_pending[s_ppp_ccb->cp] = TRUE;
 
     pppoe_header->length = sizeof(ppp_header_t) + sizeof(ppp_payload->ppp_protocol);
@@ -1027,7 +1026,7 @@ void build_auth_request_pap(unsigned char *buffer, U16 *mulen, ppp_ccb_t *s_ppp_
     ppp_payload->ppp_protocol = rte_cpu_to_be_16(PAP_PROTOCOL);
 
     ppp_pap_header->code = PAP_REQUEST;
-    ppp_pap_header->identifier = s_ppp_ccb->identifier;
+    ppp_pap_header->identifier = s_ppp_ccb->identifier[0];
 
     *(U8 *)pap_account = peer_id_length;
     rte_memcpy(pap_account + sizeof(U8), s_ppp_ccb->ppp_user_acc, peer_id_length);
@@ -1065,7 +1064,7 @@ void build_auth_ack_pap(unsigned char *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb)
     ppp_payload->ppp_protocol = rte_cpu_to_be_16(PAP_PROTOCOL);
 
     ppp_pap_header->code = PAP_ACK;
-    ppp_pap_header->identifier = s_ppp_ccb->identifier;
+    ppp_pap_header->identifier = s_ppp_ccb->identifier[0];
 
     ppp_pap_ack_nak->msg_length = strlen(login_msg);
     rte_memcpy(ppp_pap_ack_nak->msg, login_msg, ppp_pap_ack_nak->msg_length);

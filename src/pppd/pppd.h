@@ -143,8 +143,7 @@ typedef struct {
     U32                   hsi_ipv4_gw;       /* ip addr gateway pppoe server assign to pppoe client */
     U32                   hsi_primary_dns;   /* 1st dns addr pppoe server assign to pppoe client */
     U32                   hsi_secondary_dns; /* 2nd dns addr pppoe server assign to pppoe client */
-    U8                    identifier;        /* ppp pkt id */
-    U8                    config_request_identifier[2]; /* last LCP/IPCP Configure-Request id */
+    U8                    identifier[2];     /* per-CP (LCP=0/IPCP=1) Configure-Request id; auth frames reuse [0] */
     BOOL                  config_request_pending[2]; /* outstanding LCP/IPCP Configure-Request */
     U32                   magic_num;         /* ppp pkt magic number, in network order */
     BOOL                  is_pap_auth;       /* pap auth boolean flag */
