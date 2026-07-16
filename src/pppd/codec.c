@@ -235,8 +235,14 @@ STATUS decode_lcp(U16 ppp_hdr_len, U16 *event, struct rte_timer *tim, ppp_ccb_t 
         case CONFIG_ACK :
             if (s_ppp_ccb->phase != LCP_PHASE)
                 return ERROR;
-            if (ppp_hdr->identifier != s_ppp_ccb->identifier)
+            if (s_ppp_ccb->config_request_pending[0] == FALSE ||
+                ppp_hdr->identifier != s_ppp_ccb->identifier[0]) {
+                FastRG_LOG(DBG, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+                    "User %" PRIu16 " dropped unmatched LCP Configure-Ack id %u (pending %u, expected %u).",
+                    s_ppp_ccb->user_num, ppp_hdr->identifier, s_ppp_ccb->config_request_pending[0],
+                    s_ppp_ccb->identifier[0]);
                 return ERROR;
+            }
 
             /* only check magic number. Skip the bytes stored in ppp_options_t length to find magic num. */
             U8 ppp_options_length = 0;
@@ -252,6 +258,7 @@ STATUS decode_lcp(U16 ppp_hdr_len, U16 *event, struct rte_timer *tim, ppp_ccb_t 
                 ppp_options_length += cur->length;
                 cur = (ppp_options_t *)((char *)cur + cur->length);
             }
+            s_ppp_ccb->config_request_pending[0] = FALSE;
             *event = E_RECV_CONFIG_ACK;
             rte_timer_stop(tim);
             return SUCCESS;
@@ -354,8 +361,15 @@ STATUS decode_ipcp(U16 ppp_hdr_len, U16 *event, struct rte_timer *tim, ppp_ccb_t
             ppp_hdr->length = rte_cpu_to_be_16(ppp_hdr_len);
             return SUCCESS;
         case CONFIG_ACK :
-            if (ppp_hdr->identifier != s_ppp_ccb->identifier)
-                return FALSE;
+            if (s_ppp_ccb->config_request_pending[1] == FALSE ||
+                ppp_hdr->identifier != s_ppp_ccb->identifier[1]) {
+                FastRG_LOG(DBG, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+                    "User %" PRIu16 " dropped unmatched IPCP Configure-Ack id %u (pending %u, expected %u).",
+                    s_ppp_ccb->user_num, ppp_hdr->identifier, s_ppp_ccb->config_request_pending[1],
+                    s_ppp_ccb->identifier[1]);
+                return ERROR;
+            }
+            s_ppp_ccb->config_request_pending[1] = FALSE;
             rte_timer_stop(tim);
             *event = E_RECV_CONFIG_ACK;
             {
@@ -577,8 +591,9 @@ void build_config_request(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb)
     pppoe_header->session_id = s_ppp_ccb->session_id; 
 
     ppp_hdr->code = CONFIG_REQUEST;
-    s_ppp_ccb->identifier = (s_ppp_ccb->identifier % UINT8_MAX) + 1;
-    ppp_hdr->identifier = s_ppp_ccb->identifier;
+    s_ppp_ccb->identifier[s_ppp_ccb->cp] = (s_ppp_ccb->identifier[s_ppp_ccb->cp] % UINT8_MAX) + 1;
+    ppp_hdr->identifier = s_ppp_ccb->identifier[s_ppp_ccb->cp];
+    s_ppp_ccb->config_request_pending[s_ppp_ccb->cp] = TRUE;
 
     pppoe_header->length = sizeof(ppp_header_t) + sizeof(ppp_payload->ppp_protocol);
     ppp_hdr->length = sizeof(ppp_header_t);
@@ -1011,7 +1026,7 @@ void build_auth_request_pap(unsigned char *buffer, U16 *mulen, ppp_ccb_t *s_ppp_
     ppp_payload->ppp_protocol = rte_cpu_to_be_16(PAP_PROTOCOL);
 
     ppp_pap_header->code = PAP_REQUEST;
-    ppp_pap_header->identifier = s_ppp_ccb->identifier;
+    ppp_pap_header->identifier = s_ppp_ccb->identifier[0];
 
     *(U8 *)pap_account = peer_id_length;
     rte_memcpy(pap_account + sizeof(U8), s_ppp_ccb->ppp_user_acc, peer_id_length);
@@ -1049,7 +1064,7 @@ void build_auth_ack_pap(unsigned char *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb)
     ppp_payload->ppp_protocol = rte_cpu_to_be_16(PAP_PROTOCOL);
 
     ppp_pap_header->code = PAP_ACK;
-    ppp_pap_header->identifier = s_ppp_ccb->identifier;
+    ppp_pap_header->identifier = s_ppp_ccb->identifier[0];
 
     ppp_pap_ack_nak->msg_length = strlen(login_msg);
     rte_memcpy(ppp_pap_ack_nak->msg, login_msg, ppp_pap_ack_nak->msg_length);
@@ -1187,13 +1202,18 @@ int check_auth_result(ppp_ccb_t *s_ppp_ccb)
     U16 ppp_protocol = s_ppp_ccb->ppp_phase[0].ppp_payload.ppp_protocol;
     U8 ppp_hdr_code = s_ppp_ccb->ppp_phase[0].ppp_hdr.code;
     if (ppp_protocol == rte_cpu_to_be_16(PAP_PROTOCOL) || ppp_protocol == rte_cpu_to_be_16(CHAP_PROTOCOL)) {
-        if (ppp_hdr_code == PAP_NAK || ppp_hdr_code == CHAP_FAILURE) {
+        BOOL auth_failed = (ppp_protocol == rte_cpu_to_be_16(PAP_PROTOCOL) && ppp_hdr_code == PAP_NAK) ||
+            (ppp_protocol == rte_cpu_to_be_16(CHAP_PROTOCOL) && ppp_hdr_code == CHAP_FAILURE);
+        BOOL auth_succeeded = (ppp_protocol == rte_cpu_to_be_16(PAP_PROTOCOL) && ppp_hdr_code == PAP_ACK) ||
+            (ppp_protocol == rte_cpu_to_be_16(CHAP_PROTOCOL) && ppp_hdr_code == CHAP_SUCCESS);
+
+        if (auth_failed == TRUE) {
             FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 
                 "received auth info error and start closing connection.", s_ppp_ccb->user_num);
             s_ppp_ccb->cp = 0;
             PPP_FSM(&s_ppp_ccb->ppp, s_ppp_ccb, E_CLOSE);
             return 1;
-        } else if (ppp_hdr_code == PAP_ACK || ppp_hdr_code == CHAP_SUCCESS) {
+        } else if (auth_succeeded == TRUE) {
             s_ppp_ccb->cp = 1;
             s_ppp_ccb->phase = IPCP_PHASE;
             PPP_FSM(&s_ppp_ccb->ppp, s_ppp_ccb, E_OPEN);
@@ -1402,16 +1422,22 @@ STATUS decode_ppp(ppp_payload_t *ppp_payload, U16 *event, ppp_ccb_t *s_ppp_ccb)
             fastrg_mfree(tmp_s_ppp_ccb);
             return SUCCESS;
         } else if (ppp_hdr->code == CHAP_SUCCESS) {
+            /* Keep the authentication result in the common PAP/CHAP slot;
+             * check_auth_result owns the phase and NCP FSM transition. */
+            s_ppp_ccb->ppp_phase[0].ppp_payload = *ppp_payload;
+            s_ppp_ccb->ppp_phase[0].ppp_hdr = *ppp_hdr;
             FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " auth success.", s_ppp_ccb->user_num);
-            s_ppp_ccb->phase = IPCP_PHASE;
             return SUCCESS;
         } else if (ppp_hdr->code == CHAP_FAILURE) {
-            s_ppp_ccb->phase = LCP_PHASE;
+            /* Keep the authentication result in the common PAP/CHAP slot;
+             * check_auth_result owns the phase and LCP FSM transition. */
+            s_ppp_ccb->ppp_phase[0].ppp_payload = *ppp_payload;
+            s_ppp_ccb->ppp_phase[0].ppp_hdr = *ppp_hdr;
             FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " auth fail.", s_ppp_ccb->user_num);
             return SUCCESS;
         }
     } else if (ppp_payload->ppp_protocol == rte_cpu_to_be_16(MPLSCP_PROTOCOL) ||
-               ppp_payload->ppp_protocol == rte_cpu_to_be_16(IPV6CP_PROTOCOL)) {
+        ppp_payload->ppp_protocol == rte_cpu_to_be_16(IPV6CP_PROTOCOL)) {
         /* We don't implement MPLSCP/IPV6CP. Reply with an LCP Protocol-Reject
          * (RFC 1661 §5.7) so the peer stops retransmitting; otherwise it would
          * keep retrying these CPs and block the session from making progress

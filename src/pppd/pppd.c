@@ -157,7 +157,8 @@ STATUS ppp_init_config_by_user(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb, U16 ccb
     ppp_ccb->is_pap_auth = FALSE;
     ppp_ccb->auth_method = PAP_PROTOCOL;
     ppp_ccb->magic_num = rte_cpu_to_be_32((rand() % 0xFFFFFFFE) + 1);
-    ppp_ccb->identifier = 0x0;
+    memset(ppp_ccb->identifier, 0, sizeof(ppp_ccb->identifier));
+    memset(ppp_ccb->config_request_pending, 0, sizeof(ppp_ccb->config_request_pending));
     /* Bound was TOTAL_SOCK_PORT before — only the first quarter of the pool
      * got initialized (benign only because ccbs come zeroed from the mempool).
      * expire deadlines live in the SoA array; nat_table_reset() zeroes them
@@ -700,7 +701,7 @@ void exit_ppp(ppp_ccb_t *ppp_ccb)
 STATUS ppp_process(FastRG_t *fastrg_ccb, U8 *pkt_data, U16 len)
 {
     int         ret;
-    U16	        event, ccb_id = 0;
+    U16	        event = E_UNKNOWN, ccb_id = 0;
 
     ret = get_ccb_id(fastrg_ccb, pkt_data, &ccb_id);
     if (ret == ERROR)

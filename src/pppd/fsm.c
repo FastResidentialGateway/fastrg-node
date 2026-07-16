@@ -725,67 +725,104 @@ STATUS A_this_layer_finish(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb)
     return SUCCESS;
 }
 
-STATUS A_this_layer_up(__attribute__((unused)) struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb)
+/**
+ * @fn lcp_layer_up
+ * @brief LCP this-layer-up transition: arm the periodic keepalive probe and
+ *        start authentication — PAP transmits an Authenticate-Request; CHAP
+ *        is authenticator-driven, so the session only enters AUTH_PHASE and
+ *        waits for the server's Challenge.
+ * @param s_ppp_ccb subscriber control block
+ * @return SUCCESS
+ */
+STATUS lcp_layer_up(ppp_ccb_t *s_ppp_ccb)
 {
     unsigned char buffer[PPP_MSG_BUF_LEN];
     U16 mulen = 0;
     FastRG_t *fastrg_ccb = s_ppp_ccb->fastrg_ccb;
 
-    if (s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].ppp_payload.ppp_protocol == rte_cpu_to_be_16(LCP_PROTOCOL)) {
-        memset(buffer,0,PPP_MSG_BUF_LEN);
-        /* Start the periodic LCP keepalive: each tick probes the peer with an
-         * Echo-Request and tears down after LCP_ECHO_MAX_FAIL unanswered probes.
-         * Any frame received from the peer resets echo_miss_count. */
-        s_ppp_ccb->echo_miss_count = 0;
-        rte_timer_reset(&(s_ppp_ccb->ppp_alive), s_ppp_ccb->ppp_interval*fastrg_get_cycles_in_sec(),
-            PERIODICAL, fastrg_ccb->lcore.ctrl_thread, (rte_timer_cb_t)PPP_keepalive_cb, s_ppp_ccb);
-        if (s_ppp_ccb->auth_method == PAP_PROTOCOL)
-            build_auth_request_pap(buffer, &mulen, s_ppp_ccb);
+    memset(buffer,0,PPP_MSG_BUF_LEN);
+    /* Start the periodic LCP keepalive: each tick probes the peer with an
+     * Echo-Request and tears down after LCP_ECHO_MAX_FAIL unanswered probes.
+     * Any frame received from the peer resets echo_miss_count. */
+    s_ppp_ccb->echo_miss_count = 0;
+    rte_timer_reset(&(s_ppp_ccb->ppp_alive), s_ppp_ccb->ppp_interval*fastrg_get_cycles_in_sec(),
+        PERIODICAL, fastrg_ccb->lcore.ctrl_thread, (rte_timer_cb_t)PPP_keepalive_cb, s_ppp_ccb);
+    if (s_ppp_ccb->auth_method == PAP_PROTOCOL) {
+        build_auth_request_pap(buffer, &mulen, s_ppp_ccb);
         wan_ctrl_tx(fastrg_ccb, s_ppp_ccb->user_num - 1, buffer, mulen);
-        FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " LCP connection establish successfully.", s_ppp_ccb->user_num);
-        FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " starting Authentication.", s_ppp_ccb->user_num);
-    } else if (s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].ppp_payload.ppp_protocol == rte_cpu_to_be_16(IPCP_PROTOCOL)) {
-        rte_atomic16_set(&s_ppp_ccb->dp_start_bool, (S16)1);
-        s_ppp_ccb->phase = DATA_PHASE;
-        FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " IPCP connection establish successfully.", s_ppp_ccb->user_num);
-        FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "Now user %" PRIu16 " can start to send data via pppoe session id 0x%x and vlan is %" 
-            PRIu16 ".\n", s_ppp_ccb->user_num, rte_be_to_cpu_16(s_ppp_ccb->session_id), rte_atomic16_read(&s_ppp_ccb->vlan_id));
-        FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " PPPoE client IP address is %" PRIu8 ".%" PRIu8 ".%" PRIu8 ".%" PRIu8 
-            ", PPPoE server IP address is %" PRIu8 ".%" PRIu8 ".%" PRIu8 ".%" PRIu8 "\n", s_ppp_ccb->user_num, 
-            *(((U8 *)&(s_ppp_ccb->hsi_ipv4))), *(((U8 *)&(s_ppp_ccb->hsi_ipv4))+1), 
-            *(((U8 *)&(s_ppp_ccb->hsi_ipv4))+2), *(((U8 *)&(s_ppp_ccb->hsi_ipv4))+3), 
-            *(((U8 *)&(s_ppp_ccb->hsi_ipv4_gw))), *(((U8 *)&(s_ppp_ccb->hsi_ipv4_gw))+1), 
-            *(((U8 *)&(s_ppp_ccb->hsi_ipv4_gw))+2), *(((U8 *)&(s_ppp_ccb->hsi_ipv4_gw))+3));
-        if (s_ppp_ccb->hsi_primary_dns == 0xffffffff || s_ppp_ccb->hsi_primary_dns == 0x0)
-            s_ppp_ccb->hsi_primary_dns = rte_cpu_to_be_32(0x08080808); /* 8.8.8.8 */
-        if (s_ppp_ccb->hsi_secondary_dns == 0xffffffff || s_ppp_ccb->hsi_secondary_dns == 0x0)
-            s_ppp_ccb->hsi_secondary_dns = rte_cpu_to_be_32(0x01010101); /* 1.1.1.1 */
-        dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, s_ppp_ccb->user_num - 1);
-        if (dns_proxy_init(&dhcp_ccb->dns_state, s_ppp_ccb->hsi_primary_dns, 
-                s_ppp_ccb->hsi_secondary_dns) != SUCCESS) {
-            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
-                "User %u: Failed to init DNS proxy", s_ppp_ccb->user_num);
-            return ERROR;
-        }
-        FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " HSI module is spawned.\n", s_ppp_ccb->user_num);
-        if (fastrg_ccb->is_standalone == FALSE) {
-            char user_id_str[6];
-            snprintf(user_id_str, sizeof(user_id_str), "%u", s_ppp_ccb->user_num);
-            /* PPPoE "connected" transition → controller via Kafka (with assigned
-             * IP/gateway). Status is no longer written to etcd. */
-            struct in_addr ip = { .s_addr = s_ppp_ccb->hsi_ipv4 };
-            struct in_addr gw = { .s_addr = s_ppp_ccb->hsi_ipv4_gw };
-            char ip_str[INET_ADDRSTRLEN] = { 0 }, gw_str[INET_ADDRSTRLEN] = { 0 };
-            inet_ntop(AF_INET, &ip, ip_str, sizeof(ip_str));
-            inet_ntop(AF_INET, &gw, gw_str, sizeof(gw_str));
-            kafka_report_pppoe_state(user_id_str, KAFKA_PPPOE_CONNECTED, ip_str, gw_str, NULL);
+    } else if (s_ppp_ccb->auth_method == CHAP_PROTOCOL)
+        /* CHAP is authenticator-driven: enter AUTH phase and wait for the
+         * server's challenge; nothing is sent at LCP-up. */
+        s_ppp_ccb->phase = AUTH_PHASE;
+    FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " LCP connection establish successfully.", s_ppp_ccb->user_num);
+    FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " starting Authentication.", s_ppp_ccb->user_num);
 
-            /* Static DNS records are still loaded from etcd (read-only) now that
-             * the session is up. */
-            etcd_client_load_dns_records(fastrg_ccb->node_uuid, user_id_str,
-                dns_record_changed_callback, fastrg_ccb);
-        }
+    return SUCCESS;
+}
+
+/**
+ * @fn ipcp_layer_up
+ * @brief IPCP this-layer-up transition: open the data plane for the
+ *        subscriber, fall back to public DNS when the server assigned none,
+ *        initialize the DNS proxy, and report the connected state (Kafka /
+ *        etcd static DNS records) in SDN mode.
+ * @param s_ppp_ccb subscriber control block
+ * @return SUCCESS on success, ERROR if the DNS proxy cannot be initialized
+ */
+STATUS ipcp_layer_up(ppp_ccb_t *s_ppp_ccb)
+{
+    FastRG_t *fastrg_ccb = s_ppp_ccb->fastrg_ccb;
+
+    rte_atomic16_set(&s_ppp_ccb->dp_start_bool, (S16)1);
+    s_ppp_ccb->phase = DATA_PHASE;
+    FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " IPCP connection establish successfully.", s_ppp_ccb->user_num);
+    FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "Now user %" PRIu16 " can start to send data via pppoe session id 0x%x and vlan is %" 
+        PRIu16 ".\n", s_ppp_ccb->user_num, rte_be_to_cpu_16(s_ppp_ccb->session_id), rte_atomic16_read(&s_ppp_ccb->vlan_id));
+    FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " PPPoE client IP address is %" PRIu8 ".%" PRIu8 ".%" PRIu8 ".%" PRIu8 
+        ", PPPoE server IP address is %" PRIu8 ".%" PRIu8 ".%" PRIu8 ".%" PRIu8 "\n", s_ppp_ccb->user_num, 
+        *(((U8 *)&(s_ppp_ccb->hsi_ipv4))), *(((U8 *)&(s_ppp_ccb->hsi_ipv4))+1), 
+        *(((U8 *)&(s_ppp_ccb->hsi_ipv4))+2), *(((U8 *)&(s_ppp_ccb->hsi_ipv4))+3), 
+        *(((U8 *)&(s_ppp_ccb->hsi_ipv4_gw))), *(((U8 *)&(s_ppp_ccb->hsi_ipv4_gw))+1), 
+        *(((U8 *)&(s_ppp_ccb->hsi_ipv4_gw))+2), *(((U8 *)&(s_ppp_ccb->hsi_ipv4_gw))+3));
+    if (s_ppp_ccb->hsi_primary_dns == 0xffffffff || s_ppp_ccb->hsi_primary_dns == 0x0)
+        s_ppp_ccb->hsi_primary_dns = rte_cpu_to_be_32(0x08080808); /* 8.8.8.8 */
+    if (s_ppp_ccb->hsi_secondary_dns == 0xffffffff || s_ppp_ccb->hsi_secondary_dns == 0x0)
+        s_ppp_ccb->hsi_secondary_dns = rte_cpu_to_be_32(0x01010101); /* 1.1.1.1 */
+    dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, s_ppp_ccb->user_num - 1);
+    if (dns_proxy_init(&dhcp_ccb->dns_state, s_ppp_ccb->hsi_primary_dns, 
+            s_ppp_ccb->hsi_secondary_dns) != SUCCESS) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+            "User %u: Failed to init DNS proxy", s_ppp_ccb->user_num);
+        return ERROR;
     }
+    FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " HSI module is spawned.\n", s_ppp_ccb->user_num);
+    if (fastrg_ccb->is_standalone == FALSE) {
+        char user_id_str[6];
+        snprintf(user_id_str, sizeof(user_id_str), "%u", s_ppp_ccb->user_num);
+        /* PPPoE "connected" transition → controller via Kafka (with assigned
+         * IP/gateway). Status is no longer written to etcd. */
+        struct in_addr ip = { .s_addr = s_ppp_ccb->hsi_ipv4 };
+        struct in_addr gw = { .s_addr = s_ppp_ccb->hsi_ipv4_gw };
+        char ip_str[INET_ADDRSTRLEN] = { 0 }, gw_str[INET_ADDRSTRLEN] = { 0 };
+        inet_ntop(AF_INET, &ip, ip_str, sizeof(ip_str));
+        inet_ntop(AF_INET, &gw, gw_str, sizeof(gw_str));
+        kafka_report_pppoe_state(user_id_str, KAFKA_PPPOE_CONNECTED, ip_str, gw_str, NULL);
+
+        /* Static DNS records are still loaded from etcd (read-only) now that
+         * the session is up. */
+        etcd_client_load_dns_records(fastrg_ccb->node_uuid, user_id_str,
+            dns_record_changed_callback, fastrg_ccb);
+    }
+
+    return SUCCESS;
+}
+
+static STATUS A_this_layer_up(__attribute__((unused)) struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb)
+{
+    if (s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].ppp_payload.ppp_protocol == rte_cpu_to_be_16(LCP_PROTOCOL))
+        return lcp_layer_up(s_ppp_ccb);
+    if (s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].ppp_payload.ppp_protocol == rte_cpu_to_be_16(IPCP_PROTOCOL))
+        return ipcp_layer_up(s_ppp_ccb);
 
     return SUCCESS;
 }
