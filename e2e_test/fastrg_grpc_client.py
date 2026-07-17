@@ -9,6 +9,7 @@ Commands:
     get_hsi_info                                            - GetFastrgHsiInfo  → JSON
     get_dhcp_info                                           - GetFastrgDhcpInfo → JSON
     get_system_info                                         - GetFastrgSystemInfo → JSON
+    get_system_stats                                        - GetFastrgSystemStats → JSON
     get_user_drop_count <user_id> [port_idx]               - GetFastrgSystemStats, WAN dropped_packets for user
     get_port_fwd_info <user_id>                             - GetPortFwdInfo    → JSON
     get_dns_static <user_id>                                - GetDnsStaticRecords → JSON
@@ -204,6 +205,10 @@ def get_system_info(node_addr):
         "dpdk_version":   b.get('dpdk_version', ''),
         "num_users":      b.get('num_users', 0),
     }
+
+
+def get_system_stats(node_addr):
+    return _grpcurl(node_addr, 'GetFastrgSystemStats')
 
 
 def get_port_fwd_info(node_addr, user_id):
@@ -426,6 +431,8 @@ def main():
             result = get_dhcp_info(opts.node)
         elif opts.command == "get_system_info":
             result = get_system_info(opts.node)
+        elif opts.command == "get_system_stats":
+            result = get_system_stats(opts.node)
         elif opts.command == "get_port_fwd_info":
             if not opts.args:
                 print(json.dumps({"error": "get_port_fwd_info requires <user_id>"}),
