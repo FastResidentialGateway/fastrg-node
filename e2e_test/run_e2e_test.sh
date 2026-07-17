@@ -27,6 +27,13 @@
 #   - FastRG node: etcdctl
 #   - WAN host:    iperf3, python3 + scapy
 #   - LAN host:    ping, iperf3, curl, tcpdump
+#
+# Subscriber-scale resource requirement:
+#   E2E_MAX_USER_COUNT defaults to 100 and may be overridden in the environment.
+#   A 100-subscriber run needs about 15.5 GB of hugepages: each subscriber uses
+#   about 148.5 MB (22 MB ppp_ccb + 126.5 MB mac_table), in addition to shared
+#   packet pools. With insufficient hugepages, node startup fails while allocating
+#   the ppp_ccb mempool or per-subscriber mac_table.
 # =============================================================================
 
 # ---------------------------------------------------------------------------
@@ -70,6 +77,13 @@ unset _prev _arg
 _E2E_RUNNER_USER="root"
 _E2E_REMOTE_DIR='~/fastrg_e2e_test'
 _E2E_REMOTE_PATH="${_E2E_REMOTE_DIR}/run_e2e_test.sh"
+E2E_MAX_USER_COUNT="${E2E_MAX_USER_COUNT:-100}"
+
+if [[ ! "$E2E_MAX_USER_COUNT" =~ ^[0-9]+$ ]] || \
+   [[ "$E2E_MAX_USER_COUNT" -lt 2 || "$E2E_MAX_USER_COUNT" -gt 2000 ]]; then
+    error "E2E_MAX_USER_COUNT must be an integer between 2 and 2000 (got '${E2E_MAX_USER_COUNT}')."
+    exit 1
+fi
 
 if [[ -z "${_FASTRG_E2E_RELOCATED:-}" ]]; then
     # Collect local IPs — hostname -I on Linux, ifconfig on macOS
@@ -200,7 +214,8 @@ if [[ -z "${_FASTRG_E2E_RELOCATED:-}" ]]; then
         _remote_args=""
         for _a in "$@"; do _remote_args="${_remote_args} '${_a}'"; done
         ssh $_SSH_OPTS "${_E2E_RUNNER_USER}@${_E2E_RUNNER_HOST}" \
-            "chmod +x ${_E2E_REMOTE_PATH} && _FASTRG_E2E_RELOCATED=1 ${_E2E_REMOTE_PATH}${_remote_args}"
+            "chmod +x ${_E2E_REMOTE_PATH} && E2E_MAX_USER_COUNT=${E2E_MAX_USER_COUNT} \
+             _FASTRG_E2E_RELOCATED=1 ${_E2E_REMOTE_PATH}${_remote_args}"
         _ssh_rc=$?
 
         # Clean up uploaded files from runner (always, regardless of test result)
@@ -364,6 +379,56 @@ ssh_node() { ssh $SSH_OPTS "root@${FASTRG_NODE}" "$@"; }
 ssh_lan()  { ssh $SSH_OPTS "root@${LAN_HOST}"    "$@"; }
 ssh_wan()  { ssh $SSH_OPTS "root@${WAN_HOST}"   "$@"; }
 ssh_bras() { ssh $SSH_OPTS "root@${BRAS_HOST}"   "$@"; }
+
+# MaxUserCount is consumed only at node startup. Save the bench value and apply
+# the requested E2E scale before phase0 can launch fastrg. The EXIT trap restores
+# the original value even when setup or a later phase fails.
+_E2E_ORIGINAL_MAX_USER_COUNT=""
+
+prepare_e2e_max_user_count() {
+    local _config_line="" _configured=""
+
+    _config_line=$(ssh_node \
+        "grep -E '^[[:space:]]*MaxUserCount[[:space:]]*=' /etc/fastrg/config.cfg 2>/dev/null" \
+        2>/dev/null || true)
+    _E2E_ORIGINAL_MAX_USER_COUNT=$(printf '%s' "$_config_line" | awk -F'[=;]' \
+        '{gsub(/[[:space:]]/, "", $2); print $2; exit}' || true)
+    if [[ ! "$_E2E_ORIGINAL_MAX_USER_COUNT" =~ ^[0-9]+$ ]]; then
+        error "Cannot back up MaxUserCount from node config: ${_config_line:-empty}"
+        return 1
+    fi
+
+    info "Setting node MaxUserCount ${_E2E_ORIGINAL_MAX_USER_COUNT} -> ${E2E_MAX_USER_COUNT} for this E2E run..."
+    ssh_node \
+        "sed -i -E 's/^([[:space:]]*MaxUserCount[[:space:]]*=[[:space:]]*)[0-9]+([[:space:]]*;.*)$/\\1${E2E_MAX_USER_COUNT}\\2/' /etc/fastrg/config.cfg"
+    _configured=$(ssh_node \
+        "grep -E '^[[:space:]]*MaxUserCount[[:space:]]*=' /etc/fastrg/config.cfg 2>/dev/null" \
+        2>/dev/null | awk -F'[=;]' '{gsub(/[[:space:]]/, "", $2); print $2; exit}' || true)
+    if [[ "$_configured" != "$E2E_MAX_USER_COUNT" ]]; then
+        error "Failed to set node MaxUserCount to ${E2E_MAX_USER_COUNT} (read back '${_configured:-empty}')."
+        return 1
+    fi
+    info "Node MaxUserCount is ${_configured}; the original value will be restored on exit."
+}
+
+restore_e2e_max_user_count() {
+    local _restored=""
+
+    [[ "${_E2E_ORIGINAL_MAX_USER_COUNT:-}" =~ ^[0-9]+$ ]] || return 0
+    info "Restoring node MaxUserCount to ${_E2E_ORIGINAL_MAX_USER_COUNT}..."
+    ssh_node \
+        "sed -i -E 's/^([[:space:]]*MaxUserCount[[:space:]]*=[[:space:]]*)[0-9]+([[:space:]]*;.*)$/\\1${_E2E_ORIGINAL_MAX_USER_COUNT}\\2/' /etc/fastrg/config.cfg" \
+        >/dev/null 2>&1 || true
+    _restored=$(ssh_node \
+        "grep -E '^[[:space:]]*MaxUserCount[[:space:]]*=' /etc/fastrg/config.cfg 2>/dev/null" \
+        2>/dev/null | awk -F'[=;]' '{gsub(/[[:space:]]/, "", $2); print $2; exit}' || true)
+    if [[ "$_restored" == "$_E2E_ORIGINAL_MAX_USER_COUNT" ]]; then
+        info "Node MaxUserCount restored to ${_restored}."
+    else
+        warn "Cleanup FAILED: node MaxUserCount is '${_restored:-unavailable}', expected ${_E2E_ORIGINAL_MAX_USER_COUNT}."
+        return 1
+    fi
+}
 
 # ---------------------------------------------------------------------------
 # Test result tracking (indexed arrays — bash 3.2 compatible)
@@ -561,6 +626,8 @@ cleanup_fastrg() {
         info "dpdk-bras stopped."
     fi
 
+    restore_e2e_max_user_count || true
+
     # Restore USER_ID subscriber to desire_status="connect" so the next run starts
     # clean. Phase9's hangup may have left it "disconnect". Done via the controller
     # (the node is read-only on etcd); falls back to a direct etcd write.
@@ -595,6 +662,7 @@ main() {
     info "Subscribers: ${SUB_IDS[*]} (primary=${USER_ID}, secondaries='${SUB_SECONDARY_IDS[*]:-none}')"
     printf "\n"
 
+    prepare_e2e_max_user_count
     phase0_setup
     phase1_subscriber_count_tests
     phase2_etcd_config_sync

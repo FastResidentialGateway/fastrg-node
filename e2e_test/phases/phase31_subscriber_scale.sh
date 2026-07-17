@@ -3,12 +3,13 @@
 # ---------------------------------------------------------------------------
 # Phase 31 — Subscriber slot scale boundary (Steps 123-126)
 #
-# MaxUserCount is read from the node so the regular bench exercises max=10 and
-# the same phase can be rerun at max=2000 after the node VM is enlarged. The
-# apply timeout has a fixed 60-second base plus one second per four slots. If
-# the first 2000-slot run shows allocation taking longer than this, increase
-# the proportional term (for example, change max/4 to max/2) using the measured
-# duration rather than replacing it with a fixed timeout.
+# MaxUserCount is read from the node after the runner temporarily sets it from
+# E2E_MAX_USER_COUNT (default 100). A 100-slot run requires about 15.5 GB of
+# hugepages because each subscriber consumes about 148.5 MB including its
+# ppp_ccb and mac_table. If hugepages are insufficient, node startup fails at
+# ppp_ccb mempool or mac_table allocation. The apply timeout has a fixed
+# 60-second base plus one second per four slots; keep any future adjustment
+# proportional to the configured scale rather than using a fixed timeout.
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
