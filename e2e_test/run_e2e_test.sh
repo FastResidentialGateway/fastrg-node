@@ -501,7 +501,8 @@ source "${_E2E_PHASES_DIR}/phase26_heartbeat_reregister.sh"
 source "${_E2E_PHASES_DIR}/phase27_link_flap.sh"
 source "${_E2E_PHASES_DIR}/phase28_chap_auth.sh"
 source "${_E2E_PHASES_DIR}/phase29_protocol_reject.sh"
-source "${_E2E_PHASES_DIR}/phase30_summary.sh"
+source "${_E2E_PHASES_DIR}/phase30_keepalive_failure.sh"
+source "${_E2E_PHASES_DIR}/phase31_summary.sh"
 
 # ---------------------------------------------------------------------------
 # Cleanup — kill fastrg only if the script started it
@@ -520,6 +521,7 @@ cleanup_fastrg() {
     _cleanup_phase27_link_flap 2>/dev/null || true
     _cleanup_phase28_chap_auth 2>/dev/null || true
     _cleanup_phase29_protocol_reject 2>/dev/null || true
+    _cleanup_phase30_keepalive_failure 2>/dev/null || true
 
     # Best-effort: remove new subscriber config if the test left it in etcd
     _cleanup_new_subscriber_config 2>/dev/null || true
@@ -623,7 +625,8 @@ main() {
     phase27_link_flap
     phase28_chap_auth
     phase29_protocol_reject
-    phase30_summary || true
+    phase30_keepalive_failure
+    phase31_summary || true
 }
 
 main "$@"
