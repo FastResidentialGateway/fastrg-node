@@ -23,7 +23,7 @@ extern "C" {
 #define MAX_VLAN_ID 4000
 #define MIN_VLAN_ID 2
 
-#define MAX_USER_COUNT 4000
+#define MAX_USER_COUNT 2000
 #define MIN_USER_COUNT 1
 
 #define INVALID_CCB_ID UINT16_MAX

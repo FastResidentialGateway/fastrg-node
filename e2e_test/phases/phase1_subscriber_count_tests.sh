@@ -27,7 +27,7 @@ phase1_subscriber_count_tests() {
     fi
     info "Current subscriber count: ${_sc_orig}"
 
-    # Use current + 1 as the test value (safe: well within MAX_USER_COUNT 4000)
+    # Use current + 1 as the test value (safe: well within MAX_USER_COUNT 2000)
     _sc_new=$((_sc_orig + 1))
 
     # ------------------------------------------------------------------
