@@ -29,11 +29,13 @@
 #   - LAN host:    ping, iperf3, curl, tcpdump
 #
 # Subscriber-scale resource requirement:
-#   E2E_MAX_USER_COUNT defaults to 100 and may be overridden in the environment.
-#   A 100-subscriber run needs about 15.5 GB of hugepages: each subscriber uses
-#   about 148.5 MB (22 MB ppp_ccb + 126.5 MB mac_table), in addition to shared
-#   packet pools. With insufficient hugepages, node startup fails while allocating
-#   the ppp_ccb mempool or per-subscriber mac_table.
+#   E2E_MAX_USER_COUNT defaults to 63 and may be overridden in the environment.
+#   In the IOVA PA bench environment, each added CCB consumes a measured 175 MiB
+#   of hugepage heap. At max=63, measured heap allocation is 14.76 GiB, leaving
+#   2.24 GiB of the bench's 17 1-GiB pages free. The node must start with
+#   --socket-mem 17408 so rte_malloc owns all 17 pages up front; without it, the
+#   PA-mode heap cannot dynamically add the free hugepages needed by later CCB
+#   allocations, and subscriber-scale expansion fails despite free system pages.
 # =============================================================================
 
 # ---------------------------------------------------------------------------
@@ -77,7 +79,7 @@ unset _prev _arg
 _E2E_RUNNER_USER="root"
 _E2E_REMOTE_DIR='~/fastrg_e2e_test'
 _E2E_REMOTE_PATH="${_E2E_REMOTE_DIR}/run_e2e_test.sh"
-E2E_MAX_USER_COUNT="${E2E_MAX_USER_COUNT:-100}"
+E2E_MAX_USER_COUNT="${E2E_MAX_USER_COUNT:-63}"
 
 if [[ ! "$E2E_MAX_USER_COUNT" =~ ^[0-9]+$ ]] || \
    [[ "$E2E_MAX_USER_COUNT" -lt 2 || "$E2E_MAX_USER_COUNT" -gt 2000 ]]; then

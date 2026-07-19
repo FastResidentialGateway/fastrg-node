@@ -4,12 +4,14 @@
 # Phase 31 — Subscriber slot scale boundary (Steps 123-126)
 #
 # MaxUserCount is read from the node after the runner temporarily sets it from
-# E2E_MAX_USER_COUNT (default 100). A 100-slot run requires about 15.5 GB of
-# hugepages because each subscriber consumes about 148.5 MB including its
-# ppp_ccb and mac_table. If hugepages are insufficient, node startup fails at
-# ppp_ccb mempool or mac_table allocation. The apply timeout has a fixed
-# 60-second base plus one second per four slots; keep any future adjustment
-# proportional to the configured scale rather than using a fixed timeout.
+# E2E_MAX_USER_COUNT (default 63). In the IOVA PA bench environment, each added
+# CCB consumes a measured 175 MiB of hugepage heap. At max=63, measured heap
+# allocation is 14.76 GiB, leaving 2.24 GiB of the bench's 17 1-GiB pages free.
+# The node must start with --socket-mem 17408 so rte_malloc owns all 17 pages up
+# front; otherwise PA-mode expansion fails despite free system hugepages. The
+# apply timeout has a fixed 60-second base plus one second per four slots; keep
+# any future adjustment proportional to the configured scale rather than using
+# a fixed timeout.
 # ---------------------------------------------------------------------------
 
 set -euo pipefail

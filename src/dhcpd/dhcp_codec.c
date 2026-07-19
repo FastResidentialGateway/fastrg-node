@@ -130,6 +130,12 @@ DHCP_EVENT_TYPE decode_request(dhcp_ccb_per_lan_user_t *per_lan_user, int *cur_t
         if ((per_lan_user->dhcp_hdr->client_ip & dhcp_ccb->subnet_mask) != 
                 (dhcp_ccb->dhcp_server_ip & dhcp_ccb->subnet_mask))
             return E_BAD_REQUEST;
+        U32 client_ip = rte_be_to_cpu_32(per_lan_user->dhcp_hdr->client_ip);
+        if (client_ip < dhcp_ccb->pool_start || client_ip > dhcp_ccb->pool_end) {
+            FastRG_LOG(WARN, dhcp_ccb->fastrg_ccb->fp, (U8 *)dhcp_ccb, DHCPLOGMSG,
+                "subscriber %u: DHCP ciaddr outside configured pool range\n", dhcp_ccb->ccb_id);
+            return E_BAD_REQUEST;
+        }
         per_lan_user->dhcp_hdr->ur_client_ip = per_lan_user->dhcp_hdr->client_ip;
         /* In DHCP ack, Ciaddr should be 0 */
         per_lan_user->dhcp_hdr->client_ip = 0;
@@ -207,6 +213,12 @@ DHCP_EVENT_TYPE decode_request(dhcp_ccb_per_lan_user_t *per_lan_user, int *cur_t
                 if ((per_lan_user->dhcp_hdr->ur_client_ip & dhcp_ccb->subnet_mask) != 
                         (dhcp_ccb->dhcp_server_ip & dhcp_ccb->subnet_mask))
                     return E_BAD_REQUEST;
+                U32 requested_ip = rte_be_to_cpu_32(per_lan_user->dhcp_hdr->ur_client_ip);
+                if (requested_ip < dhcp_ccb->pool_start || requested_ip > dhcp_ccb->pool_end) {
+                    FastRG_LOG(WARN, dhcp_ccb->fastrg_ccb->fp, (U8 *)dhcp_ccb, DHCPLOGMSG,
+                        "subscriber %u: DHCP Request IP outside configured pool range\n", dhcp_ccb->ccb_id);
+                    return E_BAD_REQUEST;
+                }
             } else if (cur->opt_type == DHCP_SERVER_ID) {
                 if (cur->len != sizeof(U32)) {
                     FastRG_LOG(WARN, dhcp_ccb->fastrg_ccb->fp, 
