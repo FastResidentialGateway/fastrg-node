@@ -55,6 +55,8 @@ typedef struct dhcp_ccb {
     U32                     dhcp_server_ip;
     dhcp_ccb_per_lan_user_t **per_lan_user_pool;
     U32                     per_lan_user_pool_len;
+    U32                     pool_start; // host order
+    U32                     pool_end; // host order
     U32                     subnet_mask; // network order
     rte_atomic16_t          dhcp_bool; //boolean value for accept dhcp packets at data plane
     rte_atomic32_t          active_count; // count of processing dhcp packets

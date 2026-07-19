@@ -4,7 +4,7 @@
 # Phase 0 — Prerequisites
 # ---------------------------------------------------------------------------
 _FASTRG_DAEMON="/root/fastrg-node/fastrg"
-_FASTRG_START_CMD="${_FASTRG_DAEMON} -l 1-8 -n 4 -a 0000:07:00.0 -a 0000:08:00.0"
+_FASTRG_START_CMD="${_FASTRG_DAEMON} -l 1-8 -n 4 --socket-mem 17408 -a 0000:07:00.0 -a 0000:08:00.0"
 
 phase0_setup() {
     bold "═══════════════════════════════════════════════════════"
@@ -239,6 +239,24 @@ phase0_setup() {
     info "Checking if fastrg daemon is running on ${FASTRG_NODE}..."
     FASTRG_PID=$(ssh_node "pgrep -x fastrg 2>/dev/null || pidof fastrg 2>/dev/null || true" | tr -d '[:space:]')
     if [[ -z "$FASTRG_PID" ]]; then
+        local _rtemap_removed
+        _rtemap_removed=$(ssh_node '
+            _rtemap_before=0
+            for _rtemap_file in /dev/hugepages/rtemap_*; do
+                [ -e "$_rtemap_file" ] || continue
+                _rtemap_before=$((_rtemap_before + 1))
+            done
+            rm -f -- /dev/hugepages/rtemap_* 2>/dev/null || true
+            _rtemap_after=0
+            for _rtemap_file in /dev/hugepages/rtemap_*; do
+                [ -e "$_rtemap_file" ] || continue
+                _rtemap_after=$((_rtemap_after + 1))
+            done
+            printf "%s\n" "$((_rtemap_before - _rtemap_after))"
+        ' 2>/dev/null || true)
+        [[ "$_rtemap_removed" =~ ^[0-9]+$ ]] || _rtemap_removed=0
+        info "Preflight: removed ${_rtemap_removed} stale /dev/hugepages/rtemap_* file(s)."
+
         warn "fastrg is NOT running — attempting to start..."
         info "Starting: ${_FASTRG_START_CMD}"
         ssh_node "nohup ${_FASTRG_START_CMD} >/var/log/fastrg.log 2>&1 &"

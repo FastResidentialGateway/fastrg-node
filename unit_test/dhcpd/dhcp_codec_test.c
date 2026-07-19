@@ -459,6 +459,8 @@ static void dhcp_decode_ctx_init(dhcp_decode_ctx_t *f, FastRG_t *fastrg_ccb)
     f->pool_array[0] = &f->pool_user;
 
     f->dhcp_ccb.dhcp_server_ip = rte_cpu_to_be_32(0xC0A80201); /* 192.168.2.1 */
+    f->dhcp_ccb.pool_start = 0xC0A80264; /* 192.168.2.100, host order */
+    f->dhcp_ccb.pool_end = 0xC0A80264; /* 192.168.2.100, host order */
     f->dhcp_ccb.subnet_mask = rte_cpu_to_be_32(0xFFFFFF00);
     f->dhcp_ccb.per_lan_user_pool = f->pool_array;
     f->dhcp_ccb.per_lan_user_pool_len = 1;
@@ -634,6 +636,30 @@ void test_dhcp_decode(FastRG_t *fastrg_ccb)
     fix.ip_hdr->dst_addr = fix.dhcp_ccb.dhcp_server_ip;
     event = dhcp_decode_ctx_apply(&fix, opts_req_renew, sizeof(opts_req_renew));
     TEST_ASSERT(event == E_BAD_REQUEST, "out-of-subnet ciaddr returns E_BAD_REQUEST",
+        "got %d", event);
+
+    printf("Test 18: \"SELECTING REQUEST with Option 50 above pool end\"\n");
+    dhcp_decode_ctx_init(&fix, fastrg_ccb);
+    U8 opts_req_above_pool[] = {DHCP_MSG_TYPE, 1, DHCP_REQUEST,
+        DHCP_REQUEST_IP, 4, 192, 168, 2, 101, DHCP_END};
+    event = dhcp_decode_ctx_apply(&fix, opts_req_above_pool, sizeof(opts_req_above_pool));
+    TEST_ASSERT(event == E_BAD_REQUEST, "above-pool Option 50 returns E_BAD_REQUEST",
+        "got %d", event);
+
+    printf("Test 19: \"SELECTING REQUEST with Option 50 below pool start\"\n");
+    dhcp_decode_ctx_init(&fix, fastrg_ccb);
+    U8 opts_req_below_pool[] = {DHCP_MSG_TYPE, 1, DHCP_REQUEST,
+        DHCP_REQUEST_IP, 4, 192, 168, 2, 99, DHCP_END};
+    event = dhcp_decode_ctx_apply(&fix, opts_req_below_pool, sizeof(opts_req_below_pool));
+    TEST_ASSERT(event == E_BAD_REQUEST, "below-pool Option 50 returns E_BAD_REQUEST",
+        "got %d", event);
+
+    printf("Test 20: \"renewal REQUEST with ciaddr outside configured pool\"\n");
+    dhcp_decode_ctx_init(&fix, fastrg_ccb);
+    fix.dhcp_hdr->client_ip = rte_cpu_to_be_32(0xC0A802C8); /* 192.168.2.200 */
+    fix.ip_hdr->dst_addr = fix.dhcp_ccb.dhcp_server_ip;
+    event = dhcp_decode_ctx_apply(&fix, opts_req_renew, sizeof(opts_req_renew));
+    TEST_ASSERT(event == E_BAD_REQUEST, "out-of-pool ciaddr returns E_BAD_REQUEST",
         "got %d", event);
 
     printf("  All dhcp_decode tests done.\n");

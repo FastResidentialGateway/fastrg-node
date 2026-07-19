@@ -79,6 +79,8 @@ void dhcp_pool_init_by_user(dhcp_ccb_t *dhcp_ccb, U32 dhcp_server_ip,
         rte_be_to_cpu_32(ip_start) - rte_be_to_cpu_32(ip_end) + 1;
     U32 old_pool_len = dhcp_ccb->per_lan_user_pool_len;
     dhcp_ccb->dhcp_server_ip = dhcp_server_ip; //default dhcp server ip is user provided
+    dhcp_ccb->pool_start = rte_be_to_cpu_32(ip_start);
+    dhcp_ccb->pool_end = rte_be_to_cpu_32(ip_end);
     dhcp_ccb->subnet_mask = subnet_mask;
     FastRG_t *fastrg_ccb = dhcp_ccb->fastrg_ccb;
 

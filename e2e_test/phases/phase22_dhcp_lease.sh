@@ -6,6 +6,7 @@
 
 _P22_REMOTE_CLIENT=/tmp/fastrg_dhcp_client_sim.py
 _P22_VIRTUAL_MAC=02:e2:e2:00:00:11
+_P22_BOGUS_MAC=02:e2:e2:00:00:12
 _P22_REAL_LEASE=192.168.4.2
 _P22_LEASE_IP=""
 _P22_SERVER_ID=""
@@ -16,9 +17,15 @@ _p22_snippet() {
     printf '%s' "$1" | tr '\n' ' ' | cut -c 1-500 || true
 }
 
-_p22_run_client() {
+_p22_run_client_for_mac() {
+    local _mac="$1"
+    shift
     ssh_lan "python3 '${_P22_REMOTE_CLIENT}' --interface '${_P22_LAN_IFACE}' \
-        --mac '${_P22_VIRTUAL_MAC}' $*" 2>&1
+        --mac '${_mac}' $*" 2>&1
+}
+
+_p22_run_client() {
+    _p22_run_client_for_mac "$_P22_VIRTUAL_MAC" "$@"
 }
 
 _p22_get_ips() {
@@ -89,7 +96,7 @@ phase22_dhcp_lease() {
     local _ack="" _ack_type="" _ack_ip="" _lease_time="" _renewal_time="" _rebinding_time=""
     local _renew="" _renew_type="" _renew_ip=""
     local _rebind="" _rebind_type="" _rebind_ip=""
-    local _bogus_ip="" _bogus="" _bogus_type="" _bogus_yiaddr=""
+    local _bogus_ip="" _bogus="" _bogus_type=""
     local _release="" _step91_ok=1 _step92_ok=1 _step93_ok=1 _step94_ok=1
     local _detail="" _i
 
@@ -226,24 +233,23 @@ else:
     raise SystemExit(1)
 PY
         ) || _step93_ok=0
-        _bogus=$(_p22_run_client --timeout 8 --bogus-ip "$_bogus_ip" \
+        _bogus=$(_p22_run_client_for_mac "$_P22_BOGUS_MAC" --timeout 8 --bogus-ip "$_bogus_ip" \
             --server-id "$_P22_SERVER_ID" request-bogus) || _step93_ok=0
         _bogus_type=$(printf '%s' "$_bogus" | jq -r '.received // empty' 2>/dev/null || true)
-        _bogus_yiaddr=$(printf '%s' "$_bogus" | jq -r '.yiaddr // empty' 2>/dev/null || true)
-        # Product finding: decode_request() checks only the subnet, not the configured
-        # pool range, so the current server ACKs this same-subnet out-of-pool address.
-        [[ "$_bogus_type" == "ACK" && "$_bogus_yiaddr" == "$_bogus_ip" ]] || _step93_ok=0
+        # Regression check: decode_request() must reject a same-subnet address that is
+        # outside the configured pool range.
+        [[ "$_bogus_type" == "NAK" ]] || _step93_ok=0
         _p22_poll_state "$_expected_metric" "$_P22_LEASE_IP" 1 || _step93_ok=0
     else
         _step93_ok=0
     fi
 
     if [[ $_step93_ok -eq 1 ]]; then
-        pass "Step 95: out-of-pool REQUEST actual behavior" \
-            "server ACKed out-of-pool ${_bogus_ip} (product finding); response='$(_p22_snippet "$_bogus")'; lease metric=${_P22_OBS_METRIC} ips=${_P22_OBS_IPS} unchanged"
+        pass "Step 95: out-of-pool REQUEST rejected (NAK)" \
+            "server NAKed out-of-pool ${_bogus_ip}; response='$(_p22_snippet "$_bogus")'; lease metric=${_P22_OBS_METRIC} ips=${_P22_OBS_IPS} unchanged"
     else
-        fail "Step 95: out-of-pool REQUEST actual behavior" \
-            "expected current ACK behavior for bogus='${_bogus_ip}'; response='$(_p22_snippet "$_bogus")'; metric='${_P22_OBS_METRIC:-}' ips='${_P22_OBS_IPS:-}'"
+        fail "Step 95: out-of-pool REQUEST rejected (NAK)" \
+            "expected NAK for bogus='${_bogus_ip}'; response='$(_p22_snippet "$_bogus")'; metric='${_P22_OBS_METRIC:-}' ips='${_P22_OBS_IPS:-}'"
     fi
 
     if [[ $_step91_ok -eq 1 ]]; then
