@@ -13,6 +13,7 @@
 #include "../pppd/pppd.h"
 
 #define DHCP_OPTIONS_BUFFER_SIZE 256
+#define DHCP_BOOTP_FLAG_BROADCAST 0x8000 /* RFC 2131: the BROADCAST bit in the bootp flags field */
 
 typedef struct dhcp_opt {
     U8 opt_type;
@@ -40,7 +41,21 @@ typedef struct dhcp_hdr {
     dhcp_opt_t opt_ptr[0];                // options: Variable length options field
 }dhcp_hdr_t;
 
-static inline BOOL is_client_in_pool(dhcp_ccb_t *dhcp_ccb, 
+/**
+ * @fn dhcp_reply_dst_broadcast
+ * @brief Retarget an assembled DHCP reply to L2/L3 broadcast. Applied after
+ *        all header/option fields that read the client's unicast MAC, and
+ *        before the IPv4 checksum is computed.
+ * @param dhcp_ccb dhcp control block whose eth/ip reply headers are rewritten
+ * @return void
+ */
+static void dhcp_reply_dst_broadcast(dhcp_ccb_t *dhcp_ccb)
+{
+    memset(dhcp_ccb->eth_hdr->dst_addr.addr_bytes, 0xff, RTE_ETHER_ADDR_LEN);
+    dhcp_ccb->ip_hdr->dst_addr = RTE_IPV4_BROADCAST;
+}
+
+static inline BOOL is_client_in_pool(dhcp_ccb_t *dhcp_ccb,
     struct rte_ether_addr *mac_addr, int cur_tmp_pool_index)
 {
     int i;
@@ -373,6 +388,11 @@ STATUS build_dhcp_offer(dhcp_ccb_per_lan_user_t *per_lan_user, struct rte_ether_
 
     dhcp_ccb->udp_hdr->dgram_len = rte_cpu_to_be_16(dhcp_ccb->udp_hdr->dgram_len);
     dhcp_ccb->ip_hdr->total_length = rte_cpu_to_be_16(dhcp_ccb->ip_hdr->total_length);
+    /* RFC 2131: a client that set the BROADCAST flag cannot receive unicast
+     * replies before it is configured. */
+    if (per_lan_user->dhcp_hdr->bootp_flag & rte_cpu_to_be_16(DHCP_BOOTP_FLAG_BROADCAST))
+        dhcp_reply_dst_broadcast(dhcp_ccb);
+
     dhcp_ccb->ip_hdr->hdr_checksum = rte_ipv4_cksum(dhcp_ccb->ip_hdr);
 
     return SUCCESS;
@@ -479,6 +499,11 @@ STATUS build_dhcp_ack(dhcp_ccb_per_lan_user_t *per_lan_user, struct rte_ether_ad
 
     dhcp_ccb->udp_hdr->dgram_len = rte_cpu_to_be_16(dhcp_ccb->udp_hdr->dgram_len);
     dhcp_ccb->ip_hdr->total_length = rte_cpu_to_be_16(dhcp_ccb->ip_hdr->total_length);
+    /* RFC 2131: a client that set the BROADCAST flag cannot receive unicast
+     * replies before it is configured. */
+    if (per_lan_user->dhcp_hdr->bootp_flag & rte_cpu_to_be_16(DHCP_BOOTP_FLAG_BROADCAST))
+        dhcp_reply_dst_broadcast(dhcp_ccb);
+
     dhcp_ccb->ip_hdr->hdr_checksum = rte_ipv4_cksum(dhcp_ccb->ip_hdr);
 
     FastRG_LOG(INFO, dhcp_ccb->log_fp, (U8 *)dhcp_ccb, DHCPLOGMSG, "DHCP ACK built\n");
@@ -549,6 +574,10 @@ STATUS build_dhcp_nak(dhcp_ccb_per_lan_user_t *per_lan_user, struct rte_ether_ad
 
     dhcp_ccb->udp_hdr->dgram_len = rte_cpu_to_be_16(dhcp_ccb->udp_hdr->dgram_len);
     dhcp_ccb->ip_hdr->total_length = rte_cpu_to_be_16(dhcp_ccb->ip_hdr->total_length);
+    /* RFC 2131: when giaddr is zero the server broadcasts DHCPNAK, since the
+     * declined client may not have an address the L2 path can deliver to. */
+    dhcp_reply_dst_broadcast(dhcp_ccb);
+
     dhcp_ccb->ip_hdr->hdr_checksum = rte_ipv4_cksum(dhcp_ccb->ip_hdr);
 
     return SUCCESS;
