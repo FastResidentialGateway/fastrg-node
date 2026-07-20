@@ -153,6 +153,24 @@ phase22_dhcp_lease() {
     # PF only delivers unicast frames whose dst MAC is registered in a VF's
     # filter table. Register the virtual MAC via a throwaway macvlan on the
     # VLAN's parent device (the VF); broadcast replies need no registration.
+    #
+    # Why a macvlan can add a MAC to the VF's hardware filter (Linux kernel
+    # source, the peer runs kernel ixgbevf/ixgbe):
+    #   1. drivers/net/macvlan.c: macvlan_open() -> dev_uc_add(lowerdev, ...)
+    #      — bringing the macvlan up adds its MAC to the lower device's
+    #      unicast address list.
+    #   2. drivers/net/ethernet/intel/ixgbevf/ixgbevf_main.c:
+    #      ixgbevf_set_rx_mode() -> ixgbevf_write_uc_addr_list() ->
+    #      hw->mac.ops.set_uc_addr (ixgbevf/vf.c) — the VF driver forwards
+    #      that list to the PF as IXGBE_VF_SET_MACVLAN mailbox messages; the
+    #      guest never touches the hardware filter itself.
+    #   3. drivers/net/ethernet/intel/ixgbe/ixgbe_sriov.c:
+    #      ixgbe_set_vf_macvlan_msg() -> ixgbe_set_vf_macvlan() — the PF
+    #      validates the request and programs the MAC into a RAR filter
+    #      entry mapped to this VF's pool. The PF may deny it ("...but is
+    #      administratively denied") when the admin pinned the VF MAC via
+    #      "ip link set <pf> vf N mac" (pf_set_mac), so this technique
+    #      requires the VF MAC to be auto-assigned (as on this bench).
     if [[ $_step91_ok -eq 1 ]]; then
         _p22_parent_if=$(ssh_lan "ip -o link show '${_P22_LAN_IFACE}'" 2>/dev/null | \
             grep -oE "${_P22_LAN_IFACE}@[^:]+" | cut -d@ -f2 || true)
