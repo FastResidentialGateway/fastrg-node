@@ -7,6 +7,7 @@
 _P22_REMOTE_CLIENT=/tmp/fastrg_dhcp_client_sim.py
 _P22_VIRTUAL_MAC=02:e2:e2:00:00:11
 _P22_BOGUS_MAC=02:e2:e2:00:00:12
+_P22_MACVLAN_IF=mv_p22dhcp
 _P22_REAL_LEASE=192.168.4.2
 _P22_LEASE_IP=""
 _P22_SERVER_ID=""
@@ -81,7 +82,8 @@ _cleanup_phase22_dhcp_lease() {
     set +eu
     _p22_release_best_effort || true
     ssh_lan "pkill -TERM -f '^python3 ${_P22_REMOTE_CLIENT}( |$)' 2>/dev/null || true; \
-        rm -f '${_P22_REMOTE_CLIENT}'" >/dev/null 2>&1 || true
+        rm -f '${_P22_REMOTE_CLIENT}'; \
+        ip link del '${_P22_MACVLAN_IF}' 2>/dev/null || true" >/dev/null 2>&1 || true
     return 0
 }
 
@@ -98,7 +100,7 @@ phase22_dhcp_lease() {
     local _rebind="" _rebind_type="" _rebind_ip=""
     local _bogus_ip="" _bogus="" _bogus_type=""
     local _release="" _step91_ok=1 _step92_ok=1 _step93_ok=1 _step94_ok=1
-    local _detail="" _i
+    local _detail="" _i _p22_parent_if=""
 
     _hsi=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/${USER_ID}" 2>/dev/null || true)
     _vlan=$(printf '%s' "$_hsi" | jq -r '.config.vlan_id // empty' 2>/dev/null || true)
@@ -144,6 +146,41 @@ phase22_dhcp_lease() {
         scp $SSH_OPTS "${GRPC_CLIENT_DIR}/dhcp_client_sim.py" \
             "root@${LAN_HOST}:${_P22_REMOTE_CLIENT}" >/dev/null 2>&1 || _step91_ok=0
         ssh_lan "chmod 700 '${_P22_REMOTE_CLIENT}'" >/dev/null 2>&1 || _step91_ok=0
+    fi
+
+    # The virtual client must also be able to RECEIVE unicast: the renew ACK
+    # is unicast to ciaddr per RFC 2131, and on the VF-based LAN topology the
+    # PF only delivers unicast frames whose dst MAC is registered in a VF's
+    # filter table. Register the virtual MAC via a throwaway macvlan on the
+    # VLAN's parent device (the VF); broadcast replies need no registration.
+    #
+    # Why a macvlan can add a MAC to the VF's hardware filter (Linux kernel
+    # source, the peer runs kernel ixgbevf/ixgbe):
+    #   1. drivers/net/macvlan.c: macvlan_open() -> dev_uc_add(lowerdev, ...)
+    #      — bringing the macvlan up adds its MAC to the lower device's
+    #      unicast address list.
+    #   2. drivers/net/ethernet/intel/ixgbevf/ixgbevf_main.c:
+    #      ixgbevf_set_rx_mode() -> ixgbevf_write_uc_addr_list() ->
+    #      hw->mac.ops.set_uc_addr (ixgbevf/vf.c) — the VF driver forwards
+    #      that list to the PF as IXGBE_VF_SET_MACVLAN mailbox messages; the
+    #      guest never touches the hardware filter itself.
+    #   3. drivers/net/ethernet/intel/ixgbe/ixgbe_sriov.c:
+    #      ixgbe_set_vf_macvlan_msg() -> ixgbe_set_vf_macvlan() — the PF
+    #      validates the request and programs the MAC into a RAR filter
+    #      entry mapped to this VF's pool. The PF may deny it ("...but is
+    #      administratively denied") when the admin pinned the VF MAC via
+    #      "ip link set <pf> vf N mac" (pf_set_mac), so this technique
+    #      requires the VF MAC to be auto-assigned (as on this bench).
+    if [[ $_step91_ok -eq 1 ]]; then
+        _p22_parent_if=$(ssh_lan "ip -o link show '${_P22_LAN_IFACE}'" 2>/dev/null | \
+            grep -oE "${_P22_LAN_IFACE}@[^:]+" | cut -d@ -f2 || true)
+        if [[ -z "$_p22_parent_if" ]] || \
+           ! ssh_lan "ip link del '${_P22_MACVLAN_IF}' 2>/dev/null; \
+                ip link add '${_P22_MACVLAN_IF}' link '${_p22_parent_if}' \
+                    address '${_P22_VIRTUAL_MAC}' type macvlan mode private && \
+                ip link set '${_P22_MACVLAN_IF}' up" >/dev/null 2>&1; then
+            _step91_ok=0
+        fi
     fi
 
     if [[ $_step91_ok -eq 1 ]]; then

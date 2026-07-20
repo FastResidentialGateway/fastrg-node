@@ -757,6 +757,127 @@ void test_build_dhcp_ack_inform(FastRG_t *fastrg_ccb)
     printf("  All build_dhcp_ack_inform tests done.\n");
 }
 
+/* ============== RFC 2131 BROADCAST-flag reply addressing tests ============== */
+
+typedef struct bcast_fix {
+    U8 buffer[2048];
+    struct rte_ether_hdr *eth_hdr;
+    vlan_header_t *vlan_hdr;
+    struct rte_ipv4_hdr *ip_hdr;
+    struct rte_udp_hdr *udp_hdr;
+    dhcp_hdr_t *dhcp_hdr;
+    dhcp_ccb_t dhcp_ccb;
+    dhcp_ccb_per_lan_user_t per_lan_user;
+    dhcp_ccb_per_lan_user_t pool_user;
+    dhcp_ccb_per_lan_user_t *pool_array[1];
+    struct rte_ether_addr client_mac;
+    struct rte_ether_addr lan_mac;
+} bcast_fix_t;
+
+static void setup_bcast_fix(bcast_fix_t *fix, FastRG_t *fastrg_ccb, U16 bootp_flag_be)
+{
+    memset(fix, 0, sizeof(*fix));
+
+    fix->eth_hdr = (struct rte_ether_hdr *)fix->buffer;
+    fix->eth_hdr->src_addr.addr_bytes[0] = 0xAA;
+    fix->eth_hdr->src_addr.addr_bytes[1] = 0xBB;
+    fix->eth_hdr->src_addr.addr_bytes[2] = 0xCC;
+    fix->eth_hdr->src_addr.addr_bytes[3] = 0xDD;
+    fix->eth_hdr->src_addr.addr_bytes[4] = 0xEE;
+    fix->eth_hdr->src_addr.addr_bytes[5] = 0xFF;
+    fix->eth_hdr->ether_type = rte_cpu_to_be_16(VLAN);
+    fix->client_mac = fix->eth_hdr->src_addr;
+
+    fix->vlan_hdr = (vlan_header_t *)(fix->eth_hdr + 1);
+    fix->vlan_hdr->tci_union.tci_value = rte_cpu_to_be_16(0x0064);
+    fix->vlan_hdr->next_proto = rte_cpu_to_be_16(ETH_P_IP);
+
+    fix->ip_hdr = (struct rte_ipv4_hdr *)(fix->vlan_hdr + 1);
+    fix->ip_hdr->version_ihl = 0x45;
+    fix->ip_hdr->time_to_live = 64;
+    fix->ip_hdr->next_proto_id = IPPROTO_UDP;
+
+    fix->udp_hdr = (struct rte_udp_hdr *)(fix->ip_hdr + 1);
+
+    fix->dhcp_hdr = (dhcp_hdr_t *)(fix->udp_hdr + 1);
+    fix->dhcp_hdr->msg_type = BOOT_REQUEST;
+    fix->dhcp_hdr->hwr_type = 1;
+    fix->dhcp_hdr->hwr_addr_len = 6;
+    fix->dhcp_hdr->transaction_id = rte_cpu_to_be_32(0x12345678);
+    fix->dhcp_hdr->bootp_flag = bootp_flag_be;
+    fix->dhcp_hdr->mac_addr = fix->client_mac;
+    fix->dhcp_hdr->magic_cookie = rte_cpu_to_be_32(DHCP_MAGIC_COOKIE);
+
+    fix->pool_user.ip_pool.ip_addr = rte_cpu_to_be_32(0xC0A802AE);
+    fix->pool_user.ip_pool.used = FALSE;
+    fix->pool_array[0] = &fix->pool_user;
+
+    fix->dhcp_ccb.eth_hdr = fix->eth_hdr;
+    fix->dhcp_ccb.vlan_hdr = fix->vlan_hdr;
+    fix->dhcp_ccb.ip_hdr = fix->ip_hdr;
+    fix->dhcp_ccb.udp_hdr = fix->udp_hdr;
+    fix->dhcp_ccb.dhcp_server_ip = rte_cpu_to_be_32(0xC0A80201);
+    fix->dhcp_ccb.subnet_mask = rte_cpu_to_be_32(0xFFFFFF00);
+    fix->dhcp_ccb.per_lan_user_pool = fix->pool_array;
+    fix->dhcp_ccb.per_lan_user_pool_len = 1;
+    fix->dhcp_ccb.fastrg_ccb = fastrg_ccb;
+
+    fix->per_lan_user.dhcp_hdr = fix->dhcp_hdr;
+    fix->per_lan_user.dhcp_ccb = &fix->dhcp_ccb;
+
+    fix->lan_mac = (struct rte_ether_addr){
+        .addr_bytes = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66}};
+}
+
+void test_dhcp_reply_broadcast_flag(FastRG_t *fastrg_ccb)
+{
+    printf("\nTesting RFC 2131 BROADCAST-flag reply addressing:\n");
+    printf("=========================================\n\n");
+
+    bcast_fix_t fix;
+
+    printf("Test 1: \"OFFER with BROADCAST flag is broadcast\"\n");
+    setup_bcast_fix(&fix, fastrg_ccb, rte_cpu_to_be_16(0x8000));
+    TEST_ASSERT(build_dhcp_offer(&fix.per_lan_user, &fix.lan_mac) == SUCCESS,
+        "build_dhcp_offer returned SUCCESS", NULL);
+    TEST_ASSERT(rte_is_broadcast_ether_addr(&fix.eth_hdr->dst_addr),
+        "Ethernet dst is ff:ff:ff:ff:ff:ff", "got %02x:%02x:...",
+        fix.eth_hdr->dst_addr.addr_bytes[0], fix.eth_hdr->dst_addr.addr_bytes[1]);
+    TEST_ASSERT(fix.ip_hdr->dst_addr == RTE_IPV4_BROADCAST,
+        "IP dst is 255.255.255.255", "got 0x%08x", rte_be_to_cpu_32(fix.ip_hdr->dst_addr));
+
+    printf("Test 2: \"OFFER without BROADCAST flag stays unicast\"\n");
+    setup_bcast_fix(&fix, fastrg_ccb, 0);
+    TEST_ASSERT(build_dhcp_offer(&fix.per_lan_user, &fix.lan_mac) == SUCCESS,
+        "build_dhcp_offer returned SUCCESS", NULL);
+    TEST_ASSERT(rte_is_same_ether_addr(&fix.eth_hdr->dst_addr, &fix.client_mac),
+        "Ethernet dst is the client MAC", NULL);
+    TEST_ASSERT(fix.ip_hdr->dst_addr == rte_cpu_to_be_32(0xC0A802AE),
+        "IP dst is the assigned pool address", "got 0x%08x",
+        rte_be_to_cpu_32(fix.ip_hdr->dst_addr));
+
+    printf("Test 3: \"ACK with BROADCAST flag is broadcast\"\n");
+    setup_bcast_fix(&fix, fastrg_ccb, rte_cpu_to_be_16(0x8000));
+    fix.dhcp_hdr->ur_client_ip = rte_cpu_to_be_32(0xC0A802AE);
+    TEST_ASSERT(build_dhcp_ack(&fix.per_lan_user, &fix.lan_mac) == SUCCESS,
+        "build_dhcp_ack returned SUCCESS", NULL);
+    TEST_ASSERT(rte_is_broadcast_ether_addr(&fix.eth_hdr->dst_addr),
+        "Ethernet dst is ff:ff:ff:ff:ff:ff", NULL);
+    TEST_ASSERT(fix.ip_hdr->dst_addr == RTE_IPV4_BROADCAST,
+        "IP dst is 255.255.255.255", "got 0x%08x", rte_be_to_cpu_32(fix.ip_hdr->dst_addr));
+
+    printf("Test 4: \"NAK is broadcast even without the flag\"\n");
+    setup_bcast_fix(&fix, fastrg_ccb, 0);
+    TEST_ASSERT(build_dhcp_nak(&fix.per_lan_user, &fix.lan_mac) == SUCCESS,
+        "build_dhcp_nak returned SUCCESS", NULL);
+    TEST_ASSERT(rte_is_broadcast_ether_addr(&fix.eth_hdr->dst_addr),
+        "Ethernet dst is ff:ff:ff:ff:ff:ff", NULL);
+    TEST_ASSERT(fix.ip_hdr->dst_addr == RTE_IPV4_BROADCAST,
+        "IP dst is 255.255.255.255", "got 0x%08x", rte_be_to_cpu_32(fix.ip_hdr->dst_addr));
+
+    printf("  All BROADCAST-flag reply addressing tests passed!\n");
+}
+
 void test_dhcp_codec(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 {
     printf("\n");
@@ -772,6 +893,7 @@ void test_dhcp_codec(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_build_dhcp_nak(fastrg_ccb);
     test_dhcp_decode(fastrg_ccb);
     test_build_dhcp_ack_inform(fastrg_ccb);
+    test_dhcp_reply_broadcast_flag(fastrg_ccb);
 
     printf("\n");
     printf("╔════════════════════════════════════════════════════════════╗\n");
