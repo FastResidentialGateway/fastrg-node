@@ -234,6 +234,18 @@ phase0_setup() {
     fi
 
     # ------------------------------------------------------------------
+    # The LAN peer holds a VF of enp1s0f0 on the WAN host, and the
+    # dhcp_client_sim.py-based phases (22/24) emulate virtual clients with
+    # arbitrary source MACs — the PF's MAC anti-spoof would drop their TX.
+    # The setting resets on host reboot or ixgbe reload, so re-assert it.
+    # ------------------------------------------------------------------
+    if ssh_wan "ip link set enp1s0f0 vf 0 spoofchk off" >/dev/null 2>&1; then
+        info "Preflight: LAN PF VF 0 spoofchk=off asserted."
+    else
+        warn "Preflight: failed to disable VF spoofchk on ${WAN_HOST}; phases 22/24 may fail."
+    fi
+
+    # ------------------------------------------------------------------
     # Ensure fastrg daemon is running; start it if not
     # ------------------------------------------------------------------
     info "Checking if fastrg daemon is running on ${FASTRG_NODE}..."
