@@ -134,6 +134,45 @@ void test_etcd_remove_event()
     TEST_ASSERT(is_found == FALSE, "Event removed before confirmation is not found", "got %d", is_found);
 }
 
+void test_user_count_max_validation(FastRG_t *fastrg_ccb)
+{
+    printf("\nTesting user_count_changed_callback MaxUserCount validation:\n");
+    printf("=========================================\n\n");
+
+    U16 saved_max = fastrg_ccb->max_user_count;
+    U16 saved_count = fastrg_ccb->user_count;
+    fastrg_ccb->max_user_count = 10;
+    fastrg_ccb->user_count = 10;
+
+    user_count_config_t cfg = {0};
+
+    printf("Test 1: count above configured MaxUserCount is rejected\n");
+    cfg.user_count = 11;
+    STATUS ret = user_count_changed_callback("test-node", &cfg,
+        HSI_ACTION_UPDATE, 1, fastrg_ccb);
+    TEST_ASSERT(ret == ERROR, "count above MaxUserCount returns ERROR",
+        "got %d", ret);
+    TEST_ASSERT(fastrg_ccb->user_count == 10,
+        "local user_count unchanged after rejection",
+        "got %u", fastrg_ccb->user_count);
+
+    printf("Test 2: count equal to MaxUserCount (== current) is accepted\n");
+    cfg.user_count = 10;
+    ret = user_count_changed_callback("test-node", &cfg,
+        HSI_ACTION_UPDATE, 2, fastrg_ccb);
+    TEST_ASSERT(ret == SUCCESS, "count at MaxUserCount returns SUCCESS",
+        "got %d", ret);
+
+    printf("Test 3: non-positive count is rejected\n");
+    cfg.user_count = 0;
+    ret = user_count_changed_callback("test-node", &cfg,
+        HSI_ACTION_UPDATE, 3, fastrg_ccb);
+    TEST_ASSERT(ret == ERROR, "count of zero returns ERROR", "got %d", ret);
+
+    fastrg_ccb->max_user_count = saved_max;
+    fastrg_ccb->user_count = saved_count;
+}
+
 void test_etcd_integration(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 {
     printf("\n");
@@ -146,6 +185,7 @@ void test_etcd_integration(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pa
 
     test_etcd_mark_pending_event();
     test_etcd_remove_event();
+    test_user_count_max_validation(fastrg_ccb);
 
     printf("\n");
     printf("╔════════════════════════════════════════════════════════════╗\n");

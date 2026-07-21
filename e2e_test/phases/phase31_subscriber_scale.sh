@@ -104,7 +104,7 @@ phase31_subscriber_scale() {
     if [[ ! "$_max" =~ ^[0-9]+$ || "$_max" -lt 2 ]]; then
         _issue123="cannot read a valid MaxUserCount from node config: ${_config_line:-empty}"
         fail "Step 123: expand subscriber slots to configured max" "$_issue123"
-        fail "Step 124: observe configured max+1 behavior" "precondition failed: $_issue123"
+        fail "Step 124: node rejects count beyond configured max" "precondition failed: $_issue123"
         fail "Step 125: shrink subscriber slots to canonical count" "precondition failed: $_issue123"
         fail "Step 126: data plane healthy after resize" "precondition failed: $_issue123"
         _cleanup_phase31_subscriber_scale
@@ -156,18 +156,41 @@ phase31_subscriber_scale() {
         fail "Step 123: expand subscriber slots to configured max" "$_issue123"
     fi
 
-    # Current SDN behavior: the controller/etcd path validates only count > 0,
-    # not the node's configured MaxUserCount. Because the mempool is rounded up
-    # to the next power of two, max+1 is accepted while a spare object exists.
+    # The node validates the configured MaxUserCount on its etcd apply path:
+    # max+1 lands in etcd (the controller-side validation is tracked in the
+    # controller repo), but the node refuses to apply it — the local count and
+    # the mempool stay at max, and the drift is visible instead of silently
+    # spending the mempool's power-of-two slack. Once the controller validates
+    # too, this step flips again: the REST call itself is rejected and etcd
+    # never holds the over-max value.
     _reply=$(fastrg_grpc set_subscriber_count "$_over" 2>/dev/null || true)
     _status=$(printf '%s' "$_reply" | jq -r '.status // empty' 2>/dev/null || true)
     [[ -n "$_status" ]] || _issue124="set_subscriber_count(${_over}) returned no status: ${_reply:-empty}"
-    if ! _p31_wait_count_state "$_over" "$_timeout"; then
-        _issue124="${_issue124:+${_issue124}; }current max+1 acceptance did not converge (local=${_P31_LAST_LOCAL_COUNT:-empty}, etcd=${_P31_LAST_ETCD_COUNT:-empty})"
+    # Wait for the over-max value to land in etcd, then confirm the node holds
+    # the line: local count must still be max after a settle window.
+    _over_in_etcd=0
+    for _i in $(seq 1 "$_timeout"); do
+        _p31_read_count_state
+        if [[ "$_P31_LAST_ETCD_COUNT" == "$_over" ]]; then
+            _over_in_etcd=1
+            break
+        fi
+        sleep 1
+    done
+    if [[ $_over_in_etcd -ne 1 ]]; then
+        _issue124="${_issue124:+${_issue124}; }etcd did not receive the over-max count (etcd=${_P31_LAST_ETCD_COUNT:-empty})"
+    fi
+    sleep 5
+    _p31_read_count_state
+    if [[ "$_P31_LAST_LOCAL_COUNT" != "$_max" ]]; then
+        _issue124="${_issue124:+${_issue124}; }node did not hold local count at max (local=${_P31_LAST_LOCAL_COUNT:-empty}, expected ${_max})"
     fi
     if _p31_read_ppp_mempool; then
         _over_avail=$_P31_MP_AVAIL
         _over_in_use=$_P31_MP_IN_USE
+        if [[ "$_over_in_use" != "$_at_max_in_use" ]]; then
+            _issue124="${_issue124:+${_issue124}; }mempool in_use changed after rejected max+1 (${_at_max_in_use} -> ${_over_in_use})"
+        fi
     else
         _issue124="${_issue124:+${_issue124}; }cannot read ppp_ccb_pool after max+1"
     fi
@@ -176,10 +199,10 @@ phase31_subscriber_scale() {
     fi
 
     if [[ -z "$_issue124" ]]; then
-        pass "Step 124: observe configured max+1 behavior" \
-            "existing defect reproduced: configured max=${_max}, accepted=${_over}; local/etcd=${_over}; ppp_ccb_pool avail=${_over_avail}, in_use=${_over_in_use}; node responsive"
+        pass "Step 124: node rejects count beyond configured max" \
+            "configured max=${_max}: etcd holds ${_over} (drift visible, controller-side validation pending), node held local=${_max}, ppp_ccb_pool in_use=${_over_in_use} unchanged; node responsive"
     else
-        fail "Step 124: observe configured max+1 behavior" "$_issue124"
+        fail "Step 124: node rejects count beyond configured max" "$_issue124"
     fi
 
     _reply=$(fastrg_grpc set_subscriber_count 2 2>/dev/null || true)
