@@ -247,13 +247,60 @@ typedef STATUS (*etcd_mutate_fn_t)(const char *current_json, char **out_value,
 etcd_status_t etcd_client_cas_put(const char *key, etcd_mutate_fn_t mutate_fn,
     void *user_data, int64_t *out_revision);
 
-/* Put HSI config for a node/user.
- * key: configs/{nodeId}/hsi/{userId}
- * value: JSON matching HSIConfigWithMetadata. PPPoE desired state is carried in
- *        config->desire_status ("connect"/"disconnect").
+/* Offline-queue field-write kinds. In SDN mode the node is read-only on etcd
+ * (config writes go via the controller); these kinds exist only for the
+ * etcd-down path: the node applies the change locally, queues it, and the
+ * flush replays the single-field edit on the freshest etcd value under CAS
+ * so it never clobbers a concurrent controller edit. */
+#define ETCD_FIELD_KIND_DNS_PROXY     "dns_proxy"      /* value: "true"/"false" */
+#define ETCD_FIELD_KIND_TCP_CONNTRACK "tcp_conntrack"  /* value: "true"/"false" */
+#define ETCD_FIELD_KIND_SNAT_UPSERT   "snat_upsert"    /* value: {"eport","dip","dport"} */
+#define ETCD_FIELD_KIND_SNAT_REMOVE   "snat_remove"    /* value: eport string */
+#define ETCD_FIELD_KIND_DNS_ADD       "dns_add"        /* value: {"domain","ip","ttl"} */
+#define ETCD_FIELD_KIND_DNS_DEL       "dns_del"        /* value: domain string */
+
+/**
+ * @fn etcd_client_field_merge
+ *
+ * @brief Pure JSON merge applying one queued field-level edit onto the
+ *        current etcd value (see the kind defines for value formats). HSI
+ *        kinds require an existing config object; dns_add creates the record
+ *        array when absent; dns_del on an absent key fails (nothing to
+ *        delete). Exposed for direct unit testing; the offline-queue flush
+ *        runs it inside cas_put on the freshest value.
+ * @param kind
+ *        One of the ETCD_FIELD_KIND_* strings
+ * @param current_json
+ *        Current etcd value, or NULL when the key is absent
+ * @param value
+ *        The queued field value (format per kind)
+ * @param out_json
+ *        Output: malloc'd merged JSON on SUCCESS; caller frees
+ * @return
+ *        SUCCESS or ERROR (merge not applicable / bad input)
  */
-etcd_status_t etcd_client_put_hsi_config(const char *node_id, const char *user_id,
-    const hsi_config_t *config, const char *updated_by, int64_t *revision);
+STATUS etcd_client_field_merge(const char *kind, const char *current_json,
+    const char *value, char **out_json);
+
+/**
+ * @fn etcd_client_queue_field_write
+ *
+ * @brief Queue a field-level write for CAS flush on etcd reconnect. The key
+ *        is derived from the kind: DNS record kinds target
+ *        configs/{node}/dns/{user}, the rest configs/{node}/hsi/{user}.
+ * @param node_id
+ *        Node UUID
+ * @param user_id
+ *        User identifier
+ * @param kind
+ *        One of the ETCD_FIELD_KIND_* strings
+ * @param value
+ *        The field value (format per kind)
+ * @return
+ *        ETCD_SUCCESS or error code
+ */
+etcd_status_t etcd_client_queue_field_write(const char *node_id, const char *user_id,
+    const char *kind, const char *value);
 /**
  * @fn etcd_client_delete_hsi_config
  * 
@@ -286,22 +333,6 @@ etcd_status_t etcd_client_delete_hsi_config(const char *node_id,
  */
 etcd_status_t etcd_client_get_hsi_config(const char *node_id,
     const char *user_id, hsi_config_full_t *output);
-
-/**
- * @fn etcd_client_put_subscriber_count
- * 
- * @brief Set subscriber count config to etcd
- * @param node_id
- *        Node UUID
- * @param subscriber_count_str
- *        Subscriber count to set
- * @param updated_by
- *        Identifier of who updated this config
- * @return
- *        ETCD_SUCCESS or error code
- */
-etcd_status_t etcd_client_put_subscriber_count(const char *node_id, 
-    const char *subscriber_count_str, const char *updated_by);
 
 /**
  * @fn etcd_client_get_subscriber_count
@@ -339,39 +370,6 @@ etcd_status_t etcd_client_load_existing_configs(const char *node_uuid,
     user_count_changed_callback_t user_count_callback,
     dns_record_callback_t dns_record_callback,
     void *user_data);
-
-/**
- * @fn etcd_client_put_dns_record
- * 
- * @brief Put a DNS static record to etcd
- *        key: configs/{nodeId}/{userId}/dns/{domain}
- * @param node_id 
- *      Node UUID
- * @param user_id
- *      User identifier
- * @param record
- *      DNS record to store
- * @return
- *      ETCD_SUCCESS or error code
- */
-etcd_status_t etcd_client_put_dns_record(const char *node_id, const char *user_id,
-    const dns_record_config_t *record);
-
-/**
- * @fn etcd_client_delete_dns_record
- * 
- * @brief Delete a DNS static record from etcd
- * @param node_id
- *      Node UUID
- * @param user_id
- *      User identifier
- * @param domain
- *      Domain name to delete
- * @return
- *      ETCD_SUCCESS or error code
- */
-etcd_status_t etcd_client_delete_dns_record(const char *node_id, const char *user_id,
-    const char *domain);
 
 /**
  * @fn etcd_client_load_dns_records

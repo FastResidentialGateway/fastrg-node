@@ -2,6 +2,7 @@
 #include "../../../src/fastrg.h"
 
 #include <etcd/Client.hpp>
+#include <jsoncpp/json/json.h>
 
 #include <chrono>
 #include <cstdlib>
@@ -217,6 +218,139 @@ static void test_mutate_abort(etcd::Client& client)
     remove_key(client, key);
 }
 
+/* ---- etcd_client_field_merge cases (pure JSON merge used by the offline
+ * queue flush; no etcd connection required) ---- */
+
+static const char *MERGE_SEED_HSI =
+    "{\"config\":{\"user_id\":\"7\",\"vlan_id\":\"123\","
+    "\"account_name\":\"cas-acct\",\"password\":\"cas-pw\","
+    "\"dhcp_addr_pool\":\"192.168.9.2-192.168.9.10\","
+    "\"dhcp_subnet\":\"255.255.255.0\",\"dhcp_gateway\":\"192.168.9.1\","
+    "\"dns_proxy_enable\":true,\"tcp_conntrack_enable\":true,"
+    "\"desire_status\":\"connect\","
+    "\"port-mapping\":[{\"index\":\"0\",\"eport\":\"8080\","
+    "\"dip\":\"192.168.9.5\",\"dport\":\"80\"}]},"
+    "\"metadata\":{\"node\":\"cas-test-node\",\"resourceVersion\":\"\","
+    "\"updatedBy\":\"seed\",\"updatedAt\":\"2026-01-01T00:00:00Z\"}}";
+
+static bool parse_json(const std::string& text, Json::Value& out)
+{
+    Json::Reader reader;
+    return reader.parse(text, out);
+}
+
+static std::string run_merge(const std::string& assertion, const char *kind,
+    const char *current, const char *value)
+{
+    char *out = NULL;
+    STATUS s = etcd_client_field_merge(kind, current, value, &out);
+    expect_equal(assertion + " status", SUCCESS, s);
+    std::string result = (s == SUCCESS && out) ? out : "";
+    free(out);
+    return result;
+}
+
+static void test_field_merge_preserves_untouched_fields()
+{
+    std::cout << "Case 6: field merge flips one flag, preserves the rest" << std::endl;
+    Json::Value root;
+    expect_true("case 6 result parses", parse_json(
+        run_merge("case 6 dns_proxy", ETCD_FIELD_KIND_DNS_PROXY,
+            MERGE_SEED_HSI, "false"), root));
+    const Json::Value& cfg = root["config"];
+    expect_equal("case 6 patched flag", false, cfg["dns_proxy_enable"].asBool());
+    expect_equal("case 6 vlan preserved", std::string("123"), cfg["vlan_id"].asString());
+    expect_equal("case 6 account preserved", std::string("cas-acct"), cfg["account_name"].asString());
+    expect_equal("case 6 desire_status preserved", std::string("connect"), cfg["desire_status"].asString());
+    expect_equal("case 6 tcp flag preserved", true, cfg["tcp_conntrack_enable"].asBool());
+    expect_equal("case 6 mapping count preserved", 1u, cfg["port-mapping"].size());
+    expect_equal("case 6 metadata preserved", std::string("seed"),
+        root["metadata"]["updatedBy"].asString());
+
+    Json::Value root2;
+    expect_true("case 6 tcp result parses", parse_json(
+        run_merge("case 6 tcp_conntrack", ETCD_FIELD_KIND_TCP_CONNTRACK,
+            MERGE_SEED_HSI, "false"), root2));
+    expect_equal("case 6 tcp patched", false,
+        root2["config"]["tcp_conntrack_enable"].asBool());
+    expect_equal("case 6 tcp leaves dns flag", true,
+        root2["config"]["dns_proxy_enable"].asBool());
+
+    // HSI kinds require an existing config: absent key must fail.
+    char *out = NULL;
+    expect_equal("case 6 absent config fails", ERROR,
+        etcd_client_field_merge(ETCD_FIELD_KIND_DNS_PROXY, NULL, "true", &out));
+    free(out);
+}
+
+static void test_field_merge_port_mappings()
+{
+    std::cout << "Case 7: field merge upserts/removes port mappings" << std::endl;
+    Json::Value root;
+    expect_true("case 7 upsert parses", parse_json(
+        run_merge("case 7 upsert", ETCD_FIELD_KIND_SNAT_UPSERT, MERGE_SEED_HSI,
+            "{\"index\":\"0\",\"eport\":\"9090\",\"dip\":\"192.168.9.6\",\"dport\":\"90\"}"),
+        root));
+    const Json::Value& pm = root["config"]["port-mapping"];
+    expect_equal("case 7 mapping count", 2u, pm.size());
+    expect_equal("case 7 existing kept", std::string("8080"), pm[0u]["eport"].asString());
+    expect_equal("case 7 appended", std::string("9090"), pm[1u]["eport"].asString());
+    expect_equal("case 7 reindexed", std::string("1"), pm[1u]["index"].asString());
+    expect_equal("case 7 vlan preserved", std::string("123"),
+        root["config"]["vlan_id"].asString());
+
+    Json::Value root2;
+    expect_true("case 7 remove parses", parse_json(
+        run_merge("case 7 remove", ETCD_FIELD_KIND_SNAT_REMOVE,
+            MERGE_SEED_HSI, "8080"), root2));
+    expect_equal("case 7 removed", 0u, root2["config"]["port-mapping"].size());
+
+    Json::Value root3;
+    expect_true("case 7 idempotent remove parses", parse_json(
+        run_merge("case 7 idempotent remove", ETCD_FIELD_KIND_SNAT_REMOVE,
+            MERGE_SEED_HSI, "7070"), root3));
+    expect_equal("case 7 idempotent keeps entry", 1u,
+        root3["config"]["port-mapping"].size());
+}
+
+static void test_field_merge_dns_records()
+{
+    std::cout << "Case 8: field merge edits the DNS record array" << std::endl;
+    const char *seed = "[{\"domain\":\"a.example\",\"ip\":\"10.0.0.1\",\"ttl\":3600}]";
+
+    // dns_add creates the array when the key is absent.
+    Json::Value created;
+    expect_true("case 8 create parses", parse_json(
+        run_merge("case 8 create", ETCD_FIELD_KIND_DNS_ADD, NULL,
+            "{\"domain\":\"b.example\",\"ip\":\"10.0.0.2\",\"ttl\":600}"), created));
+    expect_equal("case 8 created size", 1u, created.size());
+
+    // dns_add appends to an existing array; same-domain updates in place.
+    Json::Value appended;
+    expect_true("case 8 append parses", parse_json(
+        run_merge("case 8 append", ETCD_FIELD_KIND_DNS_ADD, seed,
+            "{\"domain\":\"b.example\",\"ip\":\"10.0.0.2\",\"ttl\":600}"), appended));
+    expect_equal("case 8 appended size", 2u, appended.size());
+    Json::Value updated;
+    expect_true("case 8 update parses", parse_json(
+        run_merge("case 8 update", ETCD_FIELD_KIND_DNS_ADD, seed,
+            "{\"domain\":\"a.example\",\"ip\":\"10.0.0.9\",\"ttl\":60}"), updated));
+    expect_equal("case 8 updated size", 1u, updated.size());
+    expect_equal("case 8 updated ip", std::string("10.0.0.9"),
+        updated[0u]["ip"].asString());
+
+    // dns_del removes by domain; absent key fails (nothing to delete).
+    Json::Value removed;
+    expect_true("case 8 remove parses", parse_json(
+        run_merge("case 8 remove", ETCD_FIELD_KIND_DNS_DEL, seed, "a.example"),
+        removed));
+    expect_equal("case 8 removed size", 0u, removed.size());
+    char *out = NULL;
+    expect_equal("case 8 absent key fails", ERROR,
+        etcd_client_field_merge(ETCD_FIELD_KIND_DNS_DEL, NULL, "a.example", &out));
+    free(out);
+}
+
 int main()
 {
     const char *endpoint = "http://127.0.0.1:2379";
@@ -236,6 +370,9 @@ int main()
     test_key_already_exists_retry(outside_client);
     test_retry_exhaustion(outside_client);
     test_mutate_abort(outside_client);
+    test_field_merge_preserves_untouched_fields();
+    test_field_merge_port_mappings();
+    test_field_merge_dns_records();
     etcd_client_cleanup();
 
     if (failures != 0) {

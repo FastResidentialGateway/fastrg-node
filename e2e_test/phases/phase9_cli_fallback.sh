@@ -129,8 +129,31 @@ phase9_cli_fallback() {
     # ------------------------------------------------------------------
     info "Step 38: node gRPC ApplyConfig should be rejected in SDN mode..."
     _p10_rej=$(ssh_node "ETCDCTL_API=3 true; grpcurl -plaintext -import-path /root/fastrg-node/northbound/grpc -proto fastrg_node.proto -d '{\"user_id\":${_U1},\"vlan_id\":360,\"pppoe_account\":\"x\",\"pppoe_password\":\"x\",\"dhcp_pool_start\":\"1.1.1.2\",\"dhcp_pool_end\":\"1.1.1.9\",\"dhcp_subnet_mask\":\"255.255.255.0\",\"dhcp_gateway\":\"1.1.1.1\"}' 127.0.0.1:${FASTRG_GRPC_PORT} fastrgnodeservice.FastrgService/ApplyConfig 2>&1" 2>/dev/null || true)
-    if printf '%s' "$_p10_rej" | grep -qiE "FailedPrecondition|etcd reachable"; then
-        pass "Step 38: node rejects write in SDN mode" "node returned FAILED_PRECONDITION as expected"
+    # The SDN guard covers every node-side config write; probe the field-level
+    # RPCs (SNAT / toggles / DNS records) the same way. Any probe not rejected
+    # flips the whole step to fail.
+    _p10_guard_ok=1
+    _p10_guard_detail=""
+    _p10_probe_rpc() {
+        local _rpc="$1" _payload="$2" _out
+        _out=$(ssh_node "grpcurl -plaintext -import-path /root/fastrg-node/northbound/grpc -proto fastrg_node.proto -d '${_payload}' 127.0.0.1:${FASTRG_GRPC_PORT} fastrgnodeservice.FastrgService/${_rpc} 2>&1" 2>/dev/null || true)
+        if ! printf '%s' "$_out" | grep -qiE "FailedPrecondition|etcd reachable"; then
+            _p10_guard_ok=0
+            _p10_guard_detail="${_p10_guard_detail:+${_p10_guard_detail}; }${_rpc}: $(printf '%s' "$_out" | tr '\n' '|' | tail -c 120)"
+        fi
+    }
+    _p10_probe_rpc SetSnatConfig "{\"user_id\":${USER_ID},\"eport\":39999,\"dip\":\"192.168.4.9\",\"iport\":80}"
+    _p10_probe_rpc RemoveSnatConfig "{\"user_id\":${USER_ID},\"eport\":39999}"
+    _p10_probe_rpc SetDnsProxy "{\"user_id\":${USER_ID},\"enable\":true}"
+    _p10_probe_rpc SetTcpConntrack "{\"user_id\":${USER_ID},\"enable\":true}"
+    _p10_probe_rpc AddDnsRecord "{\"user_id\":${USER_ID},\"domain\":\"sdnguard.example\",\"ip\":\"10.9.9.9\",\"ttl\":60}"
+    _p10_probe_rpc RemoveDnsRecord "{\"user_id\":${USER_ID},\"domain\":\"sdnguard.example\"}"
+    if printf '%s' "$_p10_rej" | grep -qiE "FailedPrecondition|etcd reachable" && \
+       [[ $_p10_guard_ok -eq 1 ]]; then
+        pass "Step 38: node rejects write in SDN mode" "ApplyConfig + 6 field-level RPCs all returned FAILED_PRECONDITION"
+    elif [[ $_p10_guard_ok -eq 0 ]]; then
+        fail "Step 38: node rejects write in SDN mode" \
+            "field-level RPC(s) not rejected: ${_p10_guard_detail}"
     else
         # grpcurl/proto may be unavailable on the node — degrade to skip rather than false fail
         if printf '%s' "$_p10_rej" | grep -qiE "No such file|proto|not found|command not found"; then
