@@ -187,6 +187,16 @@ grpc::Status FastRGNodeServiceImpl::SetSubscriberCount(::grpc::ServerContext* co
         return grpc::Status(grpc::StatusCode::INTERNAL, err);
     }
 
+    // Local capacity guard: MaxUserCount comes from this node's config.cfg
+    // (memory capacity), so it is validated here in addition to the
+    // compile-time MAX_USER_COUNT bound above.
+    if (subscriber_count > fastrg_ccb->max_user_count) {
+        std::string err = "Error! Subscriber count " + std::to_string(subscriber_count) +
+            " exceeds configured MaxUserCount " + std::to_string(fastrg_ccb->max_user_count);
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, err);
+    }
+
     // SDN mode with etcd reachable: reject — CLI must go via controller/etcd.
     if (etcd_client_is_initialized() && etcd_client_is_connected()) {
         std::string err = "etcd reachable (SDN mode); set subscriber count via controller/etcd, not the node";
