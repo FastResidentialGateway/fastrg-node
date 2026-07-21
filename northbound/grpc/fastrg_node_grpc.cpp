@@ -2,6 +2,7 @@
 #include <fstream>
 #include <sys/utsname.h>
 #include <ifaddrs.h>
+#include <jsoncpp/json/json.h>
 #include "fastrg_node_grpc.h"
 #include "../controller/etcd_client.h"
 
@@ -488,73 +489,44 @@ grpc::Status FastRGNodeServiceImpl::SetSnatConfig(::grpc::ServerContext* context
     U16 iport = request->iport();
     std::string dip = request->dip();
 
-    if (etcd_client_is_initialized() && fastrg_ccb && fastrg_ccb->node_uuid) {
-        std::string user_id_str = std::to_string(user_id);
+    // SDN guard first: when etcd is reachable the node never accepts direct
+    // config writes — port forwarding goes via the controller and reaches the
+    // node through the HSI watcher (same policy as ApplyConfig).
+    if (etcd_client_is_initialized() && etcd_client_is_connected()) {
+        std::string err = "etcd reachable (SDN mode); set SNAT port forwarding via controller/etcd, not the node";
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, err);
+    }
 
-        // Read current HSI config from etcd, update port-mapping entry, then write back
-        hsi_config_full_t full_config = { 0 };
-        etcd_status_t get_s = etcd_client_get_hsi_config(fastrg_ccb->node_uuid,
-            user_id_str.c_str(), &full_config);
-        if (get_s != ETCD_SUCCESS) {
-            std::string err = "Failed to get HSI config from etcd for user " + user_id_str;
-            cout << err << endl;
-            return grpc::Status(grpc::StatusCode::INTERNAL, err);
-        }
-
-        hsi_config_t *cfg = &full_config.config;
-
-        // Update existing entry if same eport found, otherwise append new entry
-        bool found = false;
-        for(int i=0; cfg->port_mappings!=NULL && i<cfg->port_mapping_count; i++) {
-            if (cfg->port_mappings[i].eport == eport) {
-                strncpy(cfg->port_mappings[i].dip, dip.c_str(), sizeof(cfg->port_mappings[i].dip) - 1);
-                cfg->port_mappings[i].dip[sizeof(cfg->port_mappings[i].dip) - 1] = '\0';
-                cfg->port_mappings[i].dport = iport;
-                found = true;
-                break;
-            }
-        }
-        if (!found) {
-            int new_count = cfg->port_mapping_count + 1;
-            port_mapping_t *new_mappings = (port_mapping_t *)realloc(cfg->port_mappings,
-                new_count * sizeof(port_mapping_t));
-            if (new_mappings == NULL) {
-                hsi_config_free_port_mappings(cfg);
-                std::string err = "Out of memory adding port mapping for user " + user_id_str;
-                cout << err << endl;
-                return grpc::Status(grpc::StatusCode::INTERNAL, err);
-            }
-            cfg->port_mappings = new_mappings;
-            port_mapping_t *pm = &cfg->port_mappings[cfg->port_mapping_count];
-            pm->eport = eport;
-            strncpy(pm->dip, dip.c_str(), sizeof(pm->dip) - 1);
-            pm->dip[sizeof(pm->dip) - 1] = '\0';
-            pm->dport = iport;
-            cfg->port_mapping_count = new_count;
-        }
-
-        etcd_status_t put_s = etcd_client_put_hsi_config(fastrg_ccb->node_uuid,
-            user_id_str.c_str(), cfg, "fastrg-node-grpc", NULL);
-        hsi_config_free_port_mappings(cfg);
-
-        if (put_s != ETCD_SUCCESS) {
-            std::string err = "Failed to update HSI config in etcd for user " + user_id_str;
-            cout << err << endl;
-            return grpc::Status(grpc::StatusCode::INTERNAL, err);
-        }
-        cout << "SNAT port forward synced to etcd for user " << user_id_str << endl;
-    } else if (!etcd_client_is_initialized()) {
-        cout << "Etcd not initialized, directly setting SNAT port forward for user " << user_id << endl;
-        if (set_snat_port_fwd(fastrg_ccb, ccb_id, eport, dip.c_str(), iport) == ERROR) {
-            std::string err = "Error! Failed to set SNAT port forward for user " + std::to_string(user_id) +
-                " eport=" + std::to_string(eport) + " dip=" + dip + " iport=" + std::to_string(iport);
-            cout << err << endl;
-            return grpc::Status(grpc::StatusCode::INTERNAL, err);
-        }
-    } else {
-        std::string err = "Error! fastrg_ccb or node_uuid is NULL";
+    if (!fastrg_ccb) {
+        std::string err = "Error! fastrg_ccb is NULL";
         cout << err << endl;
         return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+
+    // etcd unreachable (pure standalone, or SDN with etcd down): apply locally now.
+    if (set_snat_port_fwd(fastrg_ccb, ccb_id, eport, dip.c_str(), iport) == ERROR) {
+        std::string err = "Error! Failed to set SNAT port forward for user " + std::to_string(user_id) +
+            " eport=" + std::to_string(eport) + " dip=" + dip + " iport=" + std::to_string(iport);
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+
+    // SDN mode but etcd down: queue the field write to flush on reconnect.
+    if (etcd_client_is_initialized() && fastrg_ccb->node_uuid) {
+        Json::Value entry;
+        entry["index"] = "0";
+        entry["eport"] = std::to_string(eport);
+        entry["dip"] = dip;
+        entry["dport"] = std::to_string(iport);
+        Json::StreamWriterBuilder w; w["indentation"] = "";
+        if (etcd_client_queue_field_write(fastrg_ccb->node_uuid,
+                std::to_string(user_id).c_str(), ETCD_FIELD_KIND_SNAT_UPSERT,
+                Json::writeString(w, entry).c_str()) != ETCD_SUCCESS) {
+            std::string err = "Failed to queue SNAT port forward for user " + std::to_string(user_id);
+            cout << err << endl;
+            return grpc::Status(grpc::StatusCode::INTERNAL, err);
+        }
     }
 
     response->set_status("SNAT port forward set successfully");
@@ -570,62 +542,36 @@ grpc::Status FastRGNodeServiceImpl::RemoveSnatConfig(::grpc::ServerContext* cont
     U16 ccb_id = user_id - 1;
     U16 eport = request->eport();
 
-    if (etcd_client_is_initialized() && fastrg_ccb && fastrg_ccb->node_uuid) {
-        std::string user_id_str = std::to_string(user_id);
+    // SDN guard first: see SetSnatConfig.
+    if (etcd_client_is_initialized() && etcd_client_is_connected()) {
+        std::string err = "etcd reachable (SDN mode); remove SNAT port forwarding via controller/etcd, not the node";
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, err);
+    }
 
-        // Read current HSI config from etcd, remove the matching eport entry, then write back
-        hsi_config_full_t full_config = { 0 };
-        etcd_status_t get_s = etcd_client_get_hsi_config(fastrg_ccb->node_uuid,
-            user_id_str.c_str(), &full_config);
-        if (get_s != ETCD_SUCCESS) {
-            std::string err = "Failed to get HSI config from etcd for user " + user_id_str;
-            cout << err << endl;
-            return grpc::Status(grpc::StatusCode::INTERNAL, err);
-        }
-
-        hsi_config_t *cfg = &full_config.config;
-
-        // Find and remove the entry with matching eport (shift remaining entries left)
-        bool found = false;
-        for(int i=0; cfg->port_mappings != NULL && i<cfg->port_mapping_count; i++) {
-            if (cfg->port_mappings[i].eport == eport) {
-                for(int j=i; j<cfg->port_mapping_count-1; j++)
-                    cfg->port_mappings[j] = cfg->port_mappings[j + 1];
-                cfg->port_mapping_count--;
-                found = true;
-                break;
-            }
-        }
-        if (!found) {
-            hsi_config_free_port_mappings(cfg);
-            std::string err = "SNAT port forward eport=" + std::to_string(eport) +
-                " not found for user " + user_id_str;
-            cout << err << endl;
-            return grpc::Status(grpc::StatusCode::NOT_FOUND, err);
-        }
-
-        etcd_status_t put_s = etcd_client_put_hsi_config(fastrg_ccb->node_uuid,
-            user_id_str.c_str(), cfg, "fastrg-node-grpc", NULL);
-        hsi_config_free_port_mappings(cfg);
-
-        if (put_s != ETCD_SUCCESS) {
-            std::string err = "Failed to update HSI config in etcd for user " + user_id_str;
-            cout << err << endl;
-            return grpc::Status(grpc::StatusCode::INTERNAL, err);
-        }
-        cout << "SNAT port forward removed from etcd for user " << user_id_str << endl;
-    } else if (!etcd_client_is_initialized()) {
-        cout << "Etcd not initialized, directly removing SNAT port forward for user " << user_id << endl;
-        if (remove_snat_port_fwd(fastrg_ccb, ccb_id, eport) == ERROR) {
-            std::string err = "Error! Failed to remove SNAT port forward for user " + std::to_string(user_id) +
-                " eport=" + std::to_string(eport);
-            cout << err << endl;
-            return grpc::Status(grpc::StatusCode::INTERNAL, err);
-        }
-    } else {
-        std::string err = "Error! fastrg_ccb or node_uuid is NULL";
+    if (!fastrg_ccb) {
+        std::string err = "Error! fastrg_ccb is NULL";
         cout << err << endl;
         return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+
+    // etcd unreachable: apply locally now.
+    if (remove_snat_port_fwd(fastrg_ccb, ccb_id, eport) == ERROR) {
+        std::string err = "Error! Failed to remove SNAT port forward for user " + std::to_string(user_id) +
+            " eport=" + std::to_string(eport);
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+
+    // SDN mode but etcd down: queue the field write to flush on reconnect.
+    if (etcd_client_is_initialized() && fastrg_ccb->node_uuid) {
+        if (etcd_client_queue_field_write(fastrg_ccb->node_uuid,
+                std::to_string(user_id).c_str(), ETCD_FIELD_KIND_SNAT_REMOVE,
+                std::to_string(eport).c_str()) != ETCD_SUCCESS) {
+            std::string err = "Failed to queue SNAT port forward removal for user " + std::to_string(user_id);
+            cout << err << endl;
+            return grpc::Status(grpc::StatusCode::INTERNAL, err);
+        }
     }
 
     response->set_status("SNAT port forward removed successfully");
@@ -1235,33 +1181,41 @@ grpc::Status FastRGNodeServiceImpl::AddDnsRecord(::grpc::ServerContext* context,
     U32 ttl = request->ttl();
     if (ttl == 0) ttl = 3600;
 
-    if (etcd_client_is_initialized() && fastrg_ccb && fastrg_ccb->node_uuid) {
-        std::string user_id_str = std::to_string(user_id);
-        dns_record_config_t record;
-        memset(&record, 0, sizeof(record));
-        strncpy(record.domain, domain.c_str(), sizeof(record.domain) - 1);
-        strncpy(record.ip, ip.c_str(), sizeof(record.ip) - 1);
-        record.ttl = ttl;
+    // SDN guard first: DNS records are managed via the controller when etcd
+    // is reachable; the dns watcher applies them locally.
+    if (etcd_client_is_initialized() && etcd_client_is_connected()) {
+        std::string err = "etcd reachable (SDN mode); manage DNS records via controller/etcd, not the node";
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, err);
+    }
 
-        etcd_status_t s = etcd_client_put_dns_record(fastrg_ccb->node_uuid,
-            user_id_str.c_str(), &record);
-        if (s != ETCD_SUCCESS) {
-            std::string err = "Failed to write DNS record to etcd for user " + user_id_str;
+    // etcd unreachable: apply locally now.
+    U16 ccb_id = user_id - 1;
+    dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
+    if (!dhcp_ccb) {
+        std::string err = "DNS proxy not initialized for user " + std::to_string(user_id);
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+    U32 ip_addr;
+    if (inet_pton(AF_INET, ip.c_str(), &ip_addr) != 1) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "Invalid IP address");
+    }
+    dns_static_add(&dhcp_ccb->dns_state.static_table, domain.c_str(), ip_addr, ttl);
+
+    // SDN mode but etcd down: queue the record write to flush on reconnect.
+    if (etcd_client_is_initialized() && fastrg_ccb && fastrg_ccb->node_uuid) {
+        Json::Value rec;
+        rec["domain"] = domain;
+        rec["ip"] = ip;
+        rec["ttl"] = ttl;
+        Json::StreamWriterBuilder w; w["indentation"] = "";
+        if (etcd_client_queue_field_write(fastrg_ccb->node_uuid,
+                std::to_string(user_id).c_str(), ETCD_FIELD_KIND_DNS_ADD,
+                Json::writeString(w, rec).c_str()) != ETCD_SUCCESS) {
+            std::string err = "Failed to queue DNS record for user " + std::to_string(user_id);
+            cout << err << endl;
             return grpc::Status(grpc::StatusCode::INTERNAL, err);
         }
-    } else {
-        /* Etcd not available, apply directly */
-        U16 ccb_id = user_id - 1;
-        dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
-        if (!dhcp_ccb) {
-            std::string err = "DNS proxy not initialized for user " + std::to_string(user_id);
-            return grpc::Status(grpc::StatusCode::INTERNAL, err);
-        }
-        U32 ip_addr;
-        if (inet_pton(AF_INET, ip.c_str(), &ip_addr) != 1) {
-            return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "Invalid IP address");
-        }
-        dns_static_add(&dhcp_ccb->dns_state.static_table, domain.c_str(), ip_addr, ttl);
     }
 
     response->set_status("DNS record added successfully");
@@ -1277,22 +1231,31 @@ grpc::Status FastRGNodeServiceImpl::RemoveDnsRecord(::grpc::ServerContext* conte
     U16 user_id = request->user_id();
     std::string domain = request->domain();
 
+    // SDN guard first: see AddDnsRecord.
+    if (etcd_client_is_initialized() && etcd_client_is_connected()) {
+        std::string err = "etcd reachable (SDN mode); manage DNS records via controller/etcd, not the node";
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, err);
+    }
+
+    // etcd unreachable: apply locally now.
+    U16 ccb_id = user_id - 1;
+    dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
+    if (!dhcp_ccb) {
+        std::string err = "DNS proxy not initialized for user " + std::to_string(user_id);
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+    dns_static_remove(&dhcp_ccb->dns_state.static_table, domain.c_str());
+
+    // SDN mode but etcd down: queue the record removal to flush on reconnect.
     if (etcd_client_is_initialized() && fastrg_ccb && fastrg_ccb->node_uuid) {
-        std::string user_id_str = std::to_string(user_id);
-        etcd_status_t s = etcd_client_delete_dns_record(fastrg_ccb->node_uuid,
-            user_id_str.c_str(), domain.c_str());
-        if (s != ETCD_SUCCESS) {
-            std::string err = "Failed to delete DNS record from etcd for user " + user_id_str;
+        if (etcd_client_queue_field_write(fastrg_ccb->node_uuid,
+                std::to_string(user_id).c_str(), ETCD_FIELD_KIND_DNS_DEL,
+                domain.c_str()) != ETCD_SUCCESS) {
+            std::string err = "Failed to queue DNS record removal for user " + std::to_string(user_id);
+            cout << err << endl;
             return grpc::Status(grpc::StatusCode::INTERNAL, err);
         }
-    } else {
-        U16 ccb_id = user_id - 1;
-        dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
-        if (!dhcp_ccb) {
-            std::string err = "DNS proxy not initialized for user " + std::to_string(user_id);
-            return grpc::Status(grpc::StatusCode::INTERNAL, err);
-        }
-        dns_static_remove(&dhcp_ccb->dns_state.static_table, domain.c_str());
     }
 
     response->set_status("DNS record removed successfully");
@@ -1407,48 +1370,32 @@ grpc::Status FastRGNodeServiceImpl::SetDnsProxy(::grpc::ServerContext* context,
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, err);
     }
 
+    // SDN guard first: when etcd is reachable this toggle is set via the
+    // controller and reaches the node through the HSI watcher.
+    if (etcd_client_is_initialized() && etcd_client_is_connected()) {
+        std::string err = "etcd reachable (SDN mode); set dns_proxy_enable via controller/etcd, not the node";
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, err);
+    }
+
     dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
     if (!dhcp_ccb) {
         std::string err = "DHCP CCB not initialized for user " + std::to_string(user_id);
         return grpc::Status(grpc::StatusCode::INTERNAL, err);
     }
 
-    /* Update local state first so it takes effect immediately on the data plane. */
+    /* etcd unreachable: update local state now so it takes effect immediately. */
     dhcp_ccb->dns_state.dns_proxy_enabled = enable ? TRUE : FALSE;
 
-    /* Persist to etcd if available. Mark as self-event so the watcher does not
-     * call apply_hsi_config() (which would needlessly reset the DHCP pool). */
+    /* SDN mode but etcd down: queue the field write to flush on reconnect. */
     if (etcd_client_is_initialized() && fastrg_ccb && fastrg_ccb->node_uuid) {
-        std::string user_id_str = std::to_string(user_id);
-
-        hsi_config_full_t full_config = { 0 };
-        etcd_status_t get_s = etcd_client_get_hsi_config(fastrg_ccb->node_uuid,
-            user_id_str.c_str(), &full_config);
-        if (get_s != ETCD_SUCCESS) {
-            std::string err = "Failed to get HSI config from etcd for user " + user_id_str;
+        if (etcd_client_queue_field_write(fastrg_ccb->node_uuid,
+                std::to_string(user_id).c_str(), ETCD_FIELD_KIND_DNS_PROXY,
+                enable ? "true" : "false") != ETCD_SUCCESS) {
+            std::string err = "Failed to queue dns_proxy_enable for user " + std::to_string(user_id);
             cout << err << endl;
             return grpc::Status(grpc::StatusCode::INTERNAL, err);
         }
-
-        full_config.config.dns_proxy_enable = enable ? TRUE : FALSE;
-
-        int64_t revision = 0;
-        etcd_mark_pending_event(HSI_ACTION_UPDATE, ccb_id);
-        etcd_status_t put_s = etcd_client_put_hsi_config(fastrg_ccb->node_uuid,
-            user_id_str.c_str(), &full_config.config,
-            "fastrg-node-grpc", &revision);
-        hsi_config_free_port_mappings(&full_config.config);
-
-        if (put_s == ETCD_SUCCESS) {
-            etcd_confirm_pending_event(HSI_ACTION_UPDATE, ccb_id, revision);
-        } else {
-            etcd_remove_event(HSI_ACTION_UPDATE, ccb_id);
-            std::string err = "Failed to write dns_proxy_enable to etcd for user " + user_id_str;
-            cout << err << endl;
-            return grpc::Status(grpc::StatusCode::INTERNAL, err);
-        }
-        cout << "dns_proxy_enable=" << (enable ? "true" : "false")
-             << " synced to etcd for user " << user_id_str << endl;
     }
 
     response->set_status("ok");
@@ -1470,48 +1417,32 @@ grpc::Status FastRGNodeServiceImpl::SetTcpConntrack(::grpc::ServerContext* conte
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, err);
     }
 
+    // SDN guard first: when etcd is reachable this toggle is set via the
+    // controller and reaches the node through the HSI watcher.
+    if (etcd_client_is_initialized() && etcd_client_is_connected()) {
+        std::string err = "etcd reachable (SDN mode); set tcp_conntrack_enable via controller/etcd, not the node";
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, err);
+    }
+
     ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
     if (!ppp_ccb) {
         std::string err = "PPP CCB not initialized for user " + std::to_string(user_id);
         return grpc::Status(grpc::StatusCode::INTERNAL, err);
     }
 
-    /* Update local state first so it takes effect immediately on the data plane. */
+    /* etcd unreachable: update local state now so it takes effect immediately. */
     ppp_ccb->tcp_conntrack_enabled = enable ? TRUE : FALSE;
 
-    /* Persist to etcd if available. Mark as self-event so the watcher does not
-     * call apply_hsi_config() (which would needlessly reset the DHCP pool). */
+    /* SDN mode but etcd down: queue the field write to flush on reconnect. */
     if (etcd_client_is_initialized() && fastrg_ccb && fastrg_ccb->node_uuid) {
-        std::string user_id_str = std::to_string(user_id);
-
-        hsi_config_full_t full_config = { 0 };
-        etcd_status_t get_s = etcd_client_get_hsi_config(fastrg_ccb->node_uuid,
-            user_id_str.c_str(), &full_config);
-        if (get_s != ETCD_SUCCESS) {
-            std::string err = "Failed to get HSI config from etcd for user " + user_id_str;
+        if (etcd_client_queue_field_write(fastrg_ccb->node_uuid,
+                std::to_string(user_id).c_str(), ETCD_FIELD_KIND_TCP_CONNTRACK,
+                enable ? "true" : "false") != ETCD_SUCCESS) {
+            std::string err = "Failed to queue tcp_conntrack_enable for user " + std::to_string(user_id);
             cout << err << endl;
             return grpc::Status(grpc::StatusCode::INTERNAL, err);
         }
-
-        full_config.config.tcp_conntrack_enable = enable ? TRUE : FALSE;
-
-        int64_t revision = 0;
-        etcd_mark_pending_event(HSI_ACTION_UPDATE, ccb_id);
-        etcd_status_t put_s = etcd_client_put_hsi_config(fastrg_ccb->node_uuid,
-            user_id_str.c_str(), &full_config.config,
-            "fastrg-node-grpc", &revision);
-        hsi_config_free_port_mappings(&full_config.config);
-
-        if (put_s == ETCD_SUCCESS) {
-            etcd_confirm_pending_event(HSI_ACTION_UPDATE, ccb_id, revision);
-        } else {
-            etcd_remove_event(HSI_ACTION_UPDATE, ccb_id);
-            std::string err = "Failed to write tcp_conntrack_enable to etcd for user " + user_id_str;
-            cout << err << endl;
-            return grpc::Status(grpc::StatusCode::INTERNAL, err);
-        }
-        cout << "tcp_conntrack_enable=" << (enable ? "true" : "false")
-             << " synced to etcd for user " << user_id_str << endl;
     }
 
     response->set_status("ok");
