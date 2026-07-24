@@ -43,7 +43,6 @@
 
 #include "../grpc/fastrg_grpc_client.h"
 #include "cli_controller_client.h"
-#include "cli_etcd.h"
 #include "cli_dispatch.h"
 
 #include "cmds.h"
@@ -1305,8 +1304,7 @@ static void print_usage(const char *prog_name)
     printf("  -i, --ip <address>       Node gRPC IP address (e.g., 127.0.0.1:50052)\n");
     printf("  -c, --controller <addr>  Controller ConfigService gRPC (e.g., 192.168.10.212:50052)\n");
     printf("  -r, --rest <url>         Controller REST base URL for login (e.g., https://192.168.10.212:28443)\n");
-    printf("  -e, --etcd <endpoints>   etcd endpoints for direct-write fallback (e.g., 192.168.10.212:2379)\n");
-    printf("  -n, --node <uuid>        Managed node UUID (required for controller/etcd config keys)\n");
+    printf("  -n, --node <uuid>        Managed node UUID (required for controller config keys)\n");
     printf("  -h, --help               Show this help message\n");
     printf("\n");
     printf("Launch mode examples:\n");
@@ -1314,7 +1312,6 @@ static void print_usage(const char *prog_name)
     printf("    %s -c 192.168.10.212:50052 -r https://192.168.10.212:28443 -n <node-uuid>\n", prog_name);
     printf("    then type: controller login\n");
     printf("\n");
-    printf("  Etcd mode  (writes: etcd -> node, no controller)\n");
     printf("    %s -e 192.168.10.212:2379 -n <node-uuid>\n", prog_name);
     printf("\n");
     printf("  Standalone mode  (writes directly to node gRPC)\n");
@@ -1514,7 +1511,7 @@ int main(int argc, char **argv)
     char *grpc_target = NULL;
     char target_buffer[256];
     const char *controller_addr = NULL, *controller_rest = NULL;
-    const char *etcd_endpoints = NULL, *node_uuid = NULL;
+    const char *node_uuid = NULL;
     int opt;
 
     static struct option long_options[] = {
@@ -1522,14 +1519,13 @@ int main(int argc, char **argv)
         {"ip", required_argument, 0, 'i'},
         {"controller", required_argument, 0, 'c'},
         {"rest", required_argument, 0, 'r'},
-        {"etcd", required_argument, 0, 'e'},
         {"node", required_argument, 0, 'n'},
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0}
     };
 
     /* Parse command line arguments */
-    while ((opt = getopt_long(argc, argv, "s:i:c:r:e:n:h", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "s:i:c:r:n:h", long_options, NULL)) != -1) {
         switch (opt) {
         case 's':
             /* Unix socket path provided */
@@ -1546,9 +1542,6 @@ int main(int argc, char **argv)
             break;
         case 'r':
             controller_rest = optarg;
-            break;
-        case 'e':
-            etcd_endpoints = optarg;
             break;
         case 'n':
             node_uuid = optarg;
@@ -1573,7 +1566,6 @@ int main(int argc, char **argv)
 
     /* Configure the controller client (tier 1 of the write fallback). */
     cli_controller_configure(controller_addr, controller_rest, node_uuid);
-    cli_etcd_configure(etcd_endpoints, node_uuid);
 
     char prompt[48];
     if (controller_addr && node_uuid) {
@@ -1581,9 +1573,6 @@ int main(int argc, char **argv)
                "Run 'controller login' to authenticate.\n",
                controller_addr, node_uuid);
         snprintf(prompt, sizeof(prompt), "FastRG[controller]> ");
-    } else if (etcd_endpoints && node_uuid) {
-        printf("[Etcd mode] %s  node: %s\n", etcd_endpoints, node_uuid);
-        snprintf(prompt, sizeof(prompt), "FastRG[etcd]> ");
     } else {
         snprintf(prompt, sizeof(prompt), "FastRG> ");
     }

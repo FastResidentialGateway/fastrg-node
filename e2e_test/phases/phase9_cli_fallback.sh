@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # ---------------------------------------------------------------------------
-# Phase 9 — CLI three-tier write fallback (Steps 36-38)
+# Phase 9 — CLI write fallback: controller → node (Steps 36-38)
 #
-# Exercises fastrg_cli on the node:
+# Exercises fastrg_cli on the node (controller-is-all: no direct etcd tier):
 #   Step 36  tier 1 — CLI -> controller ConfigService (login + apply)  -> etcd
-#   Step 37  tier 2 — CLI -> direct etcd CAS (no controller configured) -> etcd
+#   Step 37  controller unreachable + etcd reachable -> the write is refused
+#            end-to-end (CLI has no etcd tier; the node's SDN guard rejects)
 #   Step 38  node gRPC rejects config writes while etcd is reachable
 #            (SDN guard: the node only accepts CLI writes when etcd is down)
 # ---------------------------------------------------------------------------
@@ -35,12 +36,12 @@ _cleanup_phase9_cli_fallback() {
 
 phase9_cli_fallback() {
     bold "═══════════════════════════════════════════════════════"
-    bold " Phase 9 — CLI three-tier write fallback (Steps 36-38)"
+    bold " Phase 9 — CLI write fallback: controller → node (Steps 36-38)"
     bold "═══════════════════════════════════════════════════════"
 
     if ! ssh_node "test -x /usr/local/bin/fastrg_cli" 2>/dev/null; then
         skip "Step 36: CLI tier-1 (controller)" "fastrg_cli not installed on node"
-        skip "Step 37: CLI tier-2 (etcd direct)" "fastrg_cli not installed on node"
+        skip "Step 37: write refused when controller is unreachable" "fastrg_cli not installed on node"
         skip "Step 38: node rejects write in SDN mode" "fastrg_cli not installed on node"
         return
     fi
@@ -106,21 +107,28 @@ phase9_cli_fallback() {
     fi
 
     # ------------------------------------------------------------------
-    # Step 37 — tier 2: CLI -> direct etcd (no controller configured)
+    # Step 37 — controller unreachable while etcd is reachable: the write is
+    # honestly refused end-to-end. The CLI's former tier-2 (direct etcd) was
+    # removed with the controller-is-all migration — the CLI falls back from
+    # the dead controller straight to the node gRPC, where the SDN guard
+    # rejects because etcd is reachable. Nothing may land in etcd.
     # ------------------------------------------------------------------
-    info "Step 37: fastrg_cli tier-2 (direct etcd) apply config for user ${_U2}..."
+    info "Step 37: CLI write with unreachable controller is refused end-to-end (user ${_U2})..."
     _p10_out2=$(_p10_cli \
-        "-e ${ETCD_ENDPOINT} -n ${NODE_UUID}" \
+        "-c 127.0.0.1:59999 -r https://127.0.0.1:59998 -n ${NODE_UUID}" \
+        "controller login" "${CONTROLLER_USER}" "${CONTROLLER_PASS}" \
         "config add user ${_U2} pppoe-dhcp vlan 370 account cli2@isp password pw2 pool 192.168.37.2~192.168.37.200 subnet 255.255.255.0 gateway 192.168.37.1" \
         2>/dev/null || true)
-    sleep 3
+    sleep 2
     _p10_e2=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/${_U2}" 2>/dev/null || true)
     _p10_v2=$(printf '%s' "$_p10_e2" | jq -r '.config.vlan_id // empty' 2>/dev/null || true)
-    if printf '%s' "$_p10_out2" | grep -q "\[etcd\] apply config: OK" && [[ "$_p10_v2" == "370" ]]; then
-        pass "Step 37: CLI tier-2 (etcd direct)" "config landed in etcd (vlan=370) via direct etcd CAS"
+    if [[ -z "$_p10_v2" ]] && \
+       ! printf '%s' "$_p10_out2" | grep -qE "\[etcd\]|apply config: OK"; then
+        pass "Step 37: write refused when controller is unreachable" \
+            "no etcd tier exists, node rejected via SDN guard, etcd untouched for user ${_U2}"
     else
-        fail "Step 37: CLI tier-2 (etcd direct)" \
-            "etcd path failed (etcd vlan='${_p10_v2:-none}'); output: $(printf '%s' "$_p10_out2" | tr '\n' '|' | tail -c 200)"
+        fail "Step 37: write refused when controller is unreachable" \
+            "expected refusal, got etcd vlan='${_p10_v2:-none}'; output: $(printf '%s' "$_p10_out2" | tr '\n' '|' | tail -c 200)"
     fi
 
     # ------------------------------------------------------------------
@@ -161,6 +169,100 @@ phase9_cli_fallback() {
         else
             fail "Step 38: node rejects write in SDN mode" \
                 "expected FAILED_PRECONDITION; got: $(printf '%s' "$_p10_rej" | tr '\n' '|' | tail -c 200)"
+        fi
+    fi
+
+    # ------------------------------------------------------------------
+    # Steps 38a-38d — CLI tier-1 gRPC path semantics against the controller's
+    # UpdateHSIConfig contract (optional toggles + clear_port_mappings).
+    # These lock the two behaviours the REST-driven SNAT/toggle steps never
+    # exercise: field omission (create default / update preserve) and the
+    # explicit last-mapping wipe. All assertions read the etcd JSON content
+    # (never DNS behaviour), so they stay out of the DNS-envelope blast
+    # radius. Suffixed ids — no global renumbering (Step 8-1 precedent).
+    # ------------------------------------------------------------------
+    local _p10_ctrl_flags="-c ${CONTROLLER_GRPC} -r ${CONTROLLER_REST} -n ${NODE_UUID}"
+
+    # Step 38a — the Step 36 create omitted both toggles: the config landed in
+    # etcd must NOT have them disabled (controller defaults / node defaults).
+    info "Step 38a: create-path toggle defaults for user ${_U1}..."
+    local _p10_dp
+    _p10_dp=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/${_U1}" 2>/dev/null | \
+        jq -r '.config.dns_proxy_enable' 2>/dev/null || true)
+    if [[ "$_p10_dp" != "false" ]]; then
+        pass "Step 38a: CLI create leaves toggles enabled by default" \
+            "dns_proxy_enable='${_p10_dp:-absent}' (not disabled) after an omitted-field create"
+    else
+        fail "Step 38a: CLI create leaves toggles enabled by default" \
+            "dns_proxy_enable=false after a create that never disabled it"
+    fi
+
+    # Step 38b — CLI snat add lands in etcd port-mapping.
+    info "Step 38b: CLI tier-1 snat add for user ${_U1}..."
+    _p10_out=$(_p10_cli "$_p10_ctrl_flags" \
+        "controller login" "${CONTROLLER_USER}" "${CONTROLLER_PASS}" \
+        "config add user ${_U1} snat eport 38180 dip 192.168.36.50 iport 8080" \
+        2>/dev/null || true)
+    sleep 3
+    local _p10_pm
+    _p10_pm=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/${_U1}" 2>/dev/null | \
+        jq -r '.config["port-mapping"][]? | select(.eport == "38180") | .eport' 2>/dev/null || true)
+    if [[ "$_p10_pm" == "38180" ]]; then
+        pass "Step 38b: CLI snat add lands in etcd" "port-mapping eport=38180 present"
+    else
+        fail "Step 38b: CLI snat add lands in etcd" \
+            "mapping missing; output: $(printf '%s' "$_p10_out" | tr '\n' '|' | tail -c 160)"
+    fi
+
+    # Step 38c — deleting the LAST mapping must actually wipe the list: the
+    # CLI sets clear_port_mappings on the update (an empty list alone means
+    # "don't touch" and the delete would silently do nothing — the exact
+    # regression this step guards).
+    info "Step 38c: CLI tier-1 snat del of the last mapping for user ${_U1}..."
+    _p10_out=$(_p10_cli "$_p10_ctrl_flags" \
+        "controller login" "${CONTROLLER_USER}" "${CONTROLLER_PASS}" \
+        "config del user ${_U1} snat eport 38180" \
+        2>/dev/null || true)
+    sleep 3
+    local _p10_pmcnt
+    _p10_pmcnt=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/${_U1}" 2>/dev/null | \
+        jq -r '.config["port-mapping"] // [] | length' 2>/dev/null || true)
+    if [[ "$_p10_pmcnt" == "0" ]]; then
+        pass "Step 38c: last-mapping delete wipes the list" \
+            "port-mapping empty after clear_port_mappings update"
+    else
+        fail "Step 38c: last-mapping delete wipes the list" \
+            "port-mapping count='${_p10_pmcnt:-unreadable}' (want 0 — silent no-op regression?); output: $(printf '%s' "$_p10_out" | tr '\n' '|' | tail -c 160)"
+    fi
+
+    # Step 38d — optional-field preservation: disable dns_proxy via the CLI
+    # toggle, then re-run the SAME full config add (update path). fill_hsi
+    # omits the toggles, so the disabled value must survive the update.
+    info "Step 38d: config re-add must preserve a disabled toggle (user ${_U1})..."
+    _p10_out=$(_p10_cli "$_p10_ctrl_flags" \
+        "controller login" "${CONTROLLER_USER}" "${CONTROLLER_PASS}" \
+        "config set subscriber ${_U1} dns_proxy off" \
+        2>/dev/null || true)
+    sleep 3
+    _p10_dp=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/${_U1}" 2>/dev/null | \
+        jq -r '.config.dns_proxy_enable' 2>/dev/null || true)
+    if [[ "$_p10_dp" != "false" ]]; then
+        fail "Step 38d: update preserves disabled toggle" \
+            "precondition failed: toggle-off did not land (dns_proxy_enable='${_p10_dp:-unreadable}'); output: $(printf '%s' "$_p10_out" | tr '\n' '|' | tail -c 160)"
+    else
+        _p10_out=$(_p10_cli "$_p10_ctrl_flags" \
+            "controller login" "${CONTROLLER_USER}" "${CONTROLLER_PASS}" \
+            "config add user ${_U1} pppoe-dhcp vlan 360 account cli1@isp password pw1 pool 192.168.36.2~192.168.36.200 subnet 255.255.255.0 gateway 192.168.36.1" \
+            2>/dev/null || true)
+        sleep 3
+        _p10_dp=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/${_U1}" 2>/dev/null | \
+            jq -r '.config.dns_proxy_enable' 2>/dev/null || true)
+        if [[ "$_p10_dp" == "false" ]]; then
+            pass "Step 38d: update preserves disabled toggle" \
+                "dns_proxy_enable stayed false across a full config re-add (omitted field preserved)"
+        else
+            fail "Step 38d: update preserves disabled toggle" \
+                "dns_proxy_enable='${_p10_dp:-unreadable}' after re-add (want false — omission clobbered the toggle)"
         fi
     fi
 

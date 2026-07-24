@@ -6,6 +6,12 @@
 
 _cleanup_phase19_node_restart() {
     local _p19_cleanup_stopped=0
+    # Step 79 safety: never leave the node's etcd path blocked.
+    if [[ "${_P19_ETCD_BLOCKED:-0}" -eq 1 ]] && [[ -n "${ETCD_ENDPOINT:-}" ]]; then
+        ssh_node "iptables -D OUTPUT -p tcp -d ${ETCD_ENDPOINT%%:*} --dport ${ETCD_ENDPOINT##*:} -j REJECT --reject-with tcp-reset 2>/dev/null || true" \
+            >/dev/null 2>&1 || true
+        _P19_ETCD_BLOCKED=0
+    fi
     local _p19_cleanup_started=0
     local _i
 
@@ -118,7 +124,7 @@ phase19_node_restart() {
     local _i
 
     bold "═══════════════════════════════════════════════════════"
-    bold " Phase 19 — Node Restart Recovery (Steps 75-78)"
+    bold " Phase 19 — Node Restart Recovery (Steps 75-79)"
     bold "═══════════════════════════════════════════════════════"
 
     # ------------------------------------------------------------------
@@ -310,5 +316,100 @@ phase19_node_restart() {
             "HSI/count revisions unchanged (${_hsi1_rev_after}/${_hsi2_rev_after}/${_count_rev_after}); num_users=2"
     else
         fail "Step 78: Startup path keeps etcd read-only" "${_step76_issue# }"
+    fi
+
+    # ------------------------------------------------------------------
+    # Step 79 — Restart with etcd unreachable: the persisted snapshot
+    # (/etc/fastrg/config_snapshot.json) is the operating base. The node must
+    # boot, apply both subscribers' configs from the snapshot and re-establish
+    # PPPoE — all while etcd is blocked. etcd connectivity is then restored
+    # and the watchers recover normal sync.
+    # ------------------------------------------------------------------
+    info "Step 79: restart with etcd unreachable — snapshot is the operating base..."
+    local _step79_issue=""
+    local _p19_etcd_host="${ETCD_ENDPOINT%%:*}"
+    local _p19_etcd_port="${ETCD_ENDPOINT##*:}"
+    _P19_ETCD_BLOCKED=0
+
+    if ! ssh_node "command -v iptables >/dev/null 2>&1"; then
+        fail "Step 79: snapshot is the boot base while etcd is down" "iptables not available on node"
+        return
+    fi
+
+    # Stop gracefully, then block etcd BEFORE the cold start.
+    _P19_RESTART_NEEDED=1
+    ssh_node "pkill -x fastrg" >/dev/null 2>&1 || true
+    for _i in $(seq 1 20); do
+        [[ "$(_p19_process_state)" == "stopped" ]] && break
+        sleep 1
+    done
+    if [[ "$(_p19_process_state)" != "stopped" ]]; then
+        fail "Step 79: snapshot is the boot base while etcd is down" "fastrg did not stop within 20s"
+        return
+    fi
+    ssh_node "iptables -I OUTPUT 1 -p tcp -d ${_p19_etcd_host} --dport ${_p19_etcd_port} -j REJECT --reject-with tcp-reset" \
+        >/dev/null 2>&1 && _P19_ETCD_BLOCKED=1
+    if [[ $_P19_ETCD_BLOCKED -ne 1 ]]; then
+        fail "Step 79: snapshot is the boot base while etcd is down" "failed to install iptables block"
+        _cleanup_phase19_node_restart || true
+        return
+    fi
+
+    if ! ssh_node "nohup ${_FASTRG_START_CMD} >/var/log/fastrg.log 2>&1 &" >/dev/null 2>&1; then
+        _step79_issue="cold start command failed"
+    fi
+    _FASTRG_STARTED_BY_SCRIPT=1
+
+    # With etcd blocked, config can only come from the snapshot: both users
+    # must reappear with their configs and reach Data phase (BRAS is not
+    # affected by the etcd block).
+    local _p79_ok=0 _s1="" _s2="" _nu=""
+    if [[ -z "$_step79_issue" ]]; then
+        for _i in $(seq 1 36); do
+            sleep 5
+            _s1=$(fastrg_grpc get_hsi_info 2>/dev/null | \
+                jq -r '.hsi_infos[]? | select(.user_id == 1) | .status' 2>/dev/null || true)
+            _s2=$(fastrg_grpc get_hsi_info 2>/dev/null | \
+                jq -r '.hsi_infos[]? | select(.user_id == 2) | .status' 2>/dev/null || true)
+            if [[ "$_s1" == "Data phase" && "$_s2" == "Data phase" ]]; then
+                _p79_ok=1
+                info "  ${_i}x5s: both users in Data phase from the snapshot base"
+                break
+            fi
+            info "  ${_i}x5s: user1='${_s1:-none}' user2='${_s2:-none}'"
+        done
+        _nu=$(fastrg_grpc get_system_info 2>/dev/null | jq -r '.num_users // empty' 2>/dev/null || true)
+        [[ $_p79_ok -eq 1 ]] || _step79_issue="users did not reach Data phase from the snapshot within 180s (user1='${_s1:-none}' user2='${_s2:-none}')"
+        [[ "$_nu" == "2" ]] || _step79_issue="${_step79_issue:+${_step79_issue}; }num_users='${_nu:-empty}' (want 2 from snapshot count)"
+    fi
+
+    # Restore etcd connectivity; the watchers must recover live sync.
+    # NB: etcd_client.cpp's own log lines are compiled out (NB_TEST), so
+    # recovery is detected via etcd_integration.c's watch-event logs instead:
+    # once the watchers are back, the controller's periodic user_counts
+    # writeback (~60s) produces a fresh "User count change request received"
+    # line. Mark the current end of the log and wait for a NEW line.
+    local _p79_logmark
+    _p79_logmark=$(ssh_node "wc -l < /var/log/fastrg/fastrg.log 2>/dev/null" || echo 0)
+    [[ "$_p79_logmark" =~ ^[0-9]+$ ]] || _p79_logmark=0
+    ssh_node "iptables -D OUTPUT -p tcp -d ${_p19_etcd_host} --dport ${_p19_etcd_port} -j REJECT --reject-with tcp-reset 2>/dev/null || true" \
+        >/dev/null 2>&1 || true
+    _P19_ETCD_BLOCKED=0
+    local _p79_sync=0
+    for _i in $(seq 1 75); do
+        sleep 2
+        if ssh_node "tail -n +$(( _p79_logmark + 1 )) /var/log/fastrg/fastrg.log 2>/dev/null | grep -qE 'User count change request received|Reconcile: HSI user'"; then
+            _p79_sync=1
+            break
+        fi
+    done
+    [[ $_p79_sync -eq 1 ]] || _step79_issue="${_step79_issue:+${_step79_issue}; }no etcd watch event observed within 150s of unblocking (watchers did not recover)"
+
+    if [[ -z "$_step79_issue" ]]; then
+        _P19_RESTART_NEEDED=0
+        pass "Step 79: snapshot is the boot base while etcd is down" \
+            "cold start with etcd blocked: both users restored from snapshot to Data phase, num_users=2; etcd sync recovered after unblock"
+    else
+        fail "Step 79: snapshot is the boot base while etcd is down" "$_step79_issue"
     fi
 }

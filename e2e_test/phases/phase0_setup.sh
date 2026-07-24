@@ -328,6 +328,44 @@ phase0_setup() {
         done
         [[ $_dns_ready -eq 0 ]] && info "  (DNS static not loaded yet — will verify in step 4d)"
 
+        # ------------------------------------------------------------------
+        # PPPoE link-negotiation self-heal: when the node boots right after
+        # dpdk-bras (re)initialized its port, the WAN link can enter a
+        # sustained LSC flap storm (observed ~1 down/up per second) in which
+        # PADI never crosses — every session step of the run then fails even
+        # though both ends are healthy. Restarting dpdk-bras while the node
+        # is up renegotiates the link and stops the storm immediately, so if
+        # sessions are not up shortly after boot, restart the BRAS once.
+        # ------------------------------------------------------------------
+        _p0_sess_ok=0
+        for _i in $(seq 1 12); do
+            _p0_st=$(python3 "${GRPC_CLIENT_DIR}/fastrg_grpc_client.py" \
+                      --node "${FASTRG_NODE}:${FASTRG_GRPC_PORT}" \
+                      get_hsi_info 2>/dev/null | \
+                jq -r ".hsi_infos[]? | select(.user_id == ${USER_ID}) | .status" 2>/dev/null || true)
+            [[ "$_p0_st" == "Data phase" ]] && { _p0_sess_ok=1; break; }
+            sleep 5
+        done
+        if [[ $_p0_sess_ok -eq 0 ]]; then
+            warn "PPPoE session for USER_ID=${USER_ID} not up 60s after boot (status='${_p0_st:-none}') — restarting dpdk-bras once to break a possible WAN LSC flap storm..."
+            ssh_bras "pkill -x dpdk-bras 2>/dev/null || true" 2>/dev/null || true
+            sleep 3
+            ssh_bras "cd /root/dpdk-bras && exec ./dpdk-bras -l 0-7 -n 4 -- --pri-dns 192.168.10.1 --drop-pcap ./test.pcap --vlans 3,5 >/var/log/dpdk-bras.log 2>&1" </dev/null >/dev/null 2>&1 &
+            for _i in $(seq 1 24); do
+                _p0_st=$(python3 "${GRPC_CLIENT_DIR}/fastrg_grpc_client.py" \
+                          --node "${FASTRG_NODE}:${FASTRG_GRPC_PORT}" \
+                          get_hsi_info 2>/dev/null | \
+                    jq -r ".hsi_infos[]? | select(.user_id == ${USER_ID}) | .status" 2>/dev/null || true)
+                [[ "$_p0_st" == "Data phase" ]] && { _p0_sess_ok=1; break; }
+                sleep 5
+            done
+            if [[ $_p0_sess_ok -eq 1 ]]; then
+                info "PPPoE session recovered after BRAS restart."
+            else
+                warn "PPPoE session still not up after BRAS restart (status='${_p0_st:-none}') — continuing; session steps will report."
+            fi
+        fi
+
         info "fastrg gRPC is ready."
     else
         info "fastrg is running (pid: ${FASTRG_PID})."

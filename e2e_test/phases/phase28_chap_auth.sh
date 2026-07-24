@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # ---------------------------------------------------------------------------
-# Phase 28 — CHAP authentication and PAP baseline restore (Steps 113-115)
+# Phase 28 — CHAP authentication and PAP baseline restore (Steps 114-116)
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
@@ -123,7 +123,7 @@ phase28_chap_auth() {
     local _issue113="" _issue114="" _issue115="" _ping_out="" _ping_loss=""
 
     bold "═══════════════════════════════════════════════════════"
-    bold " Phase 28 — CHAP Authentication (Steps 113-115)"
+    bold " Phase 28 — CHAP Authentication (Steps 114-116)"
     bold "═══════════════════════════════════════════════════════"
 
     _config_log_path=$(ssh_node "grep 'LogPath' /etc/fastrg/config.cfg 2>/dev/null" || true)
@@ -152,10 +152,10 @@ phase28_chap_auth() {
     fi
 
     if [[ $_step113_ok -eq 1 ]]; then
-        pass "Step 113: CHAP dial reaches Data phase" \
+        pass "Step 114: CHAP dial reaches Data phase" \
             "users ${SUB_IDS[*]} reached Data phase with per-user challenge and auth-success logs"
     else
-        fail "Step 113: CHAP dial reaches Data phase" "$_issue113"
+        fail "Step 114: CHAP dial reaches Data phase" "$_issue113"
     fi
 
     _ping_out=$(ssh_lan "ping -c 4 -W 3 ${WAN_IP}" 2>&1 || true)
@@ -167,10 +167,10 @@ phase28_chap_auth() {
     fi
 
     if [[ $_step114_ok -eq 1 ]]; then
-        pass "Step 114: CHAP session data plane" \
+        pass "Step 115: CHAP session data plane" \
             "${WAN_IP} reachable with 4 packets and 0% packet loss"
     else
-        fail "Step 114: CHAP session data plane" "$_issue114"
+        fail "Step 115: CHAP session data plane" "$_issue114"
     fi
 
     if ! _p28_restart_bras ""; then
@@ -184,10 +184,10 @@ phase28_chap_auth() {
     fi
 
     if [[ $_step115_ok -eq 1 ]]; then
-        pass "Step 115: restore default PAP baseline" \
+        pass "Step 116: restore default PAP baseline" \
             "default BRAS parameters restored; users ${SUB_IDS[*]} returned to Data phase"
     else
-        fail "Step 115: restore default PAP baseline" "$_issue115"
+        fail "Step 116: restore default PAP baseline" "$_issue115"
     fi
 
     _cleanup_phase28_chap_auth || true

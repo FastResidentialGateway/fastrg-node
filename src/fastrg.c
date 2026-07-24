@@ -32,6 +32,7 @@
 #include "controller.h"
 #include "etcd_integration.h"
 #include "kafka_producer.h"
+#include "config_snapshot.h"
 #include "utils.h"
 #include "pdump_capture.h"
 #include "../northbound/grpc/fastrg_grpc_server.h"
@@ -765,6 +766,15 @@ STATUS northbound(FastRG_t *fastrg_ccb)
                     "Kafka producer init failed; telemetry disabled");
         }
 
+        /* Load the persisted config snapshot (SDN-only subsystem: the etcd
+         * watch/load paths mirror into it, offline edits accumulate on it and
+         * a degraded boot operates from it). MUST precede etcd integration —
+         * the load path mirrors etcd values into the snapshot. */
+        if (config_snapshot_init() != SUCCESS) {
+            FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
+                "Config snapshot file unreadable; starting with an empty snapshot");
+        }
+
         // Initialize and start etcd integration
         if (etcd_integration_init(fastrg_ccb) == ERROR) {
             FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Etcd integration initialization failed");
@@ -801,6 +811,8 @@ void fastrg_stop()
     kafka_producer_cleanup();
     // Cleanup etcd integration
     etcd_integration_cleanup(&fastrg_ccb);
+    // Persist and release the config snapshot (init'd in northbound(), SDN mode)
+    config_snapshot_cleanup();
 
     // Cleanup controller client
     controller_cleanup(&fastrg_ccb);

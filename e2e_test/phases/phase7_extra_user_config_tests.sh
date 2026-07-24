@@ -311,7 +311,7 @@ phase7_extra_user_config_tests() {
         _dns24_etcd_arr=$(etcdctl_get_value \
             "configs/${NODE_UUID}/dns/${U1}" 2>/dev/null || true)
         _dns24_etcd_entry=$(printf '%s' "$_dns24_etcd_arr" | \
-            jq -r ".[]? | select(.domain == \"${U1_DNS_DOMAIN}\")" 2>/dev/null || true)
+            jq -r ".records[]? | select(.domain == \"${U1_DNS_DOMAIN}\")" 2>/dev/null || true)
         _dns24_grpc=$(fastrg_grpc get_dns_static "${U1}")
         _dns24_match=$(printf '%s' "$_dns24_grpc" | \
             jq -r ".entries[] | select(.domain == \"${U1_DNS_DOMAIN}\") | .domain" 2>/dev/null || true)
@@ -349,7 +349,7 @@ phase7_extra_user_config_tests() {
             _dns25_etcd_arr=$(etcdctl_get_value \
                 "configs/${NODE_UUID}/dns/${U1}" 2>/dev/null || true)
             _dns25_etcd_still=$(printf '%s' "$_dns25_etcd_arr" | \
-                jq -r ".[]? | select(.domain == \"${U1_DNS_DOMAIN}\") | .domain" 2>/dev/null || true)
+                jq -r ".records[]? | select(.domain == \"${U1_DNS_DOMAIN}\") | .domain" 2>/dev/null || true)
             _dns25_grpc=$(fastrg_grpc get_dns_static "${U1}")
             _dns25_grpc_still=$(printf '%s' "$_dns25_grpc" | \
                 jq -r ".entries[] | select(.domain == \"${U1_DNS_DOMAIN}\") | .domain" 2>/dev/null || true)

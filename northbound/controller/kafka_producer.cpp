@@ -1,4 +1,6 @@
 #include "kafka_producer.h"
+#include "etcd_client.h"
+#include "config_snapshot.h"
 #include "proto/kafka-events.pb.h"
 
 #include <librdkafka/rdkafka.h>
@@ -344,7 +346,8 @@ void kafka_report_pppoe_state(const char *user_id, kafka_pppoe_phase_t phase,
 }
 
 void kafka_report_config_apply(const char *user_id, const char *action,
-    BOOL success, const char *err_code, const char *err_msg) {
+    BOOL success, const char *err_code, const char *err_msg,
+    const char *applied_resource_version) {
     if (!g_ready.load())
         return;
 
@@ -352,11 +355,168 @@ void kafka_report_config_apply(const char *user_id, const char *action,
     fill_envelope(&evt, user_id,
         success == TRUE ? ev::EVENT_TYPE_CONFIG_APPLY_OK : ev::EVENT_TYPE_CONFIG_APPLY_FAIL);
     ev::ConfigApplyResult *c = evt.mutable_config_apply_result();
-    if (action) c->set_action(action);
+    if (action != NULL) c->set_action(action);
     c->set_success(success == TRUE);
-    if (err_code) c->set_error_code(err_code);
-    if (err_msg)  c->set_error_message(err_msg);
+    if (err_code != NULL) c->set_error_code(err_code);
+    if (err_msg != NULL)  c->set_error_message(err_msg);
+    if (applied_resource_version != NULL)
+        c->set_applied_resource_version(applied_resource_version);
     produce_event(evt);
+}
+
+void kafka_report_config_offline_edit(kafka_offline_edit_kind_t kind,
+    const char *user_id, const char *config_json, const char *resource_version,
+    int64_t edited_at, const char *edit_summary) {
+    if (!g_ready.load() || !config_json)
+        return;
+
+    ev::OfflineEditKind pkind;
+    switch (kind) {
+        case KAFKA_OFFLINE_EDIT_HSI:   pkind = ev::OFFLINE_EDIT_KIND_HSI_CONFIG; break;
+        case KAFKA_OFFLINE_EDIT_DNS:   pkind = ev::OFFLINE_EDIT_KIND_DNS_RECORDS; break;
+        case KAFKA_OFFLINE_EDIT_COUNT: pkind = ev::OFFLINE_EDIT_KIND_SUBSCRIBER_COUNT; break;
+        default: return;
+    }
+
+    ev::NodeEvent evt;
+    fill_envelope(&evt, user_id, ev::EVENT_TYPE_CONFIG_OFFLINE_EDIT);
+    ev::ConfigOfflineEdit *o = evt.mutable_config_offline_edit();
+    o->set_config_json(config_json);
+    if (resource_version) o->set_resource_version(resource_version);
+    o->set_edited_at(edited_at);
+    if (edit_summary) o->set_edit_summary(edit_summary);
+    o->set_kind(pkind);
+    produce_event(evt);
+}
+
+void kafka_report_config_offline_delete(kafka_offline_edit_kind_t kind,
+    const char *user_id, const char *resource_version, int64_t edited_at,
+    const char *edit_summary) {
+    if (!g_ready.load())
+        return;
+
+    ev::OfflineEditKind pkind;
+    switch (kind) {
+        case KAFKA_OFFLINE_EDIT_HSI:   pkind = ev::OFFLINE_EDIT_KIND_HSI_CONFIG; break;
+        case KAFKA_OFFLINE_EDIT_DNS:   pkind = ev::OFFLINE_EDIT_KIND_DNS_RECORDS; break;
+        case KAFKA_OFFLINE_EDIT_COUNT: pkind = ev::OFFLINE_EDIT_KIND_SUBSCRIBER_COUNT; break;
+        default: return;
+    }
+
+    ev::NodeEvent evt;
+    fill_envelope(&evt, user_id, ev::EVENT_TYPE_CONFIG_OFFLINE_EDIT);
+    ev::ConfigOfflineEdit *o = evt.mutable_config_offline_edit();
+    // deleted tombstone: config_json stays empty.
+    o->set_deleted(true);
+    if (resource_version) o->set_resource_version(resource_version);
+    o->set_edited_at(edited_at);
+    if (edit_summary) o->set_edit_summary(edit_summary);
+    o->set_kind(pkind);
+    produce_event(evt);
+}
+
+namespace {
+
+// Per-entry state for kafka_report_offline_edits' dirty scan.
+struct OfflineReportCtx {
+    // false when any dirty entry could not be handled (transient etcd read
+    // failure) and is still pending. The caller must then SKIP any
+    // snapshot-refreshing reconcile this round: mirror writes clear the dirty
+    // flag unconditionally and would silently swallow the pending proposal
+    // (report-before-mirror invariant).
+    bool all_ok = true;
+};
+
+void offline_report_cb(snapshot_kind_t kind, const char *user_id,
+    const char *value_json, const char *resource_version, int64_t edited_at,
+    const char *edit_summary, void *user_data) {
+    OfflineReportCtx *ctx = (OfflineReportCtx *)user_data;
+
+    std::string key;
+    kafka_offline_edit_kind_t kkind;
+    switch (kind) {
+        case SNAPSHOT_KIND_HSI:
+            key = "configs/" + g_node_uuid + "/hsi/" + user_id;
+            kkind = KAFKA_OFFLINE_EDIT_HSI;
+            break;
+        case SNAPSHOT_KIND_DNS:
+            key = "configs/" + g_node_uuid + "/dns/" + user_id;
+            kkind = KAFKA_OFFLINE_EDIT_DNS;
+            break;
+        case SNAPSHOT_KIND_COUNT:
+            key = "user_counts/" + g_node_uuid + "/";
+            kkind = KAFKA_OFFLINE_EDIT_COUNT;
+            break;
+        default:
+            return;
+    }
+
+    char *current = NULL;
+    etcd_status_t st = etcd_client_get_value(key.c_str(), &current);
+    if (st != ETCD_SUCCESS && st != ETCD_KEY_NOT_FOUND) {
+        // transient read failure: stay dirty, retry on the next tick
+        ctx->all_ok = false;
+        return;
+    }
+
+    // value_json == NULL marks a tombstone (offline delete).
+    if (value_json == NULL) {
+        if (st == ETCD_KEY_NOT_FOUND) {
+            // Already gone in etcd: idempotent, nothing to propose.
+            config_snapshot_clear_dirty(kind, user_id);
+            free(current);
+            return;
+        }
+        kafka_report_config_offline_delete(kkind, user_id,
+            resource_version, edited_at, edit_summary);
+        config_snapshot_clear_dirty(kind, user_id);
+        std::fprintf(stderr, "[kafka] offline delete reported for %s (last rv=%s)\n",
+            key.c_str(), resource_version ? resource_version : "");
+        free(current);
+        return;
+    }
+
+    if (st == ETCD_SUCCESS &&
+            config_snapshot_content_equal(value_json, current) == TRUE) {
+        // Identical content is never sent.
+        config_snapshot_clear_dirty(kind, user_id);
+        free(current);
+        return;
+    }
+
+    // Key absent in etcd is still reported; the controller's arbitration
+    // discards edits whose key was deleted.
+    kafka_report_config_offline_edit(kkind, user_id, value_json,
+        resource_version, edited_at, edit_summary);
+    config_snapshot_clear_dirty(kind, user_id);
+    std::fprintf(stderr, "[kafka] offline edit reported for %s (rv=%s)\n",
+        key.c_str(), resource_version ? resource_version : "");
+    free(current);
+}
+
+void count_dirty_cb(snapshot_kind_t kind, const char *user_id,
+    const char *value_json, const char *resource_version, int64_t edited_at,
+    const char *edit_summary, void *user_data) {
+    (void)kind; (void)user_id; (void)value_json; (void)resource_version;
+    (void)edited_at; (void)edit_summary;
+    (*(int *)user_data)++;
+}
+
+}  // namespace
+
+extern "C" BOOL kafka_report_offline_edits(void) {
+    int dirty = 0;
+    config_snapshot_foreach_dirty(count_dirty_cb, &dirty);
+    if (dirty == 0)
+        return TRUE;   // nothing pending
+    // Skip when etcd is unreachable: every per-entry diff read would just
+    // burn a connect timeout. Entries stay dirty and the etcd watchdog calls
+    // back in after reconnection.
+    if (!etcd_client_is_connected())
+        return FALSE;
+    OfflineReportCtx ctx;
+    config_snapshot_foreach_dirty(offline_report_cb, &ctx);
+    return ctx.all_ok ? TRUE : FALSE;
 }
 
 void kafka_report_runtime_error(const char *module, const char *err_code,

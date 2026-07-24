@@ -239,7 +239,7 @@ static tcp_conntrack_state_tbl_t tcp_conntrack_tbl[] = {
 static int8_t tcp_fsm_idx[TCP_NSTATE][TCP_NEVENT];
 
 /* Whether a state has at least one table row.  Preserves the former "state
- * not found in table → ERROR" contract: a state stripped of all its rows
+ * not found in table → ERROR". A state stripped of all its rows
  * must keep failing loudly instead of degrading to silent ignore.
  * Static storage → already zero-initialized to all-FALSE (unlike tcp_fsm_idx,
  * whose empty value is -1 and therefore needs the explicit memset). */

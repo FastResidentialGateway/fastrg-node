@@ -131,6 +131,9 @@ typedef struct etcd_event {
         struct {
             hsi_config_t config;        /* config.port_mappings is heap-owned by this event */
             BOOL         desire_connect;/* derived from config.desire_status == "connect" */
+            char         resource_version[24]; /* metadata.resourceVersion of the watched
+                                                * value; empty when absent/unparsable. Used
+                                                * for ConfigApplyResult.applied_resource_version. */
         } hsi;
         user_count_config_t user_count;
         dns_record_config_t dns_record;
@@ -178,129 +181,65 @@ int etcd_client_is_initialized(void);
  * when etcd is unreachable. */
 int etcd_client_is_connected(void);
 
-/* ---- Offline config write queue (point 7) -------------------------------
- * When the node is in SDN mode but etcd is unreachable, CLI config writes that
- * arrive via the node gRPC server are applied locally AND queued here. The queue
- * is persisted to disk (survives a node restart while etcd is still down) and
- * flushed to etcd (with timestamp-based merge + CAS) once etcd is reachable again.
- * This is the ONLY path by which the node writes config to etcd.
- */
-
-/* Load any persisted queue from disk. Call once after etcd_client_init(). */
-etcd_status_t etcd_client_queue_load(void);
-
-/* Enqueue a CLI-originated HSI config PUT for later flush to etcd. Builds the
- * etcd JSON internally and stamps it with the current time. On flush, the
- * subscriber's existing desire_status in etcd is preserved (a config edit must
- * not clobber PPPoE intent). */
-etcd_status_t etcd_client_queue_hsi_put(const char *node_id, const char *user_id,
-    const hsi_config_t *config, const char *updated_by);
-
-/* Enqueue a CLI-originated HSI config DELETE for later flush to etcd. */
-etcd_status_t etcd_client_queue_hsi_delete(const char *node_id, const char *user_id);
-
-/* Enqueue a CLI-originated subscriber-count change for later flush to etcd. */
-etcd_status_t etcd_client_queue_subscriber_count(const char *node_id,
-    const char *subscriber_count_str, const char *updated_by);
-
-/* Enqueue a CLI-originated PPPoE desire_status change (connect/disconnect) for
- * later flush. On flush the subscriber's existing config in etcd is preserved
- * and ONLY config.desire_status is updated (a connect/disconnect must not
- * clobber a concurrent config edit). desire_status must be "connect"/"disconnect". */
-etcd_status_t etcd_client_queue_desire_status(const char *node_id, const char *user_id,
-    const char *desire_status);
-
-/* Number of entries currently pending in the offline queue. */
-int etcd_client_queue_pending(void);
-
-/* ---- Compare-And-Swap primitive -----------------------------------------
- * Generic CAS put built on etcd ModRevision. See docs/contracts/cas-convention.md.
- * Later slices (config writes, desire_status, offline-queue flush) build on this.
+/* ---- Offline edits ------------------------------------------------------
+ * The node is read-only on etcd (writes go via the controller). Offline
+ * (etcd-unreachable) edits are applied to the persisted local snapshot (see
+ * config_snapshot.h) and reported to the controller as ConfigOfflineEdit
+ * events over Kafka on reconnect — the node never writes etcd.
  */
 
 /**
- * @brief Mutate callback for etcd_client_cas_put().
- * @param current_json  Current value as a NUL-terminated JSON string, or NULL if
- *                      the key does not exist.
- * @param out_value     On SUCCESS, set to a malloc'd NUL-terminated JSON string to
- *                      write; etcd_client_cas_put() takes ownership and frees it.
- * @param user_data     Opaque pointer forwarded from etcd_client_cas_put().
- * @return SUCCESS to proceed with the write, ERROR to abort the CAS (no write).
- */
-typedef STATUS (*etcd_mutate_fn_t)(const char *current_json, char **out_value,
-    void *user_data);
-
-/**
- * @fn etcd_client_cas_put
- * @brief Compare-And-Swap put on an etcd key, keyed on ModRevision.
+ * @fn etcd_client_render_hsi_config
  *
- * Reads the key, invokes @p mutate_fn to produce the new value, then writes it
- * back only if the key's revision is unchanged. On a concurrent write (CAS
- * conflict) it retries with exponential backoff (5 attempts, 50ms..800ms).
- *
- * @param key           Full etcd key (e.g. "configs/{node}/hsi/{user}").
- * @param mutate_fn     Callback that produces the new value from the current one.
- * @param user_data     Opaque pointer forwarded to @p mutate_fn.
- * @param out_revision  Optional (may be NULL); receives the new etcd revision on success.
- * @return ETCD_SUCCESS, ETCD_CAS_CONFLICT (retries exhausted), or ETCD_ERROR.
- */
-etcd_status_t etcd_client_cas_put(const char *key, etcd_mutate_fn_t mutate_fn,
-    void *user_data, int64_t *out_revision);
-
-/* Offline-queue field-write kinds. In SDN mode the node is read-only on etcd
- * (config writes go via the controller); these kinds exist only for the
- * etcd-down path: the node applies the change locally, queues it, and the
- * flush replays the single-field edit on the freshest etcd value under CAS
- * so it never clobbers a concurrent controller edit. */
-#define ETCD_FIELD_KIND_DNS_PROXY     "dns_proxy"      /* value: "true"/"false" */
-#define ETCD_FIELD_KIND_TCP_CONNTRACK "tcp_conntrack"  /* value: "true"/"false" */
-#define ETCD_FIELD_KIND_SNAT_UPSERT   "snat_upsert"    /* value: {"eport","dip","dport"} */
-#define ETCD_FIELD_KIND_SNAT_REMOVE   "snat_remove"    /* value: eport string */
-#define ETCD_FIELD_KIND_DNS_ADD       "dns_add"        /* value: {"domain","ip","ttl"} */
-#define ETCD_FIELD_KIND_DNS_DEL       "dns_del"        /* value: domain string */
-
-/**
- * @fn etcd_client_field_merge
- *
- * @brief Pure JSON merge applying one queued field-level edit onto the
- *        current etcd value (see the kind defines for value formats). HSI
- *        kinds require an existing config object; dns_add creates the record
- *        array when absent; dns_del on an absent key fails (nothing to
- *        delete). Exposed for direct unit testing; the offline-queue flush
- *        runs it inside cas_put on the freshest value.
- * @param kind
- *        One of the ETCD_FIELD_KIND_* strings
- * @param current_json
- *        Current etcd value, or NULL when the key is absent
- * @param value
- *        The queued field value (format per kind)
- * @param out_json
- *        Output: malloc'd merged JSON on SUCCESS; caller frees
- * @return
- *        SUCCESS or ERROR (merge not applicable / bad input)
- */
-STATUS etcd_client_field_merge(const char *kind, const char *current_json,
-    const char *value, char **out_json);
-
-/**
- * @fn etcd_client_queue_field_write
- *
- * @brief Queue a field-level write for CAS flush on etcd reconnect. The key
- *        is derived from the kind: DNS record kinds target
- *        configs/{node}/dns/{user}, the rest configs/{node}/hsi/{user}.
+ * @brief Serialize an hsi_config_t into the HSIConfigWithMetadata JSON
+ *        envelope (same shape as the etcd value; metadata fields are
+ *        placeholders — the snapshot layer re-stamps them).
+ *        Used by the offline-edit path to store full configs into the local
+ *        snapshot.
  * @param node_id
  *        Node UUID
- * @param user_id
- *        User identifier
- * @param kind
- *        One of the ETCD_FIELD_KIND_* strings
- * @param value
- *        The field value (format per kind)
+ * @param config
+ *        Config to serialize
  * @return
- *        ETCD_SUCCESS or error code
+ *        malloc'd JSON string (caller frees), or NULL on error
  */
-etcd_status_t etcd_client_queue_field_write(const char *node_id, const char *user_id,
-    const char *kind, const char *value);
+char *etcd_client_render_hsi_config(const char *node_id, const hsi_config_t *config);
+
+/**
+ * @fn etcd_client_parse_hsi_config
+ *
+ * @brief parse an etcd-schema HSI config JSON (metadata envelope or legacy
+ *        bare config) into an hsi_config_t; the parser lives here because the
+ *        JSON schema is the etcd client's domain
+ * @param value_json
+ *      raw JSON value (etcd value or snapshot mirror of it)
+ * @param out_config
+ *      parsed config; caller frees port_mappings via
+ *      hsi_config_free_port_mappings()
+ * @param out_is_enabled
+ *      optional; receives the config's desire_status == "connect"
+ * @return
+ *      SUCCESS, or ERROR when the client is uninitialized or the JSON is
+ *      unparsable
+ */
+STATUS etcd_client_parse_hsi_config(const char *value_json, hsi_config_t *out_config,
+    BOOL *out_is_enabled);
+
+/**
+ * @fn etcd_client_get_value
+ *
+ * @brief read a single etcd key's current value (offline-edit reporter
+ *        primitive)
+ * @param key
+ *      full etcd key
+ * @param out_value
+ *      receives a malloc'd copy of the value on ETCD_SUCCESS (caller frees);
+ *      NULL otherwise
+ * @return
+ *      ETCD_SUCCESS, ETCD_KEY_NOT_FOUND when the key is absent, or
+ *      ETCD_ERROR on a transient read failure
+ */
+etcd_status_t etcd_client_get_value(const char *key, char **out_value);
 /**
  * @fn etcd_client_delete_hsi_config
  * 

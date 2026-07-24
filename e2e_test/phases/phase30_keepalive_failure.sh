@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # ---------------------------------------------------------------------------
-# Phase 30 — PPPoE runtime disconnect and keepalive recovery (Steps 119-122)
+# Phase 30 — PPPoE runtime disconnect and keepalive recovery (Steps 120-123)
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
@@ -271,7 +271,7 @@ phase30_keepalive_failure() {
     local _issue119="" _issue120="" _issue121="" _issue122=""
 
     bold "═══════════════════════════════════════════════════════"
-    bold " Phase 30 — PPPoE Runtime Recovery (Steps 119-122)"
+    bold " Phase 30 — PPPoE Runtime Recovery (Steps 120-123)"
     bold "═══════════════════════════════════════════════════════"
 
     _config_log_path=$(ssh_node "grep 'LogPath' /etc/fastrg/config.cfg 2>/dev/null" || true)
@@ -290,10 +290,10 @@ phase30_keepalive_failure() {
     done
 
     if [[ -n "$_issue119" ]]; then
-        fail "Step 119: recover after LCP Terminate-Request" "dirty precondition: ${_issue119}"
-        fail "Step 120: recover after peer PADT" "dirty precondition: ${_issue119}"
-        fail "Step 121: detect LCP keepalive failure" "dirty precondition: ${_issue119}"
-        fail "Step 122: restore default BRAS and auto-recover" "dirty precondition: ${_issue119}"
+        fail "Step 120: recover after LCP Terminate-Request" "dirty precondition: ${_issue119}"
+        fail "Step 121: recover after peer PADT" "dirty precondition: ${_issue119}"
+        fail "Step 122: detect LCP keepalive failure" "dirty precondition: ${_issue119}"
+        fail "Step 123: restore default BRAS and auto-recover" "dirty precondition: ${_issue119}"
         return 0
     fi
 
@@ -317,10 +317,10 @@ phase30_keepalive_failure() {
     fi
 
     if [[ $_step119_ok -eq 1 ]]; then
-        pass "Step 119: recover after LCP Terminate-Request" \
+        pass "Step 120: recover after LCP Terminate-Request" \
             "${#SUB_IDS[@]} Terminate-Acks and all teardowns observed in ${_event_seconds}s; users ${SUB_IDS[*]} auto-recovered in ${_recovery_seconds}s"
     else
-        fail "Step 119: recover after LCP Terminate-Request" "$_issue119"
+        fail "Step 120: recover after LCP Terminate-Request" "$_issue119"
     fi
 
     for _uid in "${SUB_IDS[@]}"; do
@@ -352,10 +352,10 @@ phase30_keepalive_failure() {
     fi
 
     if [[ $_step120_ok -eq 1 ]]; then
-        pass "Step 120: recover after peer PADT" \
+        pass "Step 121: recover after peer PADT" \
             "${#SUB_IDS[@]} PADT disconnects and all teardowns observed in ${_event_seconds}s; users ${SUB_IDS[*]} auto-recovered in ${_recovery_seconds}s"
     else
-        fail "Step 120: recover after peer PADT" "$_issue120"
+        fail "Step 121: recover after peer PADT" "$_issue120"
     fi
 
     _P30_BRAS_NEEDS_DEFAULT_RESTORE=1
@@ -376,10 +376,10 @@ phase30_keepalive_failure() {
     fi
 
     if [[ $_step121_ok -eq 1 ]]; then
-        pass "Step 121: detect LCP keepalive failure" \
+        pass "Step 122: detect LCP keepalive failure" \
             "users ${SUB_IDS[*]} logged 3 missed echo-requests and left Data phase in ${_event_seconds}s"
     else
-        fail "Step 121: detect LCP keepalive failure" "$_issue121"
+        fail "Step 122: detect LCP keepalive failure" "$_issue121"
     fi
 
     if ! _p30_restart_bras ""; then
@@ -394,10 +394,10 @@ phase30_keepalive_failure() {
     fi
 
     if [[ $_step122_ok -eq 1 ]]; then
-        pass "Step 122: restore default BRAS and auto-recover" \
+        pass "Step 123: restore default BRAS and auto-recover" \
             "default echo behavior restored; users ${SUB_IDS[*]} auto-recovered in ${_recovery_seconds}s without connect_hsi"
     else
-        fail "Step 122: restore default BRAS and auto-recover" "$_issue122"
+        fail "Step 123: restore default BRAS and auto-recover" "$_issue122"
     fi
 
     _cleanup_phase30_keepalive_failure || true

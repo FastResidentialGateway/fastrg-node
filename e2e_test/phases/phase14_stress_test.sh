@@ -39,7 +39,7 @@ phase14_stress_test() {
 
         local DNS_VAL
         DNS_VAL=$(etcdctl_get_value "configs/${NODE_UUID}/dns/${USER_ID}" 2>/dev/null || true)
-        DNS_DOMAINS=$(printf '%s' "$DNS_VAL" | jq -r '.[].domain // empty' 2>/dev/null || true)
+        DNS_DOMAINS=$(printf '%s' "$DNS_VAL" | jq -r '.records[]?.domain // empty' 2>/dev/null || true)
 
         if [[ -z "$DNS_DOMAINS" ]]; then
             skip "$_step_name" "No DNS static records in etcd — nothing to verify"
