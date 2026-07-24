@@ -35,6 +35,34 @@ extern "C"
 using namespace std;
 using namespace fastrgnodeservice;
 
+#include "../controller/config_snapshot.h"
+
+/* Apply an offline field edit onto the persisted snapshot: the
+ * edit is merged onto the snapshot's current value, then stored back with a
+ * fresh metadata stamp, the dirty flag and an edit summary. On
+ * reconnect, dirty entries are reported to the controller as ConfigOfflineEdit
+ * over Kafka — the node never writes etcd. allow_create only for edits that
+ * may create the key's value from scratch (DNS record add). */
+static bool snapshot_field_edit(snapshot_kind_t skind, const char *user_id,
+    const char *kind, const char *value, const std::string &summary,
+    bool allow_create)
+{
+    char *cur = config_snapshot_get(skind, user_id);
+    if (cur == NULL && !allow_create)
+        return false;
+    char *merged = NULL;
+    STATUS s = config_snapshot_field_merge(kind, cur, value, &merged);
+    free(cur);
+    if (s != SUCCESS || merged == NULL) {
+        free(merged);
+        return false;
+    }
+    bool ok = config_snapshot_offline_edit(skind, user_id, merged,
+        summary.c_str()) == SUCCESS;
+    free(merged);
+    return ok;
+}
+
 grpc::Status FastRGNodeServiceImpl::ApplyConfig(::grpc::ServerContext* context, const ::fastrgnodeservice::ConfigRequest* request, ::fastrgnodeservice::ConfigReply* response)
 {
     uint16_t user_id = request->user_id(), ccb_id = request->user_id() - 1;
@@ -106,15 +134,20 @@ grpc::Status FastRGNodeServiceImpl::ApplyConfig(::grpc::ServerContext* context, 
         cout << err << endl;
         return grpc::Status(grpc::StatusCode::INTERNAL, err);
     }
-    // SDN mode but etcd is down: queue the write to flush to etcd on reconnect.
+    // SDN mode but etcd is down: record the full config into the snapshot for
+    // controller arbitration on reconnect (ConfigOfflineEdit over Kafka).
     if (etcd_client_is_initialized()) {
-        if (etcd_client_queue_hsi_put(fastrg_ccb->node_uuid, user_id_str.c_str(),
-                &hsi_config, "fastrg-node-grpc") != ETCD_SUCCESS) {
-            std::string err = "Applied locally but failed to queue config for user " + user_id_str;
+        char *rendered = etcd_client_render_hsi_config(fastrg_ccb->node_uuid, &hsi_config);
+        bool ok = rendered != NULL &&
+            config_snapshot_offline_edit(SNAPSHOT_KIND_HSI, user_id_str.c_str(),
+                rendered, "apply config") == SUCCESS;
+        free(rendered);
+        if (!ok) {
+            std::string err = "Applied locally but failed to snapshot config for user " + user_id_str;
             cout << err << endl;
             return grpc::Status(grpc::StatusCode::INTERNAL, err);
         }
-        cout << "Config applied locally and queued for etcd flush, user " << user_id_str << endl;
+        cout << "Config applied locally and snapshotted for offline-edit report, user " << user_id_str << endl;
     }
 
     response->set_status("Configuration successful");
@@ -147,21 +180,25 @@ grpc::Status FastRGNodeServiceImpl::RemoveConfig(::grpc::ServerContext* context,
         return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, err);
     }
 
-    // etcd unreachable: remove locally now.
+    // etcd unreachable (pure standalone, or SDN with etcd down): remove locally now.
     std::string user_id_str = std::to_string(user_id);
     if (remove_hsi_config(fastrg_ccb, ccb_id) == ERROR) {
         std::string err = "Error! Failed to remove configuration for user " + user_id_str;
         cout << err << endl;
         return grpc::Status(grpc::StatusCode::INTERNAL, err);
     }
-    // SDN mode but etcd down: queue the delete to flush on reconnect.
+
+    // SDN mode but etcd is down: record a tombstone in the snapshot so the
+    // deletion is reported to the controller for arbitration on reconnect
+    // (deleted=true ConfigOfflineEdit over Kafka).
     if (etcd_client_is_initialized()) {
-        if (etcd_client_queue_hsi_delete(fastrg_ccb->node_uuid, user_id_str.c_str()) != ETCD_SUCCESS) {
-            std::string err = "Removed locally but failed to queue delete for user " + user_id_str;
+        if (config_snapshot_offline_delete(SNAPSHOT_KIND_HSI, user_id_str.c_str(),
+                "remove config") != SUCCESS) {
+            std::string err = "Removed locally but failed to snapshot deletion for user " + user_id_str;
             cout << err << endl;
             return grpc::Status(grpc::StatusCode::INTERNAL, err);
         }
-        cout << "Config removed locally and queued for etcd flush, user " << user_id_str << endl;
+        cout << "Config removed locally and tombstoned for offline-delete report, user " << user_id_str << endl;
     }
 
     response->set_status("Configuration removal successful");
@@ -214,11 +251,14 @@ grpc::Status FastRGNodeServiceImpl::SetSubscriberCount(::grpc::ServerContext* co
         cout << err << endl;
         return grpc::Status(grpc::StatusCode::INTERNAL, err);
     }
-    // SDN mode but etcd down: queue for flush on reconnect.
+    // SDN mode but etcd down: record the count into the snapshot for
+    // controller arbitration on reconnect.
     if (etcd_client_is_initialized()) {
-        if (etcd_client_queue_subscriber_count(fastrg_ccb->node_uuid,
-                subscriber_count_str.c_str(), "fastrg-node-grpc") != ETCD_SUCCESS) {
-            std::string err = "Applied locally but failed to queue subscriber count " + subscriber_count_str;
+        std::string count_json = "{\"subscriber_count\":\"" + subscriber_count_str + "\"}";
+        if (config_snapshot_offline_edit(SNAPSHOT_KIND_COUNT, "0",
+                count_json.c_str(),
+                ("subscriber_count=" + subscriber_count_str).c_str()) != SUCCESS) {
+            std::string err = "Applied locally but failed to snapshot subscriber count " + subscriber_count_str;
             cout << err << endl;
             return grpc::Status(grpc::StatusCode::INTERNAL, err);
         }
@@ -268,7 +308,8 @@ grpc::Status FastRGNodeServiceImpl::ConnectHsi(::grpc::ServerContext* context, c
             }
             if (sdn_offline) {
                 std::string u = std::to_string(i + 1);
-                etcd_client_queue_desire_status(fastrg_ccb->node_uuid, u.c_str(), DESIRE_STATUS_CONNECT);
+                snapshot_field_edit(SNAPSHOT_KIND_HSI, u.c_str(), SNAPSHOT_FIELD_KIND_DESIRE,
+                    DESIRE_STATUS_CONNECT, std::string("desire=") + DESIRE_STATUS_CONNECT, false);
             }
         }
     } else {
@@ -292,8 +333,8 @@ grpc::Status FastRGNodeServiceImpl::ConnectHsi(::grpc::ServerContext* context, c
             return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, err);
         }
         if (sdn_offline)
-            etcd_client_queue_desire_status(fastrg_ccb->node_uuid, std::to_string(user_id).c_str(),
-                DESIRE_STATUS_CONNECT);
+            snapshot_field_edit(SNAPSHOT_KIND_HSI, std::to_string(user_id).c_str(), SNAPSHOT_FIELD_KIND_DESIRE,
+                    DESIRE_STATUS_CONNECT, std::string("desire=") + DESIRE_STATUS_CONNECT, false);
     }
 
     return grpc::Status::OK;
@@ -345,7 +386,8 @@ grpc::Status FastRGNodeServiceImpl::DisconnectHsi(::grpc::ServerContext* context
             }
             if (sdn_offline) {
                 std::string u = std::to_string(i + 1);
-                etcd_client_queue_desire_status(fastrg_ccb->node_uuid, u.c_str(), DESIRE_STATUS_DISCONNECT);
+                snapshot_field_edit(SNAPSHOT_KIND_HSI, u.c_str(), SNAPSHOT_FIELD_KIND_DESIRE,
+                    DESIRE_STATUS_DISCONNECT, std::string("desire=") + DESIRE_STATUS_DISCONNECT, false);
             }
         }
     } else {
@@ -357,8 +399,8 @@ grpc::Status FastRGNodeServiceImpl::DisconnectHsi(::grpc::ServerContext* context
                 return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, err);
             } else {
                 if (sdn_offline)
-                    etcd_client_queue_desire_status(fastrg_ccb->node_uuid, std::to_string(user_id).c_str(),
-                        DESIRE_STATUS_DISCONNECT);
+                    snapshot_field_edit(SNAPSHOT_KIND_HSI, std::to_string(user_id).c_str(), SNAPSHOT_FIELD_KIND_DESIRE,
+                    DESIRE_STATUS_DISCONNECT, std::string("desire=") + DESIRE_STATUS_DISCONNECT, false);
                 return grpc::Status::OK;
             }
         }
@@ -382,8 +424,8 @@ grpc::Status FastRGNodeServiceImpl::DisconnectHsi(::grpc::ServerContext* context
             return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, err);
         }
         if (sdn_offline)
-            etcd_client_queue_desire_status(fastrg_ccb->node_uuid, std::to_string(user_id).c_str(),
-                DESIRE_STATUS_DISCONNECT);
+            snapshot_field_edit(SNAPSHOT_KIND_HSI, std::to_string(user_id).c_str(), SNAPSHOT_FIELD_KIND_DESIRE,
+                    DESIRE_STATUS_DISCONNECT, std::string("desire=") + DESIRE_STATUS_DISCONNECT, false);
     }
 
     return grpc::Status::OK;
@@ -530,10 +572,11 @@ grpc::Status FastRGNodeServiceImpl::SetSnatConfig(::grpc::ServerContext* context
         entry["dip"] = dip;
         entry["dport"] = std::to_string(iport);
         Json::StreamWriterBuilder w; w["indentation"] = "";
-        if (etcd_client_queue_field_write(fastrg_ccb->node_uuid,
-                std::to_string(user_id).c_str(), ETCD_FIELD_KIND_SNAT_UPSERT,
-                Json::writeString(w, entry).c_str()) != ETCD_SUCCESS) {
-            std::string err = "Failed to queue SNAT port forward for user " + std::to_string(user_id);
+        if (!snapshot_field_edit(SNAPSHOT_KIND_HSI,
+                std::to_string(user_id).c_str(), SNAPSHOT_FIELD_KIND_SNAT_UPSERT,
+                Json::writeString(w, entry).c_str(),
+                "snat set eport=" + std::to_string(eport), false)) {
+            std::string err = "Failed to snapshot SNAT port forward for user " + std::to_string(user_id);
             cout << err << endl;
             return grpc::Status(grpc::StatusCode::INTERNAL, err);
         }
@@ -575,10 +618,11 @@ grpc::Status FastRGNodeServiceImpl::RemoveSnatConfig(::grpc::ServerContext* cont
 
     // SDN mode but etcd down: queue the field write to flush on reconnect.
     if (etcd_client_is_initialized() && fastrg_ccb->node_uuid) {
-        if (etcd_client_queue_field_write(fastrg_ccb->node_uuid,
-                std::to_string(user_id).c_str(), ETCD_FIELD_KIND_SNAT_REMOVE,
-                std::to_string(eport).c_str()) != ETCD_SUCCESS) {
-            std::string err = "Failed to queue SNAT port forward removal for user " + std::to_string(user_id);
+        if (!snapshot_field_edit(SNAPSHOT_KIND_HSI,
+                std::to_string(user_id).c_str(), SNAPSHOT_FIELD_KIND_SNAT_REMOVE,
+                std::to_string(eport).c_str(),
+                "snat unset eport=" + std::to_string(eport), false)) {
+            std::string err = "Failed to snapshot SNAT port forward removal for user " + std::to_string(user_id);
             cout << err << endl;
             return grpc::Status(grpc::StatusCode::INTERNAL, err);
         }
@@ -1219,10 +1263,11 @@ grpc::Status FastRGNodeServiceImpl::AddDnsRecord(::grpc::ServerContext* context,
         rec["ip"] = ip;
         rec["ttl"] = ttl;
         Json::StreamWriterBuilder w; w["indentation"] = "";
-        if (etcd_client_queue_field_write(fastrg_ccb->node_uuid,
-                std::to_string(user_id).c_str(), ETCD_FIELD_KIND_DNS_ADD,
-                Json::writeString(w, rec).c_str()) != ETCD_SUCCESS) {
-            std::string err = "Failed to queue DNS record for user " + std::to_string(user_id);
+        if (!snapshot_field_edit(SNAPSHOT_KIND_DNS,
+                std::to_string(user_id).c_str(), SNAPSHOT_FIELD_KIND_DNS_ADD,
+                Json::writeString(w, rec).c_str(),
+                "dns add " + domain, true)) {
+            std::string err = "Failed to snapshot DNS record for user " + std::to_string(user_id);
             cout << err << endl;
             return grpc::Status(grpc::StatusCode::INTERNAL, err);
         }
@@ -1259,10 +1304,11 @@ grpc::Status FastRGNodeServiceImpl::RemoveDnsRecord(::grpc::ServerContext* conte
 
     // SDN mode but etcd down: queue the record removal to flush on reconnect.
     if (etcd_client_is_initialized() && fastrg_ccb && fastrg_ccb->node_uuid) {
-        if (etcd_client_queue_field_write(fastrg_ccb->node_uuid,
-                std::to_string(user_id).c_str(), ETCD_FIELD_KIND_DNS_DEL,
-                domain.c_str()) != ETCD_SUCCESS) {
-            std::string err = "Failed to queue DNS record removal for user " + std::to_string(user_id);
+        if (!snapshot_field_edit(SNAPSHOT_KIND_DNS,
+                std::to_string(user_id).c_str(), SNAPSHOT_FIELD_KIND_DNS_DEL,
+                domain.c_str(),
+                "dns del " + domain, false)) {
+            std::string err = "Failed to snapshot DNS record removal for user " + std::to_string(user_id);
             cout << err << endl;
             return grpc::Status(grpc::StatusCode::INTERNAL, err);
         }
@@ -1399,10 +1445,11 @@ grpc::Status FastRGNodeServiceImpl::SetDnsProxy(::grpc::ServerContext* context,
 
     /* SDN mode but etcd down: queue the field write to flush on reconnect. */
     if (etcd_client_is_initialized() && fastrg_ccb && fastrg_ccb->node_uuid) {
-        if (etcd_client_queue_field_write(fastrg_ccb->node_uuid,
-                std::to_string(user_id).c_str(), ETCD_FIELD_KIND_DNS_PROXY,
-                enable ? "true" : "false") != ETCD_SUCCESS) {
-            std::string err = "Failed to queue dns_proxy_enable for user " + std::to_string(user_id);
+        if (!snapshot_field_edit(SNAPSHOT_KIND_HSI,
+                std::to_string(user_id).c_str(), SNAPSHOT_FIELD_KIND_DNS_PROXY,
+                enable ? "true" : "false",
+                std::string("dns_proxy=") + (enable ? "true" : "false"), false)) {
+            std::string err = "Failed to snapshot dns_proxy_enable for user " + std::to_string(user_id);
             cout << err << endl;
             return grpc::Status(grpc::StatusCode::INTERNAL, err);
         }
@@ -1446,10 +1493,11 @@ grpc::Status FastRGNodeServiceImpl::SetTcpConntrack(::grpc::ServerContext* conte
 
     /* SDN mode but etcd down: queue the field write to flush on reconnect. */
     if (etcd_client_is_initialized() && fastrg_ccb && fastrg_ccb->node_uuid) {
-        if (etcd_client_queue_field_write(fastrg_ccb->node_uuid,
-                std::to_string(user_id).c_str(), ETCD_FIELD_KIND_TCP_CONNTRACK,
-                enable ? "true" : "false") != ETCD_SUCCESS) {
-            std::string err = "Failed to queue tcp_conntrack_enable for user " + std::to_string(user_id);
+        if (!snapshot_field_edit(SNAPSHOT_KIND_HSI,
+                std::to_string(user_id).c_str(), SNAPSHOT_FIELD_KIND_TCP_CONNTRACK,
+                enable ? "true" : "false",
+                std::string("tcp_conntrack=") + (enable ? "true" : "false"), false)) {
+            std::string err = "Failed to snapshot tcp_conntrack_enable for user " + std::to_string(user_id);
             cout << err << endl;
             return grpc::Status(grpc::StatusCode::INTERNAL, err);
         }

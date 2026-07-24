@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # ---------------------------------------------------------------------------
-# Phase 31 — Subscriber slot scale boundary (Steps 123-126)
+# Phase 31 — Subscriber slot scale boundary (Steps 124-127)
 #
 # MaxUserCount is read from the node after the runner temporarily sets it from
 # E2E_MAX_USER_COUNT (default 63). In the IOVA PA bench environment, each added
@@ -92,7 +92,7 @@ phase31_subscriber_scale() {
     local _stable_local="" _stable_etcd="" _uid="" _phase="" _ping_out="" _loss=""
 
     bold "═══════════════════════════════════════════════════════"
-    bold " Phase 31 — Subscriber Slot Scale Boundary (Steps 123-126)"
+    bold " Phase 31 — Subscriber Slot Scale Boundary (Steps 124-127)"
     bold "═══════════════════════════════════════════════════════"
 
     _config_line=$(ssh_node \
@@ -103,10 +103,10 @@ phase31_subscriber_scale() {
 
     if [[ ! "$_max" =~ ^[0-9]+$ || "$_max" -lt 2 ]]; then
         _issue123="cannot read a valid MaxUserCount from node config: ${_config_line:-empty}"
-        fail "Step 123: expand subscriber slots to configured max" "$_issue123"
-        fail "Step 124: node rejects count beyond configured max" "precondition failed: $_issue123"
-        fail "Step 125: shrink subscriber slots to canonical count" "precondition failed: $_issue123"
-        fail "Step 126: data plane healthy after resize" "precondition failed: $_issue123"
+        fail "Step 124: expand subscriber slots to configured max" "$_issue123"
+        fail "Step 125: node rejects count beyond configured max" "precondition failed: $_issue123"
+        fail "Step 126: shrink subscriber slots to canonical count" "precondition failed: $_issue123"
+        fail "Step 127: data plane healthy after resize" "precondition failed: $_issue123"
         _cleanup_phase31_subscriber_scale
         return 0
     fi
@@ -150,10 +150,10 @@ phase31_subscriber_scale() {
     fi
 
     if [[ -z "$_issue123" ]]; then
-        pass "Step 123: expand subscriber slots to configured max" \
+        pass "Step 124: expand subscriber slots to configured max" \
             "max=${_max}; local/etcd stable; ppp_ccb_pool avail ${_before_avail}->${_at_max_avail}, in_use ${_before_in_use}->${_at_max_in_use}; node responsive"
     else
-        fail "Step 123: expand subscriber slots to configured max" "$_issue123"
+        fail "Step 124: expand subscriber slots to configured max" "$_issue123"
     fi
 
     # The node validates the configured MaxUserCount on its etcd apply path:
@@ -199,10 +199,10 @@ phase31_subscriber_scale() {
     fi
 
     if [[ -z "$_issue124" ]]; then
-        pass "Step 124: node rejects count beyond configured max" \
+        pass "Step 125: node rejects count beyond configured max" \
             "configured max=${_max}: etcd holds ${_over} (drift visible, controller-side validation pending), node held local=${_max}, ppp_ccb_pool in_use=${_over_in_use} unchanged; node responsive"
     else
-        fail "Step 124: node rejects count beyond configured max" "$_issue124"
+        fail "Step 125: node rejects count beyond configured max" "$_issue124"
     fi
 
     _reply=$(fastrg_grpc set_subscriber_count 2 2>/dev/null || true)
@@ -226,10 +226,10 @@ phase31_subscriber_scale() {
     fi
 
     if [[ -z "$_issue125" ]]; then
-        pass "Step 125: shrink subscriber slots to canonical count" \
+        pass "Step 126: shrink subscriber slots to canonical count" \
             "local/etcd=2; RCU resize returned; CCB pool intentionally retained at avail/in_use=${_shrink_avail}/${_shrink_in_use}; node responsive"
     else
-        fail "Step 125: shrink subscriber slots to canonical count" "$_issue125"
+        fail "Step 126: shrink subscriber slots to canonical count" "$_issue125"
     fi
 
     for _uid in 1 2; do
@@ -250,10 +250,10 @@ phase31_subscriber_scale() {
     fi
 
     if [[ -z "$_issue126" ]]; then
-        pass "Step 126: data plane healthy after resize" \
+        pass "Step 127: data plane healthy after resize" \
             "canonical users 1/2 remain in Data phase; ${WAN_IP} reachable with 0% packet loss"
     else
-        fail "Step 126: data plane healthy after resize" "$_issue126"
+        fail "Step 127: data plane healthy after resize" "$_issue126"
     fi
 
     _cleanup_phase31_subscriber_scale

@@ -163,8 +163,12 @@ static void fill_hsi(controller::HSIConfig* cfg, unsigned int user_id, unsigned 
     cfg->set_dhcp_addr_pool(std::string(pool_start ? pool_start : "") + "-" + (pool_end ? pool_end : ""));
     cfg->set_dhcp_subnet(subnet ? subnet : "");
     cfg->set_dhcp_gateway(gateway ? gateway : "");
-    cfg->set_dns_proxy_enable(true);
-    cfg->set_tcp_conntrack_enable(true);
+    /* dns_proxy_enable / tcp_conntrack_enable are intentionally left unset
+     * (proto3 optional): on create the controller defaults them to true (the
+     * node's etcd parser does the same when absent), and on the update path
+     * omission preserves the user's earlier CLI toggles instead of forcing
+     * them back to true.
+     **/
 }
 
 cli_ctrl_status_t cli_controller_apply_hsi(unsigned int user_id, unsigned int vlan_id,
@@ -281,13 +285,19 @@ static cli_ctrl_status_t fetch_config(unsigned int user_id, controller::HSIConfi
     return map_status(s);
 }
 
-// Update an HSI config after a local modification.
-static cli_ctrl_status_t update_config(unsigned int user_id, const controller::HSIConfig& cfg) {
+/* Update an HSI config after a local modification. clear_port_mappings must
+ * only be set when cfg carries no mappings (the combination is invalid): an
+ * empty port_mappings list otherwise means "leave the stored mappings alone".
+ **/
+static cli_ctrl_status_t update_config(unsigned int user_id, const controller::HSIConfig& cfg,
+    bool clear_port_mappings = false) {
     grpc::ClientContext ctx; set_ctx(ctx);
     controller::UpdateHSIConfigRequest req;
     req.set_node_id(g_node_uuid);
     req.set_user_id(std::to_string(user_id));
     *req.mutable_config() = cfg;
+    if (clear_port_mappings)
+        req.set_clear_port_mappings(true);
     controller::HSIConfigResponse reply;
     return map_status(g_stub->UpdateHSIConfig(&ctx, req, &reply));
 }
@@ -346,7 +356,9 @@ cli_ctrl_status_t cli_controller_snat_unset(unsigned int user_id, unsigned int e
         if (cfg.port_mappings(i).eport() != std::to_string(eport))
             *out.add_port_mappings() = cfg.port_mappings(i);
     }
-    return update_config(user_id, out);
+    /* Removing the last mapping yields an empty list, which the controller
+    treats as "don't touch" — the explicit flag is required for the wipe.*/
+    return update_config(user_id, out, out.port_mappings_size() == 0);
 }
 
 cli_ctrl_status_t cli_controller_get_hsi(unsigned int user_id, char* out_buf, size_t out_len) {

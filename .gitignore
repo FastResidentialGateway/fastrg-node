@@ -14,3 +14,10 @@ src/version.h
 northbound/controller/proto
 .github/*.md
 CLAUDE.md
+root_plan.md
+SETUP.md
+WORKFLOW.md
+AGENTS.md
+.codex
+.claude
+artifacts

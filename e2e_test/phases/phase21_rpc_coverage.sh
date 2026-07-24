@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # ---------------------------------------------------------------------------
-# Phase 21 — Read-only RPC coverage (Steps 90-92)
+# Phase 21 — Read-only RPC coverage (Steps 91-93)
 # ---------------------------------------------------------------------------
 
 _p21_response_snippet() {
@@ -10,7 +10,7 @@ _p21_response_snippet() {
 
 phase21_rpc_coverage() {
     bold "═══════════════════════════════════════════════════════"
-    bold " Phase 21 — Read-only RPC Coverage (Steps 90-92)"
+    bold " Phase 21 — Read-only RPC Coverage (Steps 91-93)"
     bold "═══════════════════════════════════════════════════════"
 
     local _hsi_config="" _gateway="" _subnet=""
@@ -57,11 +57,11 @@ PY
     fi
 
     if [[ $_arp_positive_ok -eq 1 && $_arp_negative_ok -eq 1 ]]; then
-        pass "Step 90: GetArpTable" "${_arp_detail}; invalid user rejected (rc=${_invalid_rc})"
+        pass "Step 91: GetArpTable" "${_arp_detail}; invalid user rejected (rc=${_invalid_rc})"
     else
         _arp_snippet=$(_p21_response_snippet "$_arp")
         _invalid_snippet=$(_p21_response_snippet "$_invalid_out")
-        fail "Step 90: GetArpTable" \
+        fail "Step 91: GetArpTable" \
             "positive=${_arp_positive_ok} response='${_arp_snippet:-empty}'; invalid=${_arp_negative_ok} rc=${_invalid_rc} response='${_invalid_snippet:-empty}'"
     fi
 
@@ -95,10 +95,10 @@ if values[0] <= 0:
 print(f"ports=0,1; xstats={counts[0]}/{counts[1]}; rx_good_packets={values[0]}/{values[1]}")
 PY
     ); then
-        pass "Step 91: GetFastrgSystemXStats" "$_xstats_detail"
+        pass "Step 92: GetFastrgSystemXStats" "$_xstats_detail"
     else
         _xstats_snippet=$(_p21_response_snippet "$_xstats")
-        fail "Step 91: GetFastrgSystemXStats" "response='${_xstats_snippet:-empty}'"
+        fail "Step 92: GetFastrgSystemXStats" "response='${_xstats_snippet:-empty}'"
     fi
 
     local _status="" _status_detail="" _status_snippet=""
@@ -120,9 +120,9 @@ ipaddress.IPv4Address(ip_info.split("/", 1)[0])
 print(f"healthy=true; uptime={uptime}s; os='{os_version}'; ip='{ip_info}'")
 PY
     ); then
-        pass "Step 92: GetNodeStatus" "$_status_detail"
+        pass "Step 93: GetNodeStatus" "$_status_detail"
     else
         _status_snippet=$(_p21_response_snippet "$_status")
-        fail "Step 92: GetNodeStatus" "response='${_status_snippet:-empty}'"
+        fail "Step 93: GetNodeStatus" "response='${_status_snippet:-empty}'"
     fi
 }

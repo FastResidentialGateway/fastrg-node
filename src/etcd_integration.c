@@ -6,6 +6,7 @@
 #include <rte_cycles.h>
 
 #include "etcd_integration.h"
+#include "../northbound/controller/config_snapshot.h"
 #include "fastrg.h"
 #include "dbg.h"
 #include "utils.h"
@@ -13,321 +14,7 @@
 #include "../northbound/controller/kafka_producer.h"
 #include "pppd/pppd.h"
 #include "dhcpd/dhcpd.h"
-#include "avl_tree.h"
 #include "northbound.h"
-
-// Track self-initiated events to avoid processing them again
-#define PENDING_EVENT_TIMEOUT_SECONDS (24 * 60 * 60)  // 1 day in seconds
-#define EVENT_RETRY_DELAY_MS 500   // Retry delay in milliseconds
-#define EVENT_MAX_RETRIES 5       // Maximum retry attempts
-
-typedef enum {
-    PENDING_STATE_WAITING,    // Waiting for revision
-    PENDING_STATE_CONFIRMED   // Have revision
-} pending_state_t;
-
-// Data structure for storing multiple revisions for multiple events
-typedef struct revision_node {
-    int64_t revision; // Only used in CONFIRMED state
-    pending_state_t state;
-    struct revision_node *next;
-} revision_node_t;
-
-// Data structure for self-triggered events
-typedef struct self_triggered_event {
-    U8 action; // e.g., delete/modify
-    U8 reference;
-    U16 ccb_id;
-    revision_node_t *revision_list;  // Linked list of revisions and event states
-    time_t timestamp; // When this entry was marked
-} self_triggered_event_t;
-
-static avl_tree_t *pending_events_tree = NULL;
-static pthread_mutex_t pending_events_mutex = PTHREAD_MUTEX_INITIALIZER;
-
-// Comparison function for self_triggered_event (compares by revision and ccb_id)
-static int compare_events(const void *data1, const void *data2)
-{
-    const self_triggered_event_t *e1 = (const self_triggered_event_t*)data1;
-    const self_triggered_event_t *e2 = (const self_triggered_event_t*)data2;
-
-    // key: ccb_id and action
-    if (e1->ccb_id < e2->ccb_id)
-        return -1;
-    if (e1->ccb_id > e2->ccb_id)
-        return 1;
-
-    if (e1->action < e2->action)
-        return -1;
-    if (e1->action > e2->action)
-        return 1;
-
-    return 0;
-}
-
-// Helper function to add revision to the list
-static void add_revision_to_list(self_triggered_event_t *event)
-{
-    revision_node_t *new_node = fastrg_malloc(revision_node_t, sizeof(revision_node_t), 0);
-    if (!new_node)
-        return;
-
-    new_node->revision = -1;
-    new_node->next = event->revision_list;
-    new_node->state = PENDING_STATE_WAITING;
-    event->revision_list = new_node;
-}
-
-// Helper function to check if revision exists in the list
-static BOOL revision_exists_in_list(const self_triggered_event_t *event, int64_t revision)
-{
-    revision_node_t *current = event->revision_list;
-    while (current) {
-        if (current->revision == revision)
-            return TRUE;
-        current = current->next;
-    }
-    return FALSE;
-}
-
-static BOOL has_still_waiting(const self_triggered_event_t *event)
-{
-    revision_node_t *current = event->revision_list;
-    while (current) {
-        if (current->state == PENDING_STATE_WAITING)
-            return TRUE;
-        current = current->next;
-    }
-    return FALSE;
-}
-
-static void assign_revision_to_list(self_triggered_event_t *event, int64_t revision)
-{
-    revision_node_t *current = event->revision_list;
-    while (current) {
-        if (current->revision == -1) {
-            current->revision = revision;
-            current->state = PENDING_STATE_CONFIRMED;
-            return;
-        }
-        current = current->next;
-    }
-    // If no empty slot, add a new node
-    revision_node_t *new_node = fastrg_malloc(revision_node_t, sizeof(revision_node_t), 0);
-    if (new_node == NULL)
-        return;
-    new_node->revision = revision;
-    new_node->state = PENDING_STATE_CONFIRMED;
-    new_node->next = event->revision_list;
-    event->revision_list = new_node;
-}
-
-// Helper function to remove a revision from the list
-static void remove_revision_from_list(self_triggered_event_t *event, int64_t revision)
-{
-    revision_node_t **current = &event->revision_list;
-
-    while (*current) {
-        if ((*current)->revision == revision) {
-            revision_node_t *to_delete = *current;
-            *current = (*current)->next;
-            fastrg_mfree(to_delete);
-            return;
-        }
-        current = &(*current)->next;
-    }
-}
-
-// Helper function to free all revisions in the list
-static void free_revision_list(revision_node_t *list)
-{
-    while (list) {
-        revision_node_t *next = list->next;
-        fastrg_mfree(list);
-        list = next;
-    }
-}
-
-// Free function for self_triggered_event
-static void free_event(void *data)
-{
-    if (data) {
-        self_triggered_event_t *event = (self_triggered_event_t *)data;
-        free_revision_list(event->revision_list);
-        fastrg_mfree(data);
-    }
-}
-
-// Predicate to check if event is too old
-typedef struct {
-    time_t now;
-} cleanup_context_t;
-
-static bool is_event_expired(const void *data, void *context)
-{
-    const self_triggered_event_t *event = (const self_triggered_event_t*)data;
-    const cleanup_context_t *ctx = (const cleanup_context_t*)context;
-
-    time_t age = ctx->now - event->timestamp;
-    return age >= PENDING_EVENT_TIMEOUT_SECONDS;
-}
-
-// Add a pending event before etcd operation
-void etcd_mark_pending_event(etcd_action_type_t action, U16 ccb_id)
-{
-    pthread_mutex_lock(&pending_events_mutex);
-
-    // Initialize tree if needed
-    if (pending_events_tree == NULL) {
-        pending_events_tree = avl_tree_create(compare_events, free_event, NULL);
-        if (pending_events_tree == NULL) {
-            pthread_mutex_unlock(&pending_events_mutex);
-            return;
-        }
-    }
-
-    // Clean up old entries (older than 1 day)
-    struct timespec now_ts;
-    clock_gettime(CLOCK_MONOTONIC, &now_ts);
-    time_t now = now_ts.tv_sec;
-
-    cleanup_context_t ctx = { .now = now };
-    avl_tree_delete_if(pending_events_tree, is_event_expired, &ctx);
-
-    // Create and add new pending event to the AVL tree
-    self_triggered_event_t search_key = { .action = action, .ccb_id = ccb_id };
-    self_triggered_event_t *existing = (self_triggered_event_t *)avl_tree_search(pending_events_tree, &search_key);
-
-    if (existing) {
-        // Update existing: reset to WAITING state
-        existing->timestamp = now;
-        if (existing->reference < UINT8_MAX) {
-            add_revision_to_list(existing);
-            existing->reference++;
-        }
-    } else {
-        // Create new entry in WAITING state
-        self_triggered_event_t *event = fastrg_malloc(self_triggered_event_t, sizeof(self_triggered_event_t), 0);
-        if (event) {
-            event->revision_list = fastrg_malloc(revision_node_t, sizeof(revision_node_t), 0);
-            if (event->revision_list == NULL) {
-                fastrg_mfree(event);
-                pthread_mutex_unlock(&pending_events_mutex);
-                return;
-            }
-            event->action = action;
-            event->ccb_id = ccb_id;
-            event->revision_list->revision = -1;
-            event->revision_list->state = PENDING_STATE_WAITING;
-            event->revision_list->next = NULL;
-            event->timestamp = now;
-            event->reference = 1; // Initialize reference
-            avl_tree_insert(pending_events_tree, event);
-        }
-    }
-
-    pthread_mutex_unlock(&pending_events_mutex);
-}
-
-void etcd_confirm_pending_event(etcd_action_type_t action, U16 ccb_id, int64_t revision)
-{
-    pthread_mutex_lock(&pending_events_mutex);
-
-    if (pending_events_tree == NULL) {
-        pthread_mutex_unlock(&pending_events_mutex);
-        return;
-    }
-
-    self_triggered_event_t search_key = { .action = action, .ccb_id = ccb_id };
-    self_triggered_event_t *found = (self_triggered_event_t *)avl_tree_search(pending_events_tree, &search_key);
-
-    if (found) {
-        // Add revision to the list
-        assign_revision_to_list(found, revision);
-    }
-
-    pthread_mutex_unlock(&pending_events_mutex);
-}
-
-// Check if event is self-initiated by matching revision and remove from tracking
-BOOL etcd_is_self_event(etcd_action_type_t action, U16 ccb_id, int64_t revision)
-{
-    for(int retry=0; retry<EVENT_MAX_RETRIES; retry++) {
-        pthread_mutex_lock(&pending_events_mutex);
-
-        if (!pending_events_tree) {
-            pthread_mutex_unlock(&pending_events_mutex);
-            return FALSE;
-        }
-
-        // Search for the event
-        self_triggered_event_t search_key = {
-            .action = action,
-            .ccb_id = ccb_id,
-            .revision_list = NULL, // Not used in comparison
-            .timestamp = 0  // Not used in comparison
-        };
-
-        self_triggered_event_t *found = (self_triggered_event_t *)avl_tree_search(pending_events_tree, &search_key);
-        if (found) {
-            if (revision_exists_in_list(found, revision)) {
-                // Match! This is self-event
-                found->reference--;
-                remove_revision_from_list(found, revision);
-                if (found->reference == 0)
-                    avl_tree_delete(pending_events_tree, &search_key);
-                pthread_mutex_unlock(&pending_events_mutex);
-                return TRUE;
-            } else if (has_still_waiting(found)) {
-                // Still WAITING for revision confirmation
-                pthread_mutex_unlock(&pending_events_mutex);
-
-                // Wait a bit and retry
-                if (retry < EVENT_MAX_RETRIES - 1) {
-                    posix_sleep_ms(EVENT_RETRY_DELAY_MS);
-                    continue;
-                } else {
-                    // Max retries reached, treat as external event
-                    return FALSE;
-                }
-            } else {
-                // Revision doesn't match - not self-event
-                pthread_mutex_unlock(&pending_events_mutex);
-                return FALSE;
-            }
-        } else {
-            // Not found
-            pthread_mutex_unlock(&pending_events_mutex);
-            if (retry < EVENT_MAX_RETRIES - 1)
-                posix_sleep_ms(EVENT_RETRY_DELAY_MS);
-        }
-    }
-
-    return FALSE;
-}
-
-void etcd_remove_event(etcd_action_type_t action, U16 ccb_id)
-{
-    pthread_mutex_lock(&pending_events_mutex);
-
-    if (!pending_events_tree) {
-        pthread_mutex_unlock(&pending_events_mutex);
-        return;
-    }
-
-    // Search for the event
-    self_triggered_event_t search_key = {
-        .action = action,
-        .ccb_id = ccb_id,
-        .revision_list = NULL,
-        .timestamp = 0  // Not used in comparison
-    };
-
-    // Remove the event if it exists
-    avl_tree_delete(pending_events_tree, &search_key);
-
-    pthread_mutex_unlock(&pending_events_mutex);
-}
 
 STATUS etcd_integration_init(FastRG_t *fastrg_ccb) 
 {
@@ -352,6 +39,18 @@ STATUS etcd_integration_start(FastRG_t *fastrg_ccb)
         return ERROR;
     }
 
+    /* The node is read-only on etcd: config is owned by the controller. The
+     * node only reads (watch); offline edits accumulate in the persisted local
+     * snapshot (initialized in northbound() before this) and are reported to
+     * the controller over Kafka on reconnect.
+     *
+     * The reason we call this function here is we need to compare configs in local snapshot and
+     * etcd. If local snapshot has newer configs(dirty), we will send to controller over Kafka */
+    if (kafka_report_offline_edits() == FALSE) {
+        FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
+            "Some offline config edits are still pending report; they remain queued");
+    }
+
     // Load existing HSI configs from etcd before starting the watcher
     FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "Loading existing HSI configs for node: %s", fastrg_ccb->node_uuid);
     etcd_status_t load_status = etcd_client_load_existing_configs(
@@ -362,17 +61,15 @@ STATUS etcd_integration_start(FastRG_t *fastrg_ccb)
         fastrg_ccb);
 
     if (load_status != ETCD_SUCCESS) {
-        FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL, "Failed to load existing configs, continuing anyway");
-        // Continue even if loading fails - the watcher will still work for new changes
+        /* etcd unreachable at boot: operate from the persisted snapshot as the
+         * base — apply its subscriber count and HSI configs
+         * through the same callbacks the etcd load would have used. The
+         * watcher below still recovers live sync once etcd returns. */
+        FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
+            "Failed to load configs from etcd; operating from the local snapshot");
+        config_snapshot_apply_all(fastrg_ccb->node_uuid,
+            hsi_config_changed_callback, user_count_changed_callback, fastrg_ccb);
     }
-
-    /* The node no longer seeds config/subscriber-count into etcd: config is owned
-     * by the CLI/controller. The node only reads (watch) and, when offline, queues
-     * CLI-originated writes for flush (slice 10). */
-
-    /* Load any offline config-write queue persisted from a previous session; the
-     * watchdog flushes it to etcd once etcd is reachable. */
-    etcd_client_queue_load();
 
     // Start etcd watching. Watch/reconcile events are delivered to fastrg_loop
     // via FastRG_t.etcd_event_q; only sync_request_callback is passed through.
@@ -403,14 +100,6 @@ void etcd_integration_cleanup(FastRG_t *fastrg_ccb)
 {
     etcd_integration_stop(fastrg_ccb);
     etcd_client_cleanup();
-
-    // Clean up the pending events AVL tree
-    pthread_mutex_lock(&pending_events_mutex);
-    if (pending_events_tree) {
-        avl_tree_destroy(pending_events_tree);
-        pending_events_tree = NULL;
-    }
-    pthread_mutex_unlock(&pending_events_mutex);
 
     if (fastrg_ccb)
         FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "Etcd integration cleaned up");
@@ -994,12 +683,14 @@ void etcd_event_dispatch(FastRG_t *fastrg_ccb, etcd_event_t *ev)
                 const char *action_str = (ev->action == HSI_ACTION_CREATE) ? "create"
                                        : (ev->action == HSI_ACTION_DELETE) ? "delete" : "update";
                 if (ret == SUCCESS) {
-                    kafka_report_config_apply(ev->user_id, action_str, TRUE, NULL, NULL);
+                    kafka_report_config_apply(ev->user_id, action_str, TRUE, NULL, NULL,
+                        ev->event_data.hsi.resource_version);
                 } else {
                     FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
                         "HSI %s apply failed for user %s (reported via Kafka)", action_str, ev->user_id);
                     kafka_report_config_apply(ev->user_id, action_str, FALSE,
-                        "apply_failed", "node failed to apply HSI config");
+                        "apply_failed", "node failed to apply HSI config",
+                        ev->event_data.hsi.resource_version);
                 }
             }
             break;

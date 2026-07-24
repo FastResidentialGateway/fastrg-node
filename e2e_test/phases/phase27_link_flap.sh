@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # ---------------------------------------------------------------------------
-# Phase 27 — NIC link flap / LSC handling (Steps 110-112)
+# Phase 27 — NIC link flap / LSC handling (Steps 111-113)
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
@@ -380,7 +380,7 @@ _cleanup_phase27_link_flap() {
 
 phase27_link_flap() {
     bold "═══════════════════════════════════════════════════════"
-    bold " Phase 27 — NIC Link Flap / LSC Handling (Steps 110-112)"
+    bold " Phase 27 — NIC Link Flap / LSC Handling (Steps 111-113)"
     bold "═══════════════════════════════════════════════════════"
 
     local _step110_ok=1 _step111_ok=1 _step112_ok=1
@@ -404,7 +404,7 @@ phase27_link_flap() {
 
     _cleanup_phase27_link_flap || true
 
-    # Step 110 — WAN LSC down/up, speed cache, flap count, and current-run logs.
+    # Step 111 — WAN LSC down/up, speed cache, flap count, and current-run logs.
     _wan_flap_base=$(_p27_read_metric fastrg_nic_link_flaps_total 1 || true)
     _wan_up_base=$(_p27_read_metric fastrg_nic_link_up 1 || true)
     _wan_log_baseline=$(_p27_log_line_count "$_P27_LOG_PATH")
@@ -449,21 +449,21 @@ phase27_link_flap() {
     fi
 
     if [[ $_step110_ok -eq 1 ]]; then
-        pass "Step 110: WAN LSC event and flap counter" \
+        pass "Step 111: WAN LSC event and flap counter" \
             "port 1 link 1→0→1, speed 0→${_P27_OBS_SPEED} Mbps, flap ${_wan_flap_base}→${_wan_flap_after} (+${_wan_delta}, even), current-run down/up logs present"
     else
-        fail "Step 110: WAN LSC event and flap counter" "$_issue110"
+        fail "Step 111: WAN LSC event and flap counter" "$_issue110"
     fi
 
     # Let the WAN events settle before independently flapping the LAN peer.
     sleep 2
 
-    # Step 111 — LAN flap: full down/up observation and per-port isolation.
+    # Step 112 — LAN flap: full down/up observation and per-port isolation.
     #
     # The flap is driven on the host-side PF: the peer only holds a VF, and
     # nothing inside the guest can drop the physical signal the node
     # observes — the PF's admin state controls the link. This mirrors the
-    # WAN mechanism of Step 110.
+    # WAN mechanism of Step 111.
     _lan_flap_base=$(_p27_read_metric fastrg_nic_link_flaps_total 0 || true)
     _lan_up_base=$(_p27_read_metric fastrg_nic_link_up 0 || true)
     _lan_log_baseline=$(_p27_log_line_count "$_P27_LOG_PATH")
@@ -542,13 +542,13 @@ phase27_link_flap() {
     fi
 
     if [[ $_step111_ok -eq 1 ]]; then
-        pass "Step 111: LAN flap and per-port isolation" \
+        pass "Step 112: LAN flap and per-port isolation" \
             "port 0 link 1→0 in ${_lan_down_elapsed}s →1 in ${_lan_up_elapsed}s, speed 0→${_P27_OBS_SPEED} Mbps, flap ${_lan_flap_base}→${_lan_flap_after} (+2); ${_P27_LAN_VLAN}@${_P27_LAN_VM_NIC} has IPv4; port 1 remained ${_wan_after_lan}"
     else
-        fail "Step 111: LAN flap and per-port isolation" "$_issue111"
+        fail "Step 112: LAN flap and per-port isolation" "$_issue111"
     fi
 
-    # Step 112 — the sub-10s WAN outage must not run link_disconnect or drop data.
+    # Step 113 — the sub-10s WAN outage must not run link_disconnect or drop data.
     _ping_out=$(ssh_lan "ping -c 4 -W 3 ${WAN_IP}" 2>&1 || true)
     if ! printf '%s\n' "$_ping_out" | grep -qE '0% packet loss|0\.0% packet loss'; then
         _step112_ok=0
@@ -574,10 +574,10 @@ phase27_link_flap() {
 
     if [[ $_step112_ok -eq 1 ]]; then
         _p27_needs_session_recovery=0
-        pass "Step 112: preserve session across short WAN flap" \
+        pass "Step 113: preserve session across short WAN flap" \
             "${WAN_IP} reachable with 0% packet loss; no automatic session teardown; ${_P27_PATH_RECOVERY_DETAIL}"
     else
-        fail "Step 112: preserve session across short WAN flap" "$_issue112"
+        fail "Step 113: preserve session across short WAN flap" "$_issue112"
     fi
 
     _cleanup_phase27_link_flap || true

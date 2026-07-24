@@ -19,7 +19,7 @@ SRC = $(wildcard *.c)
 OBJ = $(SRC:.c=.o)
 
 # CLI-local C++ sources: controller gRPC client + direct etcd writer.
-CLI_CPP_OBJ = cli_controller_client.o cli_etcd.o
+CLI_CPP_OBJ = cli_controller_client.o
 
 GRPCDIR = ../grpc
 GRPC_SRC = $(GRPCDIR)/fastrg_grpc_client.cpp
@@ -42,9 +42,6 @@ all: $(TARGET)
 ######################################
 cli_controller_client.o: cli_controller_client.cpp cli_controller_client.h
 	$(CXX) $(CXXFLAGS) -c cli_controller_client.cpp -o cli_controller_client.o
-
-cli_etcd.o: cli_etcd.cpp cli_etcd.h
-	$(CXX) $(CXXFLAGS) -c cli_etcd.cpp -o cli_etcd.o
 
 $(TARGET): $(OBJ) $(CLI_CPP_OBJ) $(GRPC_OBJ) $(PB_OBJ)
 	$(CC) $(CFLAGS) $(OBJ) $(CLI_CPP_OBJ) $(GRPC_OBJ) $(PB_OBJ) $(CTRL_PB_OBJ) -o $(TARGET) $(LDFLAGS)

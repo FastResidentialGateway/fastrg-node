@@ -2,7 +2,6 @@
 
 #include "cli_dispatch.h"
 #include "cli_controller_client.h"
-#include "cli_etcd.h"
 #include "../grpc/fastrg_grpc_client.h"
 
 /*
@@ -45,22 +44,6 @@ static int controller_ready(int *stop)
     return 1;
 }
 
-/* Decide what to do after a tier-2 (etcd) attempt: 1 = stop, 0 = fall through. */
-static int after_etcd(cli_etcd_status_t st, const char *op)
-{
-    switch (st) {
-    case CLI_ETCD_OK:
-        printf("[etcd] %s: OK\n", op);
-        return 1;
-    case CLI_ETCD_UNAVAIL:
-        printf("[etcd] unreachable, falling back to node...\n");
-        return 0;
-    default:
-        printf("[etcd] %s failed\n", op);
-        return 1;
-    }
-}
-
 void cli_dispatch_apply_hsi(U16 user_id, U16 vlan_id, char *account, char *password,
     char *pool_start, char *pool_end, char *subnet, char *gateway)
 {
@@ -72,10 +55,6 @@ void cli_dispatch_apply_hsi(U16 user_id, U16 vlan_id, char *account, char *passw
     } else if (stop) {
         return;
     }
-    if (cli_etcd_configured() &&
-            after_etcd(cli_etcd_apply_hsi(user_id, vlan_id, account, password,
-                pool_start, pool_end, subnet, gateway), "apply config"))
-        return;
     fastrg_grpc_apply_config(user_id, vlan_id, account, password,
         pool_start, pool_end, subnet, gateway);
 }
@@ -89,8 +68,6 @@ void cli_dispatch_remove_hsi(U16 user_id)
     } else if (stop) {
         return;
     }
-    if (cli_etcd_configured() && after_etcd(cli_etcd_remove_hsi(user_id), "remove config"))
-        return;
     fastrg_grpc_remove_config(user_id);
 }
 
@@ -103,9 +80,6 @@ void cli_dispatch_set_subscriber_count(U16 count)
     } else if (stop) {
         return;
     }
-    if (cli_etcd_configured() &&
-            after_etcd(cli_etcd_set_subscriber_count((int)count), "set subscriber count"))
-        return;
     fastrg_grpc_set_subscriber(count);
 }
 
@@ -118,8 +92,6 @@ void cli_dispatch_connect(U16 user_id)
     } else if (stop) {
         return;
     }
-    if (cli_etcd_configured() && after_etcd(cli_etcd_set_desire(user_id, "connect"), "connect"))
-        return;
     fastrg_grpc_hsi_connect(user_id);
 }
 
@@ -132,8 +104,6 @@ void cli_dispatch_disconnect(U16 user_id, bool force)
     } else if (stop) {
         return;
     }
-    if (cli_etcd_configured() && after_etcd(cli_etcd_set_desire(user_id, "disconnect"), "disconnect"))
-        return;
     fastrg_grpc_hsi_disconnect(user_id, force);
 }
 
@@ -146,9 +116,6 @@ void cli_dispatch_add_dns(U16 user_id, char *domain, char *ip, U32 ttl)
     } else if (stop) {
         return;
     }
-    if (cli_etcd_configured() &&
-            after_etcd(cli_etcd_add_dns(user_id, domain, ip, ttl), "add dns record"))
-        return;
     fastrg_grpc_add_dns_record(user_id, domain, ip, ttl);
 }
 
@@ -161,8 +128,6 @@ void cli_dispatch_del_dns(U16 user_id, char *domain)
     } else if (stop) {
         return;
     }
-    if (cli_etcd_configured() && after_etcd(cli_etcd_del_dns(user_id, domain), "remove dns record"))
-        return;
     fastrg_grpc_remove_dns_record(user_id, domain);
 }
 
@@ -175,9 +140,6 @@ void cli_dispatch_snat_set(U16 user_id, U16 eport, char *dip, U16 iport)
     } else if (stop) {
         return;
     }
-    if (cli_etcd_configured() &&
-            after_etcd(cli_etcd_snat_set(user_id, eport, dip, iport), "set snat"))
-        return;
     fastrg_grpc_hsi_snat_set(user_id, eport, dip, iport);
 }
 
@@ -190,8 +152,6 @@ void cli_dispatch_snat_unset(U16 user_id, U16 eport)
     } else if (stop) {
         return;
     }
-    if (cli_etcd_configured() && after_etcd(cli_etcd_snat_unset(user_id, eport), "unset snat"))
-        return;
     fastrg_grpc_hsi_snat_unset(user_id, eport);
 }
 
@@ -204,9 +164,6 @@ void cli_dispatch_set_dns_proxy(U16 user_id, bool enable)
     } else if (stop) {
         return;
     }
-    if (cli_etcd_configured() &&
-            after_etcd(cli_etcd_set_dns_proxy(user_id, enable ? 1 : 0), "set dns_proxy"))
-        return;
     fastrg_grpc_set_dns_proxy(user_id, enable);
 }
 
@@ -220,13 +177,9 @@ const char *cli_dispatch_get_desire(U16 user_id, char *buf, U32 len)
             snprintf(buf, len, "(not found on controller)");
             return "controller";
         }
-        /* AUTH / UNAVAIL / ERR → try etcd */
+        /* AUTH / UNAVAIL / ERR → no further tier */
     }
-    if (cli_etcd_configured()) {
-        if (cli_etcd_get_hsi(user_id, buf, len) == CLI_ETCD_OK)
-            return "etcd";
-    }
-    snprintf(buf, len, "(desired config unavailable: no controller token / etcd)");
+    snprintf(buf, len, "(desired config unavailable: no controller token)");
     return "none";
 }
 
@@ -239,8 +192,5 @@ void cli_dispatch_set_tcp_conntrack(U16 user_id, bool enable)
     } else if (stop) {
         return;
     }
-    if (cli_etcd_configured() &&
-            after_etcd(cli_etcd_set_tcp_conntrack(user_id, enable ? 1 : 0), "set tcp_conntrack"))
-        return;
     fastrg_grpc_set_tcp_conntrack(user_id, enable);
 }

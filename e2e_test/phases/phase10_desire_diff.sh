@@ -4,14 +4,16 @@
 # Phase 10 — desire/current config + show config diff (Steps 39-40)
 #
 # Exercises `fastrg_cli show config diff`, which compares the DESIRED config
-# (etcd, tier-2 source) with the CURRENT running state (node gRPC) for a user.
+# (controller ConfigService — the CLI's etcd tier was retired with
+# controller-is-all) with the CURRENT running state (node gRPC) for a user.
 #   Step 39  in-sync config + desired=connect after a dial
 #   Step 40  desired flips to disconnect after a hangup (diff reflects intent)
 # ---------------------------------------------------------------------------
 
 _p11_diff() {
-    # Run `show config diff user $1` via fastrg_cli on the node (etcd = desire source).
-    ssh_node "printf 'show config diff user $1\nquit\n' | /usr/local/bin/fastrg_cli -i 127.0.0.1:${FASTRG_GRPC_PORT} -e ${ETCD_ENDPOINT} -n ${NODE_UUID} 2>&1"
+    # Run `show config diff user $1` via fastrg_cli on the node. Desired comes
+    # from the controller (login first); current from the node gRPC (-i).
+    ssh_node "printf 'controller login\n${CONTROLLER_USER}\n${CONTROLLER_PASS}\nshow config diff user $1\nquit\n' | /usr/local/bin/fastrg_cli -i 127.0.0.1:${FASTRG_GRPC_PORT} -c ${CONTROLLER_GRPC} -r ${CONTROLLER_REST} -n ${NODE_UUID} 2>&1"
 }
 
 phase10_desire_diff() {
@@ -33,7 +35,7 @@ phase10_desire_diff() {
     sleep 3
     _p11_out=$(_p11_diff "${USER_ID}" 2>/dev/null || true)
     info "  diff output:"
-    printf '%s\n' "$_p11_out" | grep -E "desired|current|diff:" | sed 's/^/    /'
+    printf '%s\n' "$_p11_out" | { grep -E "desired|current|diff:" || true; } | sed 's/^/    /'
 
     if printf '%s' "$_p11_out" | grep -q "diff: config in-sync" && \
        printf '%s' "$_p11_out" | grep -q "desired=connect"; then
@@ -51,7 +53,7 @@ phase10_desire_diff() {
     sleep 3
     _p11_out2=$(_p11_diff "${USER_ID}" 2>/dev/null || true)
     info "  diff output:"
-    printf '%s\n' "$_p11_out2" | grep -E "diff:" | sed 's/^/    /'
+    printf '%s\n' "$_p11_out2" | { grep -E "diff:" || true; } | sed 's/^/    /'
 
     if printf '%s' "$_p11_out2" | grep -q "desired=disconnect"; then
         pass "Step 40: diff reflects desire flip" "pppoe desired=disconnect after hangup"

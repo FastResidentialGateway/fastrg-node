@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # ---------------------------------------------------------------------------
-# Phase 24 — Multiple virtual LAN devices (Steps 100-102)
+# Phase 24 — Multiple virtual LAN devices (Steps 101-103)
 # ---------------------------------------------------------------------------
 
 _P24_REMOTE_DHCP=/tmp/fastrg_multi_lan_dhcp_client.py
@@ -136,7 +136,7 @@ _cleanup_phase24_multi_lan() {
 
 phase24_multi_lan() {
     bold "═══════════════════════════════════════════════════════"
-    bold " Phase 24 — Multiple LAN Devices (Steps 100-102)"
+    bold " Phase 24 — Multiple LAN Devices (Steps 101-103)"
     bold "═══════════════════════════════════════════════════════"
 
     local _hsi="" _vlan="" _pool="" _pool_start="" _pool_end="" _gateway=""
@@ -255,10 +255,10 @@ PY
     fi
 
     if [[ $_step98_ok -eq 1 ]]; then
-        pass "Step 100: multiple LAN DHCP leases" \
+        pass "Step 101: multiple LAN DHCP leases" \
             "baseline=${_P24_BASELINE_LEASE_COUNT}/${_P24_BASELINE_IPS}; leases=${_P24_LEASE_IPS[*]}; observed=${_observed_metric}/${_observed_ips}"
     else
-        fail "Step 100: multiple LAN DHCP leases" \
+        fail "Step 101: multiple LAN DHCP leases" \
             "baseline='${_P24_BASELINE_LEASE_COUNT}' ips='${_P24_BASELINE_IPS}'; iface='${_P24_LAN_IFACE}' pool='${_pool}'; leases='${_P24_LEASE_IPS[*]}'; offer='$(_p24_snippet "$_offer")'; ack='$(_p24_snippet "$_ack")'; observed='${_observed_metric}/${_observed_ips}'"
     fi
 
@@ -296,16 +296,16 @@ PY
     fi
 
     if [[ $_step99_ok -eq 1 ]]; then
-        pass "Step 101: MAC table per-device mappings" "$_arp_detail"
+        pass "Step 102: MAC table per-device mappings" "$_arp_detail"
     else
-        fail "Step 101: MAC table per-device mappings" \
-            "Step 100 ready=${_step98_ok}; response='$(_p24_snippet "$_arp")'; expected=${_P24_LEASE_IPS[0]:-NA}/${_P24_MACS[0]},${_P24_LEASE_IPS[1]:-NA}/${_P24_MACS[1]},${_P24_LEASE_IPS[2]:-NA}/${_P24_MACS[2]}"
+        fail "Step 102: MAC table per-device mappings" \
+            "Step 101 ready=${_step98_ok}; response='$(_p24_snippet "$_arp")'; expected=${_P24_LEASE_IPS[0]:-NA}/${_P24_MACS[0]},${_P24_LEASE_IPS[1]:-NA}/${_P24_MACS[1]},${_P24_LEASE_IPS[2]:-NA}/${_P24_MACS[2]}"
     fi
 
     if [[ $_step98_ok -eq 1 ]]; then
         # The DHCP reply Ethernet source is the FastRG LAN gateway MAC.  Use
         # that authoritative value instead of depending on LAN-host neighbor
-        # cache state after the synthetic ARP traffic in Step 101.
+        # cache state after the synthetic ARP traffic in Step 102.
         _gateway_mac="${_P24_SERVER_MACS[0]}"
         [[ "$_gateway_mac" =~ ^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$ ]] || _step100_ok=0
         _nat_base=$(_p24_fetch_nat_metric)
@@ -393,11 +393,11 @@ echo \$! >'${_P24_WAN_LISTENER_PID}'" >/dev/null 2>&1 || _step100_ok=0
 
     _p24_stop_wan_listener || _step100_ok=0
     if [[ $_step100_ok -eq 1 ]]; then
-        pass "Step 102: NAT mappings for multiple source IPs" \
+        pass "Step 103: NAT mappings for multiple source IPs" \
             "entries delta=${_nat_delta} (baseline=${_nat_base}, peak=${_nat_peak}); WAN observed ${_received_ports} distinct source ports; lease count=${_lease_after}"
     else
-        fail "Step 102: NAT mappings for multiple source IPs" \
-            "Step 100 ready=${_step98_ok}; gateway_mac='${_gateway_mac}'; listener=${_listener_ready} output='$(_p24_snippet "$_listener_out")'; send=${_send_ok}; entries=${_nat_base:-NA}->${_nat_peak:-NA} delta=${_nat_delta}; WAN ports=${_received_ports}; lease=${_lease_after:-NA}/${_expected_count}"
+        fail "Step 103: NAT mappings for multiple source IPs" \
+            "Step 101 ready=${_step98_ok}; gateway_mac='${_gateway_mac}'; listener=${_listener_ready} output='$(_p24_snippet "$_listener_out")'; send=${_send_ok}; entries=${_nat_base:-NA}->${_nat_peak:-NA} delta=${_nat_delta}; WAN ports=${_received_ports}; lease=${_lease_after:-NA}/${_expected_count}"
     fi
 
     _cleanup_phase24_multi_lan

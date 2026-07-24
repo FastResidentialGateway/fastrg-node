@@ -163,20 +163,12 @@ int main()
     test_utils(fastrg_ccb, &total_tests, &total_pass);
     puts("ok!");
 
-    puts("====================test avl_tree.c====================");
-    test_avl_tree(fastrg_ccb, &total_tests, &total_pass);
-    puts("ok!");
-
     puts("====================test mac_table.c====================");
     test_mac_table(fastrg_ccb, &total_tests, &total_pass);
     puts("ok!");
 
     puts("====================test pppd/nat.h====================");
     test_nat(fastrg_ccb, &total_tests, &total_pass);
-    puts("ok!");
-
-    puts("====================test etcd_integration.c====================");
-    test_etcd_integration(fastrg_ccb, &total_tests, &total_pass);
     puts("ok!");
 
     puts("====================test dp_codec.h====================");

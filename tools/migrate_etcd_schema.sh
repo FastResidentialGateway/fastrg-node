@@ -2,8 +2,7 @@
 # =============================================================================
 # migrate_etcd_schema.sh — one-time etcd migration for the control-plane refactor
 #
-# Brings existing etcd data to the post-refactor schema
-# (see docs/contracts/etcd-schema.md):
+# Brings existing etcd data to the post-refactor schema:
 #
 #   1. HSI configs (configs/{node}/hsi/{user}):
 #        - derive config.desire_status from the old metadata.enableStatus
@@ -65,7 +64,7 @@ info "etcd endpoint : ${ENDPOINTS}"
 
 ETCD() { ETCDCTL_API=3 etcdctl --endpoints="${ENDPOINTS}" "$@"; }
 
-# --- enableStatus -> desire_status mapping (docs/contracts/etcd-schema.md) ---
+# --- enableStatus -> desire_status mapping ---
 map_desire() {
     case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
         enabled|enabling)   echo "connect" ;;

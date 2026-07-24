@@ -20,8 +20,8 @@ EVENTS_PROTO_SRC = $(PROTOS_PATH)/kafka-events.pb.cc
 EVENTS_PROTO_HDR = $(PROTOS_PATH)/kafka-events.pb.h
 EVENTS_PROTO_OBJ = $(PROTOS_PATH)/kafka-events.pb.o
 
-SOURCES = controller_client.cpp etcd_client.cpp kafka_producer.cpp
-OBJECTS = controller_client.o etcd_client.o kafka_producer.o $(PROTO_OBJECTS) $(EVENTS_PROTO_OBJ)
+SOURCES = controller_client.cpp etcd_client.cpp kafka_producer.cpp config_snapshot.cpp
+OBJECTS = controller_client.o etcd_client.o kafka_producer.o config_snapshot.o $(PROTO_OBJECTS) $(EVENTS_PROTO_OBJ)
 
 # Test related variables
 TEST_DIR = test
@@ -57,6 +57,9 @@ controller_client.o: controller_client.cpp $(PROTO_HEADERS)
 # Compile etcd client
 etcd_client.o: etcd_client.cpp etcd_client.h
 	$(CXX) $(CXXFLAGS) -c etcd_client.cpp -o etcd_client.o
+
+config_snapshot.o: config_snapshot.cpp config_snapshot.h
+	$(CXX) $(CXXFLAGS) -c config_snapshot.cpp -o config_snapshot.o
 
 # Generate Kafka events protobuf C++ from the shared contract
 $(EVENTS_PROTO_SRC) $(EVENTS_PROTO_HDR): $(EVENTS_PROTO_FILE)
@@ -102,11 +105,13 @@ $(TEST_SERVER): $(TEST_SERVER_SRC) $(PROTO_OBJECTS)
 		$(LDFLAGS) -laddress_sorting -lpthread
 
 $(TEST_ETCD): $(TEST_ETCD_SRC) $(OBJECTS)
-	$(CXX) $(CXXFLAGS) -I. -o $(TEST_ETCD) $(TEST_ETCD_SRC) etcd_client.o ../../src/dbg.o \
+	$(CXX) $(CXXFLAGS) -I. -o $(TEST_ETCD) $(TEST_ETCD_SRC) etcd_client.o \
+		config_snapshot.o kafka_producer.o $(EVENTS_PROTO_OBJ) ../../src/dbg.o \
 		$(LDFLAGS) -laddress_sorting -lpthread
 
-$(TEST_ETCD_CAS): $(TEST_ETCD_CAS_SRC) etcd_client.o
-	$(CXX) $(CXXFLAGS) -I. -o $(TEST_ETCD_CAS) $(TEST_ETCD_CAS_SRC) etcd_client.o ../../src/dbg.o \
+$(TEST_ETCD_CAS): $(TEST_ETCD_CAS_SRC) etcd_client.o config_snapshot.o kafka_producer.o $(EVENTS_PROTO_OBJ)
+	$(CXX) $(CXXFLAGS) -I. -o $(TEST_ETCD_CAS) $(TEST_ETCD_CAS_SRC) etcd_client.o \
+		config_snapshot.o kafka_producer.o $(EVENTS_PROTO_OBJ) ../../src/dbg.o \
 		$(LDFLAGS) -laddress_sorting -lpthread
 
 clean:
