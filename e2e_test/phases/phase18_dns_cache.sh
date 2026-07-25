@@ -97,7 +97,8 @@ _p18_add_secondary_dns_alias() {
 }
 
 _p18_query_count() {
-    ssh_wan "wc -l < ${_P18_RESPONDER_LOG} 2>/dev/null || echo 0" 2>/dev/null | tr -d '[:space:]' || true
+    ssh_wan "grep -F ' ${_P18_DOMAIN}' ${_P18_RESPONDER_LOG} 2>/dev/null | wc -l" \
+        2>/dev/null | tr -d '[:space:]' || true
 }
 
 _p18_start_bras() {
