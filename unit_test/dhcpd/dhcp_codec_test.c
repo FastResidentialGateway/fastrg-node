@@ -57,6 +57,42 @@ typedef struct dhcp_hdr {
 
 // Forward declarations - actual functions from dhcp_codec.c
 
+void test_dhcp_select_dns_servers(void)
+{
+    printf("\nTesting dhcp_select_dns_servers function:\n");
+    printf("=========================================\n\n");
+
+    U32 dhcp_server_ip = rte_cpu_to_be_32(0xC0A80201);
+    U32 hsi_primary_dns = rte_cpu_to_be_32(0x09090909);
+    U32 hsi_secondary_dns = rte_cpu_to_be_32(0x04040404);
+    U32 dns_1 = 0;
+    U32 dns_2 = 0;
+
+    printf("Test 1: \"DNS proxy enabled selects the DHCP server\"\n");
+    dhcp_select_dns_servers(TRUE, dhcp_server_ip, FALSE,
+        hsi_primary_dns, hsi_secondary_dns, &dns_1, &dns_2);
+    TEST_ASSERT(dns_1 == dhcp_server_ip && dns_2 == dhcp_server_ip,
+        "proxy DNS pair is the DHCP server IP", "got 0x%08x / 0x%08x",
+        rte_be_to_cpu_32(dns_1), rte_be_to_cpu_32(dns_2));
+
+    printf("Test 2: \"DNS proxy disabled before dial selects public fallback DNS\"\n");
+    dhcp_select_dns_servers(FALSE, dhcp_server_ip, FALSE,
+        hsi_primary_dns, hsi_secondary_dns, &dns_1, &dns_2);
+    TEST_ASSERT(dns_1 == rte_cpu_to_be_32(0x08080808) &&
+        dns_2 == rte_cpu_to_be_32(0x01010101),
+        "pre-dial DNS pair is 8.8.8.8 / 1.1.1.1", "got 0x%08x / 0x%08x",
+        rte_be_to_cpu_32(dns_1), rte_be_to_cpu_32(dns_2));
+
+    printf("Test 3: \"DNS proxy disabled after dial selects HSI DNS\"\n");
+    dhcp_select_dns_servers(FALSE, dhcp_server_ip, TRUE,
+        hsi_primary_dns, hsi_secondary_dns, &dns_1, &dns_2);
+    TEST_ASSERT(dns_1 == hsi_primary_dns && dns_2 == hsi_secondary_dns,
+        "post-dial DNS pair preserves HSI DNS", "got 0x%08x / 0x%08x",
+        rte_be_to_cpu_32(dns_1), rte_be_to_cpu_32(dns_2));
+
+    printf("  All dhcp_select_dns_servers tests passed!\n");
+}
+
 void test_build_dhcp_offer(FastRG_t *fastrg_ccb)
 {
     printf("\nTesting build_dhcp_offer function:\n");
@@ -888,6 +924,7 @@ void test_dhcp_codec(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_count = 0;
     pass_count = 0;
 
+    test_dhcp_select_dns_servers();
     test_build_dhcp_offer(fastrg_ccb);
     test_build_dhcp_ack(fastrg_ccb);
     test_build_dhcp_nak(fastrg_ccb);
