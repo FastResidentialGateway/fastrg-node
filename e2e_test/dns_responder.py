@@ -9,6 +9,7 @@ import struct
 
 def question_end(packet):
     offset = 12
+    labels = []
     while offset < len(packet):
         label_len = packet[offset]
         offset += 1
@@ -16,10 +17,11 @@ def question_end(packet):
             break
         if label_len & 0xC0 or offset + label_len > len(packet):
             return None
+        labels.append(packet[offset : offset + label_len].decode("ascii"))
         offset += label_len
     if offset + 4 > len(packet):
         return None
-    return offset + 4
+    return offset + 4, ".".join(labels)
 
 
 def build_response(query, answer, ttl):
@@ -28,9 +30,10 @@ def build_response(query, answer, ttl):
     query_id, _flags, qdcount = struct.unpack("!HHH", query[:6])
     if qdcount != 1:
         return None
-    end = question_end(query)
-    if end is None:
+    question = question_end(query)
+    if question is None:
         return None
+    end, qname = question
 
     header = struct.pack("!HHHHHH", query_id, 0x8180, 1, 1, 0, 0)
     answer_record = struct.pack(
@@ -42,7 +45,7 @@ def build_response(query, answer, ttl):
         4,
         ipaddress.IPv4Address(answer).packed,
     )
-    return header + query[12:end] + answer_record
+    return header + query[12:end] + answer_record, qname
 
 
 def main():
@@ -59,10 +62,11 @@ def main():
         sock.bind((args.bind, 53))
         while True:
             query, peer = sock.recvfrom(4096)
-            response = build_response(query, args.answer, args.ttl)
-            if response is None:
+            result = build_response(query, args.answer, args.ttl)
+            if result is None:
                 continue
-            query_log.write(f"{peer[0]}:{peer[1]}\n")
+            response, qname = result
+            query_log.write(f"{peer[0]}:{peer[1]} {qname}\n")
             sock.sendto(response, peer)
 
 
