@@ -129,12 +129,20 @@ phase13_pdump() {
 
     _P47_SIZE=$(ssh_node "stat -c %s '${_P47_FILE}' 2>/dev/null || echo 0" 2>/dev/null \
         | tr -d '[:space:]')
-    if [[ "${_P47_SIZE:-0}" -gt 24 ]]; then
-        pass "Step 49: pdump BPF filter (vlan and icmp)" \
-            "pcap written with ICMP filter (${_P47_SIZE} bytes): ${_P47_FILE}"
+    _P47_ICMP_COUNT=$(ssh_node \
+        "tcpdump -r '${_P47_FILE}' -nn 'vlan and icmp' 2>/dev/null | wc -l" 2>/dev/null \
+        | tr -d '[:space:]' || true)
+    _P47_TCP_COUNT=$(ssh_node \
+        "tcpdump -r '${_P47_FILE}' -nn 'vlan and tcp' 2>/dev/null | wc -l" 2>/dev/null \
+        | tr -d '[:space:]' || true)
+    if [[ "${_P47_ICMP_COUNT:-0}" -gt 0 && "${_P47_TCP_COUNT:-0}" -eq 0 ]]; then
+        _P47_DETAIL="pcap contains ${_P47_ICMP_COUNT} ICMP and ${_P47_TCP_COUNT} TCP packets"
+        _P47_DETAIL+=" (${_P47_SIZE:-0} bytes): ${_P47_FILE}"
+        pass "Step 49: pdump BPF filter (vlan and icmp)" "${_P47_DETAIL}"
     else
-        fail "Step 49: pdump BPF filter (vlan and icmp)" \
-            "pcap file missing or empty after icmp-filtered capture (size=${_P47_SIZE:-0})"
+        _P47_DETAIL="expected ICMP > 0 and TCP = 0; got ICMP=${_P47_ICMP_COUNT:-0},"
+        _P47_DETAIL+=" TCP=${_P47_TCP_COUNT:-0} (size=${_P47_SIZE:-0}): ${_P47_FILE}"
+        fail "Step 49: pdump BPF filter (vlan and icmp)" "${_P47_DETAIL}"
     fi
 
     # -----------------------------------------------------------------------
