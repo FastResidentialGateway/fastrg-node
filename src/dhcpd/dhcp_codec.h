@@ -59,6 +59,31 @@ enum {
     DHCP_LEASE_ACTIVE,
 };
 
+/**
+ * @fn dhcp_select_dns_servers
+ *
+ * @brief Select the DNS server pair advertised in DHCP replies.
+ *
+ * @param dns_proxy_enabled
+ *      Whether the subscriber DNS proxy is enabled.
+ * @param dhcp_server_ip
+ *      DHCP server IPv4 address in network byte order.
+ * @param dp_started
+ *      Whether the subscriber data plane has started.
+ * @param hsi_primary_dns
+ *      Primary HSI DNS server in network byte order.
+ * @param hsi_secondary_dns
+ *      Secondary HSI DNS server in network byte order.
+ * @param dns_1
+ *      Selected primary DNS server output.
+ * @param dns_2
+ *      Selected secondary DNS server output.
+ * @return void
+ */
+void dhcp_select_dns_servers(BOOL dns_proxy_enabled, U32 dhcp_server_ip,
+    BOOL dp_started, U32 hsi_primary_dns, U32 hsi_secondary_dns,
+    U32 *dns_1, U32 *dns_2);
+
 STATUS build_dhcp_offer(dhcp_ccb_per_lan_user_t *per_lan_user, struct rte_ether_addr *lan_mac);
 STATUS build_dhcp_ack(dhcp_ccb_per_lan_user_t *per_lan_user, struct rte_ether_addr *lan_mac);
 STATUS build_dhcp_nak(dhcp_ccb_per_lan_user_t *per_lan_user, struct rte_ether_addr *lan_mac);
