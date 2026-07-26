@@ -1,3 +1,5 @@
+#include <stdlib.h>
+
 #include <rte_timer.h>
 #include <rte_ether.h>
 #include <rte_memcpy.h>
@@ -24,14 +26,8 @@ typedef enum check_nak_rej_result {
  *
  * @param flag
  *      check NAK/REJ
- * @param pppoe_header
- *      pppoe_header pointer
- * @param ppp_payload
- *      ppp_payload pointer
- * @param ppp_hdr
- *      ppp_hdr pointer
- * @param ppp_options
- *      ppp_options pointer
+ * @param s_ppp_ccb
+ *      ppp_ccb pointer
  * @param ppp_hdr_len
  * 
  * @return should send NAK/REJ or ACK
@@ -95,14 +91,8 @@ check_nak_rej_result_t check_ipcp_nak_rej(U8 flag, ppp_ccb_t *s_ppp_ccb, U16 ppp
  * 
  * @param flag
  *      check NAK/REJ
- * @param pppoe_header
- *      pppoe_header pointer
- * @param ppp_payload
- *      ppp_payload pointer
- * @param ppp_hdr
- *      ppp_hdr pointer
- * @param ppp_options
- *      ppp_options pointer
+ * @param s_ppp_ccb
+ *      ppp_ccb pointer
  * @param ppp_hdr_len
  *      ppp_hdr_len
  * 
@@ -151,6 +141,9 @@ check_nak_rej_result_t check_nak_reject(U8 flag, ppp_ccb_t *s_ppp_ccb, U16 ppp_h
                 ppp_hdr->length += cur->length;
                 tmp_cur = (ppp_options_t *)((char *)tmp_cur + cur->length);
             } else if (cur->type == AUTH) {
+                /* The peer demands we authenticate ourselves — remember it so
+                 * lcp_layer_up never skips the AUTH phase for this session. */
+                s_ppp_ccb->peer_requires_auth = TRUE;
                 U16 ppp_server_auth_method = cur->val[0] << 8 | cur->val[1];
                 if (ppp_server_auth_method != s_ppp_ccb->auth_method) {
                     /* if server wants to use pap or chap, then we just follow it */
@@ -262,21 +255,88 @@ STATUS decode_lcp(U16 ppp_hdr_len, U16 *event, struct rte_timer *tim, ppp_ccb_t 
             *event = E_RECV_CONFIG_ACK;
             rte_timer_stop(tim);
             return SUCCESS;
-        case CONFIG_NAK : 
+        case CONFIG_NAK :
+            /* RFC 1661 §5.3: the Identifier must match our outstanding
+             * Configure-Request; silently discard otherwise. */
+            if (s_ppp_ccb->config_request_pending[0] == FALSE ||
+                ppp_hdr->identifier != s_ppp_ccb->identifier[0]) {
+                FastRG_LOG(DBG, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+                    "User %" PRIu16 " dropped unmatched LCP Configure-Nak id %u (pending %u, expected %u).",
+                    s_ppp_ccb->user_num, ppp_hdr->identifier, s_ppp_ccb->config_request_pending[0],
+                    s_ppp_ccb->identifier[0]);
+                return ERROR;
+            }
+            /* Walk every naked option (a Nak carries corrected values). */
+            {
+                U16 opt_total = sizeof(ppp_header_t);
+                for(ppp_options_t *cur=ppp_options; opt_total<ppp_hdr_len;
+                        cur = (ppp_options_t *)((char *)cur + cur->length)) {
+                    if (cur->length < sizeof(ppp_options_t) || cur->length > ppp_hdr_len - opt_total) {
+                        FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+                            "User %" PRIu16 " recv LCP Configure-Nak with invalid option length %u.",
+                            s_ppp_ccb->user_num, cur->length);
+                        return ERROR;
+                    }
+                    if (cur->type == AUTH && cur->length >= sizeof(ppp_options_t) + sizeof(U16)) {
+                        /* Follow the peer's suggested auth protocol when we support it. */
+                        U16 peer_auth_method = cur->val[0] << 8 | cur->val[1];
+                        s_ppp_ccb->auth_method =
+                            (peer_auth_method == CHAP_PROTOCOL) ? CHAP_PROTOCOL : PAP_PROTOCOL;
+                    } else if (cur->type == MRU && cur->length >= sizeof(ppp_options_t) + sizeof(U16)/* MRU */) {
+                        /* Adopt the peer's corrected MRU when it is sane for us. */
+                        U16 peer_mru = cur->val[0] << 8 | cur->val[1];
+                        if (peer_mru != 0 && peer_mru <= MAX_RECV_UNIT)
+                            s_ppp_ccb->mru = peer_mru;
+                    } else if (cur->type == MAGIC_NUM) {
+                        /* The peer saw a magic-number collision — pick a new one. */
+                        s_ppp_ccb->magic_num = rte_cpu_to_be_32((rand() % 0xFFFFFFFE) + 1);
+                    }
+                    FastRG_LOG(WARN, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+                        "User %" PRIu16 " recv LCP nak message with option %x.", s_ppp_ccb->user_num, cur->type);
+                    opt_total += cur->length;
+                }
+            }
+            s_ppp_ccb->config_request_pending[0] = FALSE;
             *event = E_RECV_CONFIG_NAK_REJ;
-            if (ppp_options->type == AUTH)
-                s_ppp_ccb->auth_method = PAP_PROTOCOL;
-            FastRG_LOG(WARN, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " recv LCP nak message with option %x.", s_ppp_ccb->user_num, ppp_options->type);
             return SUCCESS;
         case CONFIG_REJECT :
-            *event = E_RECV_CONFIG_NAK_REJ;
-            FastRG_LOG(WARN, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " recv LCP reject message with option %x.", s_ppp_ccb->user_num, ppp_options->type);
-            if (ppp_options->type == AUTH) {
-                if (s_ppp_ccb->is_pap_auth == TRUE)
-                    return ERROR;
-                s_ppp_ccb->is_pap_auth = TRUE;
-                s_ppp_ccb->auth_method = PAP_PROTOCOL;
+            if (s_ppp_ccb->config_request_pending[0] == FALSE ||
+                ppp_hdr->identifier != s_ppp_ccb->identifier[0]) {
+                FastRG_LOG(DBG, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+                    "User %" PRIu16 " dropped unmatched LCP Configure-Reject id %u (pending %u, expected %u).",
+                    s_ppp_ccb->user_num, ppp_hdr->identifier, s_ppp_ccb->config_request_pending[0],
+                    s_ppp_ccb->identifier[0]);
+                return ERROR;
             }
+            /* RFC 1661 §5.4: every rejected option must be dropped from
+             * subsequent Configure-Requests. */
+            {
+                U16 opt_total = sizeof(ppp_header_t);
+                for(ppp_options_t *cur=ppp_options; opt_total<ppp_hdr_len;
+                        cur = (ppp_options_t *)((char *)cur + cur->length)) {
+                    if (cur->length < sizeof(ppp_options_t) || cur->length > ppp_hdr_len - opt_total) {
+                        FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+                            "User %" PRIu16 " recv LCP Configure-Reject with invalid option length %u.",
+                            s_ppp_ccb->user_num, cur->length);
+                        return ERROR;
+                    }
+                    if (cur->type == AUTH) {
+                        /* The peer refuses to authenticate itself to us; stop
+                         * proposing the option. lcp_layer_up skips the AUTH
+                         * phase unless the peer demanded auth on its side. */
+                        s_ppp_ccb->lcp_auth_rejected = TRUE;
+                    } else if (cur->type == MRU) {
+                        s_ppp_ccb->lcp_mru_rejected = TRUE;
+                    } else if (cur->type == MAGIC_NUM) {
+                        s_ppp_ccb->lcp_magic_rejected = TRUE;
+                    }
+                    FastRG_LOG(WARN, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+                        "User %" PRIu16 " recv LCP reject message with option %x.", s_ppp_ccb->user_num, cur->type);
+                    opt_total += cur->length;
+                }
+            }
+            s_ppp_ccb->config_request_pending[0] = FALSE;
+            *event = E_RECV_CONFIG_NAK_REJ;
             return SUCCESS;
         case TERMIN_REQUEST :
             *event = E_RECV_TERMINATE_REQUEST;
@@ -388,14 +448,28 @@ STATUS decode_ipcp(U16 ppp_hdr_len, U16 *event, struct rte_timer *tim, ppp_ccb_t
                 }
             }
             return SUCCESS;
-        case CONFIG_NAK : 
+        case CONFIG_NAK :
+            /* RFC 1661 §5.3: the Identifier must match our outstanding
+             * Configure-Request; silently discard otherwise. */
+            if (s_ppp_ccb->config_request_pending[1] == FALSE ||
+                ppp_hdr->identifier != s_ppp_ccb->identifier[1]) {
+                FastRG_LOG(DBG, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+                    "User %" PRIu16 " dropped unmatched IPCP Configure-Nak id %u (pending %u, expected %u).",
+                    s_ppp_ccb->user_num, ppp_hdr->identifier, s_ppp_ccb->config_request_pending[1],
+                    s_ppp_ccb->identifier[1]);
+                return ERROR;
+            }
             // if we receive nak packet, the option field contains correct ip address we want
             {
                 U16 opt_total = sizeof(ppp_header_t);
                 for(ppp_options_t *cur=ppp_options; opt_total<ppp_hdr_len;
                         cur = (ppp_options_t *)((char *)cur + cur->length)) {
-                    if (cur->length < sizeof(ppp_options_t))
-                        break;
+                    if (cur->length < sizeof(ppp_options_t) || cur->length > ppp_hdr_len - opt_total) {
+                        FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+                            "User %" PRIu16 " recv IPCP Configure-Nak with invalid option length %u.",
+                            s_ppp_ccb->user_num, cur->length);
+                        return ERROR;
+                    }
                     if (cur->type == IP_ADDRESS)
                         rte_memcpy(&(s_ppp_ccb->hsi_ipv4), cur->val, sizeof(s_ppp_ccb->hsi_ipv4));
                     else if (cur->type == PRIMARY_DNS)
@@ -405,22 +479,36 @@ STATUS decode_ipcp(U16 ppp_hdr_len, U16 *event, struct rte_timer *tim, ppp_ccb_t
                     opt_total += cur->length;
                 }
             }
+            s_ppp_ccb->config_request_pending[1] = FALSE;
             *event = E_RECV_CONFIG_NAK_REJ;
             return SUCCESS;
         case CONFIG_REJECT :
+            if (s_ppp_ccb->config_request_pending[1] == FALSE ||
+                ppp_hdr->identifier != s_ppp_ccb->identifier[1]) {
+                FastRG_LOG(DBG, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+                    "User %" PRIu16 " dropped unmatched IPCP Configure-Reject id %u (pending %u, expected %u).",
+                    s_ppp_ccb->user_num, ppp_hdr->identifier, s_ppp_ccb->config_request_pending[1],
+                    s_ppp_ccb->identifier[1]);
+                return ERROR;
+            }
             {
                 U16 opt_total = sizeof(ppp_header_t);
                 for(ppp_options_t *cur=ppp_options; opt_total<ppp_hdr_len;
                         cur = (ppp_options_t *)((char *)cur + cur->length)) {
-                    if (cur->length < sizeof(ppp_options_t))
-                        break;
-                    else if (cur->type == PRIMARY_DNS)
+                    if (cur->length < sizeof(ppp_options_t) || cur->length > ppp_hdr_len - opt_total) {
+                        FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+                            "User %" PRIu16 " recv IPCP Configure-Reject with invalid option length %u.",
+                            s_ppp_ccb->user_num, cur->length);
+                        return ERROR;
+                    }
+                    if (cur->type == PRIMARY_DNS)
                         s_ppp_ccb->hsi_primary_dns = 0x0; /* if primary dns is rejected, we set it to 0 */
                     else if (cur->type == SECONDARY_DNS)
                         s_ppp_ccb->hsi_secondary_dns = 0x0; /* if secondary dns is rejected, we set it to 0 */
                     opt_total += cur->length;
                 }
             }
+            s_ppp_ccb->config_request_pending[1] = FALSE;
             *event = E_RECV_CONFIG_NAK_REJ;
             return SUCCESS;
         case TERMIN_REQUEST :
@@ -625,44 +713,51 @@ void build_config_request(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb)
     } else if (s_ppp_ccb->cp == 0) {
         ppp_payload->ppp_protocol = rte_cpu_to_be_16(LCP_PROTOCOL);
         ppp_options_t *cur = ppp_options;
-        /* option, auth */
-        /*if (s_ppp_ccb->auth_method == PAP_PROTOCOL) {
-            cur->type = AUTH;
+        /* option, auth — ask the peer to authenticate itself; dropped for the
+         * rest of the session once the peer Configure-Rejects it (RFC 1661 §5.4) */
+        if (s_ppp_ccb->lcp_auth_rejected == FALSE) {
+            if (s_ppp_ccb->auth_method == PAP_PROTOCOL) {
+                cur->type = AUTH;
+                cur->length = 0x4;
+                U16 auth_pro = rte_cpu_to_be_16(PAP_PROTOCOL);
+                rte_memcpy(cur->val,&auth_pro,sizeof(U16));
+                pppoe_header->length += 4;
+                ppp_hdr->length += 4;
+
+                cur = (ppp_options_t *)((char *)(cur + 1) + sizeof(auth_pro));
+            } else if (s_ppp_ccb->auth_method == CHAP_PROTOCOL) {
+                cur->type = AUTH;
+                cur->length = 0x5;
+                U16 auth_pro = rte_cpu_to_be_16(CHAP_PROTOCOL);
+                rte_memcpy(cur->val,&auth_pro,sizeof(U16));
+                U8 chap_algorithm = 0x5; // CHAP with MD5
+                rte_memcpy((cur->val)+2,&chap_algorithm,sizeof(U8));
+                pppoe_header->length += 5;
+                ppp_hdr->length += 5;
+
+                cur = (ppp_options_t *)((char *)(cur + 1) + sizeof(auth_pro) + sizeof(chap_algorithm));
+            }
+        }
+        /* options, max recv units */
+        if (s_ppp_ccb->lcp_mru_rejected == FALSE) {
+            cur->type = MRU;
             cur->length = 0x4;
-            U16 auth_pro = rte_cpu_to_be_16(PAP_PROTOCOL);
-            rte_memcpy(cur->val,&auth_pro,sizeof(U16));
+            /* mru == 0 means "not negotiated yet" — propose our default */
+            U16 max_recv_unit = rte_cpu_to_be_16(s_ppp_ccb->mru != 0 ? s_ppp_ccb->mru : MAX_RECV_UNIT);
+            rte_memcpy(cur->val, &max_recv_unit, sizeof(U16));
             pppoe_header->length += 4;
             ppp_hdr->length += 4;
 
-            cur = (ppp_options_t *)((char *)(cur + 1) + sizeof(auth_pro));
-        } else if (s_ppp_ccb->auth_method == CHAP_PROTOCOL) {
-            cur->type = AUTH;
-            cur->length = 0x5;
-            U16 auth_pro = rte_cpu_to_be_16(CHAP_PROTOCOL);
-            rte_memcpy(cur->val,&auth_pro,sizeof(U16));
-            U8 auth_method = 0x5; // CHAP with MD5
-            rte_memcpy((cur->val)+2,&auth_method,sizeof(U8));
-            pppoe_header->length += 5;
-            ppp_hdr->length += 5;
-
-            cur = (ppp_options_t *)((char *)(cur + 1) + sizeof(auth_pro) + sizeof(auth_method));
-        }*/
-        /* options, max recv units */
-
-        cur->type = MRU;
-        cur->length = 0x4;
-        U16 max_recv_unit = rte_cpu_to_be_16(MAX_RECV_UNIT);
-        rte_memcpy(cur->val, &max_recv_unit, sizeof(U16));
-        pppoe_header->length += 4;
-        ppp_hdr->length += 4;
-
-        cur = (ppp_options_t *)((char *)(cur + 1) + sizeof(max_recv_unit));
+            cur = (ppp_options_t *)((char *)(cur + 1) + sizeof(max_recv_unit));
+        }
         /* options, magic number */
-        cur->type = MAGIC_NUM;
-        cur->length = 0x6;
-        *(U32 *)(cur->val) = s_ppp_ccb->magic_num;
-        pppoe_header->length += 6;
-        ppp_hdr->length += 6;
+        if (s_ppp_ccb->lcp_magic_rejected == FALSE) {
+            cur->type = MAGIC_NUM;
+            cur->length = 0x6;
+            *(U32 *)(cur->val) = s_ppp_ccb->magic_num;
+            pppoe_header->length += 6;
+            ppp_hdr->length += 6;
+        }
     }
 
     *mulen = pppoe_header->length + sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) + sizeof(pppoe_header_t);

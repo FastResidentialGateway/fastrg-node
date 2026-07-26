@@ -146,7 +146,11 @@ typedef struct {
     U8                    identifier[2];     /* per-CP (LCP=0/IPCP=1) Configure-Request id; auth frames reuse [0] */
     BOOL                  config_request_pending[2]; /* outstanding LCP/IPCP Configure-Request */
     U32                   magic_num;         /* ppp pkt magic number, in network order */
-    BOOL                  is_pap_auth;       /* pap auth boolean flag */
+    U16                   mru;               /* MRU we propose in LCP Configure-Request, host order; 0 = default */
+    BOOL                  lcp_auth_rejected; /* peer Configure-Rejected our authentication-protocol option */
+    BOOL                  lcp_mru_rejected;  /* peer Configure-Rejected our MRU option */
+    BOOL                  lcp_magic_rejected; /* peer Configure-Rejected our magic-number option */
+    BOOL                  peer_requires_auth; /* peer's Configure-Request carried an AUTH option (we must authenticate) */
     U16                   auth_method;       /* use chap or pap */
     U8                    *ppp_user_acc;     /* pap/chap account */
     U8                    *ppp_passwd;       /* pap/chap password */
