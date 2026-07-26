@@ -154,7 +154,11 @@ STATUS ppp_init_config_by_user(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb, U16 ccb
     ppp_ccb->hsi_secondary_dns = 0xffffffff; /* 0xffffffff means no dns assigned by server */
     // vlan_id of each subscriptor is 0 to indicate unconfigured
     ppp_ccb->phase = vlan_id != 0 ? END_PHASE : NOT_CONFIGURED;
-    ppp_ccb->is_pap_auth = FALSE;
+    ppp_ccb->mru = MAX_RECV_UNIT;
+    ppp_ccb->lcp_auth_rejected = FALSE;
+    ppp_ccb->lcp_mru_rejected = FALSE;
+    ppp_ccb->lcp_magic_rejected = FALSE;
+    ppp_ccb->peer_requires_auth = FALSE;
     ppp_ccb->auth_method = PAP_PROTOCOL;
     ppp_ccb->magic_num = rte_cpu_to_be_32((rand() % 0xFFFFFFFE) + 1);
     memset(ppp_ccb->identifier, 0, sizeof(ppp_ccb->identifier));
@@ -673,6 +677,13 @@ void exit_ppp(ppp_ccb_t *ppp_ccb)
     ppp_ccb->hsi_ipv4_gw = 0x0;
     ppp_ccb->hsi_primary_dns = 0xffffffff; /* 0xffffffff means no dns assigned by server */
     ppp_ccb->hsi_secondary_dns = 0xffffffff; /* 0xffffffff means no dns assigned by server */
+    /* LCP option negotiation state is per-session (RFC 1661): a redial starts a
+     * fresh negotiation, so rejected-option suppression must not leak across. */
+    ppp_ccb->mru = MAX_RECV_UNIT;
+    ppp_ccb->lcp_auth_rejected = FALSE;
+    ppp_ccb->lcp_mru_rejected = FALSE;
+    ppp_ccb->lcp_magic_rejected = FALSE;
+    ppp_ccb->peer_requires_auth = FALSE;
     dns_proxy_cleanup(&dhcp_ccb->dns_state);
     FastRG_LOG(INFO, fastrg_ccb->fp, ppp_ccb, PPPLOGMSG, "User %" PRIu16
         " HSI module is terminated.\n", ppp_ccb->user_num);

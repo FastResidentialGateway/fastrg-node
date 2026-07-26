@@ -730,7 +730,9 @@ STATUS A_this_layer_finish(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb)
  * @brief LCP this-layer-up transition: arm the periodic keepalive probe and
  *        start authentication — PAP transmits an Authenticate-Request; CHAP
  *        is authenticator-driven, so the session only enters AUTH_PHASE and
- *        waits for the server's Challenge.
+ *        waits for the server's Challenge. When the peer Configure-Rejected
+ *        our authentication-protocol option and never demanded authentication
+ *        itself, the AUTH phase is skipped and IPCP opens directly.
  * @param s_ppp_ccb subscriber control block
  * @return SUCCESS
  */
@@ -747,6 +749,19 @@ STATUS lcp_layer_up(ppp_ccb_t *s_ppp_ccb)
     s_ppp_ccb->echo_miss_count = 0;
     rte_timer_reset(&(s_ppp_ccb->ppp_alive), s_ppp_ccb->ppp_interval*fastrg_get_cycles_in_sec(),
         PERIODICAL, fastrg_ccb->lcore.ctrl_thread, (rte_timer_cb_t)PPP_keepalive_cb, s_ppp_ccb);
+    if (s_ppp_ccb->lcp_auth_rejected == TRUE && s_ppp_ccb->peer_requires_auth == FALSE) {
+        /* Neither side authenticates: our AUTH option was rejected and the
+         * peer's Configure-Request never carried one. Skip the AUTH phase and
+         * open IPCP directly (mirrors check_auth_result's success path). */
+        FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+            "User %" PRIu16 " LCP connection establish successfully.", s_ppp_ccb->user_num);
+        FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+            "User %" PRIu16 " peer rejected authentication; skipping AUTH phase.", s_ppp_ccb->user_num);
+        s_ppp_ccb->cp = 1;
+        s_ppp_ccb->phase = IPCP_PHASE;
+        PPP_FSM(&s_ppp_ccb->ppp, s_ppp_ccb, E_OPEN);
+        return SUCCESS;
+    }
     if (s_ppp_ccb->auth_method == PAP_PROTOCOL) {
         build_auth_request_pap(buffer, &mulen, s_ppp_ccb);
         wan_ctrl_tx(fastrg_ccb, s_ppp_ccb->user_num - 1, buffer, mulen);

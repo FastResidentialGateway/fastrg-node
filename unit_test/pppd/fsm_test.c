@@ -628,6 +628,58 @@ static void test_fsm_chap_lcp_up_enters_auth_phase(FastRG_t *fastrg_ccb)
     free_test_ppp_ccb(ccb);
 }
 
+/**
+ * Test 28: when the peer Configure-Rejected our AUTH option and never demanded
+ * authentication itself, LCP-up must skip the AUTH phase and open IPCP.
+ */
+static void test_fsm_auth_rejected_lcp_up_skips_auth_phase(FastRG_t *fastrg_ccb)
+{
+    printf("\nTest 28: \"AUTH-rejected LCP up skips AUTH phase\"\n");
+    printf("=========================================\n\n");
+
+    ppp_ccb_t *ccb = create_test_ppp_ccb(fastrg_ccb, 0, S_OPENED);
+    ccb->auth_method = PAP_PROTOCOL;
+    ccb->phase = LCP_PHASE;
+    ccb->lcp_auth_rejected = TRUE;
+    ccb->peer_requires_auth = FALSE;
+    ccb->ppp_phase[1].state = S_INIT;
+
+    TEST_ASSERT(lcp_layer_up(ccb) == SUCCESS,
+        "AUTH-rejected LCP-up returns SUCCESS", "");
+    TEST_ASSERT(ccb->phase == IPCP_PHASE && ccb->cp == 1,
+        "AUTH-rejected LCP-up opens IPCP directly",
+        "got phase %u cp %u", ccb->phase, ccb->cp);
+    TEST_ASSERT(ccb->ppp_phase[1].state == S_STARTING,
+        "AUTH-rejected LCP-up drives the NCP FSM through E_OPEN",
+        "got state %u", ccb->ppp_phase[1].state);
+
+    free_test_ppp_ccb(ccb);
+}
+
+/**
+ * Test 29: the AUTH-phase skip must not trigger when the peer demanded
+ * authentication in its own Configure-Request.
+ */
+static void test_fsm_peer_requires_auth_keeps_auth_phase(FastRG_t *fastrg_ccb)
+{
+    printf("\nTest 29: \"peer-required auth still enters AUTH phase\"\n");
+    printf("=========================================\n\n");
+
+    ppp_ccb_t *ccb = create_test_ppp_ccb(fastrg_ccb, 0, S_OPENED);
+    ccb->auth_method = CHAP_PROTOCOL;
+    ccb->phase = LCP_PHASE;
+    ccb->lcp_auth_rejected = TRUE;
+    ccb->peer_requires_auth = TRUE;
+
+    TEST_ASSERT(lcp_layer_up(ccb) == SUCCESS,
+        "peer-required-auth LCP-up returns SUCCESS", "");
+    TEST_ASSERT(ccb->phase == AUTH_PHASE,
+        "peer-required auth still advances to AUTH_PHASE",
+        "got phase %u", ccb->phase);
+
+    free_test_ppp_ccb(ccb);
+}
+
 // ============================================================================
 // Main test function
 // ============================================================================
@@ -675,6 +727,8 @@ void test_ppp_fsm(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_fsm_full_table_scan(fastrg_ccb);
     test_fsm_timer_counter_reset_requires_handler(fastrg_ccb);
     test_fsm_chap_lcp_up_enters_auth_phase(fastrg_ccb);
+    test_fsm_auth_rejected_lcp_up_skips_auth_phase(fastrg_ccb);
+    test_fsm_peer_requires_auth_keeps_auth_phase(fastrg_ccb);
 
     printf("\n");
     printf("╔════════════════════════════════════════════════════════════╗\n");

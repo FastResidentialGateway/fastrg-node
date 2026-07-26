@@ -1696,6 +1696,294 @@ void test_ppp_decode_config_ack_request_matching(FastRG_t *fastrg_ccb)
     codec_cleanup_ppp_ccb(&decode_ccb);
 }
 
+void test_build_config_request_auth_option(FastRG_t *fastrg_ccb)
+{
+    printf("\nTesting build_config_request AUTH option:\n");
+    printf("=========================================\n\n");
+
+    U8 frame[128] = {0};
+    U16 frame_len = 0;
+
+    decode_env_init(fastrg_ccb);
+
+    /* Test 1: PAP auth method proposes the AUTH option first */
+    printf("Test 1: \"%s\"\n", "PAP auth method emits AUTH option");
+    decode_ccb_reset(fastrg_ccb, LCP_PHASE);
+    decode_ccb.auth_method = PAP_PROTOCOL;
+    build_config_request(frame, &frame_len, &decode_ccb);
+    ppp_header_t *ppp_hdr = (ppp_header_t *)(frame + sizeof(struct rte_ether_hdr) +
+        sizeof(vlan_header_t) + sizeof(pppoe_header_t) + sizeof(ppp_payload_t));
+    ppp_options_t *opt = (ppp_options_t *)(ppp_hdr + 1);
+    TEST_ASSERT(ppp_hdr->length == rte_cpu_to_be_16(18),
+        "PAP request length covers AUTH + MRU + MAGIC options",
+        "length=%u", rte_be_to_cpu_16(ppp_hdr->length));
+    TEST_ASSERT(opt->type == AUTH && opt->length == 4 &&
+        opt->val[0] == 0xc0 && opt->val[1] == 0x23,
+        "first option is AUTH proposing PAP", NULL);
+
+    /* Test 2: CHAP auth method proposes CHAP with MD5 */
+    printf("Test 2: \"%s\"\n", "CHAP auth method emits AUTH option with MD5");
+    decode_ccb_reset(fastrg_ccb, LCP_PHASE);
+    decode_ccb.auth_method = CHAP_PROTOCOL;
+    build_config_request(frame, &frame_len, &decode_ccb);
+    ppp_hdr = (ppp_header_t *)(frame + sizeof(struct rte_ether_hdr) +
+        sizeof(vlan_header_t) + sizeof(pppoe_header_t) + sizeof(ppp_payload_t));
+    opt = (ppp_options_t *)(ppp_hdr + 1);
+    TEST_ASSERT(ppp_hdr->length == rte_cpu_to_be_16(19),
+        "CHAP request length covers AUTH(5) + MRU + MAGIC options",
+        "length=%u", rte_be_to_cpu_16(ppp_hdr->length));
+    TEST_ASSERT(opt->type == AUTH && opt->length == 5 &&
+        opt->val[0] == 0xc2 && opt->val[1] == 0x23 && opt->val[2] == 0x05,
+        "first option is AUTH proposing CHAP with MD5", NULL);
+
+    /* Test 3: a rejected AUTH option is dropped from subsequent requests */
+    printf("Test 3: \"%s\"\n", "rejected AUTH option is not re-proposed");
+    decode_ccb_reset(fastrg_ccb, LCP_PHASE);
+    decode_ccb.auth_method = PAP_PROTOCOL;
+    decode_ccb.lcp_auth_rejected = TRUE;
+    build_config_request(frame, &frame_len, &decode_ccb);
+    ppp_hdr = (ppp_header_t *)(frame + sizeof(struct rte_ether_hdr) +
+        sizeof(vlan_header_t) + sizeof(pppoe_header_t) + sizeof(ppp_payload_t));
+    opt = (ppp_options_t *)(ppp_hdr + 1);
+    TEST_ASSERT(ppp_hdr->length == rte_cpu_to_be_16(14),
+        "request length shrinks to MRU + MAGIC after AUTH rejection",
+        "length=%u", rte_be_to_cpu_16(ppp_hdr->length));
+    TEST_ASSERT(opt->type == MRU,
+        "first option is MRU once AUTH is suppressed", "type=%u", opt->type);
+
+    /* Test 4: all rejected options leave an empty (but valid) request */
+    printf("Test 4: \"%s\"\n", "all options rejected leaves empty request");
+    decode_ccb_reset(fastrg_ccb, LCP_PHASE);
+    decode_ccb.auth_method = PAP_PROTOCOL;
+    decode_ccb.lcp_auth_rejected = TRUE;
+    decode_ccb.lcp_mru_rejected = TRUE;
+    decode_ccb.lcp_magic_rejected = TRUE;
+    build_config_request(frame, &frame_len, &decode_ccb);
+    ppp_hdr = (ppp_header_t *)(frame + sizeof(struct rte_ether_hdr) +
+        sizeof(vlan_header_t) + sizeof(pppoe_header_t) + sizeof(ppp_payload_t));
+    TEST_ASSERT(ppp_hdr->length == rte_cpu_to_be_16(sizeof(ppp_header_t)),
+        "request carries no options when all are rejected",
+        "length=%u", rte_be_to_cpu_16(ppp_hdr->length));
+
+    /* Test 5: a naked MRU value is adopted in the next request */
+    printf("Test 5: \"%s\"\n", "naked MRU value is re-proposed");
+    decode_ccb_reset(fastrg_ccb, LCP_PHASE);
+    decode_ccb.mru = 1450;
+    build_config_request(frame, &frame_len, &decode_ccb);
+    ppp_hdr = (ppp_header_t *)(frame + sizeof(struct rte_ether_hdr) +
+        sizeof(vlan_header_t) + sizeof(pppoe_header_t) + sizeof(ppp_payload_t));
+    opt = (ppp_options_t *)(ppp_hdr + 1);
+    TEST_ASSERT(opt->type == MRU && opt->val[0] == (1450 >> 8) && opt->val[1] == (1450 & 0xff),
+        "MRU option carries the adopted value", NULL);
+}
+
+void test_ppp_decode_config_nak_rej_options(FastRG_t *fastrg_ccb)
+{
+    printf("\nTesting Configure-Nak/Reject option parsing:\n");
+    printf("=========================================\n\n");
+
+    U8 frame[128] = {0};
+    U16 frame_len = 0;
+    U16 event = E_UNKNOWN;
+
+    decode_env_init(fastrg_ccb);
+
+    /* Test 1: a zero-option LCP Configure-Nak must not crash (regression for
+     * the NULL ppp_options dereference) and must emit the NAK/REJ event */
+    printf("Test 1: \"zero-option LCP Configure-Nak is handled\"\n");
+    decode_ccb_reset(fastrg_ccb, LCP_PHASE);
+    decode_ccb.identifier[0] = 1;
+    decode_ccb.config_request_pending[0] = TRUE;
+    frame_len = build_session_frame(frame, LCP_PROTOCOL, CONFIG_NAK,
+        sizeof(ppp_header_t), 0);
+    event = E_UNKNOWN;
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == SUCCESS,
+        "zero-option Configure-Nak returns SUCCESS", NULL);
+    TEST_ASSERT(event == E_RECV_CONFIG_NAK_REJ,
+        "zero-option Configure-Nak emits E_RECV_CONFIG_NAK_REJ", "event=%u", event);
+    TEST_ASSERT(decode_ccb.config_request_pending[0] == FALSE,
+        "matching Configure-Nak clears the outstanding request", NULL);
+
+    /* Test 2: a zero-option LCP Configure-Reject must not crash either */
+    printf("Test 2: \"zero-option LCP Configure-Reject is handled\"\n");
+    decode_ccb_reset(fastrg_ccb, LCP_PHASE);
+    decode_ccb.identifier[0] = 1;
+    decode_ccb.config_request_pending[0] = TRUE;
+    frame_len = build_session_frame(frame, LCP_PROTOCOL, CONFIG_REJECT,
+        sizeof(ppp_header_t), 0);
+    event = E_UNKNOWN;
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == SUCCESS,
+        "zero-option Configure-Reject returns SUCCESS", NULL);
+    TEST_ASSERT(event == E_RECV_CONFIG_NAK_REJ,
+        "zero-option Configure-Reject emits E_RECV_CONFIG_NAK_REJ", "event=%u", event);
+
+    /* Test 3: an unmatched Configure-Nak identifier is silently discarded */
+    printf("Test 3: \"unmatched LCP Configure-Nak is dropped\"\n");
+    decode_ccb_reset(fastrg_ccb, LCP_PHASE);
+    decode_ccb.identifier[0] = 7; /* frame carries id 1 */
+    decode_ccb.config_request_pending[0] = TRUE;
+    frame_len = build_session_frame(frame, LCP_PROTOCOL, CONFIG_NAK,
+        sizeof(ppp_header_t), 0);
+    event = E_UNKNOWN;
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == ERROR,
+        "mismatched Configure-Nak returns ERROR without an FSM event", NULL);
+    TEST_ASSERT(event == E_UNKNOWN,
+        "mismatched Configure-Nak leaves the event unchanged", "event=%u", event);
+    TEST_ASSERT(decode_ccb.config_request_pending[0] == TRUE,
+        "mismatched Configure-Nak preserves the outstanding request", NULL);
+
+    /* Test 4: every naked option is honoured, not just the first one */
+    printf("Test 4: \"multi-option Configure-Nak adopts MRU and CHAP\"\n");
+    decode_ccb_reset(fastrg_ccb, LCP_PHASE);
+    decode_ccb.identifier[0] = 1;
+    decode_ccb.config_request_pending[0] = TRUE;
+    decode_ccb.auth_method = PAP_PROTOCOL;
+    frame_len = build_session_frame(frame, LCP_PROTOCOL, CONFIG_NAK,
+        sizeof(ppp_header_t) + 8, 8);
+    U8 *opts = frame + sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) +
+        sizeof(pppoe_header_t) + sizeof(ppp_payload_t) + sizeof(ppp_header_t);
+    const U8 nak_opts[] = {0x01, 0x04, 0x05, 0xaa,  /* MRU 1450 */
+                           0x03, 0x04, 0xc2, 0x23}; /* AUTH CHAP */
+    rte_memcpy(opts, nak_opts, sizeof(nak_opts));
+    event = E_UNKNOWN;
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == SUCCESS,
+        "multi-option Configure-Nak returns SUCCESS", NULL);
+    TEST_ASSERT(decode_ccb.mru == 1450,
+        "naked MRU value is adopted", "mru=%u", decode_ccb.mru);
+    TEST_ASSERT(decode_ccb.auth_method == CHAP_PROTOCOL,
+        "naked AUTH suggestion switches to CHAP", "auth_method=%x", decode_ccb.auth_method);
+
+    /* Test 5: a naked magic number is regenerated (collision handling) */
+    printf("Test 5: \"naked magic number is regenerated\"\n");
+    decode_ccb_reset(fastrg_ccb, LCP_PHASE);
+    decode_ccb.identifier[0] = 1;
+    decode_ccb.config_request_pending[0] = TRUE;
+    decode_ccb.magic_num = rte_cpu_to_be_32(0x01020304);
+    frame_len = build_session_frame(frame, LCP_PROTOCOL, CONFIG_NAK,
+        sizeof(ppp_header_t) + 6, 6);
+    opts = frame + sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) +
+        sizeof(pppoe_header_t) + sizeof(ppp_payload_t) + sizeof(ppp_header_t);
+    const U8 magic_opt[] = {0x05, 0x06, 0x01, 0x02, 0x03, 0x04};
+    rte_memcpy(opts, magic_opt, sizeof(magic_opt));
+    event = E_UNKNOWN;
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == SUCCESS,
+        "magic-number Configure-Nak returns SUCCESS", NULL);
+    TEST_ASSERT(decode_ccb.magic_num != rte_cpu_to_be_32(0x01020304),
+        "naked magic number is replaced with a fresh one", NULL);
+
+    /* Test 6: an option with length 0 is rejected instead of looping forever */
+    printf("Test 6: \"invalid option length in Configure-Nak is rejected\"\n");
+    decode_ccb_reset(fastrg_ccb, LCP_PHASE);
+    decode_ccb.identifier[0] = 1;
+    decode_ccb.config_request_pending[0] = TRUE;
+    frame_len = build_session_frame(frame, LCP_PROTOCOL, CONFIG_NAK,
+        sizeof(ppp_header_t) + 4, 4);
+    opts = frame + sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) +
+        sizeof(pppoe_header_t) + sizeof(ppp_payload_t) + sizeof(ppp_header_t);
+    const U8 bad_opt[] = {0x01, 0x00, 0x00, 0x00};
+    rte_memcpy(opts, bad_opt, sizeof(bad_opt));
+    event = E_UNKNOWN;
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == ERROR,
+        "zero option length in Configure-Nak returns ERROR", NULL);
+
+    /* Test 7: Configure-Reject marks every rejected option for suppression */
+    printf("Test 7: \"Configure-Reject suppresses AUTH, MRU and MAGIC\"\n");
+    decode_ccb_reset(fastrg_ccb, LCP_PHASE);
+    decode_ccb.identifier[0] = 1;
+    decode_ccb.config_request_pending[0] = TRUE;
+    decode_ccb.auth_method = PAP_PROTOCOL;
+    frame_len = build_session_frame(frame, LCP_PROTOCOL, CONFIG_REJECT,
+        sizeof(ppp_header_t) + 14, 14);
+    opts = frame + sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) +
+        sizeof(pppoe_header_t) + sizeof(ppp_payload_t) + sizeof(ppp_header_t);
+    const U8 rej_opts[] = {0x03, 0x04, 0xc0, 0x23,              /* AUTH */
+                           0x01, 0x04, 0x05, 0xd0,              /* MRU */
+                           0x05, 0x06, 0x01, 0x02, 0x03, 0x04}; /* MAGIC */
+    rte_memcpy(opts, rej_opts, sizeof(rej_opts));
+    event = E_UNKNOWN;
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == SUCCESS,
+        "multi-option Configure-Reject returns SUCCESS", NULL);
+    TEST_ASSERT(decode_ccb.lcp_auth_rejected == TRUE &&
+        decode_ccb.lcp_mru_rejected == TRUE &&
+        decode_ccb.lcp_magic_rejected == TRUE,
+        "all rejected options are flagged for suppression",
+        "auth=%u mru=%u magic=%u", decode_ccb.lcp_auth_rejected,
+        decode_ccb.lcp_mru_rejected, decode_ccb.lcp_magic_rejected);
+    TEST_ASSERT(decode_ccb.config_request_pending[0] == FALSE,
+        "matching Configure-Reject clears the outstanding request", NULL);
+
+    /* Test 8: an unmatched IPCP Configure-Nak is silently discarded */
+    printf("Test 8: \"unmatched IPCP Configure-Nak is dropped\"\n");
+    decode_ccb_reset(fastrg_ccb, IPCP_PHASE);
+    decode_ccb.config_request_pending[1] = FALSE; /* nothing outstanding */
+    frame_len = build_session_frame(frame, IPCP_PROTOCOL, CONFIG_NAK,
+        sizeof(ppp_header_t) + 6, 6);
+    opts = frame + sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) +
+        sizeof(pppoe_header_t) + sizeof(ppp_payload_t) + sizeof(ppp_header_t);
+    const U8 ip_opt[] = {0x03, 0x06, 0xc0, 0xa8, 0xc8, 0xfe};
+    rte_memcpy(opts, ip_opt, sizeof(ip_opt));
+    event = E_UNKNOWN;
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == ERROR,
+        "unmatched IPCP Configure-Nak returns ERROR", NULL);
+    TEST_ASSERT(decode_ccb.hsi_ipv4 == 0x0,
+        "unmatched IPCP Configure-Nak does not apply its options", NULL);
+
+    /* Test 9: a matching IPCP Configure-Nak applies options and clears pending */
+    printf("Test 9: \"matching IPCP Configure-Nak applies the naked IP\"\n");
+    decode_ccb_reset(fastrg_ccb, IPCP_PHASE);
+    decode_ccb.identifier[1] = 1;
+    decode_ccb.config_request_pending[1] = TRUE;
+    frame_len = build_session_frame(frame, IPCP_PROTOCOL, CONFIG_NAK,
+        sizeof(ppp_header_t) + 6, 6);
+    opts = frame + sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) +
+        sizeof(pppoe_header_t) + sizeof(ppp_payload_t) + sizeof(ppp_header_t);
+    rte_memcpy(opts, ip_opt, sizeof(ip_opt));
+    event = E_UNKNOWN;
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == SUCCESS,
+        "matching IPCP Configure-Nak returns SUCCESS", NULL);
+    TEST_ASSERT(decode_ccb.hsi_ipv4 == rte_cpu_to_be_32(0xc0a8c8fe),
+        "naked IP address is adopted", "hsi_ipv4=%x", decode_ccb.hsi_ipv4);
+    TEST_ASSERT(decode_ccb.config_request_pending[1] == FALSE,
+        "matching IPCP Configure-Nak clears the outstanding request", NULL);
+
+    /* Test 10: an IPCP option overrunning the header length is rejected */
+    printf("Test 10: \"invalid option length in IPCP Configure-Nak is rejected\"\n");
+    decode_ccb_reset(fastrg_ccb, IPCP_PHASE);
+    decode_ccb.identifier[1] = 1;
+    decode_ccb.config_request_pending[1] = TRUE;
+    frame_len = build_session_frame(frame, IPCP_PROTOCOL, CONFIG_NAK,
+        sizeof(ppp_header_t) + 4, 4);
+    opts = frame + sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) +
+        sizeof(pppoe_header_t) + sizeof(ppp_payload_t) + sizeof(ppp_header_t);
+    const U8 overrun_opt[] = {0x03, 0x20, 0x00, 0x00}; /* length 32 > remaining 4 */
+    rte_memcpy(opts, overrun_opt, sizeof(overrun_opt));
+    event = E_UNKNOWN;
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == ERROR,
+        "overrunning option length in IPCP Configure-Nak returns ERROR", NULL);
+
+    /* Test 11: a matching IPCP Configure-Reject zeroes the rejected DNS */
+    printf("Test 11: \"matching IPCP Configure-Reject clears rejected DNS\"\n");
+    decode_ccb_reset(fastrg_ccb, IPCP_PHASE);
+    decode_ccb.identifier[1] = 1;
+    decode_ccb.config_request_pending[1] = TRUE;
+    decode_ccb.hsi_primary_dns = rte_cpu_to_be_32(0x08080808);
+    frame_len = build_session_frame(frame, IPCP_PROTOCOL, CONFIG_REJECT,
+        sizeof(ppp_header_t) + 6, 6);
+    opts = frame + sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) +
+        sizeof(pppoe_header_t) + sizeof(ppp_payload_t) + sizeof(ppp_header_t);
+    const U8 dns_opt[] = {0x81, 0x06, 0x08, 0x08, 0x08, 0x08};
+    rte_memcpy(opts, dns_opt, sizeof(dns_opt));
+    event = E_UNKNOWN;
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == SUCCESS,
+        "matching IPCP Configure-Reject returns SUCCESS", NULL);
+    TEST_ASSERT(decode_ccb.hsi_primary_dns == 0x0,
+        "rejected primary DNS is cleared", "dns=%x", decode_ccb.hsi_primary_dns);
+    TEST_ASSERT(decode_ccb.config_request_pending[1] == FALSE,
+        "matching IPCP Configure-Reject clears the outstanding request", NULL);
+
+    codec_cleanup_ppp_ccb(&decode_ccb);
+}
+
 void test_ppp_codec(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 {
     printf("\n");
@@ -1725,6 +2013,8 @@ void test_ppp_codec(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_ppp_decode_frame_chap(fastrg_ccb);
     test_ppp_decode_frame_chap_challenge_phase_guard(fastrg_ccb);
     test_ppp_decode_config_ack_request_matching(fastrg_ccb);
+    test_build_config_request_auth_option(fastrg_ccb);
+    test_ppp_decode_config_nak_rej_options(fastrg_ccb);
 
     printf("\n");
     printf("╔════════════════════════════════════════════════════════════╗\n");
