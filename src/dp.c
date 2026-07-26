@@ -58,7 +58,6 @@ static struct rte_eth_conf port_conf_default = {
     //.rxmode = { .mtu = RTE_ETHER_MAX_JUMBO_FRAME_LEN - RTE_ETHER_HDR_LEN - RTE_ETHER_CRC_LEN, }, 
     .txmode = { .offloads = RTE_ETH_TX_OFFLOAD_IPV4_CKSUM | 
                             RTE_ETH_TX_OFFLOAD_UDP_CKSUM | 
-                            /*RTE_ETH_TX_OFFLOAD_MT_LOCKFREE |*/
                             RTE_ETH_TX_OFFLOAD_TCP_CKSUM, },
     .intr_conf = {
         .lsc = 1, /**< link status interrupt feature enabled */ },
@@ -90,35 +89,48 @@ STATUS PORT_INIT(FastRG_t *fastrg_ccb, U16 port)
         return ERROR;
     }
 
-    /* Queue layout per data-plane mode:
-     *   DP_MODE_RSS         : N+1 RX + N+1 TX (queue 0 = ctrl, 1..N = RSS data).
-     *   DP_MODE_DISTRIBUTOR : single RX queue 0 (polled by the distributor RX
-     *                         lcore) + N+1 TX (queue 0 for the RX/ctrl lcore,
-     *                         queues 1..N one per worker for contention-free TX).
-     * In distributor mode, clamp the worker count to the NIC's TX queue
-     * capability so each worker keeps a dedicated TX queue. */
+    /* i40e does not support RTE_ETH_TX_OFFLOAD_MT_LOCKFREE, so each TX queue
+     * has exactly one lcore owner:
+     *   queue 0    : ctrl_thread
+     *   queues 1..N: data lcores / distributor workers
+     *   queue N+1  : this port's queue-0 poller lcore (inline replies)
+     *   queue N+2  : the opposite port's queue-0 poller lcore
+     *                (cross-port forwarding)
+     *
+     * DP_MODE_RSS uses N+1 RX queues and N+3 TX queues. DP_MODE_DISTRIBUTOR
+     * uses one RX queue and N+3 TX queues. In distributor mode, clamp the
+     * worker count to the NIC's TX queue capability while preserving all
+     * dedicated control queues. */
     if (fastrg_ccb->datapath_mode == DP_MODE_RSS) {
         rx_rings = fastrg_calc_queue_count(rte_lcore_count());
-        tx_rings = rx_rings;
+        tx_rings = rx_rings + 2;
+        if (tx_rings > dev_info.max_tx_queues) {
+            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+                "Port %u supports only %u TX queue(s); RSS mode needs %u",
+                port, dev_info.max_tx_queues, tx_rings);
+            return ERROR;
+        }
     } else {
         rx_rings = 1;
-        U16 want_tx = fastrg_ccb->lcore.num_data_queues + 1;
+        U16 want_tx = fastrg_ccb->lcore.num_data_queues + 3;
         if (want_tx > dev_info.max_tx_queues) {
-            if (dev_info.max_tx_queues < 2) {
+            if (dev_info.max_tx_queues < 4) {
                 FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
-                    "Port %u supports only %u TX queue(s); distributor mode needs >= 2",
+                    "Port %u supports only %u TX queue(s); distributor mode needs >= 4",
                     port, dev_info.max_tx_queues);
                 return ERROR;
             }
-            U16 new_n = dev_info.max_tx_queues - 1;
+            U16 new_n = dev_info.max_tx_queues - 3;
             FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
                 "Port %u max_tx_queues=%u: reducing distributor workers from %u to %u",
                 port, dev_info.max_tx_queues, fastrg_ccb->lcore.num_data_queues, new_n);
             fastrg_ccb->lcore.num_data_queues = new_n;
-            want_tx = new_n + 1;
+            want_tx = new_n + 3;
         }
         tx_rings = want_tx;
     }
+    fastrg_ccb->dp_ctrl_txq_self = fastrg_ccb->lcore.num_data_queues + 1;
+    fastrg_ccb->dp_ctrl_txq_opposite = fastrg_ccb->lcore.num_data_queues + 2;
 
     if (dev_info.tx_offload_capa & RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE)
         port_conf.txmode.offloads |= RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE;
@@ -277,7 +289,7 @@ int wan_ctrl_rx(void *arg)
     U16                  pppoe_len = sizeof(pppoe_header_t) + sizeof(ppp_payload_t);
     FastRG_t             *fastrg_ccb = (FastRG_t *)arg;
     const U16            rx_q = 0;  /* always queue 0 */
-    const U16            tx_q = 0;  /* TX on LAN queue 0 */
+    const U16            tx_q = fastrg_ccb->txq_xctrl;  /* cross-port poller queue on LAN */
 
     rte_thread_t thread_id = rte_thread_self();
     rte_thread_set_name(thread_id, "fastrg_wan_ctrl");
@@ -535,7 +547,8 @@ int lan_ctrl_rx(void *arg)
 {
     FastRG_t             *fastrg_ccb = (FastRG_t *)arg;
     const U16            rx_q = 0;  /* always queue 0 */
-    const U16            tx_q = 0;  /* TX queue on both WAN and LAN */
+    const U16            lan_tx_q = fastrg_ccb->dp_ctrl_txq_self;  /* own-port inline reply queue */
+    const U16            wan_tx_q = fastrg_ccb->dp_ctrl_txq_opposite;  /* cross-port poller queue */
     struct rte_mbuf      *single_pkt;
     uint64_t             total_wan_tx = 0;
     struct rte_ether_hdr *eth_hdr;
@@ -598,7 +611,7 @@ int lan_ctrl_rx(void *arg)
                     arphdr->arp_opcode = rte_cpu_to_be_16(RTE_ARP_OP_REPLY);
                     count_tx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                     count_rx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
-                    rte_eth_tx_burst(LAN_PORT, tx_q, &single_pkt, 1);
+                    rte_eth_tx_burst(LAN_PORT, lan_tx_q, &single_pkt, 1);
                 } else if (arphdr->arp_opcode == rte_cpu_to_be_16(RTE_ARP_OP_REPLY) &&
                         arphdr->arp_data.arp_tip == dhcp_server_ip) {
                     /* ARP reply to us → drain pending queue */
@@ -610,7 +623,7 @@ int lan_ctrl_rx(void *arg)
                         &arphdr->arp_data.arp_sha,
                         drain_pkts, &drain_count, ARP_PENDING_QUEUE_SIZE);
                     if (drain_count > 0) {
-                        U16 nb_tx = rte_eth_tx_burst(LAN_PORT, tx_q,
+                        U16 nb_tx = rte_eth_tx_burst(LAN_PORT, lan_tx_q,
                             drain_pkts, drain_count);
                         for(U16 d=0; d<nb_tx; d++)
                             count_tx_packet(fastrg_ccb, drain_pkts[d], LAN_PORT, ccb_id);
@@ -622,7 +635,7 @@ int lan_ctrl_rx(void *arg)
                     /* ARP to other → forward to WAN */
                     count_rx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                     count_tx_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
-                    rte_eth_tx_burst(WAN_PORT, tx_q, &single_pkt, 1);
+                    rte_eth_tx_burst(WAN_PORT, wan_tx_q, &single_pkt, 1);
                 }
                 continue;
             }
@@ -672,10 +685,10 @@ int lan_ctrl_rx(void *arg)
                             cksum = (cksum & 0xffff) + (cksum >> 16);
                             cksum = (cksum & 0xffff) + (cksum >> 16);
                             icmphdr->icmp_cksum = ~cksum;
-                            rte_eth_tx_burst(LAN_PORT, tx_q, &single_pkt, 1);
+                            rte_eth_tx_burst(LAN_PORT, lan_tx_q, &single_pkt, 1);
                         } else {
                             /* ICMP to other host in subnet → forward on LAN */
-                            rte_eth_tx_burst(LAN_PORT, tx_q, &single_pkt, 1);
+                            rte_eth_tx_burst(LAN_PORT, lan_tx_q, &single_pkt, 1);
                         }
                     } else {
                         drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
@@ -726,7 +739,7 @@ int lan_ctrl_rx(void *arg)
             }
         }
         if (likely(total_wan_tx > 0)) {
-            U16 nb_tx = rte_eth_tx_burst(WAN_PORT, tx_q, wan_pkt, total_wan_tx);
+            U16 nb_tx = rte_eth_tx_burst(WAN_PORT, wan_tx_q, wan_pkt, total_wan_tx);
             if (unlikely(nb_tx < total_wan_tx)) {
                 for(U16 buf=nb_tx; buf<total_wan_tx; buf++) {
                     mbuf_priv_t *mbuf_priv = rte_mbuf_to_priv(wan_pkt[buf]);
@@ -957,7 +970,7 @@ int wan_dist_rx(void *arg)
     FastRG_t               *fastrg_ccb = (FastRG_t *)arg;
     struct rte_distributor *dist = fastrg_ccb->wan_dist;
     const U16              rx_q = 0;
-    const U16              tx_q = 0;   /* inline (IPTV / ICMP) TX on LAN queue 0 */
+    const U16              tx_q = fastrg_ccb->dp_ctrl_txq_opposite;  /* cross-port poller queue on LAN */
     struct rte_mbuf        *single_pkt;
     uint64_t               total_tx = 0;
     struct rte_ether_hdr   *eth_hdr, tmp_eth_hdr;
@@ -998,7 +1011,7 @@ int wan_dist_rx(void *arg)
             eth_hdr = mbuf_priv->eth_hdr;
             ccb_id = mbuf_priv->ccb_id;
 
-            /* Non-PPPoE → IPTV / multicast handling (inline, TX LAN queue 0) */
+            /* Non-PPPoE → IPTV / multicast handling (inline, TX LAN cross-port poller queue) */
             if (unlikely(vlan_header->next_proto != rte_cpu_to_be_16(ETH_P_PPP_SES) &&
                     vlan_header->next_proto != rte_cpu_to_be_16(ETH_P_PPP_DIS))) {
                 if (is_iptv_pkt_need_drop(fastrg_ccb, vlan_header) == TRUE) {
@@ -1091,7 +1104,7 @@ int wan_dist_rx(void *arg)
                 drop_packet(fastrg_ccb, dist_pkt[k], WAN_PORT, mbuf_priv->ccb_id);
             }
         }
-        /* Inline (IPTV + ICMP) TX to LAN queue 0 */
+        /* Inline (IPTV + ICMP) TX to the LAN cross-port poller queue */
         if (likely(total_tx > 0)) {
             U16 nb_tx = rte_eth_tx_burst(LAN_PORT, tx_q, pkt, total_tx);
             if (unlikely(nb_tx < total_tx)) {
@@ -1219,7 +1232,8 @@ int lan_dist_rx(void *arg)
     FastRG_t               *fastrg_ccb = (FastRG_t *)arg;
     struct rte_distributor *dist = fastrg_ccb->lan_dist;
     const U16              rx_q = 0;
-    const U16              tx_q = 0;   /* inline TX on queue 0 */
+    const U16              lan_tx_q = fastrg_ccb->dp_ctrl_txq_self;  /* own-port inline reply queue */
+    const U16              wan_tx_q = fastrg_ccb->dp_ctrl_txq_opposite;  /* cross-port poller queue */
     struct rte_mbuf        *single_pkt;
     uint64_t               total_wan_tx = 0;
     struct rte_ether_hdr   *eth_hdr;
@@ -1287,7 +1301,7 @@ int lan_dist_rx(void *arg)
                     arphdr->arp_opcode = rte_cpu_to_be_16(RTE_ARP_OP_REPLY);
                     count_tx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                     count_rx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
-                    rte_eth_tx_burst(LAN_PORT, tx_q, &single_pkt, 1);
+                    rte_eth_tx_burst(LAN_PORT, lan_tx_q, &single_pkt, 1);
                 } else if (arphdr->arp_opcode == rte_cpu_to_be_16(RTE_ARP_OP_REPLY) &&
                         arphdr->arp_data.arp_tip == dhcp_server_ip) {
                     /* ARP reply to us → drain pending queue */
@@ -1299,7 +1313,7 @@ int lan_dist_rx(void *arg)
                         &arphdr->arp_data.arp_sha,
                         drain_pkts, &drain_count, ARP_PENDING_QUEUE_SIZE);
                     if (drain_count > 0) {
-                        U16 nb_tx = rte_eth_tx_burst(LAN_PORT, tx_q,
+                        U16 nb_tx = rte_eth_tx_burst(LAN_PORT, lan_tx_q,
                             drain_pkts, drain_count);
                         for(U16 d=0; d<nb_tx; d++)
                             count_tx_packet(fastrg_ccb, drain_pkts[d], LAN_PORT, ccb_id);
@@ -1310,7 +1324,7 @@ int lan_dist_rx(void *arg)
                 } else {
                     count_rx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                     count_tx_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
-                    rte_eth_tx_burst(WAN_PORT, tx_q, &single_pkt, 1);
+                    rte_eth_tx_burst(WAN_PORT, wan_tx_q, &single_pkt, 1);
                 }
                 continue;
             }
@@ -1357,9 +1371,9 @@ int lan_dist_rx(void *arg)
                             cksum = (cksum & 0xffff) + (cksum >> 16);
                             cksum = (cksum & 0xffff) + (cksum >> 16);
                             icmphdr->icmp_cksum = ~cksum;
-                            rte_eth_tx_burst(LAN_PORT, tx_q, &single_pkt, 1);
+                            rte_eth_tx_burst(LAN_PORT, lan_tx_q, &single_pkt, 1);
                         } else {
-                            rte_eth_tx_burst(LAN_PORT, tx_q, &single_pkt, 1);
+                            rte_eth_tx_burst(LAN_PORT, lan_tx_q, &single_pkt, 1);
                         }
                     } else if (ip_hdr->next_proto_id == PROTO_TYPE_UDP) {
                         /* DHCP and DNS on gateway subnet */
@@ -1540,9 +1554,9 @@ int lan_dist_rx(void *arg)
                 drop_packet(fastrg_ccb, dist_pkt[k], LAN_PORT, mbuf_priv->ccb_id);
             }
         }
-        /* Inline (ARP/ICMP/IGMP/passthrough) TX to WAN queue 0 */
+        /* Inline (ARP/ICMP/IGMP/passthrough) TX to the WAN cross-port poller queue */
         if (likely(total_wan_tx > 0)) {
-            U16 nb_tx = rte_eth_tx_burst(WAN_PORT, tx_q, wan_pkt, total_wan_tx);
+            U16 nb_tx = rte_eth_tx_burst(WAN_PORT, wan_tx_q, wan_pkt, total_wan_tx);
             if (unlikely(nb_tx < total_wan_tx)) {
                 for(U16 buf=nb_tx; buf<total_wan_tx; buf++) {
                     mbuf_priv_t *mbuf_priv = rte_mbuf_to_priv(wan_pkt[buf]);
