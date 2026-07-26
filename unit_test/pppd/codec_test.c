@@ -1469,6 +1469,31 @@ void test_ppp_decode_frame(FastRG_t *fastrg_ccb)
     ((pppoe_header_t *)(vlan_hdr + 1))->code = PADM;
     TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == ERROR,
         "PPPoE discovery frame (PADM) returns ERROR by design", NULL);
+
+    /* Test 9: the production caller must hold the builder's maximum reply */
+    printf("Test 9: \"%s\"\n", "maximum Protocol-Reject fits caller buffer");
+    static U8 max_proto_frame[ETH_MTU];
+    U16 max_rejected_info_len = ETH_MTU -
+        (sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) +
+         sizeof(pppoe_header_t) + sizeof(ppp_payload_t) +
+         sizeof(ppp_header_t) + sizeof(U16));
+    U16 max_ncp_info_len = max_rejected_info_len - sizeof(ppp_header_t);
+
+    memset(&decode_wan_stats, 0, sizeof(decode_wan_stats));
+    decode_ccb_reset(fastrg_ccb, DATA_PHASE);
+    frame_len = build_session_frame(max_proto_frame, IPV6CP_PROTOCOL,
+        CONFIG_REQUEST, max_rejected_info_len, max_ncp_info_len);
+    TEST_ASSERT(PPP_decode_frame(max_proto_frame, frame_len, &event,
+        &decode_ccb) == ERROR,
+        "maximum IPV6CP frame short-circuits with ERROR (stateless reply)",
+        NULL);
+    TEST_ASSERT(decode_wan_stats.tx_packets == 1,
+        "maximum Protocol-Reject was handed to wan_ctrl_tx",
+        "tx_packets=%" PRIu64, decode_wan_stats.tx_packets);
+    TEST_ASSERT(decode_wan_stats.tx_bytes == ETH_MTU,
+        "maximum Protocol-Reject uses the full caller buffer",
+        "expected %u bytes, got %" PRIu64, ETH_MTU,
+        decode_wan_stats.tx_bytes);
 }
 
 void test_ppp_decode_frame_chap(FastRG_t *fastrg_ccb)
