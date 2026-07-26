@@ -139,7 +139,8 @@ STATUS build_code_reject(U8 *buffer, ppp_ccb_t *s_ppp_ccb, U16 *mulen);
  *        stateless — caller must not drive the FSM off the rejected packet.
  *
  * @param buffer
- *      Frame buffer to fill (eth + vlan + pppoe + lcp + body).
+ *      Frame buffer to fill (eth + vlan + pppoe + lcp + body); at least
+ *      ETH_MTU bytes.
  * @param mulen
  *      [out] Total bytes written into buffer.
  * @param s_ppp_ccb
@@ -150,7 +151,8 @@ STATUS build_code_reject(U8 *buffer, ppp_ccb_t *s_ppp_ccb, U16 *mulen);
  *      Pointer to the rejected PPP information field
  *      (starts at the inner ppp_header_t).
  * @param rejected_info_len
- *      Bytes available at rejected_info; truncated to MRU.
+ *      Bytes available at rejected_info; truncated so the complete reply
+ *      frame does not exceed ETH_MTU.
  *
  * @return void
  */

@@ -1442,7 +1442,7 @@ STATUS decode_ppp(ppp_payload_t *ppp_payload, U16 *event, ppp_ccb_t *s_ppp_ccb)
          * (RFC 1661 §5.7) so the peer stops retransmitting; otherwise it would
          * keep retrying these CPs and block the session from making progress
          * — including blocking DisconnectHsi from completing cleanly. */
-        U8  reject_buf[PPP_MSG_BUF_LEN];
+        U8  reject_buf[ETH_MTU];
         U16 reject_len = 0;
         U16 rejected_proto = rte_be_to_cpu_16(ppp_payload->ppp_protocol);
 
