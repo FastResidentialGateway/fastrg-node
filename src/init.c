@@ -161,8 +161,8 @@ STATUS init_ring(FastRG_t *fastrg_ccb)
         return ERROR;
     }
 
-    /* Create free mail ring for pre-allocated mail slots */
-    fastrg_ccb->free_mail_ring = rte_ring_create("free_mail_ring", RING_BURST_SIZE, rte_socket_id(), RING_F_SC_DEQ);
+    /* Multiple control and data-plane threads dequeue mail slots, so the ring must use MC dequeue. */
+    fastrg_ccb->free_mail_ring = rte_ring_create("free_mail_ring", RING_BURST_SIZE, rte_socket_id(), 0);
     if (!fastrg_ccb->free_mail_ring) {
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Cannot create free_mail_ring", rte_strerror(rte_errno));
         goto err;
