@@ -289,7 +289,7 @@ int wan_ctrl_rx(void *arg)
     U16                  pppoe_len = sizeof(pppoe_header_t) + sizeof(ppp_payload_t);
     FastRG_t             *fastrg_ccb = (FastRG_t *)arg;
     const U16            rx_q = 0;  /* always queue 0 */
-    const U16            tx_q = fastrg_ccb->txq_xctrl;  /* cross-port poller queue on LAN */
+    const U16            tx_q = fastrg_ccb->dp_ctrl_txq_opposite;  /* cross-port poller queue on LAN */
 
     rte_thread_t thread_id = rte_thread_self();
     rte_thread_set_name(thread_id, "fastrg_wan_ctrl");
