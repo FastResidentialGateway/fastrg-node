@@ -308,7 +308,19 @@ PY
         # cache state after the synthetic ARP traffic in Step 102.
         _gateway_mac="${_P24_SERVER_MACS[0]}"
         [[ "$_gateway_mac" =~ ^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$ ]] || _step100_ok=0
-        _nat_base=$(_p24_fetch_nat_metric)
+        # NAT entries idle out after NAT_ENTRY_TIMEOUT_SEC (10s), and the
+        # metric is a live gauge over nat_free_ring.  A stale entry counted
+        # into the baseline can expire during listener setup and the poll
+        # window below, shrinking the observed delta by one (the
+        # "entries=1->15 delta=14" flake) even though all 15 flows were
+        # NATted.  Drain the gauge to zero before taking the baseline so
+        # delta == peak deterministically; the wait is only paid when stale
+        # entries exist.
+        for _i in $(seq 1 15); do
+            _nat_base=$(_p24_fetch_nat_metric)
+            [[ "$_nat_base" == "0" ]] && break
+            sleep 2
+        done
         [[ "$_nat_base" =~ ^[0-9]+$ ]] || _step100_ok=0
     else
         _step100_ok=0
