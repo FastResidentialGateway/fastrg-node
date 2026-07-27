@@ -992,10 +992,12 @@ int wan_dist_rx(void *arg)
         rte_pause();
 
     fastrg_ccb->lcore_usage[rte_lcore_id()].role = "wan_dist_rx";
+    fastrg_rcu_dp_register(fastrg_ccb);
     U32 nat_gc_backpressure = 0;
     while(likely(rte_atomic16_read(&stop_flag) == 0)) {
         uint64_t _t0 = rte_rdtsc();
         nb_rx = rte_eth_rx_burst(WAN_PORT, rx_q, pkt, BURST_SIZE);
+        fastrg_rcu_dp_quiescent(fastrg_ccb);
         dist_n = 0;
         U16 pf_k = rx_prefetch_prologue(pkt, nb_rx);
         for(int i=0; i<nb_rx; i++) {
@@ -1127,6 +1129,7 @@ int wan_dist_rx(void *arg)
         if (nb_rx > 0)
             fastrg_ccb->lcore_usage[rte_lcore_id()].busy_cycles += _elapsed;
     }
+    fastrg_rcu_dp_unregister(fastrg_ccb);
     rte_distributor_flush(dist);
     rte_distributor_clear_returns(dist);
     return 0;
@@ -1168,7 +1171,10 @@ int wan_dist_worker(void *arg)
         rte_pause();
 
     fastrg_ccb->lcore_usage[rte_lcore_id()].role = "wan_dist_worker";
+    fastrg_rcu_dp_register(fastrg_ccb);
+    fastrg_rcu_dp_offline(fastrg_ccb);
     n = rte_distributor_get_pkt(dist, worker_id, bufs, NULL, 0);
+    fastrg_rcu_dp_online(fastrg_ccb);
     while(likely(rte_atomic16_read(&stop_flag) == 0)) {
         uint64_t _t0 = rte_rdtsc();
         U16 total_tx = 0;
@@ -1212,8 +1218,11 @@ int wan_dist_worker(void *arg)
         fastrg_ccb->lcore_usage[rte_lcore_id()].total_cycles += _elapsed;
         if (n > 0)
             fastrg_ccb->lcore_usage[rte_lcore_id()].busy_cycles += _elapsed;
+        fastrg_rcu_dp_offline(fastrg_ccb);
         n = rte_distributor_get_pkt(dist, worker_id, bufs, bufs, n);
+        fastrg_rcu_dp_online(fastrg_ccb);
     }
+    fastrg_rcu_dp_unregister(fastrg_ccb);
     if (n > 0)
         rte_distributor_return_pkt(dist, worker_id, bufs, n);
     return 0;
@@ -1256,11 +1265,13 @@ int lan_dist_rx(void *arg)
         rte_pause();
 
     fastrg_ccb->lcore_usage[rte_lcore_id()].role = "lan_dist_rx";
+    fastrg_rcu_dp_register(fastrg_ccb);
     struct rte_mbuf *rx_pkt[BURST_SIZE];
     U32 nat_gc_backpressure = 0;
     while(likely(rte_atomic16_read(&stop_flag) == 0)) {
         uint64_t _t0 = rte_rdtsc();
         nb_rx = rte_eth_rx_burst(LAN_PORT, rx_q, rx_pkt, BURST_SIZE);
+        fastrg_rcu_dp_quiescent(fastrg_ccb);
         dist_n = 0;
         U16 pf_k = rx_prefetch_prologue(rx_pkt, nb_rx);
         for(int i=0; i<nb_rx; i++) {
@@ -1577,6 +1588,7 @@ int lan_dist_rx(void *arg)
         if (nb_rx > 0)
             fastrg_ccb->lcore_usage[rte_lcore_id()].busy_cycles += _elapsed;
     }
+    fastrg_rcu_dp_unregister(fastrg_ccb);
     rte_distributor_flush(dist);
     rte_distributor_clear_returns(dist);
     return 0;
@@ -1615,7 +1627,10 @@ int lan_dist_worker(void *arg)
         rte_pause();
 
     fastrg_ccb->lcore_usage[rte_lcore_id()].role = "lan_dist_worker";
+    fastrg_rcu_dp_register(fastrg_ccb);
+    fastrg_rcu_dp_offline(fastrg_ccb);
     n = rte_distributor_get_pkt(dist, worker_id, bufs, NULL, 0);
+    fastrg_rcu_dp_online(fastrg_ccb);
     while(likely(rte_atomic16_read(&stop_flag) == 0)) {
         uint64_t _t0 = rte_rdtsc();
         U16 total_wan_tx = 0;
@@ -1658,8 +1673,11 @@ int lan_dist_worker(void *arg)
         fastrg_ccb->lcore_usage[rte_lcore_id()].total_cycles += _elapsed;
         if (n > 0)
             fastrg_ccb->lcore_usage[rte_lcore_id()].busy_cycles += _elapsed;
+        fastrg_rcu_dp_offline(fastrg_ccb);
         n = rte_distributor_get_pkt(dist, worker_id, bufs, bufs, n);
+        fastrg_rcu_dp_online(fastrg_ccb);
     }
+    fastrg_rcu_dp_unregister(fastrg_ccb);
     if (n > 0)
         rte_distributor_return_pkt(dist, worker_id, bufs, n);
     return 0;

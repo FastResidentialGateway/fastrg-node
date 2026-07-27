@@ -232,6 +232,45 @@ static inline void send2cp(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt,
 }
 
 /**
+ * @fn fastrg_rcu_dp_offline
+ *
+ * @brief Temporarily mark the calling data-plane lcore QSBR-offline on all
+ *        three RCUs while it enters a blocking operation.  The persistent flag
+ *        remains set because no code (and therefore no RCU getter) executes
+ *        while the lcore is blocked; avoiding flag updates also keeps this
+ *        helper's meaning limited to QSBR state.
+ *
+ * @param fastrg_ccb
+ *      FastRG control block
+ */
+static inline void fastrg_rcu_dp_offline(FastRG_t *fastrg_ccb)
+{
+    unsigned int lcore_id = rte_lcore_id();
+    rte_rcu_qsbr_thread_offline(fastrg_ccb->ppp_ccb_rcu, lcore_id);
+    rte_rcu_qsbr_thread_offline(fastrg_ccb->dhcp_ccb_rcu, lcore_id);
+    rte_rcu_qsbr_thread_offline(fastrg_ccb->per_subscriber_stats_rcu, lcore_id);
+}
+
+/**
+ * @fn fastrg_rcu_dp_online
+ *
+ * @brief Mark the calling data-plane lcore QSBR-online on all three RCUs after
+ *        a blocking operation.  This also reports a quiescent state.  The
+ *        persistent flag remains set because the lcore executes no RCU getter
+ *        while offline, and these helpers only manage temporary QSBR state.
+ *
+ * @param fastrg_ccb
+ *      FastRG control block
+ */
+static inline void fastrg_rcu_dp_online(FastRG_t *fastrg_ccb)
+{
+    unsigned int lcore_id = rte_lcore_id();
+    rte_rcu_qsbr_thread_online(fastrg_ccb->ppp_ccb_rcu, lcore_id);
+    rte_rcu_qsbr_thread_online(fastrg_ccb->dhcp_ccb_rcu, lcore_id);
+    rte_rcu_qsbr_thread_online(fastrg_ccb->per_subscriber_stats_rcu, lcore_id);
+}
+
+/**
  * @fn fastrg_rcu_dp_register
  *
  * @brief Mark the calling data-plane lcore as persistently QSBR-online for all
@@ -244,11 +283,8 @@ static inline void send2cp(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt,
  */
 static inline void fastrg_rcu_dp_register(FastRG_t *fastrg_ccb)
 {
-    unsigned int lcore_id = rte_lcore_id();
-    rte_rcu_qsbr_thread_online(fastrg_ccb->ppp_ccb_rcu, lcore_id);
-    rte_rcu_qsbr_thread_online(fastrg_ccb->dhcp_ccb_rcu, lcore_id);
-    rte_rcu_qsbr_thread_online(fastrg_ccb->per_subscriber_stats_rcu, lcore_id);
-    fastrg_rcu_persistent[lcore_id] = TRUE;   /* online first, then flip flag */
+    fastrg_rcu_dp_online(fastrg_ccb);
+    fastrg_rcu_persistent[rte_lcore_id()] = TRUE;   /* online first, then flip flag */
 }
 
 /**
@@ -285,11 +321,8 @@ static inline void fastrg_rcu_dp_quiescent(FastRG_t *fastrg_ccb)
  */
 static inline void fastrg_rcu_dp_unregister(FastRG_t *fastrg_ccb)
 {
-    unsigned int lcore_id = rte_lcore_id();
-    fastrg_rcu_persistent[lcore_id] = FALSE;
-    rte_rcu_qsbr_thread_offline(fastrg_ccb->ppp_ccb_rcu, lcore_id);
-    rte_rcu_qsbr_thread_offline(fastrg_ccb->dhcp_ccb_rcu, lcore_id);
-    rte_rcu_qsbr_thread_offline(fastrg_ccb->per_subscriber_stats_rcu, lcore_id);
+    fastrg_rcu_persistent[rte_lcore_id()] = FALSE;  /* flag first, then go offline */
+    fastrg_rcu_dp_offline(fastrg_ccb);
 }
 
 #endif /* _DP_H_ */
