@@ -142,6 +142,8 @@ typedef struct FastRG {
     struct rte_timer        link;           /* for physical link checking timer */
     struct rte_timer        heartbeat_timer;/* for controller heartbeat timer */
     datapath_mode_t         datapath_mode;    /* RSS multi-queue vs software distributor */
+    U16                     dp_ctrl_txq_self; /* data core self-port control packet TX queue (N+1) */
+    U16                     dp_ctrl_txq_opposite;/* data core opposite-port control packet TX queue (N+2) */
     struct rte_distributor  *wan_dist;        /* WAN ingress software distributor (DP_MODE_DISTRIBUTOR) */
     struct rte_distributor  *lan_dist;        /* LAN ingress software distributor (DP_MODE_DISTRIBUTOR) */
     struct rte_ring         *cp_q;            /* data/ctrl plane -> control loop event ring */
