@@ -19,6 +19,14 @@ typedef enum check_nak_rej_result {
     CHECK_NAK_REJ_SEND_RESPONSE = 1
 } check_nak_rej_result_t;
 
+/* Every build_* function writes into a caller-provided buffer of at least
+ * PPP_MSG_BUF_LEN bytes (the builder's MTU contract). Builders that copy a
+ * variable-length option list must bound it by PPP_BUILD_MAX_OPT_LEN and
+ * report failure by setting *mulen to 0 without touching the buffer. */
+#define PPP_BUILD_FRAME_OVERHEAD (sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) + \
+                                  sizeof(pppoe_header_t) + sizeof(ppp_payload_t) + sizeof(ppp_header_t))
+#define PPP_BUILD_MAX_OPT_LEN    (PPP_MSG_BUF_LEN - PPP_BUILD_FRAME_OVERHEAD)
+
 /**
  * @fn check_ipcp_nak_rej
  *
@@ -731,7 +739,7 @@ void build_config_request(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb)
                 cur->type = AUTH;
                 cur->length = 0x4;
                 U16 auth_pro = rte_cpu_to_be_16(PAP_PROTOCOL);
-                rte_memcpy(cur->val,&auth_pro,sizeof(U16));
+                rte_memcpy(cur->val, &auth_pro, sizeof(U16));
                 pppoe_header->length += 4;
                 ppp_hdr->length += 4;
 
@@ -740,9 +748,9 @@ void build_config_request(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb)
                 cur->type = AUTH;
                 cur->length = 0x5;
                 U16 auth_pro = rte_cpu_to_be_16(CHAP_PROTOCOL);
-                rte_memcpy(cur->val,&auth_pro,sizeof(U16));
+                rte_memcpy(cur->val, &auth_pro, sizeof(U16));
                 U8 chap_algorithm = 0x5; // CHAP with MD5
-                rte_memcpy((cur->val)+2,&chap_algorithm,sizeof(U8));
+                rte_memcpy((cur->val)+2, &chap_algorithm, sizeof(U8));
                 pppoe_header->length += 5;
                 ppp_hdr->length += 5;
 
@@ -788,6 +796,21 @@ void build_config_ack(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb)
     ppp_payload_t        *ppp_payload = (ppp_payload_t *)(pppoe_header + 1);
     ppp_header_t         *ppp_hdr = (ppp_header_t *)(ppp_payload + 1);
     ppp_options_t        *ppp_options = (ppp_options_t *)(ppp_hdr + 1);
+    U16                  ppp_hdr_total = rte_be_to_cpu_16(s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].ppp_hdr.length);
+    U16                  frame_len = rte_be_to_cpu_16(s_ppp_ccb->pppoe_header.length) +
+                                     sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) + sizeof(pppoe_header_t);
+    U16                  ppp_opt_len;
+
+    if (ppp_hdr_total < sizeof(ppp_header_t) ||
+            ppp_hdr_total - sizeof(ppp_header_t) > PPP_BUILD_MAX_OPT_LEN ||
+            frame_len > PPP_MSG_BUF_LEN) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16
+            " config ack dropped: stored lengths (ppp %u, frame %u) exceed builder buffer.",
+            s_ppp_ccb->user_num, ppp_hdr_total, frame_len);
+        *mulen = 0;
+        return;
+    }
+    ppp_opt_len = ppp_hdr_total - sizeof(ppp_header_t);
 
     *eth_hdr = s_ppp_ccb->eth_hdr;
     rte_ether_addr_copy(&fastrg_ccb->nic_info.hsi_wan_src_mac, &eth_hdr->src_addr);
@@ -798,9 +821,10 @@ void build_config_ack(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb)
     *ppp_payload = s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].ppp_payload;
     *ppp_hdr = s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].ppp_hdr;
     ppp_hdr->code = CONFIG_ACK;
-    rte_memcpy(ppp_options, s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].ppp_options, rte_cpu_to_be_16(ppp_hdr->length) - sizeof(ppp_header_t));
 
-    *mulen = rte_be_to_cpu_16(pppoe_header->length) + sizeof(struct rte_ether_hdr) + sizeof(pppoe_header_t) + sizeof(vlan_header_t);
+    rte_memcpy(ppp_options, s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].ppp_options, ppp_opt_len);
+
+    *mulen = frame_len;
 
     FastRG_LOG(DBG, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " config ack built.", s_ppp_ccb->user_num);
 }
@@ -812,6 +836,21 @@ void build_config_nak_rej(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb)
     vlan_header_t        *vlan_header = (vlan_header_t *)(eth_hdr + 1);
     pppoe_header_t       *pppoe_header = (pppoe_header_t *)(vlan_header + 1);
     ppp_payload_t        *ppp_payload = (ppp_payload_t *)(pppoe_header + 1);
+    U16                  ppp_hdr_total = rte_be_to_cpu_16(s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].ppp_hdr.length);
+    U16                  frame_len = rte_be_to_cpu_16(s_ppp_ccb->pppoe_header.length) +
+                                     sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) + sizeof(pppoe_header_t);
+    U16                  ppp_opt_len;
+
+    if (ppp_hdr_total < sizeof(ppp_header_t) ||
+            ppp_hdr_total - sizeof(ppp_header_t) > PPP_BUILD_MAX_OPT_LEN ||
+            frame_len > PPP_MSG_BUF_LEN) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16
+            " config nak/rej dropped: stored lengths (ppp %u, frame %u) exceed builder buffer.",
+            s_ppp_ccb->user_num, ppp_hdr_total, frame_len);
+        *mulen = 0;
+        return;
+    }
+    ppp_opt_len = ppp_hdr_total - sizeof(ppp_header_t);
     ppp_header_t         *ppp_hdr = (ppp_header_t *)(ppp_payload + 1);
     ppp_options_t        *ppp_options = (ppp_options_t *)(ppp_hdr + 1);
 
@@ -824,9 +863,9 @@ void build_config_nak_rej(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb)
     *ppp_payload = s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].ppp_payload;
     *ppp_hdr = s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].ppp_hdr;
 
-    *mulen = rte_be_to_cpu_16(pppoe_header->length) + sizeof(struct rte_ether_hdr) + sizeof(pppoe_header_t) + sizeof(vlan_header_t);
+    rte_memcpy(ppp_options, s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].ppp_options, ppp_opt_len);
 
-    rte_memcpy(ppp_options, s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].ppp_options, rte_be_to_cpu_16(ppp_hdr->length) - sizeof(ppp_header_t));
+    *mulen = frame_len;
 
     FastRG_LOG(DBG, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " config nak/rej built.", s_ppp_ccb->user_num);
 }

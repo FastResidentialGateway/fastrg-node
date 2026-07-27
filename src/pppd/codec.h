@@ -61,15 +61,17 @@ void build_config_request(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb);
  * @fn build_config_ack
  *
  * @brief For build PPP config ack, either in NCP or LCP phase.
- * 
- * @param buffer 
- *      The buffer to be processed by the codec.
- * @param mulen 
- *      The length of the buffer.
- * @param s_ppp_ccb 
+ *
+ * @param buffer
+ *      The buffer to be processed by the codec, at least PPP_MSG_BUF_LEN bytes.
+ * @param mulen
+ *      Output only: the total frame length written to buffer, or 0 when the
+ *      stored option list cannot fit the PPP_MSG_BUF_LEN builder buffer —
+ *      in that case the buffer is untouched and the frame must not be sent.
+ * @param s_ppp_ccb
  *      The ppp ccb.
- * 
- * @return 
+ *
+ * @return
  *      void
  */
 void build_config_ack(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb);
@@ -78,15 +80,17 @@ void build_config_ack(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb);
  * @fn build_config_nak_rej
  *
  * @brief For build PPP config reject and nak, either in NCP or LCP phase.
- * 
- * @param buffer 
- *      The buffer to be processed by the codec.
- * @param mulen 
- *      The length of the buffer.
- * @param s_ppp_ccb 
+ *
+ * @param buffer
+ *      The buffer to be processed by the codec, at least PPP_MSG_BUF_LEN bytes.
+ * @param mulen
+ *      Output only: the total frame length written to buffer, or 0 when the
+ *      stored option list cannot fit the PPP_MSG_BUF_LEN builder buffer —
+ *      in that case the buffer is untouched and the frame must not be sent.
+ * @param s_ppp_ccb
  *      The ppp ccb.
- * 
- * @return 
+ *
+ * @return
  *      void
  */
 void build_config_nak_rej(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb);
