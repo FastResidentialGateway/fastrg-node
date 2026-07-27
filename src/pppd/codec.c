@@ -48,11 +48,22 @@ check_nak_rej_result_t check_ipcp_nak_rej(U8 flag, ppp_ccb_t *s_ppp_ccb, U16 ppp
         return CHECK_NAK_REJ_ERROR;
     }
 
+    if (ppp_hdr_len < sizeof(ppp_header_t) || 
+            (ppp_hdr_len - sizeof(ppp_header_t)) > PPP_MSG_BUF_LEN) {
+        fastrg_mfree(tmp_buf);
+        return CHECK_NAK_REJ_ERROR;
+    }
+
     memset(tmp_buf, 0, PPP_MSG_BUF_LEN);
     rte_memcpy(tmp_buf, ppp_options, ppp_hdr_len-sizeof(ppp_header_t));
 
     ppp_hdr->length = sizeof(ppp_header_t);
     for(ppp_options_t *cur=ppp_options; tmp_total_length<ppp_hdr_len; cur=(ppp_options_t *)((char *)cur + cur->length)) {
+        if (cur->length == 0 || cur->length > (ppp_hdr_len - tmp_total_length)) {
+            FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "Invalid PPP option length");
+            fastrg_mfree(tmp_buf);
+            return ERROR;
+        }
         if (flag == CONFIG_NAK) {
             if (cur->type == IP_ADDRESS && cur->val[0] == 0) {
                 bool_flag = 1;
@@ -98,7 +109,7 @@ check_nak_rej_result_t check_ipcp_nak_rej(U8 flag, ppp_ccb_t *s_ppp_ccb, U16 ppp
  * 
  * @return should send NAK/REJ or ACK
  **/
-check_nak_rej_result_t check_nak_reject(U8 flag, ppp_ccb_t *s_ppp_ccb, U16 ppp_hdr_len)
+check_nak_rej_result_t check_lcp_nak_rej(U8 flag, ppp_ccb_t *s_ppp_ccb, U16 ppp_hdr_len)
 {
     FastRG_t       *fastrg_ccb = s_ppp_ccb->fastrg_ccb;
     pppoe_header_t *pppoe_header = &(s_ppp_ccb->pppoe_header);
@@ -110,7 +121,7 @@ check_nak_rej_result_t check_nak_reject(U8 flag, ppp_ccb_t *s_ppp_ccb, U16 ppp_h
     U16            tmp_total_length = 4;
 
     if (tmp_buf == NULL) {
-        FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "check_nak_reject failed: fastrg_malloc failed: %s", rte_strerror(rte_errno));
+        FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "check_lcp_nak_rej failed: fastrg_malloc failed: %s", rte_strerror(rte_errno));
         return CHECK_NAK_REJ_ERROR;
     }
 
@@ -204,7 +215,7 @@ STATUS decode_lcp(U16 ppp_hdr_len, U16 *event, struct rte_timer *tim, ppp_ccb_t 
             if (s_ppp_ccb->phase != LCP_PHASE)
                 return ERROR;
             /* we check if the request packet contains what we want */
-            switch (check_nak_reject(CONFIG_NAK, s_ppp_ccb, ppp_hdr_len)) {
+            switch (check_lcp_nak_rej(CONFIG_NAK, s_ppp_ccb, ppp_hdr_len)) {
                 case ERROR:
                     return ERROR;
                 case 1:
@@ -213,7 +224,7 @@ STATUS decode_lcp(U16 ppp_hdr_len, U16 *event, struct rte_timer *tim, ppp_ccb_t 
                 default:
                     ;
             }
-            switch (check_nak_reject(CONFIG_REJECT, s_ppp_ccb, ppp_hdr_len)) {
+            switch (check_lcp_nak_rej(CONFIG_REJECT, s_ppp_ccb, ppp_hdr_len)) {
                 case ERROR:
                         return ERROR;
                 case 1:
