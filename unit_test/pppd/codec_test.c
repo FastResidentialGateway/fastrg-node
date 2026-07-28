@@ -1526,6 +1526,18 @@ void test_ppp_decode_frame(FastRG_t *fastrg_ccb)
         "maximum Protocol-Reject uses the full caller buffer",
         "expected %u bytes, got %" PRIu64, ETH_MTU,
         decode_wan_stats.tx_bytes);
+
+    /* Test 10: a PAP peer request receives an ACK in AUTH_PHASE */
+    printf("Test 10: \"%s\"\n", "PAP Request is answered with PAP Ack");
+    memset(&decode_wan_stats, 0, sizeof(decode_wan_stats));
+    decode_ccb_reset(fastrg_ccb, AUTH_PHASE);
+    frame_len = build_session_frame(frame, PAP_PROTOCOL, PAP_REQUEST,
+        sizeof(ppp_header_t), 0);
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == SUCCESS,
+        "PAP Request in AUTH_PHASE returns SUCCESS", NULL);
+    TEST_ASSERT(decode_wan_stats.tx_packets == 1,
+        "PAP Request in AUTH_PHASE sends one ACK response",
+        "tx_packets=%" PRIu64, decode_wan_stats.tx_packets);
 }
 
 void test_ppp_decode_frame_length_validation(FastRG_t *fastrg_ccb)
