@@ -9,6 +9,8 @@
 #include <errno.h>
 #include <sys/queue.h>
 
+#include <common.h>
+
 #include <rte_common.h>
 #include <rte_ethdev.h>
 #include <rte_memory.h>
@@ -45,7 +47,7 @@
 #include "cli_controller_client.h"
 #include "cli_dispatch.h"
 
-#include "cmds.h"
+#include "ip_pool_range.h"
 
 #define PARSE_DELIMITER	" \f\n\r\t\v"
 
@@ -268,7 +270,6 @@ static void cmd_config_pppoe_dhcp_parsed(void *parsed_result,
     char pool_end[32] = {0};
     char subnet_str[32] = {0};
     char gateway_str[32] = {0};
-    char *tilde_pos;
 
     if (strncmp(res->cmd_str, "del", 3) == 0) {
         /* Call gRPC function to remove the configuration */
@@ -277,20 +278,11 @@ static void cmd_config_pppoe_dhcp_parsed(void *parsed_result,
     }
 
     /* Parse IP pool range (192.168.3.2~192.168.3.5) */
-    tilde_pos = strchr(res->ip_pool_range, '~');
-    if (tilde_pos == NULL) {
-        tilde_pos = strchr(res->ip_pool_range, '-');
-        if (tilde_pos == NULL) {
-            cmdline_printf(cl, "Invalid IP pool range format. Expected: start_ip~end_ip or start_ip-end_ip\n");
-            return;
-        }
+    if (cli_parse_ip_pool_range(res->ip_pool_range, pool_start, sizeof(pool_start), pool_end, sizeof(pool_end)) ==
+        ERROR) {
+        cmdline_printf(cl, "Invalid IP pool range format. Expected: start_ip~end_ip or start_ip-end_ip\n");
+        return;
     }
-
-    /* Extract start and end IP addresses */
-    size_t start_len = tilde_pos - res->ip_pool_range;
-    strncpy(pool_start, res->ip_pool_range, start_len);
-    pool_start[start_len] = '\0';
-    strcpy(pool_end, tilde_pos + 1);
 
     /* Format subnet mask */
     if (res->subnet_mask.family == AF_INET) {

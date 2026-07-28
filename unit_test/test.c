@@ -219,6 +219,10 @@ int main()
     test_dp(fastrg_ccb, &total_tests, &total_pass);
     puts("ok!");
 
+    puts("====================test northbound/cmdline/ip_pool_range.c====================");
+    test_cmdline(fastrg_ccb, &total_tests, &total_pass);
+    puts("ok!");
+
     printf("\n====================Unit Test Summary====================\n\n");
     printf("╔════════════════════════════════════════════════════════════╗\n");
     printf("║  All Test Summary                                          ║\n");
