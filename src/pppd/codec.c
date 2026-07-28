@@ -1511,6 +1511,8 @@ STATUS decode_ppp(ppp_payload_t *ppp_payload, U16 payload_avail, U16 *event, ppp
             memset(tmp_s_ppp_ccb, 0, sizeof(ppp_ccb_t));
 
             s_ppp_ccb->phase = AUTH_PHASE;
+            tmp_s_ppp_ccb->fastrg_ccb = fastrg_ccb;
+            tmp_s_ppp_ccb->user_num = s_ppp_ccb->user_num;
             tmp_s_ppp_ccb->eth_hdr = s_ppp_ccb->eth_hdr;
             tmp_s_ppp_ccb->vlan_header = s_ppp_ccb->vlan_header;
             tmp_s_ppp_ccb->pppoe_header = s_ppp_ccb->pppoe_header;
