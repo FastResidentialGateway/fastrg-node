@@ -698,6 +698,23 @@ void test_dhcp_decode(FastRG_t *fastrg_ccb)
     TEST_ASSERT(event == E_BAD_REQUEST, "out-of-pool ciaddr returns E_BAD_REQUEST",
         "got %d", event);
 
+    printf("Test 21: \"dgram_len smaller than UDP + DHCP headers rejected\"\n");
+    /* bypass dhcp_decode_ctx_apply: it derives a consistent dgram_len, but this
+       case needs a wire dgram_len too small to even hold the fixed headers */
+    dhcp_decode_ctx_init(&fix, fastrg_ccb);
+    memcpy((U8 *)(fix.dhcp_hdr + 1), opts_discover, sizeof(opts_discover));
+    fix.udp_hdr->dgram_len = rte_cpu_to_be_16(
+        sizeof(struct rte_udp_hdr) + sizeof(dhcp_hdr_t) - 1);
+    event = dhcp_decode(&fix.dhcp_ccb, &fix.per_lan_user, &fix.cur_tmp_pool_index,
+        fix.eth_hdr, fix.vlan_hdr, fix.ip_hdr, fix.udp_hdr);
+    TEST_ASSERT(event == ERROR, "dgram_len one byte short of headers returns ERROR",
+        "got %d", event);
+
+    fix.udp_hdr->dgram_len = 0;
+    event = dhcp_decode(&fix.dhcp_ccb, &fix.per_lan_user, &fix.cur_tmp_pool_index,
+        fix.eth_hdr, fix.vlan_hdr, fix.ip_hdr, fix.udp_hdr);
+    TEST_ASSERT(event == ERROR, "zero dgram_len returns ERROR", "got %d", event);
+
     printf("  All dhcp_decode tests done.\n");
 }
 
