@@ -705,8 +705,15 @@ S16 dhcp_decode(dhcp_ccb_t *dhcp_ccb,
     }
 
     cur = (dhcp_opt_t *)(per_lan_user->dhcp_hdr + 1);
-    U16 dhcp_field_len = rte_be_to_cpu_16(udp_hdr->dgram_len) - 
-        sizeof(struct rte_udp_hdr) - sizeof(dhcp_hdr_t);
+    U16 udp_len = rte_be_to_cpu_16(udp_hdr->dgram_len);
+    if (udp_len < sizeof(struct rte_udp_hdr) + sizeof(dhcp_hdr_t)) {
+        FastRG_LOG(ERR, dhcp_ccb->fastrg_ccb->fp, 
+            (U8 *)dhcp_ccb, DHCPLOGMSG,
+            "subscriber %u: Malformed DHCP packet (UDP length %u too small)\n",
+            dhcp_ccb->ccb_id, udp_len);
+        return ERROR;
+    }
+    U16 dhcp_field_len = udp_len - sizeof(struct rte_udp_hdr) - sizeof(dhcp_hdr_t);
     U16 cur_opt_len = 0;
 
     for(; cur->opt_type!=DHCP_END && cur_opt_len<dhcp_field_len; 
