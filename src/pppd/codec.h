@@ -29,13 +29,14 @@ extern "C" {
  * @param pkt_buf
  *      The buffer to be processed by the codec.
  * @param pkt_len
- *      The length of the buffer.
+ *      The actual received length of the buffer. Runt PPPoE and PPP session
+ *      frames are rejected before their headers are decoded.
  * @param event
  *      The event to be set after decoding.
  * @param s_ppp_ccb
  *      The ppp ccb.
  * @return
- *      SUCCESS or FAILURE
+ *      SUCCESS or ERROR
  */
 STATUS PPP_decode_frame(U8 *pkt_buf, int pkt_len, U16 *event, 
     ppp_ccb_t *s_ppp_ccb);

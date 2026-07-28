@@ -1528,6 +1528,78 @@ void test_ppp_decode_frame(FastRG_t *fastrg_ccb)
         decode_wan_stats.tx_bytes);
 }
 
+void test_ppp_decode_frame_length_validation(FastRG_t *fastrg_ccb)
+{
+    printf("\nTesting PPP_decode_frame length validation:\n");
+    printf("=========================================\n\n");
+
+    U8 frame[128];
+    U16 event = E_UNKNOWN;
+    U16 frame_len;
+    const U16 payload_offset = sizeof(struct rte_ether_hdr) +
+        sizeof(vlan_header_t) + sizeof(pppoe_header_t);
+    const U16 session_min_len = payload_offset + sizeof(ppp_payload_t) +
+        sizeof(ppp_header_t);
+
+    decode_env_init(fastrg_ccb);
+
+    /* Test 1: a forged maximum PPP length is rejected before the existing
+     * options buffer can be freed, allocated, or overwritten. */
+    printf("Test 1: \"%s\"\n", "forged maximum PPP length rejected");
+    U8 existing_options[] = {0xde, 0xad, 0xbe, 0xef};
+    decode_ccb_reset(fastrg_ccb, LCP_PHASE);
+    decode_ccb.ppp_phase[0].ppp_options = (ppp_options_t *)existing_options;
+    frame_len = build_session_frame(frame, LCP_PROTOCOL, CONFIG_REQUEST,
+        UINT16_MAX, 0);
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == ERROR,
+        "PPP header length 0xffff returns ERROR", NULL);
+    TEST_ASSERT(decode_ccb.ppp_phase[0].ppp_options ==
+        (ppp_options_t *)existing_options,
+        "invalid PPP length leaves the existing options pointer untouched", NULL);
+    TEST_ASSERT(existing_options[0] == 0xde && existing_options[1] == 0xad &&
+        existing_options[2] == 0xbe && existing_options[3] == 0xef,
+        "invalid PPP length leaves existing option bytes untouched", NULL);
+    decode_ccb.ppp_phase[0].ppp_options = NULL;
+
+    /* Test 2: reject the exact off-by-one boundary beyond received bytes. */
+    printf("Test 2: \"%s\"\n", "PPP length one byte beyond payload rejected");
+    decode_ccb_reset(fastrg_ccb, LCP_PHASE);
+    frame_len = build_session_frame(frame, LCP_PROTOCOL, CONFIG_REQUEST,
+        sizeof(ppp_header_t) + 1, 0);
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == ERROR,
+        "PPP header length one byte beyond payload returns ERROR", NULL);
+    TEST_ASSERT(decode_ccb.ppp_phase[0].ppp_options == NULL,
+        "off-by-one PPP length does not allocate options", NULL);
+
+    /* Test 3: an exact fit remains valid and reaches normal PAP decoding. */
+    printf("Test 3: \"%s\"\n", "exact-fit PPP payload accepted");
+    decode_ccb_reset(fastrg_ccb, AUTH_PHASE);
+    frame_len = build_session_frame(frame, PAP_PROTOCOL, PAP_ACK,
+        sizeof(ppp_header_t), 0);
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == SUCCESS,
+        "exact-fit PPP header length returns SUCCESS", NULL);
+
+    /* Test 4: reject a frame before dereferencing an incomplete outer header. */
+    printf("Test 4: \"%s\"\n", "outer PPPoE runt rejected");
+    decode_ccb_reset(fastrg_ccb, PPPOE_PHASE);
+    memset(frame, 0, sizeof(frame));
+    TEST_ASSERT(PPP_decode_frame(frame, payload_offset - 1, &event,
+        &decode_ccb) == ERROR,
+        "frame shorter than eth/vlan/PPPoE headers returns ERROR", NULL);
+
+    /* Test 5: a session frame must also contain the protocol and PPP headers. */
+    printf("Test 5: \"%s\"\n", "PPPoE session runt rejected");
+    decode_ccb_reset(fastrg_ccb, LCP_PHASE);
+    frame_len = build_session_frame(frame, LCP_PROTOCOL, CONFIG_REQUEST,
+        sizeof(ppp_header_t), 0);
+    TEST_ASSERT(frame_len == session_min_len,
+        "session fixture length matches the minimum complete frame",
+        "expected %u, got %u", session_min_len, frame_len);
+    TEST_ASSERT(PPP_decode_frame(frame, session_min_len - 1, &event,
+        &decode_ccb) == ERROR,
+        "session frame missing one PPP header byte returns ERROR", NULL);
+}
+
 void test_ppp_decode_frame_chap(FastRG_t *fastrg_ccb)
 {
     printf("\nTesting PPP_decode_frame CHAP dispatch:\n");
@@ -2042,6 +2114,7 @@ void test_ppp_codec(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_build_proto_reject(fastrg_ccb);
     test_build_code_reject(fastrg_ccb);
     test_ppp_decode_frame(fastrg_ccb);
+    test_ppp_decode_frame_length_validation(fastrg_ccb);
     test_ppp_decode_frame_chap(fastrg_ccb);
     test_ppp_decode_frame_chap_challenge_phase_guard(fastrg_ccb);
     test_ppp_decode_config_ack_request_matching(fastrg_ccb);
