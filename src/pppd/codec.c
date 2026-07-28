@@ -1424,7 +1424,7 @@ STATUS decode_pppoe(pppoe_header_tag_t *pppoe_header_tag, ppp_ccb_t *s_ppp_ccb)
     }
 }
 
-STATUS decode_ppp(ppp_payload_t *ppp_payload, U16 *event, ppp_ccb_t *s_ppp_ccb)
+STATUS decode_ppp(ppp_payload_t *ppp_payload, U16 payload_avail, U16 *event, ppp_ccb_t *s_ppp_ccb)
 {
     FastRG_t *fastrg_ccb = s_ppp_ccb->fastrg_ccb;
     struct rte_timer *tim = &s_ppp_ccb->ppp;
@@ -1435,6 +1435,13 @@ STATUS decode_ppp(ppp_payload_t *ppp_payload, U16 *event, ppp_ccb_t *s_ppp_ccb)
     if (ppp_hdr_len < sizeof(ppp_header_t)) {
         FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 
             " recv invalid ppp header length %u", s_ppp_ccb->user_num, ppp_hdr_len);
+        return ERROR;
+    }
+
+    if (sizeof(ppp_payload_t) + ppp_hdr_len > payload_avail) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+            "User %" PRIu16 " recv ppp header length %u exceeding available payload length %u",
+            s_ppp_ccb->user_num, ppp_hdr_len, payload_avail);
         return ERROR;
     }
 
@@ -1611,11 +1618,20 @@ STATUS decode_ppp(ppp_payload_t *ppp_payload, U16 *event, ppp_ccb_t *s_ppp_ccb)
 STATUS PPP_decode_frame(U8 *pkt_buf, int pkt_len, U16 *event, ppp_ccb_t *s_ppp_ccb)
 {
     FastRG_t *fastrg_ccb = s_ppp_ccb->fastrg_ccb;
+    const int pppoe_offset = sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t);
+    const int payload_offset = pppoe_offset + sizeof(pppoe_header_t);
+    const int session_min_len = payload_offset + sizeof(ppp_payload_t) + sizeof(ppp_header_t);
 
     if (pkt_len > ETH_JUMBO) {
         FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "error! too large frame(%d)", pkt_len);
         /* TODO: store pkt buffer to log file, not just print out */
         PRINT_MESSAGE(pkt_buf, pkt_len);
+        return ERROR;
+    }
+
+    if (pkt_len < payload_offset) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+            "User %" PRIu16 " recv runt PPPoE frame length %d", s_ppp_ccb->user_num, pkt_len);
         return ERROR;
     }
 
@@ -1637,8 +1653,16 @@ STATUS PPP_decode_frame(U8 *pkt_buf, int pkt_len, U16 *event, ppp_ccb_t *s_ppp_c
 
     /* we receive pppoe session packet and need to parse for ppp payload */
     if (s_ppp_ccb->vlan_header.next_proto == rte_cpu_to_be_16(ETH_P_PPP_SES)) {
+        if (pkt_len < session_min_len) {
+            FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+                "User %" PRIu16 " recv runt PPPoE session frame length %d",
+                s_ppp_ccb->user_num, pkt_len);
+            return ERROR;
+        }
+
         ppp_payload_t *ppp_payload = (ppp_payload_t *)(pppoe_header + 1);
-        if (decode_ppp(ppp_payload, event, s_ppp_ccb) == ERROR)
+        U16 payload_avail = pkt_len - payload_offset;
+        if (decode_ppp(ppp_payload, payload_avail, event, s_ppp_ccb) == ERROR)
             return ERROR;
     }
 
