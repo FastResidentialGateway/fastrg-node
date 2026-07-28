@@ -661,7 +661,8 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
                 vlan_header_t *vlan_header = (vlan_header_t *)(eth_hdr + 1);
                 struct rte_ipv4_hdr *ip_hdr = (struct rte_ipv4_hdr *)(vlan_header + 1);
                 struct rte_udp_hdr *udp_hdr = (struct rte_udp_hdr *)(ip_hdr + 1);
-                int ret = dhcpd(fastrg_ccb, NULL, eth_hdr, vlan_header, ip_hdr, udp_hdr, ccb_id);
+                int ret = dhcpd(fastrg_ccb, mail[i]->mbuf, eth_hdr, vlan_header,
+                    ip_hdr, udp_hdr, ccb_id);
                 if (ret > 0) {
                     U16 out_len = sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) +
                         sizeof(struct rte_ipv4_hdr) + rte_be_to_cpu_16(ip_hdr->total_length);

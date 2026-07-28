@@ -269,10 +269,17 @@ int dnsd_cp_process_lan_udp_query(FastRG_t *fastrg_ccb, U8 *pkt_data, U16 pkt_le
     struct rte_udp_hdr *udp_hdr = (struct rte_udp_hdr *)(ip_hdr + 1);
 
     /* extract DNS payload */
-    U8 *dns_data = (U8 *)(udp_hdr + 1);
-    U16 udp_payload_len = rte_be_to_cpu_16(udp_hdr->dgram_len) - sizeof(struct rte_udp_hdr);
-    if (udp_payload_len < DNS_HDR_LEN)
+    U16 udp_offset = (U16)((U8 *)udp_hdr - pkt_data);
+    if (pkt_len < udp_offset + sizeof(struct rte_udp_hdr))
         return -1;
+
+    U16 udp_len = rte_be_to_cpu_16(udp_hdr->dgram_len);
+    if (udp_len < sizeof(struct rte_udp_hdr) + DNS_HDR_LEN ||
+            udp_len > pkt_len - udp_offset)
+        return -1;
+
+    U8 *dns_data = (U8 *)(udp_hdr + 1);
+    U16 udp_payload_len = udp_len - sizeof(struct rte_udp_hdr);
 
     dns_message_t query_msg;
     if (dns_parse_query(dns_data, udp_payload_len, &query_msg) != SUCCESS)
@@ -451,10 +458,17 @@ int dnsd_cp_process_wan_udp_response(FastRG_t *fastrg_ccb, U8 *pkt_data, U16 pkt
     struct rte_udp_hdr *udp_hdr = (struct rte_udp_hdr *)(ip_hdr + 1);
 
     /* extract DNS payload */
-    U8 *dns_data = (U8 *)(udp_hdr + 1);
-    U16 udp_payload_len = rte_be_to_cpu_16(udp_hdr->dgram_len) - sizeof(struct rte_udp_hdr);
-    if (udp_payload_len < DNS_HDR_LEN)
+    U16 udp_offset = (U16)((U8 *)udp_hdr - pkt_data);
+    if (pkt_len < udp_offset + sizeof(struct rte_udp_hdr))
         return 0;
+
+    U16 udp_len = rte_be_to_cpu_16(udp_hdr->dgram_len);
+    if (udp_len < sizeof(struct rte_udp_hdr) + DNS_HDR_LEN ||
+            udp_len > pkt_len - udp_offset)
+        return 0;
+
+    U8 *dns_data = (U8 *)(udp_hdr + 1);
+    U16 udp_payload_len = udp_len - sizeof(struct rte_udp_hdr);
 
     /* get upstream query ID from DNS header */
     U16 upstream_id = (U16)((dns_data[0] << 8) | dns_data[1]);

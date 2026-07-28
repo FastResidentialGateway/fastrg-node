@@ -522,6 +522,16 @@ int dhcpd(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt,
         return -1;
     }
 
+    if (single_pkt != NULL) {
+        U8 *pkt_data = rte_pktmbuf_mtod(single_pkt, U8 *);
+        U32 udp_offset = (U32)((U8 *)udp_hdr - pkt_data);
+        U16 udp_len = rte_be_to_cpu_16(udp_hdr->dgram_len);
+        if (udp_offset + udp_len > rte_pktmbuf_pkt_len(single_pkt)) {
+            rte_atomic32_dec(&dhcp_ccb->active_count);
+            return -1;
+        }
+    }
+
     /* Temporarily pick one index from lan_user_info array and save it to dhcp_ccb */
     for(int i=0; i<dhcp_ccb->per_lan_user_pool_len; i++) {
         if (rte_is_same_ether_addr(&eth_hdr->src_addr, 
