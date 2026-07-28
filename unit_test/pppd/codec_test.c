@@ -338,6 +338,22 @@ void test_build_config_ack(FastRG_t *fastrg_ccb)
         "expected length %zu, got %u", sizeof(pkt_ipcp), mulen);
     TEST_ASSERT(memcmp(buffer, pkt_ipcp, sizeof(pkt_ipcp)) == 0, "build_config_ack packet content", 
         "packet content mismatch");
+
+    printf("Test 3: \"%s\"\n", "build_config_ack() option list exceeds builder buffer");
+    /* PPP_MSG_BUF_LEN(128) - frame overhead(30) = 98 bytes of options max;
+     * a stored option list of 100 bytes must be refused: *mulen becomes 0
+     * and the caller-provided buffer stays untouched. */
+    U8 big_opts[100] = { 0x03, 0x64 }; // one oversized option, type IP_ADDRESS
+    U8 overflow_buffer[PPP_MSG_BUF_LEN] = { 0 };
+    U8 zero_buffer[PPP_MSG_BUF_LEN] = { 0 };
+    U16 overflow_mulen = 0;
+    s_ppp_ccb_1.ppp_phase[1].ppp_hdr.length = htons(sizeof(ppp_header_t) + sizeof(big_opts));
+    s_ppp_ccb_1.ppp_phase[1].ppp_options = (ppp_options_t *)big_opts;
+    build_config_ack(overflow_buffer, &overflow_mulen, &s_ppp_ccb_1);
+    TEST_ASSERT(overflow_mulen == 0, "build_config_ack oversized options refused",
+        "expected mulen 0, got %u", overflow_mulen);
+    TEST_ASSERT(memcmp(overflow_buffer, zero_buffer, PPP_MSG_BUF_LEN) == 0,
+        "build_config_ack buffer untouched on refusal", "buffer should remain all zero");
 }
 
 void test_build_terminate_request(FastRG_t *fastrg_ccb)
@@ -573,10 +589,26 @@ void test_build_config_nak_rej(FastRG_t *fastrg_ccb)
     s_ppp_ccb_2.pppoe_header.length = htons(0x0010);
     memset(buffer, 0, sizeof(buffer));
     build_config_nak_rej(buffer, &mulen, &s_ppp_ccb_2);
-    TEST_ASSERT(mulen == sizeof(pkt_ipcp_2), "build_config_nak_rej packet length", 
+    TEST_ASSERT(mulen == sizeof(pkt_ipcp_2), "build_config_nak_rej packet length",
         "expected length %zu, got %u", sizeof(pkt_ipcp_2), mulen);
-    TEST_ASSERT(memcmp(buffer, pkt_ipcp_2, sizeof(pkt_ipcp_2)) == 0, 
+    TEST_ASSERT(memcmp(buffer, pkt_ipcp_2, sizeof(pkt_ipcp_2)) == 0,
         "build_config_nak_rej packet content", "packet content mismatch");
+
+    printf("Test 5: \"%s\"\n", "build_config_nak_rej() option list exceeds builder buffer");
+    /* Same builder contract as build_config_ack: a stored option list larger
+     * than PPP_MSG_BUF_LEN - frame overhead (98 bytes) must be refused with
+     * *mulen == 0 and the buffer left untouched. */
+    U8 big_opts[100] = { 0x03, 0x64 };
+    U8 overflow_buffer[PPP_MSG_BUF_LEN] = { 0 };
+    U8 zero_buffer[PPP_MSG_BUF_LEN] = { 0 };
+    U16 overflow_mulen = 0;
+    s_ppp_ccb_2.ppp_phase[1].ppp_hdr.length = htons(sizeof(ppp_header_t) + sizeof(big_opts));
+    s_ppp_ccb_2.ppp_phase[1].ppp_options = (ppp_options_t *)big_opts;
+    build_config_nak_rej(overflow_buffer, &overflow_mulen, &s_ppp_ccb_2);
+    TEST_ASSERT(overflow_mulen == 0, "build_config_nak_rej oversized options refused",
+        "expected mulen 0, got %u", overflow_mulen);
+    TEST_ASSERT(memcmp(overflow_buffer, zero_buffer, PPP_MSG_BUF_LEN) == 0,
+        "build_config_nak_rej buffer untouched on refusal", "buffer should remain all zero");
 }
 
 void test_build_terminate_ack(FastRG_t *fastrg_ccb) 

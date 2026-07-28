@@ -1688,6 +1688,11 @@ void wan_ctrl_tx(FastRG_t *fastrg_ccb, U16 ccb_id, U8 *mu, U16 mulen)
     struct rte_mbuf *pkt;
     unsigned char *buf;
 
+    /* mulen == 0 means the builder refused the frame (PPP_MSG_BUF_LEN
+     * contract) and the buffer content is undefined — nothing to send. */
+    if (unlikely(mulen == 0))
+        return;
+
     pkt = rte_pktmbuf_alloc(direct_pool[0]);
     if (pkt == NULL) {
         {
@@ -1710,6 +1715,11 @@ void lan_ctrl_tx(FastRG_t *fastrg_ccb, U16 ccb_id, U8 *mu, U16 mulen)
 {
     struct rte_mbuf *pkt;
     unsigned char *buf;
+
+    /* mulen == 0 means the builder refused the frame (PPP_MSG_BUF_LEN
+     * contract) and the buffer content is undefined — nothing to send. */
+    if (unlikely(mulen == 0))
+        return;
 
     pkt = rte_pktmbuf_alloc(direct_pool[0]);
     if (pkt == NULL) {
