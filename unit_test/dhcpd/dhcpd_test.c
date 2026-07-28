@@ -233,6 +233,35 @@ static void test_dhcpd_disabled_subscriber(void)
         "active_count balanced back to 0", "got %d", rte_atomic32_read(&dhcpd_ccb.active_count));
 }
 
+static void test_dhcpd_udp_length_exceeds_packet(void)
+{
+    printf("\nTesting dhcpd (UDP length exceeds actual packet):\n");
+    printf("=========================================\n\n");
+
+    dhcpd_env_reset();
+    struct rte_ether_addr mac_a = {.addr_bytes = {0x02, 0, 0, 0, 0, 0x01}};
+    mock_dhcpd_build_hdrs(&mac_a);
+    U8 opts[4] = {DHCP_MSG_TYPE, 1, DHCP_DISCOVER, DHCP_END};
+    dhcpd_set_options(opts, sizeof(opts));
+
+    struct rte_mbuf mock_pkt = {
+        .buf_addr = dhcpd_pkt_buf,
+        .data_off = 0,
+        .pkt_len = (U32)((U8 *)(g_dhcp_hdr + 1) + sizeof(opts) - dhcpd_pkt_buf),
+    };
+    g_udp_hdr->dgram_len = rte_cpu_to_be_16(
+        rte_be_to_cpu_16(g_udp_hdr->dgram_len) + 1);
+
+    int ret = dhcpd(g_dhcpd_fastrg_ccb, &mock_pkt, g_eth_hdr, g_vlan_hdr,
+        g_ip_hdr, g_udp_hdr, 0);
+    TEST_ASSERT(ret == -1, "oversized UDP datagram returns -1", "got %d", ret);
+    TEST_ASSERT(rte_atomic32_read(&dhcpd_ccb.active_count) == 0,
+        "oversized UDP datagram balances active_count back to 0", "got %d",
+        rte_atomic32_read(&dhcpd_ccb.active_count));
+    TEST_ASSERT(dhcpd_pool_users[0].lan_user_info.lan_user_used == FALSE,
+        "oversized UDP datagram is rejected before dhcp_decode claims a slot", "");
+}
+
 static void test_dhcpd_pool_exhausted(void)
 {
     printf("\nTesting dhcpd (IP pool exhausted):\n");
@@ -375,6 +404,7 @@ void test_dhcpd(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_release_lan_user_direct();
     test_dhcpd_ccb_id_out_of_range();
     test_dhcpd_disabled_subscriber();
+    test_dhcpd_udp_length_exceeds_packet();
     test_dhcpd_pool_exhausted();
     test_dhcpd_fresh_client_binds_slot();
     test_dhcpd_returning_client_reuses_slot();

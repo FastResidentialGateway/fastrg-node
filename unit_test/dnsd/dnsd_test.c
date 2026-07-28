@@ -720,6 +720,48 @@ static void test_udp_query_payload_too_short(FastRG_t *fastrg_ccb)
     dns_udp_ctx_cleanup(&c);
 }
 
+static void test_udp_query_zero_dgram_len_rejected(FastRG_t *fastrg_ccb)
+{
+    printf("\nTesting dnsd_cp_process_lan_udp_query (zero UDP length):\n");
+    printf("=========================================\n\n");
+
+    dns_udp_ctx_t c;
+    dns_udp_ctx_init(&c, fastrg_ccb);
+    U8 query[DNS_MAX_PACKET_LEN];
+    U16 query_len = build_dns_query(query, "zero.example.com", DNS_TYPE_A, 0x1234);
+    dns_udp_ctx_set_payload(&c, query, query_len);
+    c.udp_hdr->dgram_len = 0;
+
+    int ret = dnsd_cp_process_lan_udp_query(fastrg_ccb, c.buf,
+        dns_udp_ctx_frame_len(&c), 0);
+    TEST_ASSERT(ret == -1, "zero UDP dgram_len returns -1", "got %d", ret);
+
+    c.udp_hdr->dgram_len = 0xFFFF;
+    ret = dnsd_cp_process_lan_udp_query(fastrg_ccb, c.buf,
+        dns_udp_ctx_frame_len(&c), 0);
+    TEST_ASSERT(ret == -1, "UDP dgram_len of 0xFFFF returns -1", "got %d", ret);
+
+    dns_udp_ctx_cleanup(&c);
+}
+
+static void test_udp_query_dgram_len_exceeds_packet(FastRG_t *fastrg_ccb)
+{
+    printf("\nTesting dnsd_cp_process_lan_udp_query (UDP length exceeds packet):\n");
+    printf("=========================================\n\n");
+
+    dns_udp_ctx_t c;
+    dns_udp_ctx_init(&c, fastrg_ccb);
+    U8 query[DNS_MAX_PACKET_LEN];
+    U16 query_len = build_dns_query(query, "large.example.com", DNS_TYPE_A, 0x1234);
+    dns_udp_ctx_set_payload(&c, query, query_len);
+    c.udp_hdr->dgram_len = rte_cpu_to_be_16(UINT16_MAX);
+
+    int ret = dnsd_cp_process_lan_udp_query(fastrg_ccb, c.buf,
+        dns_udp_ctx_frame_len(&c), 0);
+    TEST_ASSERT(ret == -1, "oversized UDP dgram_len returns -1", "got %d", ret);
+    dns_udp_ctx_cleanup(&c);
+}
+
 static void test_udp_query_malformed_body_rejected(FastRG_t *fastrg_ccb)
 {
     printf("\nTesting dnsd_cp_process_lan_udp_query (malformed DNS body):\n");
@@ -1051,6 +1093,94 @@ static void test_udp_query_upstream_id_increments_and_skips_zero(FastRG_t *fastr
     dns_udp_ctx_cleanup(&c);
 }
 
+static void dns_udp_seed_pending(dns_udp_ctx_t *c, U16 upstream_id, U16 original_id)
+{
+    dns_pending_query_t *pending = &c->dhcp_ccb->dns_state.pending[0];
+    pending->active = TRUE;
+    pending->upstream_id = upstream_id;
+    pending->original_id = original_id;
+    pending->start_tsc = fastrg_get_cur_cycles();
+    pending->client_ip = rte_cpu_to_be_32(0xC0A80264);
+    pending->client_port = rte_cpu_to_be_16(53211);
+    pending->client_mac[0] = 0x11;
+    pending->client_mac[1] = 0x22;
+    pending->client_mac[2] = 0x33;
+    pending->client_mac[3] = 0x44;
+    pending->client_mac[4] = 0x55;
+    pending->client_mac[5] = 0x66;
+    pending->vlan_tci = rte_cpu_to_be_16(0x0064);
+    pending->qtype = DNS_TYPE_A;
+    snprintf(pending->domain, sizeof(pending->domain), "%s", "response.example.com");
+}
+
+static void test_udp_response_zero_dgram_len_rejected(FastRG_t *fastrg_ccb)
+{
+    printf("\nTesting dnsd_cp_process_wan_udp_response (zero UDP length):\n");
+    printf("=========================================\n\n");
+
+    dns_udp_ctx_t c;
+    dns_udp_ctx_init(&c, fastrg_ccb);
+    dns_udp_seed_pending(&c, 0x1234, 0x5678);
+    U8 response[DNS_MAX_PACKET_LEN];
+    U16 response_len = build_cached_a_response(response, "response.example.com",
+        0x1234, rte_cpu_to_be_32(0xC6336401));
+    dns_udp_ctx_set_payload(&c, response, response_len);
+    c.udp_hdr->dgram_len = 0;
+
+    int ret = dnsd_cp_process_wan_udp_response(fastrg_ccb, c.buf,
+        dns_udp_ctx_frame_len(&c), 0);
+    TEST_ASSERT(ret == 0, "zero response UDP dgram_len returns 0", "got %d", ret);
+    TEST_ASSERT(c.dhcp_ccb->dns_state.pending[0].active == TRUE,
+        "zero response UDP dgram_len does not consume pending query", "");
+    dns_udp_ctx_cleanup(&c);
+}
+
+static void test_udp_response_dgram_len_exceeds_packet(FastRG_t *fastrg_ccb)
+{
+    printf("\nTesting dnsd_cp_process_wan_udp_response (UDP length exceeds packet):\n");
+    printf("=========================================\n\n");
+
+    dns_udp_ctx_t c;
+    dns_udp_ctx_init(&c, fastrg_ccb);
+    dns_udp_seed_pending(&c, 0x1234, 0x5678);
+    U8 response[DNS_MAX_PACKET_LEN];
+    U16 response_len = build_cached_a_response(response, "response.example.com",
+        0x1234, rte_cpu_to_be_32(0xC6336401));
+    dns_udp_ctx_set_payload(&c, response, response_len);
+    c.udp_hdr->dgram_len = rte_cpu_to_be_16(UINT16_MAX);
+
+    int ret = dnsd_cp_process_wan_udp_response(fastrg_ccb, c.buf,
+        dns_udp_ctx_frame_len(&c), 0);
+    TEST_ASSERT(ret == 0, "oversized response UDP dgram_len returns 0", "got %d", ret);
+    TEST_ASSERT(c.dhcp_ccb->dns_state.pending[0].active == TRUE,
+        "oversized response UDP dgram_len does not consume pending query", "");
+    dns_udp_ctx_cleanup(&c);
+}
+
+static void test_udp_response_valid_packet_forwarded(FastRG_t *fastrg_ccb)
+{
+    printf("\nTesting dnsd_cp_process_wan_udp_response (valid response):\n");
+    printf("=========================================\n\n");
+
+    dns_udp_ctx_t c;
+    dns_udp_ctx_init(&c, fastrg_ccb);
+    dns_udp_seed_pending(&c, 0x1234, 0x5678);
+    U8 response[DNS_MAX_PACKET_LEN];
+    U16 response_len = build_cached_a_response(response, "response.example.com",
+        0x1234, rte_cpu_to_be_32(0xC6336401));
+    dns_udp_ctx_set_payload(&c, response, response_len);
+
+    int ret = dnsd_cp_process_wan_udp_response(fastrg_ccb, c.buf,
+        dns_udp_ctx_frame_len(&c), 0);
+    TEST_ASSERT(ret == 1, "valid UDP response returns 1", "got %d", ret);
+    TEST_ASSERT(c.dhcp_ccb->dns_state.pending[0].active == FALSE,
+        "valid UDP response consumes pending query", "");
+    TEST_ASSERT(c.dns_payload[0] == 0x56 && c.dns_payload[1] == 0x78,
+        "valid UDP response restores original query ID", "got 0x%02x%02x",
+        c.dns_payload[0], c.dns_payload[1]);
+    dns_udp_ctx_cleanup(&c);
+}
+
 void test_dnsd(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 {
     printf("\n");
@@ -1094,6 +1224,8 @@ void test_dnsd(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     dns_udp_env_init(fastrg_ccb);
     test_udp_query_proxy_disabled(fastrg_ccb);
     test_udp_query_payload_too_short(fastrg_ccb);
+    test_udp_query_zero_dgram_len_rejected(fastrg_ccb);
+    test_udp_query_dgram_len_exceeds_packet(fastrg_ccb);
     test_udp_query_malformed_body_rejected(fastrg_ccb);
     test_udp_query_static_match_builds_response(fastrg_ccb);
     test_udp_query_static_aaaa_falls_through_to_servfail(fastrg_ccb);
@@ -1104,6 +1236,9 @@ void test_dnsd(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_udp_query_upstream_unavailable_returns_servfail(fastrg_ccb);
     test_udp_query_pending_full_returns_servfail(fastrg_ccb);
     test_udp_query_upstream_id_increments_and_skips_zero(fastrg_ccb);
+    test_udp_response_zero_dgram_len_rejected(fastrg_ccb);
+    test_udp_response_dgram_len_exceeds_packet(fastrg_ccb);
+    test_udp_response_valid_packet_forwarded(fastrg_ccb);
     fastrg_ccb->per_subscriber_stats[rte_lcore_id()][WAN_PORT] = NULL;
 
     printf("\n");
