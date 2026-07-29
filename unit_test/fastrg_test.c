@@ -87,6 +87,95 @@ static void test_subscriber_stats_reuse_moves_unknown_slot(void)
     free(stats_rcu);
 }
 
+static void test_remove_subscriber_stats_updates_length(void)
+{
+    FastRG_t test_ccb = {0};
+    struct rte_rcu_qsbr *stats_rcu = NULL;
+    size_t rcu_size = rte_rcu_qsbr_get_memsize(RTE_MAX_LCORE);
+    unsigned int lcore_id;
+
+    TEST_ASSERT(posix_memalign((void **)&stats_rcu, RTE_CACHE_LINE_SIZE, rcu_size) == 0,
+        "allocate subscriber stats remove RCU fixture", "allocation failed");
+    memset(stats_rcu, 0, rcu_size);
+    TEST_ASSERT(rte_rcu_qsbr_init(stats_rcu, RTE_MAX_LCORE) == 0,
+        "initialize subscriber stats remove RCU fixture", "initialization failed");
+
+    test_ccb.user_count = 2;
+    test_ccb.per_subscriber_stats_len = 2;
+    test_ccb.per_subscriber_stats_rcu = stats_rcu;
+    rte_atomic16_init(&test_ccb.per_subscriber_stats_updating);
+
+    RTE_LCORE_FOREACH(lcore_id) {
+        for (int port_id = 0; port_id < PORT_AMOUNT; port_id++) {
+            test_ccb.per_subscriber_stats[lcore_id][port_id] =
+                calloc(test_ccb.per_subscriber_stats_len + 1, sizeof(struct per_ccb_stats));
+            TEST_ASSERT(test_ccb.per_subscriber_stats[lcore_id][port_id] != NULL,
+                "allocate subscriber stats remove fixture row", "lcore %u port %d allocation failed",
+                lcore_id, port_id);
+        }
+    }
+
+    TEST_ASSERT(fastrg_remove_subscriber_stats(&test_ccb, 1, test_ccb.user_count) == SUCCESS,
+        "remove subscriber stats fixture entry", "remove failed");
+    TEST_ASSERT(test_ccb.per_subscriber_stats_len == 1,
+        "subscriber stats remove updates allocated length", "expected 1, got %u",
+        test_ccb.per_subscriber_stats_len);
+
+    RTE_LCORE_FOREACH(lcore_id) {
+        for (int port_id = 0; port_id < PORT_AMOUNT; port_id++)
+            free(test_ccb.per_subscriber_stats[lcore_id][port_id]);
+    }
+    free(stats_rcu);
+}
+
+static void test_pppoes_stats_remove_then_add_reallocates(void)
+{
+    FastRG_t test_ccb = {0};
+    struct rte_rcu_qsbr *stats_rcu = NULL;
+    struct pppoes_lcore_stats *reduced_stats = NULL;
+    size_t rcu_size = rte_rcu_qsbr_get_memsize(RTE_MAX_LCORE);
+    unsigned int lcore_id;
+    unsigned int main_lcore = rte_get_main_lcore();
+
+    TEST_ASSERT(posix_memalign((void **)&stats_rcu, RTE_CACHE_LINE_SIZE, rcu_size) == 0,
+        "allocate pppoes stats resize RCU fixture", "allocation failed");
+    memset(stats_rcu, 0, rcu_size);
+    TEST_ASSERT(rte_rcu_qsbr_init(stats_rcu, RTE_MAX_LCORE) == 0,
+        "initialize pppoes stats resize RCU fixture", "initialization failed");
+
+    test_ccb.user_count = 2;
+    test_ccb.pppoes_stats_len = 2;
+    test_ccb.ppp_ccb_rcu = stats_rcu;
+    rte_atomic16_init(&test_ccb.pppoes_stats_updating);
+
+    RTE_LCORE_FOREACH(lcore_id) {
+        test_ccb.pppoes_stats[lcore_id] =
+            calloc(test_ccb.pppoes_stats_len, sizeof(struct pppoes_lcore_stats));
+        TEST_ASSERT(test_ccb.pppoes_stats[lcore_id] != NULL,
+            "allocate pppoes stats resize fixture row", "lcore %u allocation failed", lcore_id);
+    }
+
+    TEST_ASSERT(fastrg_remove_pppoes_stats(&test_ccb, 1, test_ccb.user_count) == SUCCESS,
+        "remove pppoes stats fixture entry", "remove failed");
+    TEST_ASSERT(test_ccb.pppoes_stats_len == 1,
+        "pppoes stats remove updates allocated length", "expected 1, got %u",
+        test_ccb.pppoes_stats_len);
+
+    reduced_stats = test_ccb.pppoes_stats[main_lcore];
+    test_ccb.user_count = 1;
+    TEST_ASSERT(fastrg_add_pppoes_stats(&test_ccb, 1) == SUCCESS,
+        "add pppoes stats after remove", "add failed");
+    TEST_ASSERT(test_ccb.pppoes_stats_len == 2,
+        "pppoes stats add restores allocated length", "expected 2, got %u",
+        test_ccb.pppoes_stats_len);
+    TEST_ASSERT(test_ccb.pppoes_stats[main_lcore] != reduced_stats,
+        "pppoes stats add reallocates reduced row", "add reused the reduced row");
+
+    RTE_LCORE_FOREACH(lcore_id)
+        free(test_ccb.pppoes_stats[lcore_id]);
+    free(stats_rcu);
+}
+
 void test_fastrg(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 {
     (void)fastrg_ccb;
@@ -97,6 +186,8 @@ void test_fastrg(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     printf("╚═══════════════════════════════════════════════════════════╝\n");
 
     test_subscriber_stats_reuse_moves_unknown_slot();
+    test_remove_subscriber_stats_updates_length();
+    test_pppoes_stats_remove_then_add_reallocates();
 
     printf("\nfastrg tests: %d passed, %d failed\n", pass_count, test_count - pass_count);
     *total_tests += test_count;
