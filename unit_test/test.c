@@ -135,6 +135,10 @@ int main()
     U32 total_tests = 0;
     U32 total_pass = 0;
 
+    puts("====================test fastrg.c====================");
+    test_fastrg(fastrg_ccb, &total_tests, &total_pass);
+    puts("ok!");
+
     puts("====================test pppd/codec.c====================");
     test_ppp_codec(fastrg_ccb, &total_tests, &total_pass);
     puts("ok!");
