@@ -336,37 +336,37 @@ static void init_node_runtime_state(FastRG_t *fastrg_ccb)
     }
 }
 
-/**
- * @fn metrics_server_run
- * @brief pthread entry point for the Prometheus /metrics HTTP server. Registers
- *        the metrics thread's RCU reader slot, binds lighthttp on the configured
- *        address and serves GET /metrics. Non-fatal on bind failure (observability
- *        only) — logs a warning and exits the thread.
- *
- * @param arg
- *      FastRG control block (FastRG_t *)
- */
 void *metrics_server_run(void *arg)
 {
     FastRG_t *fastrg_ccb = (FastRG_t *)arg;
-    lighthttp_server_t srv;
+    lighthttp_server_t *srv = &fastrg_ccb->metrics_server;
 
     /* Register our dedicated RCU reader slot before serving any scrape. */
     metrics_rcu_register(fastrg_ccb);
 
-    if (lighthttp_init(&srv, fastrg_ccb->metrics_ip_port) != 0) {
+    if (lighthttp_init(srv, fastrg_ccb->metrics_ip_port) != 0) {
         FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
             "metrics: failed to start /metrics server on %s; Prometheus scrape disabled",
             fastrg_ccb->metrics_ip_port);
+        metrics_rcu_unregister(fastrg_ccb);
         return NULL;
     }
-    lighthttp_add_route(&srv, "GET", "/metrics", metrics_build, fastrg_ccb);
+    lighthttp_add_route(srv, "GET", "/metrics", metrics_build, fastrg_ccb);
     /* Future read-only endpoints (e.g. GET /healthz) register here. */
 
     FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
-        "metrics: Prometheus /metrics listening on %s:%d", srv.host, srv.port);
+        "metrics: Prometheus /metrics listening on %s:%d", srv->host, srv->port);
 
-    lighthttp_serve(&srv); /* blocks until the listen socket fails */
+    /* Publish lighthttp_init()'s listen_fd store before loading the stop request.
+     * This full barrier prevents a StoreLoad reorder where the stop path sees -1
+     * while this thread sees the old stop flag, leaving accept() and join blocked. */
+    rte_smp_mb();
+    if (rte_atomic16_read(&fastrg_ccb->metrics_stop_requested))
+        lighthttp_stop(srv);
+    else
+        lighthttp_serve(srv); /* blocks until the listen socket fails */
+
+    metrics_rcu_unregister(fastrg_ccb);
     return NULL;
 }
 

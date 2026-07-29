@@ -199,8 +199,11 @@ int lighthttp_add_route(lighthttp_server_t *s, const char *method, const char *p
 
 int lighthttp_init(lighthttp_server_t *s, const char *addr)
 {
-    memset(s, 0, sizeof(*s));
-    s->listen_fd = -1;
+    __atomic_store_n(&s->listen_fd, -1, __ATOMIC_RELEASE);
+    memset(s->host, 0, sizeof(s->host));
+    s->port = 0;
+    memset(s->routes, 0, sizeof(s->routes));
+    s->n_routes = 0;
 
     if (lighthttp_parse_addr(addr, s->host, sizeof(s->host), &s->port) != 0) {
         fprintf(stderr, "lighthttp: invalid listen addr '%s'\n", addr ? addr : "(null)");
@@ -238,8 +241,21 @@ int lighthttp_init(lighthttp_server_t *s, const char *addr)
         return -1;
     }
 
-    s->listen_fd = fd;
+    __atomic_store_n(&s->listen_fd, fd, __ATOMIC_RELEASE);
     return 0;
+}
+
+void lighthttp_stop(lighthttp_server_t *s)
+{
+    if (s == NULL)
+        return;
+
+    int fd = __atomic_exchange_n(&s->listen_fd, -1, __ATOMIC_ACQ_REL);
+    if (fd < 0)
+        return;
+
+    shutdown(fd, SHUT_RDWR);
+    close(fd);
 }
 
 static int write_all(int fd, const char *buf, size_t len)
@@ -324,7 +340,11 @@ static void handle_conn(lighthttp_server_t *s, int fd)
 void lighthttp_serve(lighthttp_server_t *s)
 {
     for(;;) {
-        int conn = accept(s->listen_fd, NULL, NULL);
+        int listen_fd = __atomic_load_n(&s->listen_fd, __ATOMIC_ACQUIRE);
+        if (listen_fd < 0)
+            break;
+
+        int conn = accept(listen_fd, NULL, NULL);
         if (conn < 0) {
             if (errno == EINTR)
                 continue;
@@ -333,6 +353,5 @@ void lighthttp_serve(lighthttp_server_t *s)
         handle_conn(s, conn);
         close(conn);
     }
-    close(s->listen_fd);
-    s->listen_fd = -1;
+    lighthttp_stop(s);
 }

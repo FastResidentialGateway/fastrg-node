@@ -83,6 +83,14 @@ void metrics_rcu_register(void *arg)
     rte_rcu_qsbr_thread_register(fastrg_ccb->dhcp_ccb_rcu, METRICS_RCU_THREAD_ID);
 }
 
+void metrics_rcu_unregister(void *arg)
+{
+    FastRG_t *fastrg_ccb = (FastRG_t *)arg;
+    rte_rcu_qsbr_thread_unregister(fastrg_ccb->per_subscriber_stats_rcu, METRICS_RCU_THREAD_ID);
+    rte_rcu_qsbr_thread_unregister(fastrg_ccb->ppp_ccb_rcu, METRICS_RCU_THREAD_ID);
+    rte_rcu_qsbr_thread_unregister(fastrg_ccb->dhcp_ccb_rcu, METRICS_RCU_THREAD_ID);
+}
+
 /* Escape a Prometheus label value ( \, ", \n ) into dst. Returns dst. */
 static const char *esc(const char *s, char *dst, size_t dstsz)
 {

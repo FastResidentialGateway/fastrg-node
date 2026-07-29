@@ -29,7 +29,16 @@ int setup_signalfd(void);
 STATUS sys_init(FastRG_t *fastrg_ccb, struct fastrg_config *fastrg_cfg);
 void sys_cleanup(FastRG_t *fastrg_ccb);
 
-/* pthread entry: serves the Prometheus /metrics endpoint via lighthttp. */
+/**
+ * @fn metrics_server_run
+ * @brief pthread entry point for the Prometheus /metrics HTTP server. Registers
+ *        the metrics thread's RCU reader slot, binds lighthttp on the configured
+ *        address and serves GET /metrics. Non-fatal on bind failure (observability
+ *        only) — logs a warning and exits the thread.
+ *
+ * @param arg
+ *      FastRG control block (FastRG_t *)
+ */
 void *metrics_server_run(void *arg);
 
 extern struct rte_mempool *direct_pool[PORT_AMOUNT];

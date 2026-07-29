@@ -1,5 +1,9 @@
+#define _GNU_SOURCE
+
 #include <stdio.h>
 #include <stdlib.h>
+#include <pthread.h>
+#include <sched.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -208,6 +212,59 @@ void test_parse_pci_ids()
     unlink(test_file);
 }
 
+static rte_atomic16_t null_out_thread_done;
+
+static void *null_out_thread(void *arg)
+{
+    (void)arg;
+    pthread_detach(pthread_self());
+    rte_atomic16_set(&null_out_thread_done, 1);
+    return NULL;
+}
+
+static void *joinable_thread(void *arg)
+{
+    return arg;
+}
+
+static int first_allowed_cpu(void)
+{
+    cpu_set_t allowed_cpus;
+    if (sched_getaffinity(0, sizeof(allowed_cpus), &allowed_cpus) != 0)
+        return -1;
+
+    for(int cpu_id = 0; cpu_id < CPU_SETSIZE; cpu_id++) {
+        if (CPU_ISSET(cpu_id, &allowed_cpus))
+            return cpu_id;
+    }
+    return -1;
+}
+
+static void test_create_pthread_out_param(FastRG_t *fastrg_ccb)
+{
+    printf("\nTesting fastrg_create_pthread out parameter:\n");
+    printf("=========================================\n\n");
+
+    int cpu_id = first_allowed_cpu();
+    rte_atomic16_set(&null_out_thread_done, 0);
+    STATUS ret = cpu_id >= 0 ? fastrg_create_pthread("utils_null_out", null_out_thread,
+        fastrg_ccb, (unsigned int)cpu_id, NULL) : ERROR;
+    for(int i = 0; ret == SUCCESS && !rte_atomic16_read(&null_out_thread_done) && i < 1000; i++)
+        usleep(1000);
+    TEST_ASSERT(ret == SUCCESS && rte_atomic16_read(&null_out_thread_done),
+        "pthread creation accepts NULL out parameter", "ret=%d done=%d",
+        ret, rte_atomic16_read(&null_out_thread_done));
+
+    pthread_t thread;
+    void *thread_result = NULL;
+    ret = fastrg_create_pthread("utils_out", joinable_thread,
+        fastrg_ccb, (unsigned int)cpu_id, &thread);
+    int join_ret = ret == SUCCESS ? pthread_join(thread, &thread_result) : -1;
+    TEST_ASSERT(ret == SUCCESS && join_ret == 0 && thread_result == fastrg_ccb,
+        "pthread creation returns joinable handle", "ret=%d join_ret=%d result=%p",
+        ret, join_ret, thread_result);
+}
+
 void test_utils(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 {
     printf("\n");
@@ -225,6 +282,7 @@ void test_utils(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_parse_unix_sock_path();
     test_create_dir_if_not_exists();
     test_parse_pci_ids();
+    test_create_pthread_out_param(fastrg_ccb);
 
     printf("\n");
     printf("╔════════════════════════════════════════════════════════════╗\n");

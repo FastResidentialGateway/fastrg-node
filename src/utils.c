@@ -250,7 +250,7 @@ STATUS parse_ip(const char *ip_addr_str, U32 *ip_addr)
 }
 
 STATUS fastrg_create_pthread(const char *thread_name, 
-    void *(*thread_func)(void *), void *arg, unsigned int cpu_id)
+    void *(*thread_func)(void *), void *arg, unsigned int cpu_id, pthread_t *out_thread)
 {
     FastRG_t *fastrg_ccb = (FastRG_t *)arg;
     pthread_t thread_id;
@@ -277,6 +277,9 @@ STATUS fastrg_create_pthread(const char *thread_name,
         pthread_attr_destroy(&thread_attr);
         return ERROR;
     }
+    if (out_thread != NULL)
+        *out_thread = thread_id;
+
     ret = pthread_setname_np(thread_id, thread_name);
     if (ret != 0) {
         FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL, 

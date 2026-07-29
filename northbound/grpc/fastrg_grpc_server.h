@@ -6,6 +6,7 @@ extern "C" {
 #endif
 
 void *fastrg_grpc_server_run(void *arg);
+void fastrg_grpc_server_shutdown(void);
 
 #ifdef __cplusplus
 }

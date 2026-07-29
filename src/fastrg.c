@@ -739,6 +739,33 @@ int control_plane(FastRG_t *fastrg_ccb)
     return 0;
 }
 
+static void fastrg_stop_northbound_threads(FastRG_t *fastrg_ccb)
+{
+    if (fastrg_ccb->grpc_thread_started)
+        fastrg_grpc_server_shutdown();
+
+    if (fastrg_ccb->metrics_thread_started) {
+        rte_atomic16_set(&fastrg_ccb->metrics_stop_requested, 1);
+        lighthttp_stop(&fastrg_ccb->metrics_server);
+    }
+
+    if (fastrg_ccb->grpc_thread_started) {
+        int ret = pthread_join(fastrg_ccb->grpc_thread, NULL);
+        if (ret != 0)
+            FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
+                "Failed to join gRPC server thread: %s", strerror(ret));
+        fastrg_ccb->grpc_thread_started = FALSE;
+    }
+
+    if (fastrg_ccb->metrics_thread_started) {
+        int ret = pthread_join(fastrg_ccb->metrics_thread, NULL);
+        if (ret != 0)
+            FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
+                "Failed to join metrics server thread: %s", strerror(ret));
+        fastrg_ccb->metrics_thread_started = FALSE;
+    }
+}
+
 STATUS northbound(FastRG_t *fastrg_ccb)
 {
     // Initialize controller client
@@ -793,21 +820,35 @@ STATUS northbound(FastRG_t *fastrg_ccb)
 
     unlink(fastrg_ccb->unix_sock_path);
 
+    fastrg_ccb->metrics_thread_started = FALSE;
+    fastrg_ccb->grpc_thread_started = FALSE;
+    fastrg_ccb->metrics_server.listen_fd = -1;
+    rte_atomic16_set(&fastrg_ccb->metrics_stop_requested, 0);
+
     /* Start the Prometheus /metrics HTTP server so Prometheus can scrape this node
      * directly. Non-fatal on failure — metrics are observability, not core function. */
     if (fastrg_create_pthread("fastrg_metrics",
-        metrics_server_run, fastrg_ccb, rte_lcore_id()) != SUCCESS)
+        metrics_server_run, fastrg_ccb, rte_lcore_id(), &fastrg_ccb->metrics_thread) != SUCCESS) {
         FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
             "Metrics HTTP server thread failed to start; Prometheus scrape disabled");
+    } else {
+        fastrg_ccb->metrics_thread_started = TRUE;
+    }
 
-    return fastrg_create_pthread("fastrg_grpc",
-        fastrg_grpc_server_run, fastrg_ccb, rte_lcore_id());
+    if (fastrg_create_pthread("fastrg_grpc",
+        fastrg_grpc_server_run, fastrg_ccb, rte_lcore_id(), &fastrg_ccb->grpc_thread) != SUCCESS) {
+        fastrg_stop_northbound_threads(fastrg_ccb);
+        return ERROR;
+    }
+    fastrg_ccb->grpc_thread_started = TRUE;
+    return SUCCESS;
 }
 
 void fastrg_stop()
 {
     FastRG_LOG(INFO, fastrg_ccb.fp, NULL, NULL, "FastRG system stopping...");
     rte_eal_mp_wait_lcore();
+    fastrg_stop_northbound_threads(&fastrg_ccb);
     // Cleanup Kafka producer (flush pending telemetry)
     kafka_producer_cleanup();
     // Cleanup etcd integration
