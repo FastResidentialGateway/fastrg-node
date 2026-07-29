@@ -1,6 +1,12 @@
 #include <stdlib.h>
 #include <assert.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <string.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 
 #include "../src/lighthttp.h"
 #include "../src/fastrg.h"
@@ -132,6 +138,55 @@ static void test_match(void)
         "route table overflow rejected", "n=%d max=%d", s.n_routes, LIGHTHTTP_MAX_ROUTES);
 }
 
+static int find_available_port(void)
+{
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0)
+        return -1;
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        close(fd);
+        return -1;
+    }
+
+    socklen_t addr_len = sizeof(addr);
+    if (getsockname(fd, (struct sockaddr *)&addr, &addr_len) != 0) {
+        close(fd);
+        return -1;
+    }
+
+    int port = ntohs(addr.sin_port);
+    close(fd);
+    return port;
+}
+
+static void test_stop(void)
+{
+    printf("\nTesting lighthttp stop:\n");
+    int port = find_available_port();
+    lighthttp_server_t s;
+    char addr[64];
+    snprintf(addr, sizeof(addr), "127.0.0.1:%d", port);
+
+    int ret = port > 0 ? lighthttp_init(&s, addr) : -1;
+    TEST_ASSERT(ret == 0, "server initializes before stop", "ret=%d port=%d", ret, port);
+    if (ret != 0)
+        return;
+
+    int listen_fd = s.listen_fd;
+    lighthttp_stop(&s);
+    errno = 0;
+    int fd_status = fcntl(listen_fd, F_GETFD);
+    TEST_ASSERT(s.listen_fd == -1 && fd_status == -1 && errno == EBADF,
+        "stop closes listening socket", "listen_fd=%d fd_status=%d errno=%d",
+        s.listen_fd, fd_status, errno);
+}
+
 void test_lighthttp(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 {
     (void)fastrg_ccb;
@@ -145,6 +200,7 @@ void test_lighthttp(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_parse_addr();
     test_parse_request_line();
     test_match();
+    test_stop();
 
     printf("\n");
     printf("╔════════════════════════════════════════════════════════════╗\n");

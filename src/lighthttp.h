@@ -182,6 +182,17 @@ const lighthttp_route_t *lighthttp_match(const lighthttp_server_t *s,
 int lighthttp_init(lighthttp_server_t *s, const char *addr);
 
 /**
+ * @fn lighthttp_stop
+ *
+ * @brief Stop a server by shutting down and closing its listening socket
+ * @param s
+ *      Server to stop; safe to call when not initialized or already stopped
+ * @return
+ *      void
+ */
+void lighthttp_stop(lighthttp_server_t *s);
+
+/**
  * @fn lighthttp_add_route
  *
  * @brief Register a (method, path) route and its handler

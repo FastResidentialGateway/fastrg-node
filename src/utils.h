@@ -1,6 +1,8 @@
 #ifndef _UTILS_H_
 #define _UTILS_H_
 
+#include <pthread.h>
+
 #include <common.h>
 
 #include <rte_malloc.h>
@@ -273,8 +275,8 @@ static inline BOOL is_ip_in_range(U32 ip, U32 gateway_ip, U32 subnet_mask)
     return ((ip & subnet_mask) == (gateway_ip & subnet_mask));
 }
 
-STATUS fastrg_create_pthread(const char *thread_name, 
-    void *(*thread_func)(void *), void *arg, unsigned int cpu_id);
+STATUS fastrg_create_pthread(const char *thread_name,
+    void *(*thread_func)(void *), void *arg, unsigned int cpu_id, pthread_t *out_thread);
 
 /**
  * @fn fastrg_get_id

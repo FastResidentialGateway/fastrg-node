@@ -5,6 +5,7 @@
 extern "C" {
 #endif
 
+#include <pthread.h>
 #include <sys/types.h>
 
 #include <common.h>
@@ -19,6 +20,7 @@ extern "C" {
 #include "protocol.h"
 #include "utils.h"
 #include "init.h"
+#include "lighthttp.h"
 
 #define MAX_VLAN_ID 4000
 #define MIN_VLAN_ID 2
@@ -151,6 +153,19 @@ typedef struct FastRG {
     struct rte_ring         *etcd_event_q;    /* etcd watcher threads -> control loop event ring */
     struct lcore_usage_counter *lcore_usage;  /* per-lcore busy/total cycle counters, index by lcore_id */
     char                    *metrics_ip_port; /* Prometheus /metrics HTTP listen addr, e.g. "0.0.0.0:9101" */
+    pthread_t               metrics_thread;   /* joinable Prometheus HTTP server thread */
+    BOOL                    metrics_thread_started;
+    /* Set on every graceful shutdown before lighthttp_stop(). Covers the startup
+     * window where stop runs while the metrics thread has not yet published its
+     * listen_fd (still scheduled-but-not-running or inside lighthttp_init):
+     * lighthttp_stop() then exchanges -1 and is a no-op, so without this flag the
+     * thread would open its fd afterwards and block in accept() forever, hanging
+     * the pthread_join in fastrg_stop(). The thread re-checks this flag right
+     * after lighthttp_init() (under rte_smp_mb()) and closes its own fd. */
+    rte_atomic16_t          metrics_stop_requested;
+    lighthttp_server_t      metrics_server;
+    pthread_t               grpc_thread;      /* joinable northbound gRPC server thread */
+    BOOL                    grpc_thread_started;
     uint64_t                node_start_time;  /* process start time (epoch seconds) — crashloop detection */
     uint64_t                node_restart_total; /* persisted restart count from RESTART_COUNT_FILE */
     /* Per-port link state cache, updated by EV_LINK handler, read by metrics thread (atomic). */

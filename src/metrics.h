@@ -30,6 +30,17 @@ extern "C" {
 void metrics_rcu_register(void *fastrg_ccb);
 
 /**
+ * @fn metrics_rcu_unregister
+ *
+ * @brief Unregister the metrics thread's dedicated RCU reader slots
+ * @param fastrg_ccb
+ *      FastRG control block (FastRG_t *)
+ * @return
+ *      void
+ */
+void metrics_rcu_unregister(void *fastrg_ccb);
+
+/**
  * @fn metrics_build
  *
  * @brief lighthttp handler that builds the Prometheus text exposition for this
