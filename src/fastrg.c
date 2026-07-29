@@ -247,6 +247,7 @@ STATUS fastrg_remove_subscriber_stats(FastRG_t *fastrg_ccb, U16 remove_count, U1
     }
 
     rte_atomic16_clear(&fastrg_ccb->per_subscriber_stats_updating);
+    fastrg_ccb->per_subscriber_stats_len = new_user_count;
 
     FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, 
         "%u subscriber stats entries removed", remove_count);
@@ -433,6 +434,7 @@ STATUS fastrg_remove_pppoes_stats(FastRG_t *fastrg_ccb, U16 remove_count, U16 ol
             fastrg_mfree(old_stats[lcore_id]);
 
     rte_atomic16_clear(&fastrg_ccb->pppoes_stats_updating);
+    fastrg_ccb->pppoes_stats_len = new_user_count;
 
     FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "%u pppoes stats entries removed", remove_count);
     return SUCCESS;
