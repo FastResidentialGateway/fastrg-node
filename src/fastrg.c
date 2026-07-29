@@ -857,15 +857,19 @@ void fastrg_stop()
     config_snapshot_cleanup();
 
     // Cleanup controller client
-    controller_cleanup(&fastrg_ccb);
+    if (fastrg_ccb.controller_address)
+        controller_cleanup(&fastrg_ccb);
 
     rte_ring_free(fastrg_ccb.cp_q);
     /* drain any etcd events left unconsumed before freeing the ring */
     etcd_event_t *ev;
-    while (rte_ring_dequeue(fastrg_ccb.etcd_event_q, (void **)&ev) == 0)
-        etcd_event_free(ev);
+    if (fastrg_ccb.etcd_event_q) {
+        while (rte_ring_dequeue(fastrg_ccb.etcd_event_q, (void **)&ev) == 0)
+            etcd_event_free(ev);
+    }
     rte_ring_free(fastrg_ccb.etcd_event_q);
-    close(fastrg_ccb.unix_sock_fd);
+    if (fastrg_ccb.unix_sock_fd > 0)
+        close(fastrg_ccb.unix_sock_fd);
     U16 total_ccbs = fastrg_ccb.user_count;
     fastrg_ccb.user_count = 0;
     pppd_cleanup_ccb(&fastrg_ccb, total_ccbs);
@@ -878,15 +882,6 @@ void fastrg_stop()
     #endif
     //rte_trace_save();
     FastRG_LOG(INFO, fastrg_ccb.fp, NULL, NULL, "bye!");
-    /* DPDK still holds fastrg_ccb.fp as its log stream (set via
-     * rte_openlog_stream() during init). rte_eal_cleanup() runs after
-     * fastrg_stop() returns and may emit logs (e.g. i40e "Invalid memory"
-     * during PCI device uninit). Detach the stream back to stderr before
-     * closing the file, otherwise DPDK writes to a closed FILE* and crashes
-     * with "free(): invalid pointer" in _IO_free_backup_area. */
-    //rte_openlog_stream(stderr);
-    if (fastrg_ccb.fp != stdout)
-        fclose(fastrg_ccb.fp);
     grpc_shutdown();
     // Free allocated strings
     if (fastrg_ccb.eal_args) free(fastrg_ccb.eal_args);
@@ -902,6 +897,14 @@ void fastrg_stop()
     fastrg_mfree(fastrg_ccb.vlan_userid_map);
     fastrg_cleanup_subscriber_stats(&fastrg_ccb, total_ccbs);
     fastrg_cleanup_pppoes_stats(&fastrg_ccb, total_ccbs);
+
+    rte_eal_cleanup();
+
+    /* Close the log file last so DPDK cleanup logs (e.g. i40e
+     * "Invalid memory" during PCI device uninit) are written to the
+     * still-open log file. */
+    if (fastrg_ccb.fp && fastrg_ccb.fp != stdout)
+        fclose(fastrg_ccb.fp);
 }
 
 int fastrg_start(int argc, char **argv)
@@ -1189,8 +1192,6 @@ int fastrg_start(int argc, char **argv)
 
     close(sfd);
 
-    rte_eal_cleanup();
-
     return 0;
 
 err:
@@ -1205,25 +1206,8 @@ err:
     }
     /* Stop any data-plane lcores that were already launched. */
     rte_atomic16_set(&stop_flag, 1);
-    rte_eal_mp_wait_lcore();
-    kafka_producer_cleanup();
-    if (fastrg_ccb.fp && fastrg_ccb.fp != stdout) {
-        /* Detach DPDK log stream before closing fp; rte_eal_cleanup() below
-         * may still log and would otherwise write to a closed FILE*. */
-        rte_openlog_stream(stderr);
-        fclose(fastrg_ccb.fp);
-    }
-    if (fastrg_ccb.eal_args) free(fastrg_ccb.eal_args);
-    if (fastrg_ccb.log_path) free(fastrg_ccb.log_path);
-    if (fastrg_ccb.unix_sock_path) free(fastrg_ccb.unix_sock_path);
-    if (fastrg_ccb.node_grpc_ip_port) free(fastrg_ccb.node_grpc_ip_port);
-    if (fastrg_ccb.controller_address) free(fastrg_ccb.controller_address);
-    if (fastrg_ccb.etcd_endpoints) free(fastrg_ccb.etcd_endpoints);
-    if (fastrg_ccb.kafka_brokers) free(fastrg_ccb.kafka_brokers);
-    if (fastrg_ccb.central_office_location) free(fastrg_ccb.central_office_location);
-    if (fastrg_ccb.metrics_ip_port) free(fastrg_ccb.metrics_ip_port);
-    grpc_shutdown();
+    fastrg_stop();
     close(sfd);
-    rte_eal_cleanup();
+
     return -1;
 }
