@@ -870,6 +870,10 @@ void fastrg_stop()
     dhcpd_cleanup_ccb(&fastrg_ccb, total_ccbs);
     /* stop any active CLI capture session and free its state */
     fastrg_pdump_capture_cleanup(&fastrg_ccb);
+    if (fastrg_ccb.pdump_rcu != NULL) {
+        fastrg_mfree(fastrg_ccb.pdump_rcu);
+        fastrg_ccb.pdump_rcu = NULL;
+    }
     #ifdef RTE_LIB_PDUMP
     /*uninitialize packet capture framework */
     rte_pdump_uninit();

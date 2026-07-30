@@ -45,7 +45,6 @@
 #define PDUMP_NUM_MBUFS    8191
 #define PDUMP_CACHE_SIZE   256
 #define PDUMP_SNAPLEN      262144
-#define PDUMP_DRAIN_MS     5     /* drain window for in-flight callbacks on stop */
 #define PDUMP_MAX_SIZE_MB  2048  /* hard cap on the pcap file size (2GB)         */
 
 /* classic libpcap file headers (little-endian host assumed; magic encodes order) */
@@ -439,9 +438,12 @@ err_mp:
  * already been removed by the caller. */
 static void pdump_capture_teardown(FastRG_t *fastrg_ccb)
 {
-    /* Let any in-flight callback (already past the registration check) finish
-     * enqueuing before the writer stops draining the ring it feeds. */
-    rte_delay_ms(PDUMP_DRAIN_MS);
+    /* Removing RX/TX callbacks prevents new entries but does not wait for
+     * callbacks already executing. Synchronizing pdump_rcu waits until
+     * persistent data-plane loops, distributor workers, and ctrl TX windows
+     * cross their burst boundaries; only then can the writer stop and the
+     * callback-referenced ring, mempool, and filter be freed. */
+    rte_rcu_qsbr_synchronize(fastrg_ccb->pdump_rcu, RTE_QSBR_THRID_INVALID);
 
     if (global_pdump_ctx.writer_started) {
         rte_atomic16_set(&global_pdump_ctx.writer_running, 0);
