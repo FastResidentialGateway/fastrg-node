@@ -1805,7 +1805,12 @@ static int lsi_event_callback(U16 port_id, enum rte_eth_event_type type, void *p
     mail->type = EV_LINK;
     mail->len = 1;
     //enqueue down event to main thread
-    rte_ring_enqueue(fastrg_ccb->cp_q, (void *)mail);
+    if (rte_ring_enqueue(fastrg_ccb->cp_q, (void *)mail) != 0) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+            "lsi_event_callback failed: cp_q full, link event dropped\n");
+        fastrg_mfree(mail);
+        return -1;
+    }
 
     return 0;
 }
