@@ -3,10 +3,12 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 
 #include "../src/lighthttp.h"
 #include "../src/fastrg.h"
@@ -14,6 +16,50 @@
 
 static int test_count = 0;
 static int pass_count = 0;
+
+/* ---- connection timeouts ---- */
+static void test_conn_timeouts(void)
+{
+    printf("\nTesting lighthttp connection timeouts:\n");
+    int sockets[2];
+    int pair_ret = socketpair(AF_UNIX, SOCK_STREAM, 0, sockets);
+    TEST_ASSERT(pair_ret == 0, "socketpair for timeout test", "ret=%d errno=%d", pair_ret, errno);
+    if (pair_ret != 0)
+        return;
+
+    int ret = lighthttp_set_conn_timeouts(sockets[0], 1);
+    TEST_ASSERT(ret == 0, "set connection timeouts", "ret=%d errno=%d", ret, errno);
+
+    struct timeval recv_timeout;
+    socklen_t timeout_len = sizeof(recv_timeout);
+    memset(&recv_timeout, 0, sizeof(recv_timeout));
+    int get_ret = getsockopt(sockets[0], SOL_SOCKET, SO_RCVTIMEO, &recv_timeout, &timeout_len);
+    TEST_ASSERT(get_ret == 0 && recv_timeout.tv_sec == 1 && recv_timeout.tv_usec == 0,
+        "receive timeout is readable", "ret=%d timeout=%ld.%06ld",
+        get_ret, (long)recv_timeout.tv_sec, (long)recv_timeout.tv_usec);
+
+    TEST_ASSERT(lighthttp_set_conn_timeouts(-1, 1) == -1,
+        "invalid fd timeout rejected", "errno=%d", errno);
+
+    struct timespec start;
+    struct timespec end;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    errno = 0;
+    char byte;
+    ssize_t read_ret = read(sockets[0], &byte, sizeof(byte));
+    int read_errno = errno;
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    double elapsed = (double)(end.tv_sec - start.tv_sec) +
+                     (double)(end.tv_nsec - start.tv_nsec) / 1000000000.0;
+
+    TEST_ASSERT(read_ret == -1 && (read_errno == EAGAIN || read_errno == EWOULDBLOCK),
+        "idle read expires with would-block", "ret=%zd errno=%d elapsed=%.3f", read_ret, read_errno, elapsed);
+    TEST_ASSERT(elapsed >= 0.5 && elapsed < 3.0,
+        "idle read expires after about one second", "elapsed=%.3f", elapsed);
+
+    close(sockets[0]);
+    close(sockets[1]);
+}
 
 /* ---- growable buffer ---- */
 static void test_buf_basic(void)
@@ -195,6 +241,7 @@ void test_lighthttp(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     printf("║              lighthttp Module Unit Tests                  ║\n");
     printf("╚═══════════════════════════════════════════════════════════╝\n");
 
+    test_conn_timeouts();
     test_buf_basic();
     test_buf_appendf_and_growth();
     test_parse_addr();

@@ -11,6 +11,7 @@
 #include <errno.h>
 #include <unistd.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
@@ -19,6 +20,7 @@
 #define LIGHTHTTP_BACKLOG 16
 #define LIGHTHTTP_REQ_BUF 2048
 #define LIGHTHTTP_BUF_MIN 4096
+#define LIGHTHTTP_IO_TIMEOUT_S 5
 
 /* ----------------------------------------------------------------------- */
 /* Growable buffer                                                          */
@@ -183,6 +185,20 @@ const lighthttp_route_t *lighthttp_match(const lighthttp_server_t *s,
 /* ----------------------------------------------------------------------- */
 /* Server                                                                   */
 /* ----------------------------------------------------------------------- */
+
+int lighthttp_set_conn_timeouts(int fd, int seconds)
+{
+    struct timeval timeout = {
+        .tv_sec = seconds,
+        .tv_usec = 0,
+    };
+
+    if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) != 0)
+        return -1;
+    if (setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) != 0)
+        return -1;
+    return 0;
+}
 
 int lighthttp_add_route(lighthttp_server_t *s, const char *method, const char *path,
                         lighthttp_handler_t handler, void *ctx)
@@ -349,6 +365,10 @@ void lighthttp_serve(lighthttp_server_t *s)
             if (errno == EINTR)
                 continue;
             break;
+        }
+        if (lighthttp_set_conn_timeouts(conn, LIGHTHTTP_IO_TIMEOUT_S) != 0) {
+            close(conn);
+            continue;
         }
         handle_conn(s, conn);
         close(conn);
