@@ -271,6 +271,9 @@ STATUS send_arp_request(const struct rte_ether_addr *src_mac, U32 src_ip,
 
     encode_arp_request((U8 *)pkt, src_mac, src_ip, target_ip, vlan_id);
 
-    rte_eth_tx_burst(LAN_PORT, tx_q, &m, 1);
+    if (unlikely(rte_eth_tx_burst(LAN_PORT, tx_q, &m, 1) == 0)) {
+        rte_pktmbuf_free(m);
+        return ERROR;
+    }
     return SUCCESS;
 }
