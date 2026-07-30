@@ -1371,6 +1371,10 @@ int lan_dist_rx(void *arg)
                             unsigned char *) + sizeof(struct rte_ether_hdr) +
                             sizeof(vlan_header_t) + sizeof(struct rte_ipv4_hdr));
                         if (ip_hdr->dst_addr == dhcp_server_ip) {
+                            if (icmphdr->icmp_type != ICMP_ECHO_REQUEST) {
+                                drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
+                                continue;
+                            }
                             rte_ether_addr_copy(&eth_hdr->src_addr, &eth_hdr->dst_addr);
                             rte_ether_addr_copy(&fastrg_ccb->nic_info.hsi_lan_mac, &eth_hdr->src_addr);
                             ip_hdr->dst_addr = ip_hdr->src_addr;
