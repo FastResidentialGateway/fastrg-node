@@ -1707,7 +1707,20 @@ void wan_ctrl_tx(FastRG_t *fastrg_ccb, U16 ccb_id, U8 *mu, U16 mulen)
     pkt->data_len = mulen;
     pkt->pkt_len = mulen;
     count_tx_packet(fastrg_ccb, pkt, WAN_PORT, ccb_id);
-    if (rte_eth_tx_burst(WAN_PORT, 0, &pkt, 1) == 0)
+    unsigned int lcore_id = rte_lcore_id();
+    /* Control TX callers must run on an EAL lcore. Persistent data-plane
+     * lcores are already pdump_rcu-online. Callback removal does not wait, so
+     * this window covers ctrl_thread's queue-0 TX burst in teardown's
+     * synchronize-before-free grace period. */
+    BOOL rcu_toggle = (lcore_id != LCORE_ID_ANY) && !fastrg_rcu_persistent[lcore_id];
+    if (rcu_toggle)
+        rte_rcu_qsbr_thread_online(fastrg_ccb->pdump_rcu, lcore_id);
+    U16 nb_tx = rte_eth_tx_burst(WAN_PORT, 0, &pkt, 1);
+    if (rcu_toggle) {
+        rte_rcu_qsbr_quiescent(fastrg_ccb->pdump_rcu, lcore_id);
+        rte_rcu_qsbr_thread_offline(fastrg_ccb->pdump_rcu, lcore_id);
+    }
+    if (nb_tx == 0)
         drop_packet(fastrg_ccb, pkt, WAN_PORT, ccb_id);
 }
 
@@ -1735,7 +1748,20 @@ void lan_ctrl_tx(FastRG_t *fastrg_ccb, U16 ccb_id, U8 *mu, U16 mulen)
     pkt->data_len = mulen;
     pkt->pkt_len = mulen;
     count_tx_packet(fastrg_ccb, pkt, LAN_PORT, ccb_id);
-    if (rte_eth_tx_burst(LAN_PORT, 0, &pkt, 1) == 0)
+    unsigned int lcore_id = rte_lcore_id();
+    /* Control TX callers must run on an EAL lcore. Persistent data-plane
+     * lcores are already pdump_rcu-online. Callback removal does not wait, so
+     * this window covers ctrl_thread's queue-0 TX burst in teardown's
+     * synchronize-before-free grace period. */
+    BOOL rcu_toggle = (lcore_id != LCORE_ID_ANY) && !fastrg_rcu_persistent[lcore_id];
+    if (rcu_toggle)
+        rte_rcu_qsbr_thread_online(fastrg_ccb->pdump_rcu, lcore_id);
+    U16 nb_tx = rte_eth_tx_burst(LAN_PORT, 0, &pkt, 1);
+    if (rcu_toggle) {
+        rte_rcu_qsbr_quiescent(fastrg_ccb->pdump_rcu, lcore_id);
+        rte_rcu_qsbr_thread_offline(fastrg_ccb->pdump_rcu, lcore_id);
+    }
+    if (nb_tx == 0)
         drop_packet(fastrg_ccb, pkt, LAN_PORT, ccb_id);
 }
 

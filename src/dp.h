@@ -235,10 +235,12 @@ static inline void send2cp(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt,
  * @fn fastrg_rcu_dp_offline
  *
  * @brief Temporarily mark the calling data-plane lcore QSBR-offline on all
- *        three RCUs while it enters a blocking operation.  The persistent flag
+ *        four RCUs while it enters a blocking operation.  The persistent flag
  *        remains set because no code (and therefore no RCU getter) executes
  *        while the lcore is blocked; avoiding flag updates also keeps this
- *        helper's meaning limited to QSBR state.
+ *        helper's meaning limited to QSBR state.  pdump_rcu is the fourth RCU:
+ *        it marks whether this lcore may be inside an RX/TX burst callback,
+ *        rather than protecting a data pointer.
  *
  * @param fastrg_ccb
  *      FastRG control block
@@ -249,15 +251,18 @@ static inline void fastrg_rcu_dp_offline(FastRG_t *fastrg_ccb)
     rte_rcu_qsbr_thread_offline(fastrg_ccb->ppp_ccb_rcu, lcore_id);
     rte_rcu_qsbr_thread_offline(fastrg_ccb->dhcp_ccb_rcu, lcore_id);
     rte_rcu_qsbr_thread_offline(fastrg_ccb->per_subscriber_stats_rcu, lcore_id);
+    rte_rcu_qsbr_thread_offline(fastrg_ccb->pdump_rcu, lcore_id);
 }
 
 /**
  * @fn fastrg_rcu_dp_online
  *
- * @brief Mark the calling data-plane lcore QSBR-online on all three RCUs after
+ * @brief Mark the calling data-plane lcore QSBR-online on all four RCUs after
  *        a blocking operation.  This also reports a quiescent state.  The
  *        persistent flag remains set because the lcore executes no RCU getter
  *        while offline, and these helpers only manage temporary QSBR state.
+ *        pdump_rcu online state marks that this lcore may enter an RX/TX burst
+ *        and therefore a pdump callback.
  *
  * @param fastrg_ccb
  *      FastRG control block
@@ -268,18 +273,20 @@ static inline void fastrg_rcu_dp_online(FastRG_t *fastrg_ccb)
     rte_rcu_qsbr_thread_online(fastrg_ccb->ppp_ccb_rcu, lcore_id);
     rte_rcu_qsbr_thread_online(fastrg_ccb->dhcp_ccb_rcu, lcore_id);
     rte_rcu_qsbr_thread_online(fastrg_ccb->per_subscriber_stats_rcu, lcore_id);
+    rte_rcu_qsbr_thread_online(fastrg_ccb->pdump_rcu, lcore_id);
 }
 
 /**
  * @fn fastrg_rcu_dp_register
  *
  * @brief Mark the calling data-plane lcore as persistently QSBR-online for all
- *        three RCUs (ppp_ccb / dhcp_ccb / per_subscriber_stats).  Call once at
- *        data thread startup, after the start_flag spin.  Pairs with
+ *        four RCUs (ppp_ccb / dhcp_ccb / per_subscriber_stats / pdump).  The
+ *        pdump RCU marks possible RX/TX burst callback execution.  Call once
+ *        at data thread startup, after the start_flag spin.  Pairs with
  *        fastrg_rcu_dp_quiescent() called once per poll loop.
  *
  * @param fastrg_ccb
- *      FastRG control block (holds the three qsbr handles)
+ *      FastRG control block (holds the four qsbr handles)
  */
 static inline void fastrg_rcu_dp_register(FastRG_t *fastrg_ccb)
 {
@@ -290,9 +297,11 @@ static inline void fastrg_rcu_dp_register(FastRG_t *fastrg_ccb)
 /**
  * @fn fastrg_rcu_dp_quiescent
  *
- * @brief Report a quiescent state on all three RCUs for the calling data-plane
+ * @brief Report a quiescent state on all four RCUs for the calling data-plane
  *        lcore.  Call once at the top of each poll loop (after rte_eth_rx_burst /
  *        rte_distributor_get_pkt), before touching any RCU-protected pointer.
+ *        Reporting pdump_rcu here proves the previous burst and any pdump
+ *        callback it invoked have completed.
  *
  * @param fastrg_ccb
  *      FastRG control block
@@ -303,12 +312,13 @@ static inline void fastrg_rcu_dp_quiescent(FastRG_t *fastrg_ccb)
     rte_rcu_qsbr_quiescent(fastrg_ccb->ppp_ccb_rcu, lcore_id);
     rte_rcu_qsbr_quiescent(fastrg_ccb->dhcp_ccb_rcu, lcore_id);
     rte_rcu_qsbr_quiescent(fastrg_ccb->per_subscriber_stats_rcu, lcore_id);
+    rte_rcu_qsbr_quiescent(fastrg_ccb->pdump_rcu, lcore_id);
 }
 
 /**
  * @fn fastrg_rcu_dp_unregister
  *
- * @brief Report QSBR-offline on all three RCUs for the calling data-plane lcore
+ * @brief Report QSBR-offline on all four RCUs for the calling data-plane lcore
  *        and clear its persistent flag.  MUST be called once when the thread
  *        leaves its poll loop (on stop_flag), before returning.  Without this
  *        the thread exits while still recorded online, and the cleanup-path

@@ -421,6 +421,28 @@ STATUS sys_init(FastRG_t *fastrg_ccb, struct fastrg_config *fastrg_cfg)
         }
     }
 
+    fastrg_ccb->pdump_rcu = fastrg_calloc(struct rte_rcu_qsbr, 1, rcu_size, RTE_CACHE_LINE_SIZE);
+    if (fastrg_ccb->pdump_rcu == NULL) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+            "Cannot allocate memory for pdump_rcu");
+        goto err;
+    }
+    ret = rte_rcu_qsbr_init(fastrg_ccb->pdump_rcu, RTE_MAX_LCORE);
+    if (ret != 0) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+            "rte_rcu_qsbr_init failed for pdump_rcu: %s", rte_strerror(-ret));
+        goto err;
+    }
+    RTE_LCORE_FOREACH(lcore_id) {
+        ret = rte_rcu_qsbr_thread_register(fastrg_ccb->pdump_rcu, lcore_id);
+        if (ret != 0) {
+            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+                "rte_rcu_qsbr_thread_register failed for pdump_rcu lcore %u: %s",
+                lcore_id, rte_strerror(-ret));
+            goto err;
+        }
+    }
+
     rte_atomic16_init(&fastrg_ccb->per_subscriber_stats_updating);
 
     /* Initialize ARP pending mempool for MAC table resolution */
@@ -458,6 +480,10 @@ err:
     cleanup_ring(fastrg_ccb);
     cleanup_mem();
     arp_pending_cleanup_pool(&fastrg_ccb->arp_pending_mp);
+    if (fastrg_ccb->pdump_rcu) {
+        fastrg_mfree(fastrg_ccb->pdump_rcu);
+        fastrg_ccb->pdump_rcu = NULL;
+    }
     if (fastrg_ccb->per_subscriber_stats_rcu) {
         fastrg_mfree(fastrg_ccb->per_subscriber_stats_rcu);
         fastrg_ccb->per_subscriber_stats_rcu = NULL;

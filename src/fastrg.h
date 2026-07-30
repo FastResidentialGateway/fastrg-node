@@ -133,6 +133,13 @@ typedef struct FastRG {
     struct per_ccb_stats    *per_subscriber_stats[RTE_MAX_LCORE][PORT_AMOUNT];
     U16                     per_subscriber_stats_len;
     struct rte_rcu_qsbr     *per_subscriber_stats_rcu; /* RCU for protecting per_subscriber_stats array pointer */
+    /* pdump_rcu does not protect a data pointer and is kept separate from the
+     * stats RCUs to avoid implying a dependency on them. It marks intervals
+     * where data-plane lcores may be inside RX/TX bursts and therefore pdump
+     * callbacks. Callback removal does not wait for callbacks already in
+     * flight; teardown synchronizes this timeline after removal and frees the
+     * ring, mempool, and filter only after every reader crosses a burst boundary. */
+    struct rte_rcu_qsbr     *pdump_rcu;
     rte_atomic16_t          per_subscriber_stats_updating; /* flag indicating stats array is being updated */
     /* Per-lcore PPPoE session stats: [raw rte_lcore_id()] -> user_count-entry
      * array. Same scheme as per_subscriber_stats; protected by ppp_ccb_rcu
