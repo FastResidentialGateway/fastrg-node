@@ -116,6 +116,19 @@ typedef struct {
 } lighthttp_server_t;
 
 /**
+ * @fn lighthttp_set_conn_timeouts
+ *
+ * @brief Set receive and send timeouts on an accepted connection
+ * @param fd
+ *      Connected socket descriptor
+ * @param seconds
+ *      Timeout in seconds
+ * @return
+ *      0 on success, -1 if either socket option cannot be set
+ */
+int lighthttp_set_conn_timeouts(int fd, int seconds);
+
+/**
  * @fn lighthttp_parse_addr
  *
  * @brief Parse a listen address "host:port" or a bare "port"
