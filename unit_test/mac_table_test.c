@@ -10,6 +10,7 @@
 #include <rte_ring.h>
 
 #include <rte_arp.h>
+#include <rte_ethdev.h>
 
 #include "../src/mac_table.h"
 #include "../src/protocol.h"
@@ -25,6 +26,17 @@ static struct rte_ether_addr mac_b = {.addr_bytes = {0x02, 0x00, 0x00, 0x00, 0x0
 /* Dedicated mbuf pool — direct_pool[LAN_PORT] may already be a small pool
  * created by an earlier suite, so don't share it. */
 static struct rte_mempool *mac_test_pool;
+static U16 mock_tx_result;
+static struct rte_mbuf *mock_tx_mbuf;
+
+static U16 mock_tx_burst(void *txq, struct rte_mbuf **tx_pkts, U16 nb_pkts)
+{
+    (void)txq;
+
+    if (nb_pkts > 0)
+        mock_tx_mbuf = tx_pkts[0];
+    return mock_tx_result;
+}
 
 /* Allocate an mbuf with an all-zero ether header, so arp_pending_drain has
  * a dst_addr field to write into. */
@@ -284,6 +296,51 @@ static void test_encode_arp_request(FastRG_t *fastrg_ccb)
     TEST_ASSERT(buf[46] == 0xEE, "encoder writes exactly 46 bytes", "");
 }
 
+static void test_send_arp_request_tx_result(FastRG_t *fastrg_ccb)
+{
+    printf("\nTesting send_arp_request TX result handling:\n");
+    printf("=========================================\n\n");
+
+    struct rte_eth_fp_ops saved_ops = rte_eth_fp_ops[LAN_PORT];
+    struct rte_mempool *saved_pool = direct_pool[LAN_PORT];
+    void *tx_queue_data[] = {(void *)1};
+    RTE_ATOMIC(void *) tx_callbacks[] = {NULL};
+
+    direct_pool[LAN_PORT] = mac_test_pool;
+    /* Unit tests never init a real port, so the rte_eth_tx_burst inline
+     * wrapper would dereference NULL per-queue tables — hook a fake tx
+     * queue handle and an empty callback slot before swapping in the mock. */
+    rte_eth_fp_ops[LAN_PORT].txq.data = tx_queue_data;
+    rte_eth_fp_ops[LAN_PORT].txq.clbk = tx_callbacks;
+    rte_eth_fp_ops[LAN_PORT].tx_pkt_burst = mock_tx_burst;
+
+    unsigned avail_before = rte_mempool_avail_count(mac_test_pool);
+    mock_tx_result = 0;
+    mock_tx_mbuf = NULL;
+    STATUS status = send_arp_request(&fastrg_ccb->nic_info.hsi_lan_mac,
+        htonl(0x0A010101), htonl(0x0A010203), 3, 0);
+    TEST_ASSERT(status == ERROR, "TX rejection returns ERROR", "got %d", status);
+    TEST_ASSERT(mock_tx_mbuf != NULL, "TX rejection path reaches tx_burst", "");
+    TEST_ASSERT(rte_mempool_avail_count(mac_test_pool) == avail_before,
+        "TX rejection frees the unsent mbuf", "avail %u vs %u",
+        rte_mempool_avail_count(mac_test_pool), avail_before);
+
+    mock_tx_result = 1;
+    mock_tx_mbuf = NULL;
+    status = send_arp_request(&fastrg_ccb->nic_info.hsi_lan_mac,
+        htonl(0x0A010101), htonl(0x0A010203), 3, 0);
+    TEST_ASSERT(status == SUCCESS, "successful TX returns SUCCESS", "got %d", status);
+    TEST_ASSERT(mock_tx_mbuf != NULL, "successful TX hands mbuf to tx_burst", "");
+    if (mock_tx_mbuf != NULL)
+        rte_pktmbuf_free(mock_tx_mbuf);
+    TEST_ASSERT(rte_mempool_avail_count(mac_test_pool) == avail_before,
+        "successful TX test returns captured mbuf", "avail %u vs %u",
+        rte_mempool_avail_count(mac_test_pool), avail_before);
+
+    rte_eth_fp_ops[LAN_PORT] = saved_ops;
+    direct_pool[LAN_PORT] = saved_pool;
+}
+
 void test_mac_table(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 {
     printf("\n");
@@ -302,6 +359,7 @@ void test_mac_table(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_mac_learn_lookup();
     test_arp_pending_queue();
     test_encode_arp_request(fastrg_ccb);
+    test_send_arp_request_tx_result(fastrg_ccb);
 
     printf("\n");
     printf("╔════════════════════════════════════════════════════════════╗\n");
