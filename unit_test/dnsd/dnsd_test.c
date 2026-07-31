@@ -584,6 +584,122 @@ static void test_tcp_query_no_static_record_no_fallback(FastRG_t *fastrg_ccb)
     dns_proxy_cleanup(&c.dhcp_ccb->dns_state);
 }
 
+static void test_tcp_query_ip_total_len_underflow(FastRG_t *fastrg_ccb)
+{
+    printf("\nTesting dnsd_cp_process_lan_tcp_query (IP total_length underflow):\n");
+    printf("=========================================\n\n");
+
+    dns_tcp_ctx_t c;
+    dns_tcp_ctx_init(&c, fastrg_ccb);
+
+    U8 q[DNS_MAX_PACKET_LEN];
+    U16 qlen = build_dns_query(q, "www.fastrg.org", DNS_TYPE_A, 1);
+    dns_tcp_ctx_set_query(&c, q, qlen);
+    U16 frame_len = dns_tcp_ctx_frame_len(&c);
+
+    /* a claimed IP length that cannot even cover IP+TCP headers used to make
+     * tcp_payload_len underflow to ~65000 and read far past the packet */
+    c.ip_hdr->total_length = rte_cpu_to_be_16(0);
+    int ret = dnsd_cp_process_lan_tcp_query(fastrg_ccb, c.buf, frame_len, 0);
+    TEST_ASSERT(ret == -1, "IP total_length 0 returns -1 (no underflow)", "got %d", ret);
+
+    /* one byte below the IP+TCP header sum — the exact underflow boundary */
+    c.ip_hdr->total_length = rte_cpu_to_be_16((U16)(sizeof(struct rte_ipv4_hdr) +
+        sizeof(struct rte_tcp_hdr) - 1));
+    ret = dnsd_cp_process_lan_tcp_query(fastrg_ccb, c.buf, frame_len, 0);
+    TEST_ASSERT(ret == -1, "IP total_length below IP+TCP header size returns -1",
+        "got %d", ret);
+
+    dns_proxy_cleanup(&c.dhcp_ccb->dns_state);
+}
+
+static void test_tcp_query_ip_total_len_exceeds_packet(FastRG_t *fastrg_ccb)
+{
+    printf("\nTesting dnsd_cp_process_lan_tcp_query (IP total_length beyond packet):\n");
+    printf("=========================================\n\n");
+
+    dns_tcp_ctx_t c;
+    dns_tcp_ctx_init(&c, fastrg_ccb);
+
+    U8 q[DNS_MAX_PACKET_LEN];
+    U16 qlen = build_dns_query(q, "www.fastrg.org", DNS_TYPE_A, 1);
+    dns_tcp_ctx_set_query(&c, q, qlen);
+    U16 frame_len = dns_tcp_ctx_frame_len(&c);
+
+    /* claim 100 bytes more than the frame actually carries */
+    c.ip_hdr->total_length = rte_cpu_to_be_16((U16)(sizeof(struct rte_ipv4_hdr) +
+        sizeof(struct rte_tcp_hdr) + 2 + qlen + 100));
+
+    int ret = dnsd_cp_process_lan_tcp_query(fastrg_ccb, c.buf, frame_len, 0);
+    TEST_ASSERT(ret == -1, "IP total_length larger than pkt_len returns -1",
+        "got %d", ret);
+    dns_proxy_cleanup(&c.dhcp_ccb->dns_state);
+}
+
+static void test_tcp_query_data_off_too_small(FastRG_t *fastrg_ccb)
+{
+    printf("\nTesting dnsd_cp_process_lan_tcp_query (data_off below minimum):\n");
+    printf("=========================================\n\n");
+
+    dns_tcp_ctx_t c;
+    dns_tcp_ctx_init(&c, fastrg_ccb);
+
+    U8 q[DNS_MAX_PACKET_LEN];
+    U16 qlen = build_dns_query(q, "www.fastrg.org", DNS_TYPE_A, 1);
+    dns_tcp_ctx_set_query(&c, q, qlen);
+    U16 frame_len = dns_tcp_ctx_frame_len(&c);
+
+    /* data_off 0 -> a 0-byte TCP header, below the 20-byte minimum */
+    c.tcp_hdr->data_off = 0;
+
+    int ret = dnsd_cp_process_lan_tcp_query(fastrg_ccb, c.buf, frame_len, 0);
+    TEST_ASSERT(ret == -1, "data_off 0 returns -1", "got %d", ret);
+    dns_proxy_cleanup(&c.dhcp_ccb->dns_state);
+}
+
+static void test_tcp_query_data_off_beyond_packet(FastRG_t *fastrg_ccb)
+{
+    printf("\nTesting dnsd_cp_process_lan_tcp_query (data_off beyond packet):\n");
+    printf("=========================================\n\n");
+
+    dns_tcp_ctx_t c;
+    dns_tcp_ctx_init(&c, fastrg_ccb);
+
+    U8 q[DNS_MAX_PACKET_LEN];
+    U16 qlen = build_dns_query(q, "www.fastrg.org", DNS_TYPE_A, 1);
+    dns_tcp_ctx_set_query(&c, q, qlen);
+    U16 frame_len = dns_tcp_ctx_frame_len(&c);
+
+    /* data_off 0xF0 -> a 60-byte TCP header, more than the frame has left */
+    c.tcp_hdr->data_off = 0xF0;
+
+    int ret = dnsd_cp_process_lan_tcp_query(fastrg_ccb, c.buf, frame_len, 0);
+    TEST_ASSERT(ret == -1, "TCP header length beyond packet returns -1", "got %d", ret);
+    dns_proxy_cleanup(&c.dhcp_ccb->dns_state);
+}
+
+static void test_tcp_query_truncated_before_tcp_hdr(FastRG_t *fastrg_ccb)
+{
+    printf("\nTesting dnsd_cp_process_lan_tcp_query (frame truncated inside TCP header):\n");
+    printf("=========================================\n\n");
+
+    dns_tcp_ctx_t c;
+    dns_tcp_ctx_init(&c, fastrg_ccb);
+
+    U8 q[DNS_MAX_PACKET_LEN];
+    U16 qlen = build_dns_query(q, "www.fastrg.org", DNS_TYPE_A, 1);
+    dns_tcp_ctx_set_query(&c, q, qlen);
+
+    /* pkt_len stops halfway through the TCP header — data_off must not be read */
+    U16 short_len = (U16)(sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) +
+        sizeof(struct rte_ipv4_hdr) + 10);
+
+    int ret = dnsd_cp_process_lan_tcp_query(fastrg_ccb, c.buf, short_len, 0);
+    TEST_ASSERT(ret == -1, "packet shorter than eth+vlan+ip+tcp headers returns -1",
+        "got %d", ret);
+    dns_proxy_cleanup(&c.dhcp_ccb->dns_state);
+}
+
 /* ---- dnsd_cp_process_lan_udp_query tests ---- */
 
 typedef struct dns_udp_ctx {
@@ -1219,6 +1335,11 @@ void test_dnsd(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_tcp_query_static_match_builds_response(fastrg_ccb);
     test_tcp_query_qtype_mismatch_no_fallback(fastrg_ccb);
     test_tcp_query_no_static_record_no_fallback(fastrg_ccb);
+    test_tcp_query_ip_total_len_underflow(fastrg_ccb);
+    test_tcp_query_ip_total_len_exceeds_packet(fastrg_ccb);
+    test_tcp_query_data_off_too_small(fastrg_ccb);
+    test_tcp_query_data_off_beyond_packet(fastrg_ccb);
+    test_tcp_query_truncated_before_tcp_hdr(fastrg_ccb);
 
     /* dnsd_cp_process_lan_udp_query tests */
     dns_udp_env_init(fastrg_ccb);
