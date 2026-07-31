@@ -326,39 +326,28 @@ STATUS dhcpd_remove_ccb(FastRG_t *fastrg_ccb, U16 remove_ccb_count, U16 old_ccb_
     dhcp_ccb_t **old_array = (dhcp_ccb_t **)fastrg_ccb->dhcp_ccb;
     U16 new_user_count = old_ccb_count - remove_ccb_count;
 
+    /* Teardown only: stop the DHCP service of the CCBs being removed and wait
+     * for in-flight processing to drain. Nothing is freed and no slot is
+     * cleared here — a data-plane reader that already fetched a pointer out of
+     * old_array keeps dereferencing it until the grace period below, and
+     * clearing the slot early would only open a new fetch-to-NULL window.
+     * Freeing happens after rte_rcu_qsbr_synchronize(). */
     for(U16 i=0; i<remove_ccb_count; i++) {
         U16 ccb_id = old_ccb_count - 1 - i;
         dhcp_ccb_t *dhcp_ccb = old_array[ccb_id];
+        /* Unconfigured slots past the old count may be NULL — nothing to stop. */
+        if (dhcp_ccb == NULL)
+            continue;
 
-        /* Stop DHCP service and wait for active processing to complete */
         rte_atomic16_set(&dhcp_ccb->dhcp_bool, 0);
         while(rte_atomic32_read(&dhcp_ccb->active_count) > 0)
             rte_pause();
-
-        /* Free per-LAN-user pool */
-        if (dhcp_ccb->per_lan_user_pool != NULL) {
-            for(U32 j=0; j<dhcp_ccb->per_lan_user_pool_len; j++) {
-                if (dhcp_ccb->per_lan_user_pool[j] != NULL)
-                    rte_timer_stop_sync(&dhcp_ccb->per_lan_user_pool[j]->lan_user_info.timer);
-            }
-            if (dhcp_ccb->per_lan_user_pool_len > 0) {
-                rte_mempool_put_bulk(dhcp_ccb->dhcp_per_lan_user_mempool,
-                    (void **)dhcp_ccb->per_lan_user_pool,
-                    dhcp_ccb->per_lan_user_pool_len);
-            }
-            fastrg_mfree(dhcp_ccb->per_lan_user_pool);
-            dhcp_ccb->per_lan_user_pool = NULL;
-        }
-
-        rte_mempool_put(fastrg_ccb->dhcp_ccb_mp, old_array[ccb_id]);
-        old_array[ccb_id] = NULL;
     }
 
     if (new_user_count == 0) {
         __atomic_store_n(&fastrg_ccb->dhcp_ccb, (dhcp_ccb_t **)NULL, __ATOMIC_RELEASE);
 
         rte_rcu_qsbr_synchronize(fastrg_ccb->dhcp_ccb_rcu, RTE_QSBR_THRID_INVALID);
-        fastrg_mfree(old_array);
     } else {
         dhcp_ccb_t **new_array = fastrg_malloc(dhcp_ccb_t *, 
             sizeof(dhcp_ccb_t *) * new_user_count, 0);
@@ -376,9 +365,35 @@ STATUS dhcpd_remove_ccb(FastRG_t *fastrg_ccb, U16 remove_ccb_count, U16 old_ccb_
         __atomic_store_n(&fastrg_ccb->dhcp_ccb, new_array, __ATOMIC_RELEASE);
 
         rte_rcu_qsbr_synchronize(fastrg_ccb->dhcp_ccb_rcu, RTE_QSBR_THRID_INVALID);
-
-        fastrg_mfree(old_array);
     }
+
+    /* The grace period has elapsed: no reader can still hold a pointer taken
+     * from old_array, so the removed CCBs and the old array are safe to free. */
+    for(U16 ccb_id=new_user_count; ccb_id<old_ccb_count; ccb_id++) {
+        dhcp_ccb_t *dhcp_ccb = old_array[ccb_id];
+        /* Unconfigured slots past the old count may be NULL — nothing to free. */
+        if (dhcp_ccb == NULL)
+            continue;
+
+        /* Free per-LAN-user pool */
+        if (dhcp_ccb->per_lan_user_pool != NULL) {
+            for(U32 j=0; j<dhcp_ccb->per_lan_user_pool_len; j++) {
+                if (dhcp_ccb->per_lan_user_pool[j] != NULL)
+                    rte_timer_stop_sync(&dhcp_ccb->per_lan_user_pool[j]->lan_user_info.timer);
+            }
+            if (dhcp_ccb->per_lan_user_pool_len > 0) {
+                rte_mempool_put_bulk(dhcp_ccb->dhcp_per_lan_user_mempool,
+                    (void **)dhcp_ccb->per_lan_user_pool,
+                    dhcp_ccb->per_lan_user_pool_len);
+            }
+            fastrg_mfree(dhcp_ccb->per_lan_user_pool);
+            dhcp_ccb->per_lan_user_pool = NULL;
+        }
+
+        rte_mempool_put(fastrg_ccb->dhcp_ccb_mp, dhcp_ccb);
+    }
+
+    fastrg_mfree(old_array);
 
     rte_atomic16_clear(&fastrg_ccb->dhcp_ccb_updating);
 

@@ -476,31 +476,25 @@ STATUS pppd_remove_ccb(FastRG_t *fastrg_ccb, U16 remove_ccb_count, U16 old_ccb_c
     ppp_ccb_t **old_array = (ppp_ccb_t **)fastrg_ccb->ppp_ccb;
     U16 new_user_count = old_ccb_count - remove_ccb_count;
 
+    /* Teardown only: stop the FSM/timers of the CCBs being removed. Nothing is
+     * freed and no slot is cleared here — a data-plane reader that already
+     * fetched a pointer out of old_array keeps dereferencing it until the grace
+     * period below, and clearing the slot early would only open a new
+     * fetch-to-NULL window. Freeing happens after rte_rcu_qsbr_synchronize(). */
     for(U16 i=0; i<remove_ccb_count; i++) {
         U16 ccb_id = old_ccb_count - 1 - i;
         ppp_ccb_t *ppp_ccb = old_array[ccb_id];
+        /* A slot can be NULL when the count was grown past the configured users
+         * (unconfigured slots are not allocated). Nothing to tear down there. */
+        if (ppp_ccb == NULL)
+            continue;
         exit_ppp(ppp_ccb);
-        if (ppp_ccb->ppp_user_acc != NULL)
-            fastrg_mfree(ppp_ccb->ppp_user_acc);
-        if (ppp_ccb->ppp_passwd != NULL)
-            fastrg_mfree(ppp_ccb->ppp_passwd);
-        if (ppp_ccb->pppoe_phase.pppoe_header_tag != NULL)
-            fastrg_mfree(ppp_ccb->pppoe_phase.pppoe_header_tag);
-        arp_pending_cleanup_queue(&ppp_ccb->arp_pq, fastrg_ccb->arp_pending_mp);
-        if (ppp_ccb->mac_table != NULL) {
-            mac_table_free(ppp_ccb->mac_table);
-            ppp_ccb->mac_table = NULL;
-        }
-        nat_table_destroy(ppp_ccb);
-        rte_mempool_put(fastrg_ccb->ppp_ccb_mp, old_array[ccb_id]);
-        old_array[ccb_id] = NULL;
     }
 
     if (new_user_count == 0) {
         __atomic_store_n(&fastrg_ccb->ppp_ccb, (ppp_ccb_t **)NULL, __ATOMIC_RELEASE);
 
         rte_rcu_qsbr_synchronize(fastrg_ccb->ppp_ccb_rcu, RTE_QSBR_THRID_INVALID);
-        fastrg_mfree(old_array);
     } else {
         ppp_ccb_t **new_array = fastrg_malloc(ppp_ccb_t *, new_user_count, 0);
         if (new_array == NULL) {
@@ -517,9 +511,32 @@ STATUS pppd_remove_ccb(FastRG_t *fastrg_ccb, U16 remove_ccb_count, U16 old_ccb_c
         __atomic_store_n(&fastrg_ccb->ppp_ccb, new_array, __ATOMIC_RELEASE);
 
         rte_rcu_qsbr_synchronize(fastrg_ccb->ppp_ccb_rcu, RTE_QSBR_THRID_INVALID);
-
-        fastrg_mfree(old_array);
     }
+
+    /* The grace period has elapsed: no reader can still hold a pointer taken
+     * from old_array, so the removed CCBs and the old array are safe to free. */
+    for(U16 ccb_id=new_user_count; ccb_id<old_ccb_count; ccb_id++) {
+        ppp_ccb_t *ppp_ccb = old_array[ccb_id];
+        /* A slot can be NULL when the count was grown past the configured users
+         * (unconfigured slots are not allocated). Nothing to free there. */
+        if (ppp_ccb == NULL)
+            continue;
+        if (ppp_ccb->ppp_user_acc != NULL)
+            fastrg_mfree(ppp_ccb->ppp_user_acc);
+        if (ppp_ccb->ppp_passwd != NULL)
+            fastrg_mfree(ppp_ccb->ppp_passwd);
+        if (ppp_ccb->pppoe_phase.pppoe_header_tag != NULL)
+            fastrg_mfree(ppp_ccb->pppoe_phase.pppoe_header_tag);
+        arp_pending_cleanup_queue(&ppp_ccb->arp_pq, fastrg_ccb->arp_pending_mp);
+        if (ppp_ccb->mac_table != NULL) {
+            mac_table_free(ppp_ccb->mac_table);
+            ppp_ccb->mac_table = NULL;
+        }
+        nat_table_destroy(ppp_ccb);
+        rte_mempool_put(fastrg_ccb->ppp_ccb_mp, ppp_ccb);
+    }
+
+    fastrg_mfree(old_array);
 
     rte_atomic16_clear(&fastrg_ccb->ppp_ccb_updating);
 
