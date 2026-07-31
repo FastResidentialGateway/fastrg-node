@@ -558,7 +558,22 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
             case EV_NORTHBOUND_PPPoE: {
                 /* process cli command */
                 fastrg_event_northbound_msg_t *pppoe_msg = (fastrg_event_northbound_msg_t *)mail[i]->refp;
+                /* pppd_get_ccb() indexes the pointer array without a bound check, so the
+                 * range must be validated before the fetch. The array is RCU-protected and
+                 * a slot may be transiently NULL while a config change (re)allocates it. */
+                if (pppoe_msg->ccb_id >= fastrg_ccb->user_count) {
+                    FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Drop pppoe event with out of range ccb id %d\n",
+                        pppoe_msg->ccb_id);
+                    rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
+                    break;
+                }
                 ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, pppoe_msg->ccb_id);
+                if (ppp_ccb == NULL) {
+                    FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Drop pppoe event, user %d ppp ccb is not initialized\n",
+                        pppoe_msg->ccb_id + 1);
+                    rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
+                    break;
+                }
                 if (pppoe_msg->cmd == PPPoE_CMD_DISABLE) {
                     FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "User %d pppoe is terminating\n", pppoe_msg->ccb_id + 1);
                     if (ppp_disconnect(ppp_ccb) == SUCCESS) {
@@ -586,7 +601,21 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
             }
             case EV_NORTHBOUND_DHCP: {
                 fastrg_event_northbound_msg_t *dhcp_msg = (fastrg_event_northbound_msg_t *)mail[i]->refp;
+                /* Same as the PPPoE branch: bound check before the unchecked array index,
+                 * then NULL check on the RCU-protected slot. */
+                if (dhcp_msg->ccb_id >= fastrg_ccb->user_count) {
+                    FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Drop dhcp event with out of range ccb id %d\n",
+                        dhcp_msg->ccb_id);
+                    rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
+                    break;
+                }
                 dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, dhcp_msg->ccb_id);
+                if (dhcp_ccb == NULL) {
+                    FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Drop dhcp event, user %d dhcp ccb is not initialized\n",
+                        dhcp_msg->ccb_id + 1);
+                    rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
+                    break;
+                }
                 if (dhcp_msg->cmd == DHCP_CMD_DISABLE) {
                     FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "User %d dhcp server is terminating\n", dhcp_msg->ccb_id + 1);
                     rte_atomic16_cmpset((uint16_t *)&dhcp_ccb->dhcp_bool.cnt, 1, 0);

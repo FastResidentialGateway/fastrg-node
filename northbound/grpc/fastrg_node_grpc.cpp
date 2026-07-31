@@ -294,6 +294,12 @@ grpc::Status FastRGNodeServiceImpl::ConnectHsi(::grpc::ServerContext* context, c
     if (user_id == 0) {
         for(int i=0; i<fastrg_ccb->user_count; i++) {
             ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, i);
+            /* The CCB pointer array is RCU-protected and a slot may be transiently
+             * NULL while a config change (re)allocates it; skip empty slots. */
+            if (ppp_ccb == NULL) {
+                cout << "User " << i + 1 << " is not initialized, skip connecting" << endl;
+                continue;
+            }
             if (rte_atomic16_read(&ppp_ccb->vlan_id) == 0) {
                 cout << "User " << i + 1 << " has no configuration, skip connecting" << endl;
                 continue;
@@ -314,6 +320,11 @@ grpc::Status FastRGNodeServiceImpl::ConnectHsi(::grpc::ServerContext* context, c
         }
     } else {
         ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
+        if (!ppp_ccb) {
+            std::string err = "PPPoE session not initialized for user " + std::to_string(user_id);
+            cout << err << endl;
+            return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, err);
+        }
         if (rte_atomic16_read(&ppp_ccb->vlan_id) == 0) {
             cout << "User " << ccb_id + 1 << " has no configuration, skip connecting" << endl;
             std::string err = "Error! User " + std::to_string(user_id) + " has no configuration";
@@ -372,6 +383,12 @@ grpc::Status FastRGNodeServiceImpl::DisconnectHsi(::grpc::ServerContext* context
                 }
             }
             ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, i);
+            /* The CCB pointer array is RCU-protected and a slot may be transiently
+             * NULL while a config change (re)allocates it; skip empty slots. */
+            if (ppp_ccb == NULL) {
+                cout << "User " << i + 1 << " is not initialized, skip disconnecting" << endl;
+                continue;
+            }
             if (rte_atomic16_read(&ppp_ccb->vlan_id) == 0) {
                 cout << "User " << i + 1 << " has no configuration, skip disconnecting" << endl;
                 continue;
@@ -405,6 +422,11 @@ grpc::Status FastRGNodeServiceImpl::DisconnectHsi(::grpc::ServerContext* context
             }
         }
         ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
+        if (!ppp_ccb) {
+            std::string err = "PPPoE session not initialized for user " + std::to_string(user_id);
+            cout << err << endl;
+            return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, err);
+        }
         if (rte_atomic16_read(&ppp_ccb->vlan_id) == 0) {
             cout << "User " << ccb_id + 1 << " has no configuration, skip disconnecting" << endl;
             std::string err = "Error! User " + std::to_string(user_id) + " has no configuration";
@@ -446,6 +468,13 @@ grpc::Status FastRGNodeServiceImpl::DhcpServerStart(::grpc::ServerContext* conte
         std::string err;
         for(int i=0; i<fastrg_ccb->user_count; i++) {
             dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, i);
+            /* The CCB pointer array is RCU-protected and a slot may be transiently
+             * NULL while a config change (re)allocates it; skip empty slots. */
+            if (dhcp_ccb == NULL) {
+                cout << "User " << i + 1 << " DHCP server is not initialized, skip enabling" << endl;
+                err += "User " + std::to_string(i + 1) + " DHCP server is not initialized\n";
+                continue;
+            }
             if (rte_atomic16_read(&dhcp_ccb->dhcp_bool) == 1) {
                 cout << "User " << i + 1 << " DHCP server is already enabled, skip enabling" << endl;
                 err += "User " + std::to_string(i + 1) + " DHCP server is already enabled\n";
@@ -466,6 +495,11 @@ grpc::Status FastRGNodeServiceImpl::DhcpServerStart(::grpc::ServerContext* conte
             return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, err);
     } else {
         dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
+        if (!dhcp_ccb) {
+            std::string err = "DHCP server not initialized for user " + std::to_string(user_id);
+            cout << err << endl;
+            return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, err);
+        }
         if (rte_atomic16_read(&dhcp_ccb->dhcp_bool) == 1) {
             cout << "User " << ccb_id + 1 << " DHCP server is already enabled, skip enabling" << endl;
             std::string err = "User " + std::to_string(ccb_id + 1) + " DHCP server is already enabled\n";
@@ -501,6 +535,13 @@ grpc::Status FastRGNodeServiceImpl::DhcpServerStop(::grpc::ServerContext* contex
         std::string err;
         for(int i=0; i<fastrg_ccb->user_count; i++) {
             dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, i);
+            /* The CCB pointer array is RCU-protected and a slot may be transiently
+             * NULL while a config change (re)allocates it; skip empty slots. */
+            if (dhcp_ccb == NULL) {
+                cout << "User " << i + 1 << " DHCP server is not initialized, skip disabling" << endl;
+                err += "User " + std::to_string(i + 1) + " DHCP server is not initialized\n";
+                continue;
+            }
             if (rte_atomic16_read(&dhcp_ccb->dhcp_bool) == 0) {
                 cout << "User " << i + 1 << " DHCP server is already disabled, skip disabling" << endl;
                 err += "User " + std::to_string(i + 1) + " DHCP server is already disabled\n";
@@ -516,6 +557,11 @@ grpc::Status FastRGNodeServiceImpl::DhcpServerStop(::grpc::ServerContext* contex
             return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, err);
     } else {
         dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
+        if (!dhcp_ccb) {
+            std::string err = "DHCP server not initialized for user " + std::to_string(user_id);
+            cout << err << endl;
+            return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, err);
+        }
         if (rte_atomic16_read(&dhcp_ccb->dhcp_bool) == 0) {
             cout << "User " << ccb_id + 1 << " DHCP server is already disabled, skip disabling" << endl;
             std::string err = "User " + std::to_string(ccb_id + 1) + " DHCP server is already disabled\n";
@@ -647,6 +693,11 @@ grpc::Status FastRGNodeServiceImpl::GetPortFwdInfo(::grpc::ServerContext* contex
     }
 
     ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
+    if (!ppp_ccb) {
+        std::string err = "PPPoE session not initialized for user " + std::to_string(user_id);
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, err);
+    }
     response->set_user_id(user_id);
 
     for(int eport=0; eport<PORT_FWD_TABLE_SIZE; eport++) {
@@ -685,6 +736,14 @@ grpc::Status FastRGNodeServiceImpl::GetArpTable(::grpc::ServerContext* context, 
     }
 
     ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
+    /* The DHCP CCB only supplies the network prefix below; take it once here so the
+     * RCU-protected slots are fetched and NULL-checked together before any use. */
+    dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
+    if (!ppp_ccb || !dhcp_ccb) {
+        std::string err = "Subscriber not initialized for user " + std::to_string(user_id);
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, err);
+    }
     response->set_user_id(user_id);
 
     if (ppp_ccb->mac_table == NULL) {
@@ -708,7 +767,6 @@ grpc::Status FastRGNodeServiceImpl::GetArpTable(::grpc::ServerContext* context, 
                 U32 b = idx / (MAC_TABLE_DIM * MAC_TABLE_DIM);
 
                 /* Use the DHCP server IP's first octet as the network prefix */
-                dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
                 U32 net_ip = rte_be_to_cpu_32(dhcp_ccb->dhcp_server_ip);
                 U32 first_octet = (net_ip >> 24) & 0xFF;
 
