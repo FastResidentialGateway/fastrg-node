@@ -218,6 +218,10 @@ STATUS decode_lcp(U16 ppp_hdr_len, U16 *event, struct rte_timer *tim, ppp_ccb_t 
      * counter so the periodic Echo-Request probe does not tear the session down. */
     s_ppp_ccb->echo_miss_count = 0;
 
+    /* Option-walk offset shared by the Configure-Ack / Configure-Nak loops below;
+     * each branch resets it before its own loop. */
+    U16 opt_total;
+
     switch(ppp_hdr->code) {
         case CONFIG_REQUEST :
             if (s_ppp_ccb->phase != LCP_PHASE)
@@ -257,9 +261,23 @@ STATUS decode_lcp(U16 ppp_hdr_len, U16 *event, struct rte_timer *tim, ppp_ccb_t 
             }
 
             /* only check magic number. Skip the bytes stored in ppp_options_t length to find magic num. */
-            U8 ppp_options_length = 0;
-            for(ppp_options_t *cur=ppp_options; ppp_options_length<(rte_cpu_to_be_16(ppp_hdr->length)-4);) {
+            opt_total = sizeof(ppp_header_t);
+            for(ppp_options_t *cur=ppp_options; opt_total<ppp_hdr_len;
+                    cur = (ppp_options_t *)((char *)cur + cur->length)) {
+                if (cur->length < sizeof(ppp_options_t) || cur->length > ppp_hdr_len - opt_total) {
+                    FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+                        "User %" PRIu16 " recv LCP Configure-Ack with invalid option length %u.",
+                        s_ppp_ccb->user_num, cur->length);
+                    return ERROR;
+                }
                 if (cur->type == MAGIC_NUM) {
+                    if (cur->length != sizeof(ppp_options_t) + sizeof(s_ppp_ccb->magic_num)) {
+                        FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+                            "User %" PRIu16
+                            " recv LCP Configure-Ack with invalid Magic-Number option length %u.",
+                            s_ppp_ccb->user_num, cur->length);
+                        return ERROR;
+                    }
                     for(int i=cur->length-3; i>=0; i--) {
                         if (*(((U8 *)&(s_ppp_ccb->magic_num)) + i) != cur->val[i]) {
                             FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "Session 0x%x recv ppp LCP magic number error.", rte_cpu_to_be_16(s_ppp_ccb->session_id));
@@ -267,8 +285,7 @@ STATUS decode_lcp(U16 ppp_hdr_len, U16 *event, struct rte_timer *tim, ppp_ccb_t 
                         }
                     }
                 }
-                ppp_options_length += cur->length;
-                cur = (ppp_options_t *)((char *)cur + cur->length);
+                opt_total += cur->length;
             }
             s_ppp_ccb->config_request_pending[0] = FALSE;
             *event = E_RECV_CONFIG_ACK;
@@ -286,34 +303,32 @@ STATUS decode_lcp(U16 ppp_hdr_len, U16 *event, struct rte_timer *tim, ppp_ccb_t 
                 return ERROR;
             }
             /* Walk every naked option (a Nak carries corrected values). */
-            {
-                U16 opt_total = sizeof(ppp_header_t);
-                for(ppp_options_t *cur=ppp_options; opt_total<ppp_hdr_len;
-                        cur = (ppp_options_t *)((char *)cur + cur->length)) {
-                    if (cur->length < sizeof(ppp_options_t) || cur->length > ppp_hdr_len - opt_total) {
-                        FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
-                            "User %" PRIu16 " recv LCP Configure-Nak with invalid option length %u.",
-                            s_ppp_ccb->user_num, cur->length);
-                        return ERROR;
-                    }
-                    if (cur->type == AUTH && cur->length >= sizeof(ppp_options_t) + sizeof(U16)) {
-                        /* Follow the peer's suggested auth protocol when we support it. */
-                        U16 peer_auth_method = cur->val[0] << 8 | cur->val[1];
-                        s_ppp_ccb->auth_method =
-                            (peer_auth_method == CHAP_PROTOCOL) ? CHAP_PROTOCOL : PAP_PROTOCOL;
-                    } else if (cur->type == MRU && cur->length >= sizeof(ppp_options_t) + sizeof(U16)/* MRU */) {
-                        /* Adopt the peer's corrected MRU when it is sane for us. */
-                        U16 peer_mru = cur->val[0] << 8 | cur->val[1];
-                        if (peer_mru != 0 && peer_mru <= MAX_RECV_UNIT)
-                            s_ppp_ccb->mru = peer_mru;
-                    } else if (cur->type == MAGIC_NUM) {
-                        /* The peer saw a magic-number collision — pick a new one. */
-                        s_ppp_ccb->magic_num = rte_cpu_to_be_32((rand() % 0xFFFFFFFE) + 1);
-                    }
-                    FastRG_LOG(WARN, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
-                        "User %" PRIu16 " recv LCP nak message with option %x.", s_ppp_ccb->user_num, cur->type);
-                    opt_total += cur->length;
+            opt_total = sizeof(ppp_header_t);
+            for(ppp_options_t *cur=ppp_options; opt_total<ppp_hdr_len;
+                    cur = (ppp_options_t *)((char *)cur + cur->length)) {
+                if (cur->length < sizeof(ppp_options_t) || cur->length > ppp_hdr_len - opt_total) {
+                    FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+                        "User %" PRIu16 " recv LCP Configure-Nak with invalid option length %u.",
+                        s_ppp_ccb->user_num, cur->length);
+                    return ERROR;
                 }
+                if (cur->type == AUTH && cur->length >= sizeof(ppp_options_t) + sizeof(U16)) {
+                    /* Follow the peer's suggested auth protocol when we support it. */
+                    U16 peer_auth_method = cur->val[0] << 8 | cur->val[1];
+                    s_ppp_ccb->auth_method =
+                        (peer_auth_method == CHAP_PROTOCOL) ? CHAP_PROTOCOL : PAP_PROTOCOL;
+                } else if (cur->type == MRU && cur->length >= sizeof(ppp_options_t) + sizeof(U16)/* MRU */) {
+                    /* Adopt the peer's corrected MRU when it is sane for us. */
+                    U16 peer_mru = cur->val[0] << 8 | cur->val[1];
+                    if (peer_mru != 0 && peer_mru <= MAX_RECV_UNIT)
+                        s_ppp_ccb->mru = peer_mru;
+                } else if (cur->type == MAGIC_NUM) {
+                    /* The peer saw a magic-number collision — pick a new one. */
+                    s_ppp_ccb->magic_num = rte_cpu_to_be_32((rand() % 0xFFFFFFFE) + 1);
+                }
+                FastRG_LOG(WARN, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+                    "User %" PRIu16 " recv LCP nak message with option %x.", s_ppp_ccb->user_num, cur->type);
+                opt_total += cur->length;
             }
             s_ppp_ccb->config_request_pending[0] = FALSE;
             *event = E_RECV_CONFIG_NAK_REJ;

@@ -1812,6 +1812,139 @@ void test_ppp_decode_config_ack_request_matching(FastRG_t *fastrg_ccb)
     codec_cleanup_ppp_ccb(&decode_ccb);
 }
 
+void test_ppp_decode_config_ack_options(FastRG_t *fastrg_ccb)
+{
+    printf("\nTesting Configure-Ack option parsing:\n");
+    printf("=========================================\n\n");
+
+    U8 frame[512] = {0};
+    U16 frame_len = 0;
+    U16 event = E_UNKNOWN;
+    U8 *opts = NULL;
+
+    decode_env_init(fastrg_ccb);
+
+    /* Test 1: an option with length 0 is rejected instead of looping forever */
+    printf("Test 1: \"zero option length in Configure-Ack is rejected\"\n");
+    decode_ccb_reset(fastrg_ccb, LCP_PHASE);
+    decode_ccb.identifier[0] = 1;
+    decode_ccb.config_request_pending[0] = TRUE;
+    frame_len = build_session_frame(frame, LCP_PROTOCOL, CONFIG_ACK,
+        sizeof(ppp_header_t) + 4, 4);
+    opts = frame + sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) +
+        sizeof(pppoe_header_t) + sizeof(ppp_payload_t) + sizeof(ppp_header_t);
+    const U8 zero_len_opt[] = {0x01, 0x00, 0x00, 0x00};
+    rte_memcpy(opts, zero_len_opt, sizeof(zero_len_opt));
+    event = E_UNKNOWN;
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == ERROR,
+        "zero option length in Configure-Ack returns ERROR", NULL);
+
+    /* Test 2: an option extending past the remaining bytes is rejected */
+    printf("Test 2: \"overrunning option length in Configure-Ack is rejected\"\n");
+    decode_ccb_reset(fastrg_ccb, LCP_PHASE);
+    decode_ccb.identifier[0] = 1;
+    decode_ccb.config_request_pending[0] = TRUE;
+    frame_len = build_session_frame(frame, LCP_PROTOCOL, CONFIG_ACK,
+        sizeof(ppp_header_t) + 4, 4);
+    opts = frame + sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) +
+        sizeof(pppoe_header_t) + sizeof(ppp_payload_t) + sizeof(ppp_header_t);
+    const U8 overrun_opt[] = {0x01, 0x05, 0x00, 0x00};
+    rte_memcpy(opts, overrun_opt, sizeof(overrun_opt));
+    event = E_UNKNOWN;
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == ERROR,
+        "overrunning option length in Configure-Ack returns ERROR", NULL);
+
+    /* Test 3: Magic-Number options must have the RFC 1661 fixed length */
+    printf("Test 3: \"oversized Magic-Number option in Configure-Ack is rejected\"\n");
+    decode_ccb_reset(fastrg_ccb, LCP_PHASE);
+    decode_ccb.identifier[0] = 1;
+    decode_ccb.config_request_pending[0] = TRUE;
+    frame_len = build_session_frame(frame, LCP_PROTOCOL, CONFIG_ACK,
+        sizeof(ppp_header_t) + UINT8_MAX, UINT8_MAX);
+    opts = frame + sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) +
+        sizeof(pppoe_header_t) + sizeof(ppp_payload_t) + sizeof(ppp_header_t);
+    opts[0] = MAGIC_NUM;
+    opts[1] = UINT8_MAX;
+    event = E_UNKNOWN;
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == ERROR,
+        "oversized Magic-Number option in Configure-Ack returns ERROR", NULL);
+
+    /* Test 4: a valid Magic-Number option still completes the request */
+    printf("Test 4: \"matching Magic-Number in Configure-Ack is accepted\"\n");
+    decode_ccb_reset(fastrg_ccb, LCP_PHASE);
+    decode_ccb.identifier[0] = 1;
+    decode_ccb.config_request_pending[0] = TRUE;
+    decode_ccb.magic_num = rte_cpu_to_be_32(0x01020304);
+    frame_len = build_session_frame(frame, LCP_PROTOCOL, CONFIG_ACK,
+        sizeof(ppp_header_t) + 6, 6);
+    opts = frame + sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) +
+        sizeof(pppoe_header_t) + sizeof(ppp_payload_t) + sizeof(ppp_header_t);
+    const U8 matching_magic_opt[] = {0x05, 0x06, 0x01, 0x02, 0x03, 0x04};
+    rte_memcpy(opts, matching_magic_opt, sizeof(matching_magic_opt));
+    event = E_UNKNOWN;
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == SUCCESS,
+        "matching Magic-Number Configure-Ack returns SUCCESS", NULL);
+    TEST_ASSERT(event == E_RECV_CONFIG_ACK,
+        "matching Magic-Number Configure-Ack emits E_RECV_CONFIG_ACK", "event=%u", event);
+    TEST_ASSERT(decode_ccb.config_request_pending[0] == FALSE,
+        "matching Magic-Number Configure-Ack clears the outstanding request", NULL);
+
+    /* Test 5: a fixed-length but mismatched Magic-Number keeps the existing error path */
+    printf("Test 5: \"mismatched Magic-Number in Configure-Ack is rejected\"\n");
+    decode_ccb_reset(fastrg_ccb, LCP_PHASE);
+    decode_ccb.identifier[0] = 1;
+    decode_ccb.config_request_pending[0] = TRUE;
+    decode_ccb.magic_num = rte_cpu_to_be_32(0x01020304);
+    frame_len = build_session_frame(frame, LCP_PROTOCOL, CONFIG_ACK,
+        sizeof(ppp_header_t) + 6, 6);
+    opts = frame + sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) +
+        sizeof(pppoe_header_t) + sizeof(ppp_payload_t) + sizeof(ppp_header_t);
+    const U8 mismatched_magic_opt[] = {0x05, 0x06, 0x01, 0x02, 0x03, 0x05};
+    rte_memcpy(opts, mismatched_magic_opt, sizeof(mismatched_magic_opt));
+    event = E_UNKNOWN;
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == ERROR,
+        "mismatched Magic-Number Configure-Ack returns ERROR", NULL);
+
+    /* Test 6: a PPP header length inflated past the real frame is rejected by
+     * decode_ppp before decode_lcp ever walks the options — that outer check is
+     * what makes ppp_hdr_len safe to use as the option-loop bound. */
+    printf("Test 6: \"inflated PPP header length in Configure-Ack is rejected\"\n");
+    decode_ccb_reset(fastrg_ccb, LCP_PHASE);
+    decode_ccb.identifier[0] = 1;
+    decode_ccb.config_request_pending[0] = TRUE;
+    frame_len = build_session_frame(frame, LCP_PROTOCOL, CONFIG_ACK,
+        sizeof(ppp_header_t) + 64, 4);
+    opts = frame + sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) +
+        sizeof(pppoe_header_t) + sizeof(ppp_payload_t) + sizeof(ppp_header_t);
+    const U8 inflated_zero_len_opt[] = {0x01, 0x00, 0xff, 0xff};
+    rte_memcpy(opts, inflated_zero_len_opt, sizeof(inflated_zero_len_opt));
+    event = E_UNKNOWN;
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == ERROR,
+        "inflated PPP header length with zero option length returns ERROR", NULL);
+    TEST_ASSERT(event == E_UNKNOWN,
+        "inflated PPP header length is rejected before decode_lcp runs", "event=%u", event);
+    TEST_ASSERT(decode_ccb.config_request_pending[0] == TRUE,
+        "inflated PPP header length leaves the outstanding request untouched", NULL);
+
+    decode_ccb_reset(fastrg_ccb, LCP_PHASE);
+    decode_ccb.identifier[0] = 1;
+    decode_ccb.config_request_pending[0] = TRUE;
+    frame_len = build_session_frame(frame, LCP_PROTOCOL, CONFIG_ACK,
+        sizeof(ppp_header_t) + 64, 4);
+    opts = frame + sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) +
+        sizeof(pppoe_header_t) + sizeof(ppp_payload_t) + sizeof(ppp_header_t);
+    const U8 inflated_max_len_opt[] = {0x01, 0xff, 0xff, 0xff};
+    rte_memcpy(opts, inflated_max_len_opt, sizeof(inflated_max_len_opt));
+    event = E_UNKNOWN;
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == ERROR,
+        "inflated PPP header length with 0xff option length returns ERROR", NULL);
+    TEST_ASSERT(event == E_UNKNOWN,
+        "inflated PPP header length with 0xff option length never reaches decode_lcp",
+        "event=%u", event);
+
+    codec_cleanup_ppp_ccb(&decode_ccb);
+}
+
 void test_build_config_request_auth_option(FastRG_t *fastrg_ccb)
 {
     printf("\nTesting build_config_request AUTH option:\n");
@@ -2130,6 +2263,7 @@ void test_ppp_codec(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_ppp_decode_frame_chap(fastrg_ccb);
     test_ppp_decode_frame_chap_challenge_phase_guard(fastrg_ccb);
     test_ppp_decode_config_ack_request_matching(fastrg_ccb);
+    test_ppp_decode_config_ack_options(fastrg_ccb);
     test_build_config_request_auth_option(fastrg_ccb);
     test_ppp_decode_config_nak_rej_options(fastrg_ccb);
 
