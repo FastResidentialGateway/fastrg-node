@@ -380,10 +380,26 @@ int dnsd_cp_process_lan_tcp_query(FastRG_t *fastrg_ccb, U8 *pkt_data, U16 pkt_le
     struct rte_ipv4_hdr *ip_hdr = (struct rte_ipv4_hdr *)(vlan_header + 1);
     struct rte_tcp_hdr *tcp_hdr = (struct rte_tcp_hdr *)(ip_hdr + 1);
 
+    /* the packet must be long enough to hold the fixed TCP header before any
+     * of its fields (data_off included) may be read */
+    U16 tcp_offset = (U16)((U8 *)tcp_hdr - pkt_data);
+    if (pkt_len < tcp_offset + sizeof(struct rte_tcp_hdr))
+        return -1;
+
     /* TCP DNS has 2-byte length prefix before DNS payload */
     U16 tcp_hdr_len = (tcp_hdr->data_off >> 4) * 4;
-    U8 *tcp_payload = (U8 *)tcp_hdr + tcp_hdr_len;
+    if (tcp_hdr_len < sizeof(struct rte_tcp_hdr) || tcp_hdr_len > pkt_len - tcp_offset)
+        return -1;
+
+    /* the claimed IP length must cover both headers (otherwise the payload
+     * length below underflows) and must not exceed the received packet */
+    U16 ip_offset = (U16)((U8 *)ip_hdr - pkt_data);
     U16 ip_total = rte_be_to_cpu_16(ip_hdr->total_length);
+    if (ip_total < sizeof(struct rte_ipv4_hdr) + tcp_hdr_len ||
+            ip_total > pkt_len - ip_offset)
+        return -1;
+
+    U8 *tcp_payload = (U8 *)tcp_hdr + tcp_hdr_len;
     U16 tcp_payload_len = ip_total - sizeof(struct rte_ipv4_hdr) - tcp_hdr_len;
 
     if (tcp_payload_len < 2 + DNS_HDR_LEN)
