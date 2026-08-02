@@ -28,6 +28,19 @@
 #   - WAN host:    iperf3, python3 + scapy
 #   - LAN host:    ping, iperf3, curl, tcpdump
 #
+# LAN-side topology (environment overrides; the defaults describe this bench):
+#   LAN_FLAP_HOST  Host owning the LAN-side PF that carries the LAN link.
+#                  (default: the --wan-host value — on this bench the LAN PF
+#                  and the WAN NIC sit in the same machine.)
+#   LAN_FLAP_NIC   LAN-side PF on LAN_FLAP_HOST; link flaps are driven here
+#                  because nothing inside the peer can drop the physical
+#                  signal the node observes.       (default: enp1s0f0)
+#   LAN_PEER_NIC   NIC the LAN peer uses for LAN traffic.  (default: enp8s0)
+#   LAN_VF_ID      Index of the VF that LAN_PEER_NIC consumes. (default: 0)
+#                  Leave it EMPTY (LAN_VF_ID=) on a bench without SR-IOV on
+#                  the LAN side: every VF-specific assertion and every
+#                  host-side VF fallback is then skipped instead of failing.
+#
 # Subscriber-scale resource requirement:
 #   E2E_MAX_USER_COUNT defaults to 63 and may be overridden in the environment.
 #   In the IOVA PA bench environment, each added CCB consumes a measured 175 MiB
@@ -217,6 +230,8 @@ if [[ -z "${_FASTRG_E2E_RELOCATED:-}" ]]; then
         for _a in "$@"; do _remote_args="${_remote_args} '${_a}'"; done
         ssh $_SSH_OPTS "${_E2E_RUNNER_USER}@${_E2E_RUNNER_HOST}" \
             "chmod +x ${_E2E_REMOTE_PATH} && E2E_MAX_USER_COUNT=${E2E_MAX_USER_COUNT} \
+             LAN_FLAP_HOST='${LAN_FLAP_HOST:-}' LAN_FLAP_NIC='${LAN_FLAP_NIC:-}' \
+             LAN_PEER_NIC='${LAN_PEER_NIC:-}' LAN_VF_ID='${LAN_VF_ID-0}' \
              _FASTRG_E2E_RELOCATED=1 ${_E2E_REMOTE_PATH}${_remote_args}"
         _ssh_rc=$?
 
@@ -316,6 +331,27 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ---------------------------------------------------------------------------
+# LAN-side topology. These are facts about the bench the suite runs on — not
+# fixtures the test invents — so they belong here beside WAN_NIC rather than
+# hard-coded inside individual phases. Every value is environment-overridable;
+# the header block documents what each one means. Resolved after argument
+# parsing because LAN_FLAP_HOST follows whatever --wan-host ends up being.
+#
+# An empty LAN_VF_ID means "the LAN peer does not sit on an SR-IOV VF": phases
+# then skip the VF-specific assertions and the host-side VF fallbacks instead
+# of failing on a bench that has no VF to operate on.
+# ---------------------------------------------------------------------------
+LAN_FLAP_HOST="${LAN_FLAP_HOST:-${WAN_HOST}}"
+LAN_FLAP_NIC="${LAN_FLAP_NIC:-enp1s0f0}"
+LAN_PEER_NIC="${LAN_PEER_NIC:-enp8s0}"
+LAN_VF_ID="${LAN_VF_ID-0}"
+
+if [[ -n "$LAN_VF_ID" && ! "$LAN_VF_ID" =~ ^[0-9]+$ ]]; then
+    error "LAN_VF_ID must be a VF index, or empty on a bench without SR-IOV (got '${LAN_VF_ID}')."
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
 # Expand --sub-id into the SUB_IDS array.
 #   "2,1,3" -> (2 1 3)        "2-10" -> (2 3 4 5 6 7 8 9 10)
 #   "2-4,7" -> (2 3 4 7)      duplicates are dropped, first-seen order kept.
@@ -381,6 +417,10 @@ ssh_node() { ssh $SSH_OPTS "root@${FASTRG_NODE}" "$@"; }
 ssh_lan()  { ssh $SSH_OPTS "root@${LAN_HOST}"    "$@"; }
 ssh_wan()  { ssh $SSH_OPTS "root@${WAN_HOST}"   "$@"; }
 ssh_bras() { ssh $SSH_OPTS "root@${BRAS_HOST}"   "$@"; }
+# Host that owns the LAN-side PF (VF policy + LAN link flaps). It is the WAN
+# host on this bench, but it is addressed through its own variable so a bench
+# with a separate LAN switch host only has to set LAN_FLAP_HOST.
+ssh_lan_flap() { ssh $SSH_OPTS "root@${LAN_FLAP_HOST}" "$@"; }
 
 # MaxUserCount is consumed only at node startup. Save the bench value and apply
 # the requested E2E scale before phase0 can launch fastrg. The EXIT trap restores

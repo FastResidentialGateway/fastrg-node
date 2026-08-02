@@ -234,15 +234,19 @@ phase0_setup() {
     fi
 
     # ------------------------------------------------------------------
-    # The LAN peer holds a VF of enp1s0f0 on the WAN host, and the
+    # When the LAN peer holds a VF of LAN_FLAP_NIC on LAN_FLAP_HOST, the
     # dhcp_client_sim.py-based phases (22/24) emulate virtual clients with
     # arbitrary source MACs — the PF's MAC anti-spoof would drop their TX.
-    # The setting resets on host reboot or ixgbe reload, so re-assert it.
+    # The setting resets on host reboot or driver reload, so re-assert it.
+    # An empty LAN_VF_ID means the LAN peer is not behind a VF at all: there
+    # is no PF-side anti-spoof policy to relax, so the assertion is skipped.
     # ------------------------------------------------------------------
-    if ssh_wan "ip link set enp1s0f0 vf 0 spoofchk off" >/dev/null 2>&1; then
-        info "Preflight: LAN PF VF 0 spoofchk=off asserted."
+    if [[ -z "${LAN_VF_ID}" ]]; then
+        info "Preflight: LAN_VF_ID is empty (LAN peer is not on an SR-IOV VF); skipping VF spoofchk assertion."
+    elif ssh_lan_flap "ip link set ${LAN_FLAP_NIC} vf ${LAN_VF_ID} spoofchk off" >/dev/null 2>&1; then
+        info "Preflight: LAN PF ${LAN_FLAP_NIC} VF ${LAN_VF_ID} spoofchk=off asserted."
     else
-        warn "Preflight: failed to disable VF spoofchk on ${WAN_HOST}; phases 22/24 may fail."
+        warn "Preflight: failed to disable VF ${LAN_VF_ID} spoofchk on ${LAN_FLAP_HOST}; phases 22/24 may fail."
     fi
 
     # ------------------------------------------------------------------
