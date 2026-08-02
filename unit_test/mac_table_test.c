@@ -54,84 +54,47 @@ static struct rte_mbuf *make_test_mbuf(void)
     return m;
 }
 
-static void test_ip_to_mac_idx(void)
-{
-    printf("\nTesting ip_to_mac_idx:\n");
-    printf("=========================================\n\n");
-
-    U32 idx = 0;
-    /* 10.1.2.3 → B=1 C=2 D=3 → 1*255*255 + 2*255 + 3 */
-    TEST_ASSERT(ip_to_mac_idx(htonl(0x0A010203), &idx) == SUCCESS,
-        "10.1.2.3 maps successfully", "");
-    TEST_ASSERT(idx == (U32)(1 * 255 * 255 + 2 * 255 + 3),
-        "10.1.2.3 index formula", "expected %u, got %u", 1 * 255 * 255 + 2 * 255 + 3, idx);
-
-    /* boundary: octets 254 are the last valid values */
-    TEST_ASSERT(ip_to_mac_idx(htonl(0x0AFEFEFE), &idx) == SUCCESS,
-        "10.254.254.254 maps successfully", "");
-    TEST_ASSERT(idx == MAC_TABLE_SIZE - 1,
-        "10.254.254.254 is the last index", "expected %u, got %u", MAC_TABLE_SIZE - 1, idx);
-    TEST_ASSERT(ip_to_mac_idx(htonl(0x0A000000), &idx) == SUCCESS && idx == 0,
-        "10.0.0.0 is index 0", "got %u", idx);
-
-    /* octet 255 anywhere in B/C/D is rejected */
-    TEST_ASSERT(ip_to_mac_idx(htonl(0x0AFF0001), &idx) == ERROR,
-        "octet B=255 rejected", "");
-    TEST_ASSERT(ip_to_mac_idx(htonl(0x0A00FF01), &idx) == ERROR,
-        "octet C=255 rejected", "");
-    TEST_ASSERT(ip_to_mac_idx(htonl(0x0A0000FF), &idx) == ERROR,
-        "octet D=255 rejected (broadcast)", "");
-
-    /* first octet is the /8 network part — not range-checked */
-    TEST_ASSERT(ip_to_mac_idx(htonl(0xFF010203), &idx) == SUCCESS,
-        "first octet 255 is allowed (network part)", "");
-}
-
 static void test_mac_learn_lookup(void)
 {
     printf("\nTesting mac_table_learn / mac_table_lookup:\n");
     printf("=========================================\n\n");
 
-    mac_table_entry_t *table = mac_table_alloc();
+    mac_table_t *table = mac_table_alloc(0);
     TEST_ASSERT(table != NULL, "mac_table_alloc returns a table", "");
     if (table == NULL)
         return;
 
     U32 ip = htonl(0x0A010203);
-    TEST_ASSERT(mac_table_lookup(table, ip) == NULL,
-        "fresh table has no entry (zero-initialised)", "");
-    TEST_ASSERT(mac_table_lookup(NULL, ip) == NULL,
-        "lookup on NULL table returns NULL", "");
+    struct rte_ether_addr out;
+    TEST_ASSERT(mac_table_lookup(table, ip, &out) == ERROR,
+        "fresh table has no entry", "");
+    TEST_ASSERT(mac_table_lookup(NULL, ip, &out) == ERROR,
+        "lookup on NULL table returns ERROR", "");
 
     mac_table_learn(NULL, ip, &mac_a); /* must not crash */
     mac_table_learn(table, ip, &mac_a);
-    mac_table_entry_t *e = mac_table_lookup(table, ip);
-    TEST_ASSERT(e != NULL, "learned entry found", "");
-    TEST_ASSERT(e != NULL && rte_is_same_ether_addr(&e->mac, &mac_a),
+    TEST_ASSERT(mac_table_lookup(table, ip, &out) == SUCCESS,
+        "learned entry found", "");
+    TEST_ASSERT(rte_is_same_ether_addr(&out, &mac_a),
         "learned MAC matches", "");
 
-    /* neighbor indices untouched */
-    TEST_ASSERT(mac_table_lookup(table, htonl(0x0A010204)) == NULL,
+    /* neighbor IPs untouched */
+    TEST_ASSERT(mac_table_lookup(table, htonl(0x0A010204), &out) == ERROR,
         "adjacent IP not learned", "");
-    TEST_ASSERT(mac_table_lookup(table, htonl(0x0A010202)) == NULL,
+    TEST_ASSERT(mac_table_lookup(table, htonl(0x0A010202), &out) == ERROR,
         "other adjacent IP not learned", "");
 
-    /* re-learn same MAC (PR #69 skip-write path) — entry stays valid */
+    /* re-learn same MAC (skip-write fast path) — entry stays valid */
     mac_table_learn(table, ip, &mac_a);
-    e = mac_table_lookup(table, ip);
-    TEST_ASSERT(e != NULL && rte_is_same_ether_addr(&e->mac, &mac_a),
+    TEST_ASSERT(mac_table_lookup(table, ip, &out) == SUCCESS &&
+        rte_is_same_ether_addr(&out, &mac_a),
         "re-learn with same MAC keeps entry intact", "");
 
-    /* re-learn different MAC (host moved) — entry updated */
+    /* re-learn different MAC (host moved) — atomic data-word overwrite */
     mac_table_learn(table, ip, &mac_b);
-    e = mac_table_lookup(table, ip);
-    TEST_ASSERT(e != NULL && rte_is_same_ether_addr(&e->mac, &mac_b),
+    TEST_ASSERT(mac_table_lookup(table, ip, &out) == SUCCESS &&
+        rte_is_same_ether_addr(&out, &mac_b),
         "re-learn with new MAC updates entry", "");
-
-    /* out-of-range IP: learn is a no-op, lookup returns NULL */
-    mac_table_learn(table, htonl(0x0A0000FF), &mac_a);
-    TEST_ASSERT(mac_table_lookup(table, htonl(0x0A0000FF)) == NULL,
-        "broadcast-octet IP never learned or found", "");
 
     mac_table_free(table);
     mac_table_free(NULL); /* must not crash */
@@ -341,6 +304,97 @@ static void test_send_arp_request_tx_result(FastRG_t *fastrg_ccb)
     direct_pool[LAN_PORT] = saved_pool;
 }
 
+
+/* ---- fixed-max refactor cases (moved from the task-scoped file into the
+ * module test file per repo naming convention; additive only) ---- */
+
+static void test_mac_table_hash_generation_reset(void)
+{
+    printf("\nTesting mac_table generation reset:\n");
+    printf("=========================================\n\n");
+
+    mac_table_t *t = mac_table_alloc(1);
+    TEST_ASSERT(t != NULL, "mac_table_alloc returns a table handle", "");
+    if (t == NULL)
+        return;
+
+    U32 ip1 = htonl(0x0A010203), ip2 = htonl(0x0A010204);
+    struct rte_ether_addr out;
+
+    mac_table_learn(t, ip1, &mac_a);
+    mac_table_learn(t, ip2, &mac_b);
+
+    mac_table_reset(t);
+    TEST_ASSERT(mac_table_lookup(t, ip1, &out) == ERROR,
+        "reset invalidates learned entry (generation bump)", "");
+    TEST_ASSERT(mac_table_lookup(t, ip2, &out) == ERROR,
+        "reset invalidates every learned entry", "");
+
+    /* stale keys are excluded from iterate */
+    U32 iter = 0, iter_ip = 0;
+    TEST_ASSERT(mac_table_iterate(t, &iter, &iter_ip, &out) < 0,
+        "iterate skips stale-generation entries after reset", "");
+
+    /* re-learn after reset revalidates per key */
+    mac_table_learn(t, ip1, &mac_b);
+    TEST_ASSERT(mac_table_lookup(t, ip1, &out) == SUCCESS &&
+        rte_is_same_ether_addr(&out, &mac_b),
+        "re-learn after reset revalidates the key", "");
+    TEST_ASSERT(mac_table_lookup(t, ip2, &out) == ERROR,
+        "un-relearned key stays invalid after reset", "");
+
+    iter = 0;
+    int found = 0;
+    while (mac_table_iterate(t, &iter, &iter_ip, &out) >= 0)
+        found++;
+    TEST_ASSERT(found == 1 && iter_ip == ip1,
+        "iterate returns exactly the current-generation entry", "found %d", found);
+
+    mac_table_reset(NULL); /* must not crash */
+    mac_table_free(t);
+}
+
+static void test_mac_table_hash_capacity(void)
+{
+    printf("\nTesting mac_table 64K capacity-full behavior:\n");
+    printf("=========================================\n\n");
+
+    mac_table_t *t = mac_table_alloc(2);
+    TEST_ASSERT(t != NULL, "mac_table_alloc returns a table handle", "");
+    if (t == NULL)
+        return;
+
+    /* Fill with 64K distinct IPs (10.0.0.0 + i). rte_hash guarantees the
+     * configured entry count, so all must succeed. */
+    for(U32 i=0; i<MAC_TABLE_MAX_ENTRIES; i++) {
+        U32 ip = rte_cpu_to_be_32(0x0A000000u + i);
+        mac_table_learn(t, ip, &mac_a);
+    }
+    U64 fails_at_capacity = __atomic_load_n(&t->learn_fail, __ATOMIC_RELAXED);
+    TEST_ASSERT(fails_at_capacity == 0,
+        "all 64K entries fit without learn failures", "learn_fail=%lu",
+        (unsigned long)fails_at_capacity);
+
+    struct rte_ether_addr out;
+    TEST_ASSERT(mac_table_lookup(t, rte_cpu_to_be_32(0x0A000000u), &out) == SUCCESS,
+        "first entry still present at full capacity", "");
+    TEST_ASSERT(mac_table_lookup(t,
+        rte_cpu_to_be_32(0x0A000000u + MAC_TABLE_MAX_ENTRIES - 1), &out) == SUCCESS,
+        "last entry present at full capacity", "");
+
+    /* One more distinct IP must be dropped (counted, no crash), and an
+     * overwrite of an existing key must still work at full capacity. */
+    mac_table_learn(t, rte_cpu_to_be_32(0x0B000000u), &mac_b);
+    TEST_ASSERT(__atomic_load_n(&t->learn_fail, __ATOMIC_RELAXED) > 0,
+        "learn beyond capacity is dropped and counted", "");
+    mac_table_learn(t, rte_cpu_to_be_32(0x0A000000u), &mac_b);
+    TEST_ASSERT(mac_table_lookup(t, rte_cpu_to_be_32(0x0A000000u), &out) == SUCCESS &&
+        rte_is_same_ether_addr(&out, &mac_b),
+        "existing-key overwrite still works at full capacity", "");
+
+    mac_table_free(t);
+}
+
 void test_mac_table(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 {
     printf("\n");
@@ -355,8 +409,9 @@ void test_mac_table(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
         mac_test_pool = rte_pktmbuf_pool_create("mac_tbl_pool", 256, 0, 0,
             RTE_MBUF_DEFAULT_BUF_SIZE, (int)rte_socket_id());
 
-    test_ip_to_mac_idx();
     test_mac_learn_lookup();
+    test_mac_table_hash_generation_reset();
+    test_mac_table_hash_capacity();
     test_arp_pending_queue();
     test_encode_arp_request(fastrg_ccb);
     test_send_arp_request_tx_result(fastrg_ccb);

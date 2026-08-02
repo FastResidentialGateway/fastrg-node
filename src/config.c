@@ -40,7 +40,7 @@ STATUS is_unix_sock_path_valid(char *unix_sock_path)
 STATUS parse_config(const char *config_path, FastRG_t *fastrg_ccb, struct fastrg_config *fastrg_cfg) 
 {
     config_t cfg;
-    int max_user_count, init_user_count, heartbeat_interval, enable_ddp_int;
+    int max_user_count, heartbeat_interval, enable_ddp_int;
     const char *loglvl, *unix_sock_path, *log_path, *node_grpc_port, 
         *controller_address, *etcd_endpoints, *ddp_pkg_path, *kafka_brokers, 
         *central_office_location, *metrics_listen_port;
@@ -61,14 +61,7 @@ STATUS parse_config(const char *config_path, FastRG_t *fastrg_ccb, struct fastrg
         return ERROR;
     }
     fastrg_ccb->max_user_count = max_user_count;
-    if (config_lookup_int(&cfg, "InitUserCount", &init_user_count) == CONFIG_FALSE)
-        init_user_count = 1;
-    if (init_user_count < MIN_USER_COUNT || init_user_count > max_user_count) {
-        fprintf(stderr, "initial user count must be between %d and max user count %d\n", MIN_USER_COUNT, max_user_count);
-        config_destroy(&cfg);
-        return ERROR;
-    }
-    fastrg_ccb->user_count = init_user_count;
+    fastrg_ccb->user_count = 0;
 
     if (config_lookup_string(&cfg, "Loglvl", &loglvl) == CONFIG_FALSE)
         loglvl = "DBG";

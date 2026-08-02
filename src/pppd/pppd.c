@@ -107,37 +107,167 @@ void PPP_bye(ppp_ccb_t *s_ppp_ccb)
     }
 }
 
-STATUS ppp_update_config_by_user(ppp_ccb_t *ppp_ccb, U16 vlan_id, const char *user_name, const char *password)
+/**
+ * @fn ppp_copy_credentials
+ *
+ * @brief Replace the ccb's account/password buffers (unbounded length).
+ *        The new buffers are allocated outside the lock; the pointer swap
+ *        and the old-buffer free happen under cred_lock, so a concurrent
+ *        reader (gRPC GetFastrgHsiInfo, codec PAP/CHAP builders, etcd
+ *        sync-match — all of which take cred_lock) can never chase a freed
+ *        pointer or observe a torn string.
+ *
+ * @param ppp_ccb
+ *      PPP control block pointer
+ * @param user_name
+ *      Account name (NUL-terminated)
+ * @param password
+ *      Password (NUL-terminated)
+ * @return
+ *      SUCCESS if replaced, ERROR on allocation failure (old credentials
+ *      remain intact)
+ */
+static STATUS ppp_copy_credentials(ppp_ccb_t *ppp_ccb, const char *user_name,
+    const char *password)
 {
-    rte_atomic16_set(&ppp_ccb->vlan_id, vlan_id);
+    U8 *new_acc = fastrg_calloc(U8, 1, strlen(user_name) + 1, 0);
+    U8 *new_pwd = fastrg_calloc(U8, 1, strlen(password) + 1, 0);
 
-    /* We don't need to lock here because in dp, we don't need this field */
-    if (ppp_ccb->ppp_user_acc != NULL)
-        fastrg_mfree(ppp_ccb->ppp_user_acc);
-    ppp_ccb->ppp_user_acc = fastrg_calloc(U8, 1, strlen(user_name) + 1, 0);
-    if (ppp_ccb->ppp_user_acc == NULL) {
-        FastRG_LOG(ERR, ppp_ccb->fastrg_ccb->fp, NULL, PPPLOGMSG, 
-            "account buffer update failed: %s", rte_strerror(errno));
+    if (new_acc == NULL || new_pwd == NULL) {
+        FastRG_LOG(ERR, ppp_ccb->fastrg_ccb->fp, NULL, PPPLOGMSG,
+            "credential buffer allocation failed: %s", rte_strerror(errno));
+        if (new_acc != NULL)
+            fastrg_mfree(new_acc);
+        if (new_pwd != NULL)
+            fastrg_mfree(new_pwd);
         return ERROR;
     }
-    strcpy((char *)ppp_ccb->ppp_user_acc, user_name);
-    if (ppp_ccb->ppp_passwd != NULL)
-        fastrg_mfree(ppp_ccb->ppp_passwd);
-    ppp_ccb->ppp_passwd = fastrg_calloc(U8, 1, strlen(password) + 1, 0);
-    if (ppp_ccb->ppp_passwd == NULL) {
-        FastRG_LOG(ERR, ppp_ccb->fastrg_ccb->fp, NULL, PPPLOGMSG, 
-            "password buffer update failed: %s", rte_strerror(errno));
-        return ERROR;
-    }
-    strcpy((char *)ppp_ccb->ppp_passwd, password);
+    strcpy((char *)new_acc, user_name);
+    strcpy((char *)new_pwd, password);
+
+    rte_spinlock_lock(&ppp_ccb->cred_lock);
+    U8 *old_acc = ppp_ccb->ppp_user_acc;
+    U8 *old_pwd = ppp_ccb->ppp_passwd;
+    ppp_ccb->ppp_user_acc = new_acc;
+    ppp_ccb->ppp_passwd = new_pwd;
+    rte_spinlock_unlock(&ppp_ccb->cred_lock);
+
+    /* Safe outside the lock: after the swap above no reader can still hold
+     * the old pointers (every reader fetches them under cred_lock and
+     * finishes using them before unlocking). */
+    if (old_acc != NULL)
+        fastrg_mfree(old_acc);
+    if (old_pwd != NULL)
+        fastrg_mfree(old_pwd);
 
     return SUCCESS;
+}
+
+STATUS ppp_update_config_by_user(ppp_ccb_t *ppp_ccb, U16 vlan_id, const char *user_name, const char *password)
+{
+    if (ppp_copy_credentials(ppp_ccb, user_name, password) == ERROR)
+        return ERROR;
+    rte_atomic16_set(&ppp_ccb->vlan_id, vlan_id);
+    return SUCCESS;
+}
+
+/**
+ * @fn pppd_destroy_ccb_elements
+ *
+ * @brief Free a subscriber slot's elements. Only used on the init failure
+ *        rollback path and at shutdown (pppd_cleanup_ccb). Idempotent.
+ *
+ * @param fastrg_ccb
+ *      FastRG control block pointer
+ * @param ppp_ccb
+ *      PPP control block pointer
+ */
+static void pppd_destroy_ccb_elements(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb)
+{
+    mac_table_free(ppp_ccb->mac_table);
+    ppp_ccb->mac_table = NULL;
+    arp_pending_cleanup_queue(&ppp_ccb->arp_pq, fastrg_ccb->arp_pending_mp);
+    nat_table_destroy(ppp_ccb);
+    if (ppp_ccb->pppoe_phase.pppoe_header_tag != NULL) {
+        fastrg_mfree(ppp_ccb->pppoe_phase.pppoe_header_tag);
+        ppp_ccb->pppoe_phase.pppoe_header_tag = NULL;
+    }
+    if (ppp_ccb->ppp_user_acc != NULL) {
+        fastrg_mfree(ppp_ccb->ppp_user_acc);
+        ppp_ccb->ppp_user_acc = NULL;
+    }
+    if (ppp_ccb->ppp_passwd != NULL) {
+        fastrg_mfree(ppp_ccb->ppp_passwd);
+        ppp_ccb->ppp_passwd = NULL;
+    }
+}
+
+/**
+ * @fn pppd_construct_ccb_elements
+ *
+ * @brief Construction of a subscriber slot's runtime-immutable
+ *        elements: MAC table hash, ARP pending ring, NAT hashes + free
+ *        ring, and the PPPoE header-tag buffer. Called only from
+ *        pppd_allocate_ccbs() at init — after this, runtime configuration
+ *        changes reuse/reset these objects and never allocate or free.
+ *
+ * @param fastrg_ccb
+ *      FastRG control block pointer
+ * @param ppp_ccb
+ *      PPP control block pointer (zeroed by the caller)
+ * @param ccb_id
+ *      Subscriber index (used for unique DPDK object naming)
+ * @return
+ *      SUCCESS if all elements were created, ERROR otherwise
+ */
+static STATUS pppd_construct_ccb_elements(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb, U16 ccb_id)
+{
+    ppp_ccb->mac_table = mac_table_alloc(ccb_id);
+    if (ppp_ccb->mac_table == NULL) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG,
+            "mac_table allocation failed for ccb %u", ccb_id);
+        goto err;
+    }
+
+    if (arp_pending_init_queue(&ppp_ccb->arp_pq, ccb_id) != SUCCESS) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG,
+            "arp_pending ring creation failed for ccb %u", ccb_id);
+        goto err;
+    }
+
+    if (nat_table_init(ppp_ccb, ccb_id, fastrg_ccb->ppp_ccb_rcu) != SUCCESS) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG,
+            "NAT rev hash/ring creation failed for ccb %u", ccb_id);
+        goto err;
+    }
+
+    ppp_ccb->pppoe_phase.pppoe_header_tag = fastrg_malloc(pppoe_header_tag_t,
+        PPPoE_TAG_DEFAULT_MAX_LEN, RTE_CACHE_LINE_SIZE);
+    if (ppp_ccb->pppoe_phase.pppoe_header_tag == NULL) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG,
+            "pppoe header tag allocation failed for ccb %u: %s",
+            ccb_id, rte_strerror(errno));
+        goto err;
+    }
+
+    /* Credential lock: serializes ppp_user_acc/ppp_passwd replacement
+     * against every reader (see pppd.h). Buffers themselves stay NULL until
+     * the first ppp_init_config_by_user allocates them. */
+    rte_spinlock_init(&ppp_ccb->cred_lock);
+
+    return SUCCESS;
+
+err:
+    pppd_destroy_ccb_elements(fastrg_ccb, ppp_ccb);
+    return ERROR;
 }
 
 STATUS ppp_init_config_by_user(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb, U16 ccb_id, U16 vlan_id, 
     const char *user_name, const char *password)
 {
     ppp_ccb->fastrg_ccb = fastrg_ccb;
+    if (ppp_copy_credentials(ppp_ccb, user_name, password) == ERROR)
+        return ERROR;
     ppp_ccb->ppp_phase[0].state = S_INIT;
     ppp_ccb->ppp_phase[1].state = S_INIT;
     ppp_ccb->pppoe_phase.active = FALSE;
@@ -182,94 +312,22 @@ STATUS ppp_init_config_by_user(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb, U16 ccb
      * by apply_hsi_config() using tcp_conntrack_enable from etcd. */
     ppp_ccb->tcp_conntrack_enabled = TRUE;
 
-    /* MAC table: allocate once, reset on re-init */
-    if (ppp_ccb->mac_table == NULL) {
-        ppp_ccb->mac_table = mac_table_alloc();
-        if (ppp_ccb->mac_table == NULL) {
-            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG,
-                "mac_table allocation failed");
-            goto err;
-        }
-    } else {
-        memset(ppp_ccb->mac_table, 0,
-            (size_t)MAC_TABLE_SIZE * sizeof(mac_table_entry_t));
-    }
+    /* All elements below were preallocated by pppd_construct_ccb_elements()
+     * at init; a (re)configuration only resets their logical content. No
+     * allocation, no free — this function can no longer fail past the
+     * credential check above. */
 
-    /* ARP pending ring: create once, flush on re-init */
-    if (ppp_ccb->arp_pq.ring == NULL) {
-        if (arp_pending_init_queue(&ppp_ccb->arp_pq, ccb_id) != SUCCESS) {
-            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG,
-                "arp_pending ring creation failed for ccb %u", ccb_id);
-            goto err;
-        }
-    } else {
-        arp_pending_flush(fastrg_ccb->arp_pending_mp, &ppp_ccb->arp_pq);
-    }
+    /* MAC table: O(1) generation bump invalidates every learned entry
+     * without touching the hash structure (safe vs concurrent learns). */
+    mac_table_reset(ppp_ccb->mac_table);
 
-    /* NAT reverse hash + free-list: create once, flush on re-init */
-    if (ppp_ccb->nat_reverse_hash == NULL) {
-        if (nat_table_init(ppp_ccb, ccb_id, fastrg_ccb->ppp_ccb_rcu) != SUCCESS) {
-            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG,
-                "NAT rev hash/ring creation failed for ccb %u", ccb_id);
-            goto err;
-        }
-    } else {
-        nat_table_reset(ppp_ccb);
-    }
+    /* ARP pending ring: drop queued packets from the previous config. */
+    arp_pending_flush(fastrg_ccb->arp_pending_mp, &ppp_ccb->arp_pq);
 
-    if (ppp_ccb->ppp_user_acc != NULL)
-        fastrg_mfree(ppp_ccb->ppp_user_acc);
-    ppp_ccb->ppp_user_acc = fastrg_calloc(U8, 1, strlen(user_name) + 1, 0);
-    if (ppp_ccb->ppp_user_acc == NULL) {
-        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG, 
-            "account buffer allocation failed: %s", rte_strerror(errno));
-        goto err;
-    }
-    strcpy((char *)ppp_ccb->ppp_user_acc, user_name);
-
-    if (ppp_ccb->ppp_passwd != NULL)
-        fastrg_mfree(ppp_ccb->ppp_passwd);
-    ppp_ccb->ppp_passwd = fastrg_calloc(U8, 1, strlen(password) + 1, 0);
-    if (ppp_ccb->ppp_passwd == NULL) {
-        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG, 
-            "password buffer allocation failed: %s", 
-            rte_strerror(errno));
-        goto err;
-    }
-    strcpy((char *)ppp_ccb->ppp_passwd, password);
-
-    if (ppp_ccb->pppoe_phase.pppoe_header_tag == NULL)
-        ppp_ccb->pppoe_phase.pppoe_header_tag = fastrg_malloc(pppoe_header_tag_t, 
-            PPPoE_TAG_DEFAULT_MAX_LEN, RTE_CACHE_LINE_SIZE);
-    if (ppp_ccb->pppoe_phase.pppoe_header_tag == NULL) {
-        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG, 
-            "pppoe header tag allocation failed: %s", 
-            rte_strerror(errno));
-        goto err;
-    }
+    /* NAT hashes + free-list: flush all learned flows. */
+    nat_table_reset(ppp_ccb);
 
     return SUCCESS;
-
-err:
-    ppp_ccb->phase = NOT_CONFIGURED;
-    rte_atomic16_set(&ppp_ccb->vlan_id, 0);
-    mac_table_free(ppp_ccb->mac_table);
-    arp_pending_cleanup_queue(&ppp_ccb->arp_pq, fastrg_ccb->arp_pending_mp);
-    nat_table_destroy(ppp_ccb);
-    ppp_ccb->mac_table = NULL;
-    if (ppp_ccb->ppp_user_acc != NULL) {
-        fastrg_mfree(ppp_ccb->ppp_user_acc);
-        ppp_ccb->ppp_user_acc = NULL;
-    }
-    if (ppp_ccb->ppp_passwd != NULL) {
-        fastrg_mfree(ppp_ccb->ppp_passwd);
-        ppp_ccb->ppp_passwd = NULL;
-    }
-    if (ppp_ccb->pppoe_phase.pppoe_header_tag != NULL) {
-        fastrg_mfree(ppp_ccb->pppoe_phase.pppoe_header_tag);
-        ppp_ccb->pppoe_phase.pppoe_header_tag = NULL;
-    }
-    return ERROR;
 }
 
 STATUS pppd_allocate_ccbs(FastRG_t *fastrg_ccb, U16 start_id, U16 count, ppp_ccb_t **array)
@@ -285,9 +343,7 @@ STATUS pppd_allocate_ccbs(FastRG_t *fastrg_ccb, U16 start_id, U16 count, ppp_ccb
                 rte_mempool_avail_count(fastrg_ccb->ppp_ccb_mp));
 
             for(U16 j=start_id; j<ccb_id; j++) {
-                mac_table_free(array[j]->mac_table);
-                arp_pending_cleanup_queue(&array[j]->arp_pq, fastrg_ccb->arp_pending_mp);
-                nat_table_destroy(array[j]);
+                pppd_destroy_ccb_elements(fastrg_ccb, array[j]);
                 rte_mempool_put(fastrg_ccb->ppp_ccb_mp, array[j]);
                 array[j] = NULL;
             }
@@ -298,12 +354,11 @@ STATUS pppd_allocate_ccbs(FastRG_t *fastrg_ccb, U16 start_id, U16 count, ppp_ccb
 
         /* subscriptor id starts from 1 */
         /* vlan of each subscriptor is 0 to indicate unused */
-        if (ppp_init_config_by_user(fastrg_ccb, array[ccb_id], ccb_id, 0, 
+        if (pppd_construct_ccb_elements(fastrg_ccb, array[ccb_id], ccb_id) == ERROR ||
+                ppp_init_config_by_user(fastrg_ccb, array[ccb_id], ccb_id, 0,
                 "asdf", "zxcv") == ERROR) {
             for(U16 j=start_id; j<=ccb_id; j++) {
-                mac_table_free(array[j]->mac_table);
-                arp_pending_cleanup_queue(&array[j]->arp_pq, fastrg_ccb->arp_pending_mp);
-                nat_table_destroy(array[j]);
+                pppd_destroy_ccb_elements(fastrg_ccb, array[j]);
                 rte_mempool_put(fastrg_ccb->ppp_ccb_mp, array[j]);
                 array[j] = NULL;
             }
@@ -326,6 +381,7 @@ STATUS pppd_init_rcu(FastRG_t *fastrg_ccb)
     if (rte_rcu_qsbr_init(fastrg_ccb->ppp_ccb_rcu, RTE_MAX_LCORE) != 0) {
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG, "rte_rcu_qsbr_init failed");
         fastrg_mfree(fastrg_ccb->ppp_ccb_rcu);
+        fastrg_ccb->ppp_ccb_rcu = NULL;
         return ERROR;
     }
 
@@ -333,88 +389,6 @@ STATUS pppd_init_rcu(FastRG_t *fastrg_ccb)
     RTE_LCORE_FOREACH(lcore_id) {
         rte_rcu_qsbr_thread_register(fastrg_ccb->ppp_ccb_rcu, lcore_id);
     }
-
-    rte_atomic16_init(&fastrg_ccb->ppp_ccb_updating);
-
-    return SUCCESS;
-}
-
-STATUS pppd_add_ccb(FastRG_t *fastrg_ccb, U16 extra_ccb_count)
-{
-    if (extra_ccb_count == 0) {
-        FastRG_LOG(WARN, fastrg_ccb->fp, NULL, PPPLOGMSG, 
-            "extra_ccb_count is 0, nothing to do");
-        return SUCCESS;
-    }
-
-    /* Early-return only when ALL needed slots (0 .. old+extra-1) were already
-     * allocated in a previous expansion.  Checking in_use >= new_user_count
-     * (not just > user_count) ensures the pointer array already covers the full
-     * new range: every pppd_add_ccb that extended the array also allocated pool
-     * objects for every new slot, so in_use_count tracks array high-water-mark. */
-    U16 new_user_count_check = fastrg_ccb->user_count + extra_ccb_count;
-    if (rte_mempool_in_use_count(fastrg_ccb->ppp_ccb_mp) >= new_user_count_check) {
-        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, PPPLOGMSG,
-            "CCBs up to %u already allocated, reusing existing array", new_user_count_check);
-        return SUCCESS;
-    }
-
-    if (!rte_atomic16_cmpset((volatile uint16_t *)&fastrg_ccb->ppp_ccb_updating.cnt, 0, 1)) {
-        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG, 
-            "Another resize operation is in progress");
-        return ERROR;
-    }
-
-    ppp_ccb_t **old_array = (ppp_ccb_t **)fastrg_ccb->ppp_ccb;
-    /* Use in_use_count as the array high-water-mark.  When user_count decreases,
-     * the pointer array is NOT shrunk, so existing objects (and their DPDK rings)
-     * remain at their original indices.  Copying only up to user_count would miss
-     * those entries, and re-allocating objects for those slots would create DPDK
-     * rings with duplicate names → ring creation failure. */
-    U16 old_array_hwm = (U16)rte_mempool_in_use_count(fastrg_ccb->ppp_ccb_mp);
-    U16 old_user_count = fastrg_ccb->user_count;
-    U16 new_user_count = old_user_count + extra_ccb_count;
-    /* Clamp high-water-mark to new_user_count (can't exceed target). */
-    if (old_array_hwm > new_user_count) old_array_hwm = new_user_count;
-    U16 truly_new = new_user_count - old_array_hwm;
-
-    ppp_ccb_t **new_array = fastrg_malloc(ppp_ccb_t *,
-        sizeof(ppp_ccb_t *) * new_user_count, 0);
-    if (new_array == NULL) {
-        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG,
-            "realloc ppp_ccb array failed");
-        rte_atomic16_clear(&fastrg_ccb->ppp_ccb_updating);
-        return ERROR;
-    }
-
-    /* Copy ALL existing valid entries (up to high-water-mark, not just user_count). */
-    if (old_array != NULL)
-        memcpy(new_array, old_array, sizeof(ppp_ccb_t *) * old_array_hwm);
-
-    if (truly_new > 0) {
-        memset(&new_array[old_array_hwm], 0, sizeof(ppp_ccb_t *) * truly_new);
-    }
-
-    if (truly_new > 0 && pppd_allocate_ccbs(fastrg_ccb, old_array_hwm, truly_new, new_array) == ERROR) {
-        fastrg_mfree(new_array);
-        rte_atomic16_clear(&fastrg_ccb->ppp_ccb_updating);
-        return ERROR;
-    }
-
-    rte_wmb();
-
-    __atomic_store_n(&fastrg_ccb->ppp_ccb, new_array, __ATOMIC_RELEASE);
-
-    if (old_array != NULL) {
-        rte_rcu_qsbr_synchronize(fastrg_ccb->ppp_ccb_rcu, RTE_QSBR_THRID_INVALID);
-        fastrg_mfree(old_array);
-    }
-
-    rte_atomic16_clear(&fastrg_ccb->ppp_ccb_updating);
-
-    FastRG_LOG(INFO, fastrg_ccb->fp, NULL, PPPLOGMSG, 
-        "%u PPP CCB added, mempool available: %u", 
-        extra_ccb_count, rte_mempool_avail_count(fastrg_ccb->ppp_ccb_mp));
 
     return SUCCESS;
 }
@@ -438,8 +412,6 @@ STATUS pppd_disable_ccb(FastRG_t *fastrg_ccb, U16 remove_ccb_count, U16 old_ccb_
     for(U16 i=0; i<remove_ccb_count; i++) {
         U16 ccb_id = old_ccb_count - 1 - i;
         ppp_ccb_t *ppp_ccb = old_array[ccb_id];
-        /* A slot can be NULL when the count was grown past the configured users
-         * (unconfigured slots are not allocated). Nothing to disable there. */
         if (ppp_ccb == NULL)
             continue;
         exit_ppp(ppp_ccb);
@@ -453,107 +425,23 @@ STATUS pppd_disable_ccb(FastRG_t *fastrg_ccb, U16 remove_ccb_count, U16 old_ccb_
     return SUCCESS;
 }
 
-STATUS pppd_remove_ccb(FastRG_t *fastrg_ccb, U16 remove_ccb_count, U16 old_ccb_count)
-{
-    if (remove_ccb_count > old_ccb_count) {
-        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG, 
-            "Invalid removing ccb count %u", remove_ccb_count);
-        return ERROR;
-    }
-
-    if (remove_ccb_count == 0) {
-        FastRG_LOG(WARN, fastrg_ccb->fp, NULL, PPPLOGMSG, 
-            "remove_ccb_count is 0, nothing to do");
-        return SUCCESS;
-    }
-
-    if (!rte_atomic16_cmpset((volatile uint16_t *)&fastrg_ccb->ppp_ccb_updating.cnt, 0, 1)) {
-        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG, 
-            "Another resize operation is in progress");
-        return ERROR;
-    }
-
-    ppp_ccb_t **old_array = (ppp_ccb_t **)fastrg_ccb->ppp_ccb;
-    U16 new_user_count = old_ccb_count - remove_ccb_count;
-
-    /* Teardown only: stop the FSM/timers of the CCBs being removed. Nothing is
-     * freed and no slot is cleared here — a data-plane reader that already
-     * fetched a pointer out of old_array keeps dereferencing it until the grace
-     * period below, and clearing the slot early would only open a new
-     * fetch-to-NULL window. Freeing happens after rte_rcu_qsbr_synchronize(). */
-    for(U16 i=0; i<remove_ccb_count; i++) {
-        U16 ccb_id = old_ccb_count - 1 - i;
-        ppp_ccb_t *ppp_ccb = old_array[ccb_id];
-        /* A slot can be NULL when the count was grown past the configured users
-         * (unconfigured slots are not allocated). Nothing to tear down there. */
-        if (ppp_ccb == NULL)
-            continue;
-        exit_ppp(ppp_ccb);
-    }
-
-    if (new_user_count == 0) {
-        __atomic_store_n(&fastrg_ccb->ppp_ccb, (ppp_ccb_t **)NULL, __ATOMIC_RELEASE);
-
-        rte_rcu_qsbr_synchronize(fastrg_ccb->ppp_ccb_rcu, RTE_QSBR_THRID_INVALID);
-    } else {
-        ppp_ccb_t **new_array = fastrg_malloc(ppp_ccb_t *, new_user_count, 0);
-        if (new_array == NULL) {
-            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG, 
-                "malloc new smaller ppp_ccb array failed");
-            rte_atomic16_clear(&fastrg_ccb->ppp_ccb_updating);
-            return ERROR;
-        }
-
-        rte_memcpy(new_array, old_array, sizeof(ppp_ccb_t *) * new_user_count);
-
-        rte_wmb();
-
-        __atomic_store_n(&fastrg_ccb->ppp_ccb, new_array, __ATOMIC_RELEASE);
-
-        rte_rcu_qsbr_synchronize(fastrg_ccb->ppp_ccb_rcu, RTE_QSBR_THRID_INVALID);
-    }
-
-    /* The grace period has elapsed: no reader can still hold a pointer taken
-     * from old_array, so the removed CCBs and the old array are safe to free. */
-    for(U16 ccb_id=new_user_count; ccb_id<old_ccb_count; ccb_id++) {
-        ppp_ccb_t *ppp_ccb = old_array[ccb_id];
-        /* A slot can be NULL when the count was grown past the configured users
-         * (unconfigured slots are not allocated). Nothing to free there. */
-        if (ppp_ccb == NULL)
-            continue;
-        if (ppp_ccb->ppp_user_acc != NULL)
-            fastrg_mfree(ppp_ccb->ppp_user_acc);
-        if (ppp_ccb->ppp_passwd != NULL)
-            fastrg_mfree(ppp_ccb->ppp_passwd);
-        if (ppp_ccb->pppoe_phase.pppoe_header_tag != NULL)
-            fastrg_mfree(ppp_ccb->pppoe_phase.pppoe_header_tag);
-        arp_pending_cleanup_queue(&ppp_ccb->arp_pq, fastrg_ccb->arp_pending_mp);
-        if (ppp_ccb->mac_table != NULL) {
-            mac_table_free(ppp_ccb->mac_table);
-            ppp_ccb->mac_table = NULL;
-        }
-        nat_table_destroy(ppp_ccb);
-        rte_mempool_put(fastrg_ccb->ppp_ccb_mp, ppp_ccb);
-    }
-
-    fastrg_mfree(old_array);
-
-    rte_atomic16_clear(&fastrg_ccb->ppp_ccb_updating);
-
-    FastRG_LOG(INFO, fastrg_ccb->fp, NULL, PPPLOGMSG, 
-        "%u CCBs removed, mempool available: %u", 
-        remove_ccb_count, rte_mempool_avail_count(fastrg_ccb->ppp_ccb_mp));
-
-    return SUCCESS;
-}
-
-void pppd_cleanup_ccb(FastRG_t *fastrg_ccb, U16 total_ccb_count)
+void pppd_cleanup_ccb(FastRG_t *fastrg_ccb)
 {
     if (fastrg_ccb == NULL)
         return;
 
-    if (fastrg_ccb->ppp_ccb != NULL && total_ccb_count > 0)
-        pppd_remove_ccb(fastrg_ccb, total_ccb_count, total_ccb_count);
+    if (fastrg_ccb->ppp_ccb != NULL) {
+        for(U16 ccb_id=0; ccb_id<fastrg_ccb->max_user_count; ccb_id++) {
+            ppp_ccb_t *ppp_ccb = (ppp_ccb_t *)fastrg_ccb->ppp_ccb[ccb_id];
+            if (ppp_ccb == NULL)
+                continue;
+            exit_ppp(ppp_ccb);
+            pppd_destroy_ccb_elements(fastrg_ccb, ppp_ccb);
+            rte_mempool_put(fastrg_ccb->ppp_ccb_mp, ppp_ccb);
+        }
+        fastrg_mfree(fastrg_ccb->ppp_ccb);
+        fastrg_ccb->ppp_ccb = NULL;
+    }
 
     if (fastrg_ccb->ppp_ccb_mp != NULL) {
         rte_mempool_free(fastrg_ccb->ppp_ccb_mp);
@@ -584,16 +472,9 @@ STATUS pppd_init(FastRG_t *fastrg_ccb)
         "ppp_ccb_pool",                      /* name */
         mempool_size,                        /* user count */
         sizeof(ppp_ccb_t),                   /* ppp_ccb size */
-        /* No per-lcore cache. CCB get/put is a control-plane resize operation,
-         * not a per-packet hot path, so the cache buys nothing here. Worse, a
-         * cache strands free CCBs in one lcore's local cache where the lcore
-         * doing the resize cannot reach them: rte_mempool_get then fails with
-         * ENOENT even though rte_mempool_avail_count reports objects free,
-         * which intermittently breaks subscriber-count expansion. cache=0 keeps
-         * every object in the common ring, reachable from any lcore. (The cache
-         * only affects the alloc/free fast path — a ppp_ccb, once allocated, is
-         * shared hugepage memory referenced via the ppp_ccb[] array and stays
-         * fully accessible to the data-plane lcores regardless of cache size.) */
+        /* No per-lcore cache: every object is taken exactly once at init
+         * below (fixed-max prealloc) and returned only at shutdown, so a
+         * cache would only strand objects. */
         0,                                   /* per-lcore cache size */
         0,                                   /* private_data_size */
         NULL, NULL,                          /* mp_init, mp_init_arg */
@@ -605,27 +486,44 @@ STATUS pppd_init(FastRG_t *fastrg_ccb)
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG, 
             "rte_mempool_create failed: %s", rte_strerror(rte_errno));
         fastrg_mfree(fastrg_ccb->ppp_ccb_rcu);
+        fastrg_ccb->ppp_ccb_rcu = NULL;
         return ERROR;
     }
 
     srand(time(NULL));
 
-    U16 initial_user_count = fastrg_ccb->user_count;
-    /* assume we want to add ccbs from 0 to initial_user_count */
-    fastrg_ccb->user_count = 0;
-    fastrg_ccb->ppp_ccb = NULL;
-    if (pppd_add_ccb(fastrg_ccb, initial_user_count) == ERROR) {
-        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG, 
-            "pppd_add_ccb for initial %u CCBs failed", initial_user_count);
+    /* Fixed-max full preallocation: the pointer array covers max_user_count
+     * slots. User_count (0 at boot, driven by etcd/CLI/gRPC config) is purely the
+     * accessible upper bound. The array pointer never changes after
+     * this point. */
+    fastrg_ccb->ppp_ccb = (void **)fastrg_calloc(ppp_ccb_t *,
+        fastrg_ccb->max_user_count, sizeof(ppp_ccb_t *), 0);
+    if (fastrg_ccb->ppp_ccb == NULL) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG,
+            "ppp_ccb array allocation failed");
         rte_mempool_free(fastrg_ccb->ppp_ccb_mp);
+        fastrg_ccb->ppp_ccb_mp = NULL;
         fastrg_mfree(fastrg_ccb->ppp_ccb_rcu);
+        fastrg_ccb->ppp_ccb_rcu = NULL;
         return ERROR;
     }
 
-    fastrg_ccb->user_count = initial_user_count;
+    if (pppd_allocate_ccbs(fastrg_ccb, 0, fastrg_ccb->max_user_count,
+            (ppp_ccb_t **)fastrg_ccb->ppp_ccb) == ERROR) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG, 
+            "preallocating %u CCBs failed", fastrg_ccb->max_user_count);
+        fastrg_mfree(fastrg_ccb->ppp_ccb);
+        fastrg_ccb->ppp_ccb = NULL;
+        rte_mempool_free(fastrg_ccb->ppp_ccb_mp);
+        fastrg_ccb->ppp_ccb_mp = NULL;
+        fastrg_mfree(fastrg_ccb->ppp_ccb_rcu);
+        fastrg_ccb->ppp_ccb_rcu = NULL;
+        return ERROR;
+    }
 
     FastRG_LOG(INFO, fastrg_ccb->fp, NULL, PPPLOGMSG, 
-        "============ pppoe init successfully ==============\n");
+        "============ pppoe init successfully (%u/%u slots preallocated) ==============\n",
+        fastrg_ccb->max_user_count, fastrg_ccb->max_user_count);
     return SUCCESS;
 }
 

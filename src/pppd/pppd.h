@@ -152,8 +152,9 @@ typedef struct {
     BOOL                  lcp_magic_rejected; /* peer Configure-Rejected our magic-number option */
     BOOL                  peer_requires_auth; /* peer's Configure-Request carried an AUTH option (we must authenticate) */
     U16                   auth_method;       /* use chap or pap */
-    U8                    *ppp_user_acc;     /* pap/chap account */
-    U8                    *ppp_passwd;       /* pap/chap password */
+    U8                    *ppp_user_acc;     /* pap/chap account (NUL-terminated) */
+    U8                    *ppp_passwd;       /* pap/chap password (NUL-terminated) */
+    rte_spinlock_t        cred_lock;         /* lock for updating credentials, ppp_user_acc and ppp_passwd */
     U32	                  ppp_interval;      /* LCP keepalive echo interval, seconds */
     U32                   echo_miss_count;   /* consecutive unanswered LCP echo-requests; reset on any frame from peer */
     rte_atomic16_t        ppp_bool;          /* boolean flag for accept ppp packets at data plane */
@@ -171,9 +172,9 @@ typedef struct {
     struct rte_ring       *nat_free_ring;    /* free-list of addr_table slot indices (MPMC) */
     U32                   nat_gc_counter;    /* amortized expired-slot scan position (approximate, racy by design) */
     rte_spinlock_t        nat_insert_lock;   /* serializes miss-path inserts only (double-checked); per-packet
-                                              * same-flow refresh stays lock-free via LF hash lookup */
+                                              * same-flow refresh stays lock-free via lock free hash lookup */
     port_fwd_entry_t      port_fwd_table[PORT_FWD_TABLE_SIZE]; /* SNAT port forwarding, direct-indexed by eport */
-    mac_table_entry_t     *mac_table;        /* per-subscriber LAN host MAC table (255^3 entries) */
+    mac_table_t           *mac_table;        /* per-subscriber LAN host MAC table (fixed 64K-entry lock free hash) */
     arp_pending_queue_t   arp_pq;            /* ARP pending queue for unresolved port-fwd destinations */
     struct rte_timer      pppoe;             /* pppoe timer */
     struct rte_timer      ppp;               /* ppp timer */
@@ -243,22 +244,8 @@ STATUS pppd_init(FastRG_t *fastrg_ccb);
 void PPP_bye(ppp_ccb_t *ppp_ccb);
 
 /**
- * @fn pppd_add_ccb
- * 
- * @brief Add more ppp control blocks
- * 
- * @param fastrg_ccb
- *      FastRG control block pointer
- * @param extra_ccb_count
- *      Number of extra ccbs to add
- * @return 
- *      SUCCESS if added successfully, ERROR if failed
- */
-STATUS pppd_add_ccb(FastRG_t *fastrg_ccb, U16 extra_ccb_count);
-
-/**
  * @fn pppd_disable_ccb
- * 
+ *
  * @brief Disable ppp control blocks, reserve memory region for future use
  *
  * @param fastrg_ccb
@@ -267,80 +254,35 @@ STATUS pppd_add_ccb(FastRG_t *fastrg_ccb, U16 extra_ccb_count);
  *      Number of ccbs to disable
  * @param old_ccb_count
  *      Old number of ccbs before disable
- * @return 
+ * @return
  *      SUCCESS if disabled successfully, ERROR if failed
  */
 STATUS pppd_disable_ccb(FastRG_t *fastrg_ccb, U16 remove_ccb_count, U16 old_ccb_count);
 
 /**
- * @fn pppd_remove_ccb
- * 
- * @brief Remove ppp control blocks
+ * @fn pppd_cleanup_ccb
+ *
+ * @brief Cleanup all ppp control blocks
  *
  * @param fastrg_ccb
  *      FastRG control block pointer
- * @param remove_ccb_count
- *      Number of ccbs to remove
- * @param old_ccb_count
- *      Old number of ccbs before removal
- * @return 
- *      SUCCESS if removed successfully, ERROR if failed
  */
-STATUS pppd_remove_ccb(FastRG_t *fastrg_ccb, U16 remove_ccb_count, U16 old_ccb_count);
-
-/**
- * @fn pppd_cleanup_ccb
- * 
- * @brief Cleanup all ppp control blocks
- * 
- * @param fastrg_ccb
- *      FastRG control block pointer
- * @param total_ccb_count
- *      Total number of ccbs
- */
-void pppd_cleanup_ccb(FastRG_t *fastrg_ccb, U16 total_ccb_count);
+void pppd_cleanup_ccb(FastRG_t *fastrg_ccb);
 
 /**
  * @fn PPPD_GET_CCB
- * 
- * @brief 
+ *
+ * @brief
  *      Get ppp control block by ccb id
- * 
+ *
  * @param fastrg_ccb
  *      FastRG control block pointer
- * @param ccb_id 
+ * @param ccb_id
  *      CCB ID
- * @return 
+ * @return
  *      ppp_ccb_t *
  */
 #define PPPD_GET_CCB(fastrg_ccb_ptr, ccb_id) \
-    pppd_get_ccb((fastrg_ccb_ptr)->ppp_ccb_rcu, \
-        (ppp_ccb_t ** const *)&(fastrg_ccb_ptr)->ppp_ccb, \
-        (ccb_id))
-
-static __always_inline ppp_ccb_t *pppd_get_ccb(struct rte_rcu_qsbr *ppp_ccb_rcu, 
-    ppp_ccb_t ** const *ppp_ccb_array_ptr, U16 ccb_id)
-{
-    unsigned int lcore_id = 0;
-
-    if (likely(rte_lcore_id() != LCORE_ID_ANY))
-        lcore_id = rte_lcore_id();
-
-    /* data-plane lcore: stays QSBR-online for life + quiescent once per burst,
-     * so just do the protected load — skip per-call online/quiescent/offline. */
-    if (likely(fastrg_rcu_persistent[lcore_id])) {
-        ppp_ccb_t **arr = __atomic_load_n(ppp_ccb_array_ptr, __ATOMIC_ACQUIRE);
-        return __atomic_load_n(&arr[ccb_id], __ATOMIC_ACQUIRE);
-    }
-
-    // RCU read-side critical section
-    rte_rcu_qsbr_thread_online(ppp_ccb_rcu, lcore_id);
-    ppp_ccb_t **ppp_ccb_array = __atomic_load_n(ppp_ccb_array_ptr, __ATOMIC_ACQUIRE);
-    ppp_ccb_t *result = __atomic_load_n(&ppp_ccb_array[ccb_id], __ATOMIC_ACQUIRE);
-    rte_rcu_qsbr_quiescent(ppp_ccb_rcu, lcore_id);
-    rte_rcu_qsbr_thread_offline(ppp_ccb_rcu, lcore_id);
-
-    return result;
-}
+    ((ppp_ccb_t *)(fastrg_ccb_ptr)->ppp_ccb[(ccb_id)])
 
 #endif

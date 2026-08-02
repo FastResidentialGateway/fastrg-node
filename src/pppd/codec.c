@@ -1170,10 +1170,9 @@ void build_auth_request_pap(unsigned char *buffer, U16 *mulen, ppp_ccb_t *s_ppp_
     pppoe_header_t       *pppoe_header = (pppoe_header_t *)(vlan_header + 1);
     ppp_payload_t        *ppp_payload = (ppp_payload_t *)(pppoe_header + 1);
     ppp_header_t         *ppp_pap_header = (ppp_header_t *)(ppp_payload + 1);
-    U8                   peer_id_length = strlen((const char *)(s_ppp_ccb->ppp_user_acc));
-    U8                   peer_passwd_length = strlen((const char *)(s_ppp_ccb->ppp_passwd));
+    U8                   peer_id_length, peer_passwd_length;
     U8                   *pap_account = (U8 *)(ppp_pap_header + 1);
-    U8                   *pap_password = pap_account + peer_id_length + sizeof(U8)/* pap account length field */;
+    U8                   *pap_password;
 
     s_ppp_ccb->phase = AUTH_PHASE;
 
@@ -1188,12 +1187,20 @@ void build_auth_request_pap(unsigned char *buffer, U16 *mulen, ppp_ccb_t *s_ppp_
     ppp_pap_header->code = PAP_REQUEST;
     ppp_pap_header->identifier = s_ppp_ccb->identifier[0];
 
+    /* Credential read side: a config update replaces these buffers via free+calloc, 
+     * so length probing and copying must happen inside one cred_lock critical 
+     * section. */
+    rte_spinlock_lock(&s_ppp_ccb->cred_lock);
+    peer_id_length = strlen((const char *)(s_ppp_ccb->ppp_user_acc));
+    peer_passwd_length = strlen((const char *)(s_ppp_ccb->ppp_passwd));
+    pap_password = pap_account + peer_id_length + sizeof(U8)/* pap account length field */;
     *(U8 *)pap_account = peer_id_length;
     rte_memcpy(pap_account + sizeof(U8), s_ppp_ccb->ppp_user_acc, peer_id_length);
     *(U8 *)pap_password = peer_passwd_length;
     rte_memcpy(pap_password + sizeof(U8), s_ppp_ccb->ppp_passwd, peer_passwd_length);
+    rte_spinlock_unlock(&s_ppp_ccb->cred_lock);
 
-    ppp_pap_header->length = 2 * sizeof(U8)/* for pap account length and pap password length */ 
+    ppp_pap_header->length = 2 * sizeof(U8)/* for pap account length and pap password length */
     + peer_id_length + peer_passwd_length + sizeof(ppp_header_t);
     pppoe_header->length = ppp_pap_header->length + sizeof(ppp_payload_t);
     ppp_pap_header->length = rte_cpu_to_be_16(ppp_pap_header->length);
@@ -1582,12 +1589,35 @@ STATUS decode_ppp(ppp_payload_t *ppp_payload, U16 payload_avail, U16 *event, ppp
             tmp_s_ppp_ccb->ppp_phase[0].ppp_options = NULL;
             tmp_s_ppp_ccb->cp = 0;
             tmp_s_ppp_ccb->session_id = s_ppp_ccb->session_id;
-            tmp_s_ppp_ccb->ppp_user_acc = s_ppp_ccb->ppp_user_acc;
-            tmp_s_ppp_ccb->ppp_passwd = s_ppp_ccb->ppp_passwd;
+
+            /* Credential read side: deep-copy the strings into the temp ccb
+             * inside one cred_lock critical section. */
+            rte_spinlock_lock(&s_ppp_ccb->cred_lock);
+            size_t chap_acc_len = strlen((const char *)s_ppp_ccb->ppp_user_acc);
+            size_t chap_pwd_len = strlen((const char *)s_ppp_ccb->ppp_passwd);
+            tmp_s_ppp_ccb->ppp_user_acc = fastrg_malloc(U8, chap_acc_len + 1, 0);
+            tmp_s_ppp_ccb->ppp_passwd = fastrg_malloc(U8, chap_pwd_len + 1, 0);
+            if (tmp_s_ppp_ccb->ppp_user_acc != NULL)
+                rte_memcpy(tmp_s_ppp_ccb->ppp_user_acc, s_ppp_ccb->ppp_user_acc, chap_acc_len + 1);
+            if (tmp_s_ppp_ccb->ppp_passwd != NULL)
+                rte_memcpy(tmp_s_ppp_ccb->ppp_passwd, s_ppp_ccb->ppp_passwd, chap_pwd_len + 1);
+            rte_spinlock_unlock(&s_ppp_ccb->cred_lock);
+
+            if (tmp_s_ppp_ccb->ppp_user_acc == NULL || tmp_s_ppp_ccb->ppp_passwd == NULL) {
+                FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "fastrg_malloc error.");
+                if (tmp_s_ppp_ccb->ppp_user_acc != NULL)
+                    fastrg_mfree(tmp_s_ppp_ccb->ppp_user_acc);
+                if (tmp_s_ppp_ccb->ppp_passwd != NULL)
+                    fastrg_mfree(tmp_s_ppp_ccb->ppp_passwd);
+                fastrg_mfree(tmp_s_ppp_ccb);
+                return ERROR;
+            }
 
             build_auth_response_chap(buffer, &mulen, tmp_s_ppp_ccb, &ppp_chap_data);
             wan_ctrl_tx(fastrg_ccb, s_ppp_ccb->user_num - 1, buffer, mulen);
             FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " recv chap challenge.", s_ppp_ccb->user_num);
+            fastrg_mfree(tmp_s_ppp_ccb->ppp_user_acc);
+            fastrg_mfree(tmp_s_ppp_ccb->ppp_passwd);
             fastrg_mfree(tmp_s_ppp_ccb);
             return SUCCESS;
         } else if (ppp_hdr->code == CHAP_SUCCESS) {

@@ -10,106 +10,61 @@
 #include "../dbg.h"
 #include "dhcp_fsm.h"
 
-/* double size of 10.0.0.0-10.0.255.255 */
+/* Fixed per-subscriber pool capacity (double size of 10.0.0.0-10.0.255.255). */
 #define DHCP_MAX_POOL_SIZE_PER_USER  (1 << 17)
 
 struct rte_ether_addr zero_mac;
 
-void alloc_new_pool(dhcp_ccb_t *dhcp_ccb, U32 new_pool_len)
-{
-    FastRG_t *fastrg_ccb = dhcp_ccb->fastrg_ccb;
-    U32 old_pool_len = dhcp_ccb->per_lan_user_pool_len;
-    dhcp_ccb_per_lan_user_t **dhcp_ccb_per_lan_user = fastrg_calloc(dhcp_ccb_per_lan_user_t *, 
-        new_pool_len, sizeof(dhcp_ccb_per_lan_user_t *), 0);
-
-    if (dhcp_ccb_per_lan_user == NULL) {
-        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "DHCP: calloc dhcp_ccb_per_lan_user failed\n");
-        return;
-    }
-
-    /* If there is an existing pool, copy it to the new one */
-    if (old_pool_len > 0 && dhcp_ccb->per_lan_user_pool != NULL) {
-        rte_memcpy(dhcp_ccb_per_lan_user, dhcp_ccb->per_lan_user_pool, 
-            old_pool_len * sizeof(dhcp_ccb_per_lan_user_t *));
-    }
-    U32 need = new_pool_len - old_pool_len;
-    int ret = rte_mempool_get_bulk(dhcp_ccb->dhcp_per_lan_user_mempool, 
-        (void **)&dhcp_ccb_per_lan_user[old_pool_len], need);
-    if (ret < 0) {
-        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "DHCP: rte_mempool_get_bulk failed\n");
-        fastrg_mfree(dhcp_ccb_per_lan_user);
-        return;
-    }
-
-    if (dhcp_ccb->per_lan_user_pool != NULL)
-        fastrg_mfree(dhcp_ccb->per_lan_user_pool);
-
-    dhcp_ccb->per_lan_user_pool_len = new_pool_len;
-    dhcp_ccb->per_lan_user_pool = dhcp_ccb_per_lan_user;
-}
-
-void adjust_ip_pool(dhcp_ccb_t *dhcp_ccb, U32 new_pool_len)
-{
-    if (dhcp_ccb->per_lan_user_pool_len < new_pool_len) {
-        alloc_new_pool(dhcp_ccb, new_pool_len);
-    } else if (dhcp_ccb->per_lan_user_pool_len > new_pool_len) {
-        for(U32 i=new_pool_len; i<dhcp_ccb->per_lan_user_pool_len; i++) {
-            if (dhcp_ccb->per_lan_user_pool[i]) {
-                rte_timer_stop_sync(&dhcp_ccb->per_lan_user_pool[i]->lan_user_info.timer);
-
-                /* Clear state to ensure clean release */
-                dhcp_ccb->per_lan_user_pool[i]->ip_pool.used = FALSE;
-                dhcp_ccb->per_lan_user_pool[i]->lan_user_info.lan_user_used = FALSE;
-            }
-        }
-        rte_mempool_put_bulk(dhcp_ccb->dhcp_per_lan_user_mempool,
-            (void **)&dhcp_ccb->per_lan_user_pool[new_pool_len],
-            dhcp_ccb->per_lan_user_pool_len - new_pool_len);
-        dhcp_ccb->per_lan_user_pool_len = new_pool_len;
-    }
-}
-
-void dhcp_pool_init_by_user(dhcp_ccb_t *dhcp_ccb, U32 dhcp_server_ip, 
+STATUS dhcp_pool_init_by_user(dhcp_ccb_t *dhcp_ccb, U32 dhcp_server_ip, 
     U32 ip_start, U32 ip_end, U32 subnet_mask)
 {
     /* In pool update scenario, we don't need to lock here because in dp, 
-    each dhcp pool field is only able to be accessed while the dhcp switch is on. */
+    each dhcp pool field is only able to be accessed while the dhcp switch is on 
+    and only the ctrl thread updates the pool. */
     U32 new_pool_len = rte_be_to_cpu_32(ip_end) >= rte_be_to_cpu_32(ip_start) ? 
         rte_be_to_cpu_32(ip_end) - rte_be_to_cpu_32(ip_start) + 1 : 
         rte_be_to_cpu_32(ip_start) - rte_be_to_cpu_32(ip_end) + 1;
     U32 old_pool_len = dhcp_ccb->per_lan_user_pool_len;
+    FastRG_t *fastrg_ccb = dhcp_ccb->fastrg_ccb;
+
+    if (new_pool_len > DHCP_MAX_POOL_SIZE_PER_USER) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, DHCPLOGMSG,
+            "DHCP: requested pool length %u exceeds fixed per-user capacity %u, rejecting\n",
+            new_pool_len, DHCP_MAX_POOL_SIZE_PER_USER);
+        return ERROR;
+    }
+
     dhcp_ccb->dhcp_server_ip = dhcp_server_ip; //default dhcp server ip is user provided
     dhcp_ccb->pool_start = rte_be_to_cpu_32(ip_start);
     dhcp_ccb->pool_end = rte_be_to_cpu_32(ip_end);
     dhcp_ccb->subnet_mask = subnet_mask;
-    FastRG_t *fastrg_ccb = dhcp_ccb->fastrg_ccb;
 
-    adjust_ip_pool(dhcp_ccb, new_pool_len);
-    if (dhcp_ccb->per_lan_user_pool_len != new_pool_len) {
-        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "DHCP: adjust_ip_pool failed\n");
-        return;
-    }
+    /* Stop every lease timer the previous window may have armed (timers are
+     * only ever armed on window entries). */
+    for(U32 i=0; i<old_pool_len; i++)
+        rte_timer_stop_sync(&dhcp_ccb->per_lan_user_pool[i]->lan_user_info.timer);
 
-    for(U32 i=0; i<new_pool_len; i++) {
-        dhcp_ccb->per_lan_user_pool[i]->ip_pool.used = FALSE;
-        /* old timers should only be stopped in case they are running */
-        if (i < old_pool_len)
-            rte_timer_stop_sync(&dhcp_ccb->per_lan_user_pool[i]->lan_user_info.timer);
-        else
-            rte_timer_init(&dhcp_ccb->per_lan_user_pool[i]->lan_user_info.timer);
-        dhcp_ccb->per_lan_user_pool[i]->lan_user_info.lan_user_used = FALSE;
-        rte_ether_addr_copy(&zero_mac, &dhcp_ccb->per_lan_user_pool[i]->lan_user_info.mac_addr);
-        rte_ether_addr_copy(&zero_mac, &dhcp_ccb->per_lan_user_pool[i]->ip_pool.mac_addr);
-        dhcp_ccb->per_lan_user_pool[i]->lan_user_info.state = S_DHCP_INIT;
-        dhcp_ccb->per_lan_user_pool[i]->ip_pool.ip_addr = rte_cpu_to_be_32((rte_be_to_cpu_32(ip_start) + i));
-        dhcp_ccb->per_lan_user_pool[i]->dhcp_ccb = dhcp_ccb;
-        dhcp_ccb->per_lan_user_pool[i]->pool_index = i;
+    dhcp_ccb->per_lan_user_pool_len = new_pool_len;
+
+    U32 reset_len = RTE_MAX(old_pool_len, new_pool_len);
+    for(U32 i=0; i<reset_len; i++) {
+        dhcp_ccb_per_lan_user_t *e = dhcp_ccb->per_lan_user_pool[i];
+        e->ip_pool.used = FALSE;
+        e->lan_user_info.lan_user_used = FALSE;
+        rte_ether_addr_copy(&zero_mac, &e->lan_user_info.mac_addr);
+        rte_ether_addr_copy(&zero_mac, &e->ip_pool.mac_addr);
+        e->lan_user_info.state = S_DHCP_INIT;
+        e->ip_pool.ip_addr = (i < new_pool_len) ?
+            rte_cpu_to_be_32((rte_be_to_cpu_32(ip_start) + i)) : 0;
+        e->dhcp_ccb = dhcp_ccb;
+        e->pool_index = i;
     }
 
     FastRG_LOG(INFO, fastrg_ccb->fp, NULL, DHCPLOGMSG, 
         "DHCP: DHCP pool initialized: server_ip=0x%08x, pool_start=0x%08x, pool_end=0x%08x, pool_len=%d, subnet_mask=0x%08x\n", 
         rte_be_to_cpu_32(dhcp_ccb->dhcp_server_ip), rte_be_to_cpu_32(ip_start), 
         rte_be_to_cpu_32(ip_end), new_pool_len, rte_be_to_cpu_32(subnet_mask));
+    return SUCCESS;
 }
 
 void dhcp_init_by_user(dhcp_ccb_t *dhcp_ccb, U16 ccb_id, 
@@ -142,125 +97,59 @@ STATUS dhcpd_allocate_ccbs(FastRG_t *fastrg_ccb, U16 start_id, U16 count,
                 "rte_mempool_get for dhcp_ccb[%u] failed: %s (available: %u)", 
                 ccb_id, rte_strerror(rte_errno),
                 rte_mempool_avail_count(fastrg_ccb->dhcp_ccb_mp));
-
-            for(U16 j=start_id; j<ccb_id; j++) {
-                rte_mempool_put(fastrg_ccb->dhcp_ccb_mp, array[j]);
-                array[j] = NULL;
-            }
-            return ERROR;
+            goto err;
         }
 
         memset(array[ccb_id], 0, sizeof(dhcp_ccb_t));
         array[ccb_id]->fastrg_ccb = fastrg_ccb;
+
+        array[ccb_id]->per_lan_user_pool = fastrg_calloc(dhcp_ccb_per_lan_user_t *,
+            DHCP_MAX_POOL_SIZE_PER_USER, sizeof(dhcp_ccb_per_lan_user_t *), 0);
+        if (array[ccb_id]->per_lan_user_pool == NULL) {
+            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, DHCPLOGMSG,
+                "per_lan_user_pool array allocation failed for dhcp_ccb[%u]", ccb_id);
+            rte_mempool_put(fastrg_ccb->dhcp_ccb_mp, array[ccb_id]);
+            array[ccb_id] = NULL;
+            goto err;
+        }
+        if (rte_mempool_get_bulk(dhcp_per_lan_user_mempool,
+                (void **)array[ccb_id]->per_lan_user_pool,
+                DHCP_MAX_POOL_SIZE_PER_USER) < 0) {
+            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, DHCPLOGMSG,
+                "per-LAN-user entry preallocation failed for dhcp_ccb[%u]", ccb_id);
+            fastrg_mfree(array[ccb_id]->per_lan_user_pool);
+            rte_mempool_put(fastrg_ccb->dhcp_ccb_mp, array[ccb_id]);
+            array[ccb_id] = NULL;
+            goto err;
+        }
+        for(U32 j=0; j<DHCP_MAX_POOL_SIZE_PER_USER; j++) {
+            dhcp_ccb_per_lan_user_t *e = array[ccb_id]->per_lan_user_pool[j];
+            memset(e, 0, sizeof(*e));
+            rte_timer_init(&e->lan_user_info.timer);
+            e->dhcp_ccb = array[ccb_id];
+            e->pool_index = j;
+        }
+
         dhcp_init_by_user(array[ccb_id], ccb_id, dhcp_per_lan_user_mempool);
     }
 
     return SUCCESS;
-}
 
-STATUS dhcpd_init_rcu(FastRG_t *fastrg_ccb)
-{
-    size_t sz = rte_rcu_qsbr_get_memsize(RTE_MAX_LCORE);
-    fastrg_ccb->dhcp_ccb_rcu = fastrg_calloc(struct rte_rcu_qsbr, 1, sz, RTE_CACHE_LINE_SIZE);
-    if (fastrg_ccb->dhcp_ccb_rcu == NULL) {
-        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, DHCPLOGMSG, "rte_zmalloc for RCU failed");
-        return ERROR;
+err:
+    for(U16 j=start_id; start_id+count>j; j++) {
+        if (array[j] == NULL)
+            continue;
+        if (array[j]->per_lan_user_pool != NULL) {
+            rte_mempool_put_bulk(dhcp_per_lan_user_mempool,
+                (void **)array[j]->per_lan_user_pool,
+                DHCP_MAX_POOL_SIZE_PER_USER);
+            fastrg_mfree(array[j]->per_lan_user_pool);
+            array[j]->per_lan_user_pool = NULL;
+        }
+        rte_mempool_put(fastrg_ccb->dhcp_ccb_mp, array[j]);
+        array[j] = NULL;
     }
-
-    if (rte_rcu_qsbr_init(fastrg_ccb->dhcp_ccb_rcu, RTE_MAX_LCORE) != 0) {
-        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, DHCPLOGMSG, "rte_rcu_qsbr_init failed");
-        fastrg_mfree(fastrg_ccb->dhcp_ccb_rcu);
-        return ERROR;
-    }
-
-    unsigned int lcore_id;
-    RTE_LCORE_FOREACH(lcore_id) {
-        rte_rcu_qsbr_thread_register(fastrg_ccb->dhcp_ccb_rcu, lcore_id);
-    }
-
-    rte_atomic16_init(&fastrg_ccb->dhcp_ccb_updating);
-
-    return SUCCESS;
-}
-
-STATUS dhcpd_add_ccb(FastRG_t *fastrg_ccb, U16 extra_ccb_count)
-{
-    if (extra_ccb_count == 0) {
-        FastRG_LOG(WARN, fastrg_ccb->fp, NULL, DHCPLOGMSG, 
-            "extra_ccb_count is 0, nothing to do");
-        return SUCCESS;
-    }
-
-    /* Early-return only when all needed slots were already allocated. */
-    U16 dhcp_new_user_count_check = fastrg_ccb->user_count + extra_ccb_count;
-    if (rte_mempool_in_use_count(fastrg_ccb->dhcp_ccb_mp) >= dhcp_new_user_count_check) {
-        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, DHCPLOGMSG,
-            "DHCP CCBs up to %u already allocated, reusing existing array", dhcp_new_user_count_check);
-        return SUCCESS;
-    }
-
-    if (!rte_atomic16_cmpset((volatile uint16_t *)&fastrg_ccb->dhcp_ccb_updating.cnt, 0, 1)) {
-        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, DHCPLOGMSG, 
-            "Another resize operation is in progress");
-        return ERROR;
-    }
-
-    dhcp_ccb_t **old_array = (dhcp_ccb_t **)fastrg_ccb->dhcp_ccb;
-    /* Use dhcp pool in_use count as high-water-mark (mirrors pppd_add_ccb logic). */
-    U16 dhcp_old_array_hwm = (U16)rte_mempool_in_use_count(fastrg_ccb->dhcp_ccb_mp);
-    U16 old_user_count = fastrg_ccb->user_count;
-    U16 new_user_count = old_user_count + extra_ccb_count;
-    if (dhcp_old_array_hwm > new_user_count) dhcp_old_array_hwm = new_user_count;
-    U16 dhcp_truly_new = new_user_count - dhcp_old_array_hwm;
-
-    dhcp_ccb_t **new_array = fastrg_malloc(dhcp_ccb_t *,
-        sizeof(dhcp_ccb_t *) * new_user_count, 0);
-    if (new_array == NULL) {
-        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, DHCPLOGMSG,
-            "malloc dhcp_ccb array failed");
-        rte_atomic16_clear(&fastrg_ccb->dhcp_ccb_updating);
-        return ERROR;
-    }
-
-    if (old_array != NULL)
-        memcpy(new_array, old_array, sizeof(dhcp_ccb_t *) * dhcp_old_array_hwm);
-
-    if (dhcp_truly_new > 0)
-        memset(&new_array[dhcp_old_array_hwm], 0, sizeof(dhcp_ccb_t *) * dhcp_truly_new);
-
-    /* Get the shared dhcp_per_lan_user_mempool, assuming it was created in dhcp_init */
-    struct rte_mempool *dhcp_per_lan_user_mempool = rte_mempool_lookup("DHCP_PER_LAN_USER_MEMPOOL");
-    if (dhcp_per_lan_user_mempool == NULL) {
-        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, DHCPLOGMSG, 
-            "Failed to lookup DHCP_PER_LAN_USER_MEMPOOL");
-        fastrg_mfree(new_array);
-        rte_atomic16_clear(&fastrg_ccb->dhcp_ccb_updating);
-        return ERROR;
-    }
-
-    if (dhcp_truly_new > 0 && dhcpd_allocate_ccbs(fastrg_ccb, dhcp_old_array_hwm, dhcp_truly_new,
-            new_array, dhcp_per_lan_user_mempool) == ERROR) {
-        fastrg_mfree(new_array);
-        rte_atomic16_clear(&fastrg_ccb->dhcp_ccb_updating);
-        return ERROR;
-    }
-
-    rte_wmb();
-
-    __atomic_store_n(&fastrg_ccb->dhcp_ccb, new_array, __ATOMIC_RELEASE);
-
-    if (old_array != NULL) {
-        rte_rcu_qsbr_synchronize(fastrg_ccb->dhcp_ccb_rcu, RTE_QSBR_THRID_INVALID);
-        fastrg_mfree(old_array);
-    }
-
-    rte_atomic16_clear(&fastrg_ccb->dhcp_ccb_updating);
-
-    FastRG_LOG(INFO, fastrg_ccb->fp, NULL, DHCPLOGMSG, 
-        "%u DHCP CCB added, mempool available: %u", 
-        extra_ccb_count, rte_mempool_avail_count(fastrg_ccb->dhcp_ccb_mp));
-
-    return SUCCESS;
+    return ERROR;
 }
 
 STATUS dhcpd_disable_ccb(FastRG_t *fastrg_ccb, U16 disable_ccb_count, U16 old_ccb_count)
@@ -282,7 +171,6 @@ STATUS dhcpd_disable_ccb(FastRG_t *fastrg_ccb, U16 disable_ccb_count, U16 old_cc
     for(U16 i=0; i<disable_ccb_count; i++) {
         U16 ccb_id = old_ccb_count - 1 - i;
         dhcp_ccb_t *dhcp_ccb = old_array[ccb_id];
-        /* Unconfigured slots past the old count may be NULL — nothing to stop. */
         if (dhcp_ccb == NULL)
             continue;
 
@@ -303,123 +191,40 @@ STATUS dhcpd_disable_ccb(FastRG_t *fastrg_ccb, U16 disable_ccb_count, U16 old_cc
     return SUCCESS;
 }
 
-STATUS dhcpd_remove_ccb(FastRG_t *fastrg_ccb, U16 remove_ccb_count, U16 old_ccb_count)
-{
-    if (remove_ccb_count > old_ccb_count) {
-        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, DHCPLOGMSG, 
-            "Invalid removing ccb count %u", remove_ccb_count);
-        return ERROR;
-    }
-
-    if (remove_ccb_count == 0) {
-        FastRG_LOG(WARN, fastrg_ccb->fp, NULL, DHCPLOGMSG, 
-            "remove_ccb_count is 0, nothing to do");
-        return SUCCESS;
-    }
-
-    if (!rte_atomic16_cmpset((volatile uint16_t *)&fastrg_ccb->dhcp_ccb_updating.cnt, 0, 1)) {
-        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, DHCPLOGMSG, 
-            "Another resize operation is in progress");
-        return ERROR;
-    }
-
-    dhcp_ccb_t **old_array = (dhcp_ccb_t **)fastrg_ccb->dhcp_ccb;
-    U16 new_user_count = old_ccb_count - remove_ccb_count;
-
-    /* Teardown only: stop the DHCP service of the CCBs being removed and wait
-     * for in-flight processing to drain. Nothing is freed and no slot is
-     * cleared here — a data-plane reader that already fetched a pointer out of
-     * old_array keeps dereferencing it until the grace period below, and
-     * clearing the slot early would only open a new fetch-to-NULL window.
-     * Freeing happens after rte_rcu_qsbr_synchronize(). */
-    for(U16 i=0; i<remove_ccb_count; i++) {
-        U16 ccb_id = old_ccb_count - 1 - i;
-        dhcp_ccb_t *dhcp_ccb = old_array[ccb_id];
-        /* Unconfigured slots past the old count may be NULL — nothing to stop. */
-        if (dhcp_ccb == NULL)
-            continue;
-
-        rte_atomic16_set(&dhcp_ccb->dhcp_bool, 0);
-        while(rte_atomic32_read(&dhcp_ccb->active_count) > 0)
-            rte_pause();
-    }
-
-    if (new_user_count == 0) {
-        __atomic_store_n(&fastrg_ccb->dhcp_ccb, (dhcp_ccb_t **)NULL, __ATOMIC_RELEASE);
-
-        rte_rcu_qsbr_synchronize(fastrg_ccb->dhcp_ccb_rcu, RTE_QSBR_THRID_INVALID);
-    } else {
-        dhcp_ccb_t **new_array = fastrg_malloc(dhcp_ccb_t *, 
-            sizeof(dhcp_ccb_t *) * new_user_count, 0);
-        if (new_array == NULL) {
-            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, DHCPLOGMSG, 
-                "malloc new smaller dhcp_ccb array failed");
-            rte_atomic16_clear(&fastrg_ccb->dhcp_ccb_updating);
-            return ERROR;
-        }
-
-        rte_memcpy(new_array, old_array, sizeof(dhcp_ccb_t *) * new_user_count);
-
-        rte_wmb();
-
-        __atomic_store_n(&fastrg_ccb->dhcp_ccb, new_array, __ATOMIC_RELEASE);
-
-        rte_rcu_qsbr_synchronize(fastrg_ccb->dhcp_ccb_rcu, RTE_QSBR_THRID_INVALID);
-    }
-
-    /* The grace period has elapsed: no reader can still hold a pointer taken
-     * from old_array, so the removed CCBs and the old array are safe to free. */
-    for(U16 ccb_id=new_user_count; ccb_id<old_ccb_count; ccb_id++) {
-        dhcp_ccb_t *dhcp_ccb = old_array[ccb_id];
-        /* Unconfigured slots past the old count may be NULL — nothing to free. */
-        if (dhcp_ccb == NULL)
-            continue;
-
-        /* Free per-LAN-user pool */
-        if (dhcp_ccb->per_lan_user_pool != NULL) {
-            for(U32 j=0; j<dhcp_ccb->per_lan_user_pool_len; j++) {
-                if (dhcp_ccb->per_lan_user_pool[j] != NULL)
-                    rte_timer_stop_sync(&dhcp_ccb->per_lan_user_pool[j]->lan_user_info.timer);
-            }
-            if (dhcp_ccb->per_lan_user_pool_len > 0) {
-                rte_mempool_put_bulk(dhcp_ccb->dhcp_per_lan_user_mempool,
-                    (void **)dhcp_ccb->per_lan_user_pool,
-                    dhcp_ccb->per_lan_user_pool_len);
-            }
-            fastrg_mfree(dhcp_ccb->per_lan_user_pool);
-            dhcp_ccb->per_lan_user_pool = NULL;
-        }
-
-        rte_mempool_put(fastrg_ccb->dhcp_ccb_mp, dhcp_ccb);
-    }
-
-    fastrg_mfree(old_array);
-
-    rte_atomic16_clear(&fastrg_ccb->dhcp_ccb_updating);
-
-    FastRG_LOG(INFO, fastrg_ccb->fp, NULL, DHCPLOGMSG, 
-        "%u DHCP CCBs removed, mempool available: %u", 
-        remove_ccb_count, rte_mempool_avail_count(fastrg_ccb->dhcp_ccb_mp));
-
-    return SUCCESS;
-}
-
-void dhcpd_cleanup_ccb(FastRG_t *fastrg_ccb, U16 total_ccb_count)
+void dhcpd_cleanup_ccb(FastRG_t *fastrg_ccb)
 {
     if (fastrg_ccb == NULL)
         return;
 
-    if (fastrg_ccb->dhcp_ccb != NULL && total_ccb_count > 0)
-        dhcpd_remove_ccb(fastrg_ccb, total_ccb_count, total_ccb_count);
+    if (fastrg_ccb->dhcp_ccb != NULL) {
+        for(U16 ccb_id=0; ccb_id<fastrg_ccb->max_user_count; ccb_id++) {
+            dhcp_ccb_t *dhcp_ccb = (dhcp_ccb_t *)fastrg_ccb->dhcp_ccb[ccb_id];
+            if (dhcp_ccb == NULL)
+                continue;
+
+            rte_atomic16_set(&dhcp_ccb->dhcp_bool, 0);
+
+            if (dhcp_ccb->per_lan_user_pool != NULL) {
+                for(U32 j=0; j<dhcp_ccb->per_lan_user_pool_len; j++) {
+                    if (dhcp_ccb->per_lan_user_pool[j] != NULL)
+                        rte_timer_stop_sync(&dhcp_ccb->per_lan_user_pool[j]->lan_user_info.timer);
+                }
+                rte_mempool_put_bulk(dhcp_ccb->dhcp_per_lan_user_mempool,
+                    (void **)dhcp_ccb->per_lan_user_pool,
+                    DHCP_MAX_POOL_SIZE_PER_USER);
+                fastrg_mfree(dhcp_ccb->per_lan_user_pool);
+                dhcp_ccb->per_lan_user_pool = NULL;
+            }
+
+            rte_mempool_put(fastrg_ccb->dhcp_ccb_mp, dhcp_ccb);
+        }
+        fastrg_mfree(fastrg_ccb->dhcp_ccb);
+        fastrg_ccb->dhcp_ccb = NULL;
+    }
 
     if (fastrg_ccb->dhcp_ccb_mp != NULL) {
         rte_mempool_free(fastrg_ccb->dhcp_ccb_mp);
         fastrg_ccb->dhcp_ccb_mp = NULL;
-    }
-
-    if (fastrg_ccb->dhcp_ccb_rcu != NULL) {
-        fastrg_mfree(fastrg_ccb->dhcp_ccb_rcu);
-        fastrg_ccb->dhcp_ccb_rcu = NULL;
     }
 
     /* Free the shared per-LAN-user mempool */
@@ -435,20 +240,12 @@ STATUS dhcp_init(FastRG_t *fastrg_ccb)
 {
     unsigned int mempool_size = 1U << (31 - __builtin_clz(fastrg_ccb->max_user_count) + 1);
 
-    if (dhcpd_init_rcu(fastrg_ccb) == ERROR) {
-        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, DHCPLOGMSG, 
-            "dhcpd_init_rcu failed");
-        return ERROR;
-    }
-
     fastrg_ccb->dhcp_ccb_mp = rte_mempool_create(
         "dhcp_ccb_pool",                     /* name */
         mempool_size,                        /* user count */
         sizeof(dhcp_ccb_t),                  /* dhcp_ccb size */
-        /* No per-lcore cache: DHCP CCB get/put is a control-plane resize, not a
-         * per-packet hot path. A cache strands free CCBs in one lcore's local
-         * cache, making rte_mempool_get fail with ENOENT during subscriber-count
-         * expansion even while objects are reportedly free. See ppp_ccb_pool. */
+        /* No per-lcore cache: every object is taken exactly once at init and
+         * returned only at shutdown. */
         0,                                   /* per-lcore cache size */
         0,                                   /* private_data_size */
         NULL, NULL,                          /* mp_init, mp_init_arg */
@@ -459,41 +256,54 @@ STATUS dhcp_init(FastRG_t *fastrg_ccb)
     if (fastrg_ccb->dhcp_ccb_mp == NULL) {
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, DHCPLOGMSG, 
             "rte_mempool_create failed: %s", rte_strerror(rte_errno));
-        fastrg_mfree(fastrg_ccb->dhcp_ccb_rcu);
         return ERROR;
     }
 
-    /* Create shared per-LAN-user mempool */
+    /* No per-lcore cache: every object is taken exactly once at init and
+     * returned only at shutdown. */
     struct rte_mempool *dhcp_per_lan_user_mempool = rte_mempool_create("DHCP_PER_LAN_USER_MEMPOOL", 
         DHCP_MAX_POOL_SIZE_PER_USER * fastrg_ccb->max_user_count, 
-        sizeof(dhcp_ccb_per_lan_user_t), RTE_MEMPOOL_CACHE_MAX_SIZE, 0, NULL, NULL, NULL, NULL, 
+        sizeof(dhcp_ccb_per_lan_user_t), 0, 0, NULL, NULL, NULL, NULL, 
         rte_socket_id(), 0);
     if (dhcp_per_lan_user_mempool == NULL) {
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, DHCPLOGMSG, "Failed to create DHCP_PER_LAN_USER_MEMPOOL");
         rte_mempool_free(fastrg_ccb->dhcp_ccb_mp);
-        fastrg_mfree(fastrg_ccb->dhcp_ccb_rcu);
+        fastrg_ccb->dhcp_ccb_mp = NULL;
         return ERROR;
     }
 
     for(int i=0; i<RTE_ETHER_ADDR_LEN; i++)
         zero_mac.addr_bytes[i] = 0;
 
-    U16 initial_user_count = fastrg_ccb->user_count;
-    /* assume we want to add ccbs from 0 to initial_user_count */
-    fastrg_ccb->user_count = 0;
-    fastrg_ccb->dhcp_ccb = NULL;
-    if (dhcpd_add_ccb(fastrg_ccb, initial_user_count) == ERROR) {
-        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, DHCPLOGMSG, 
-            "dhcpd_add_ccb for initial %u CCBs failed", initial_user_count);
+    /* Fixed-max full preallocation, mirroring pppd_init: array + all slots
+     * (with their full per-LAN-user entry capacity) are allocated now; the
+     * array pointer never changes afterwards. */
+    fastrg_ccb->dhcp_ccb = (void **)fastrg_calloc(dhcp_ccb_t *,
+        fastrg_ccb->max_user_count, sizeof(dhcp_ccb_t *), 0);
+    if (fastrg_ccb->dhcp_ccb == NULL) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, DHCPLOGMSG,
+            "dhcp_ccb array allocation failed");
         rte_mempool_free(dhcp_per_lan_user_mempool);
         rte_mempool_free(fastrg_ccb->dhcp_ccb_mp);
-        fastrg_mfree(fastrg_ccb->dhcp_ccb_rcu);
+        fastrg_ccb->dhcp_ccb_mp = NULL;
         return ERROR;
     }
-    fastrg_ccb->user_count = initial_user_count;
 
-    FastRG_LOG(INFO, fastrg_ccb->fp, NULL, DHCPLOGMSG, 
-        "============ DHCP init successfully ==============\n");
+    if (dhcpd_allocate_ccbs(fastrg_ccb, 0, fastrg_ccb->max_user_count,
+            (dhcp_ccb_t **)fastrg_ccb->dhcp_ccb, dhcp_per_lan_user_mempool) == ERROR) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, DHCPLOGMSG,
+            "preallocating %u DHCP CCBs failed", fastrg_ccb->max_user_count);
+        fastrg_mfree(fastrg_ccb->dhcp_ccb);
+        fastrg_ccb->dhcp_ccb = NULL;
+        rte_mempool_free(dhcp_per_lan_user_mempool);
+        rte_mempool_free(fastrg_ccb->dhcp_ccb_mp);
+        fastrg_ccb->dhcp_ccb_mp = NULL;
+        return ERROR;
+    }
+
+    FastRG_LOG(INFO, fastrg_ccb->fp, NULL, DHCPLOGMSG,
+        "============ DHCP init successfully (%u slots preallocated) ==============\n",
+        fastrg_ccb->max_user_count);
     return SUCCESS;
 }
 

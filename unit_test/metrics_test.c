@@ -211,11 +211,8 @@ static void test_per_user_stats(FastRG_t *fastrg_ccb)
 
 void test_metrics(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 {
-    size_t rcu_size = rte_rcu_qsbr_get_memsize(RTE_MAX_LCORE);
-    struct rte_rcu_qsbr *stats_rcu = NULL;
     unsigned int lcore_id = rte_get_main_lcore();
     char *saved_uuid = fastrg_ccb->node_uuid;
-    struct rte_rcu_qsbr *saved_stats_rcu = fastrg_ccb->per_subscriber_stats_rcu;
     struct per_ccb_stats *saved_lan_stats = fastrg_ccb->per_subscriber_stats[lcore_id][LAN_PORT];
     struct per_ccb_stats *saved_wan_stats = fastrg_ccb->per_subscriber_stats[lcore_id][WAN_PORT];
     struct pppoes_lcore_stats *saved_pppoes_stats = fastrg_ccb->pppoes_stats[lcore_id];
@@ -233,12 +230,6 @@ void test_metrics(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     printf("║                metrics Module Unit Tests                  ║\n");
     printf("╚═══════════════════════════════════════════════════════════╝\n");
 
-    TEST_ASSERT(posix_memalign((void **)&stats_rcu, RTE_CACHE_LINE_SIZE, rcu_size) == 0,
-        "allocate subscriber stats RCU fixture", "allocation failed");
-    memset(stats_rcu, 0, rcu_size);
-    TEST_ASSERT(rte_rcu_qsbr_init(stats_rcu, RTE_MAX_LCORE) == 0,
-        "initialize subscriber stats RCU fixture", "initialization failed");
-    fastrg_ccb->per_subscriber_stats_rcu = stats_rcu;
     fastrg_ccb->lcore_usage = NULL;
     fastrg_ccb->user_count = 1;
     fastrg_ccb->ppp_ccb = test_ppp_array;
@@ -253,7 +244,6 @@ void test_metrics(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
         fastrg_ccb->pppoes_stats[lcore_id] != NULL && test_ppp_ccb != NULL && test_dhcp_ccb != NULL,
         "allocate metrics stats rows", "allocation failed");
 
-    metrics_rcu_register(fastrg_ccb);
     test_contract_and_families(fastrg_ccb);
     test_uuid_escaping(fastrg_ccb);
     test_pppoe_phase_tallies(fastrg_ccb);
@@ -266,12 +256,10 @@ void test_metrics(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     fastrg_ccb->per_subscriber_stats[lcore_id][LAN_PORT] = saved_lan_stats;
     fastrg_ccb->per_subscriber_stats[lcore_id][WAN_PORT] = saved_wan_stats;
     fastrg_ccb->pppoes_stats[lcore_id] = saved_pppoes_stats;
-    fastrg_ccb->per_subscriber_stats_rcu = saved_stats_rcu;
     fastrg_ccb->lcore_usage = saved_lcore_usage;
     fastrg_ccb->user_count = saved_user_count;
     fastrg_ccb->ppp_ccb = saved_ppp_ccb;
     fastrg_ccb->dhcp_ccb = saved_dhcp_ccb;
-    free(stats_rcu);
     free(test_ppp_ccb);
     free(test_dhcp_ccb);
 

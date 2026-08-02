@@ -16,6 +16,10 @@ void test_parse_config_valid(FastRG_t *fastrg_ccb)
     printf("=========================================\n\n");
 
     struct fastrg_config cfg = {0};
+    /* parse_config writes user_count/max_user_count into the shared mock ccb;
+     * save them so later suites keep the harness fixture they expect. */
+    U16 saved_user_count = fastrg_ccb->user_count;
+    U16 saved_max_user_count = fastrg_ccb->max_user_count;
 
     /* Create a temporary config file */
     const char *test_config = "/tmp/test_fastrg.conf";
@@ -33,11 +37,14 @@ void test_parse_config_valid(FastRG_t *fastrg_ccb)
         "parse_config returns ERROR");
     TEST_ASSERT(fastrg_ccb->max_user_count == 100, "check max user count", 
         "MaxUserCount != 100");
-    TEST_ASSERT(fastrg_ccb->user_count == 10, "check initial user count", 
-        "InitUserCount != 10");
+    /* user_count is configured after admin set the subscriber count */
+    TEST_ASSERT(fastrg_ccb->user_count == 0,
+        "user_count should boots at 0", "user_count != 0");
     TEST_ASSERT(cfg.heartbeat_interval == 60, "check heartbeat interval", 
         "HeartbeatInterval != 60");
 
+    fastrg_ccb->user_count = saved_user_count;
+    fastrg_ccb->max_user_count = saved_max_user_count;
     unlink(test_config);
     printf("✓ Test passed\n");
 }
@@ -55,7 +62,7 @@ void test_parse_config_invalid(FastRG_t *fastrg_ccb)
         "Create test config file failed");
 
     fprintf(fp, "MaxUserCount = 0;\n");  /* Invalid */
-    fprintf(fp, "InitUserCount = 0;\n");  /* Invalid */
+    fprintf(fp, "InitUserCount = 0;\n");  /* Malformed config, should be ignored */
     fclose(fp);
 
     STATUS ret = parse_config(test_config, fastrg_ccb, &cfg);

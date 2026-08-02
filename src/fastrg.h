@@ -117,37 +117,37 @@ typedef struct FastRG {
     BOOL                    enable_ddp;         /* mirrors EnableDDP config toggle */
     U16                     heartbeat_interval; /* heartbeat interval time in seconds */
     struct nic_info         nic_info;
-    void                    **ppp_ccb;       /* pppoe control block */
+    /* Fixed-max prealloc: the ppp_ccb / dhcp_ccb pointer arrays are sized to
+     * max_user_count at init, every slot is allocated and base-initialized
+     * then, and neither the arrays nor the slots are ever swapped, resized or
+     * freed at runtime. user_count is purely the accessible upper bound. */
+    void                    **ppp_ccb;       /* pppoe control block, the array never be changed */
     struct rte_mempool      *ppp_ccb_mp;
-    struct rte_rcu_qsbr     *ppp_ccb_rcu;   /* RCU for protecting ppp_ccb array pointer */
-    rte_atomic16_t          ppp_ccb_updating; /* flag indicating array is being updated */
-    void                    **dhcp_ccb;     /* dhcp control block */
+    /* ppp_ccb_rcu does not guard the array pointer ppp_ccb. It is
+     * KEPT because the per-subscriber NAT slot reclaim depends on it: the NAT
+     * reverse/forward rte_hash defer queues (rte_hash_rcu_qsbr_add) use this
+     * QSBR variable, and the data-plane lcores stay persistently online on it
+     * reporting one quiescent state per burst (fastrg_rcu_dp_quiescent). */
+    struct rte_rcu_qsbr     *ppp_ccb_rcu;
+    void                    **dhcp_ccb;     /* dhcp control block, the array never be changed */
     struct rte_mempool      *dhcp_ccb_mp;
-    struct rte_rcu_qsbr     *dhcp_ccb_rcu;  /* RCU for protecting dhcp_ccb array pointer */
-    rte_atomic16_t          dhcp_ccb_updating; /* flag indicating array is being updated */
     struct rte_mempool      *arp_pending_mp; /* mempool for ARP pending queue entries */
     rte_atomic16_t          *vlan_userid_map; /* vlan to user id map */
-    /* Per-lcore × per-port stats: [raw rte_lcore_id()][port] -> (user_count+1)
-     * entry array (last = unknown user). Only EAL-lcore rows are allocated;
-     * each lcore writes only its own row, readers sum across rows. */
+    /* Per-lcore × per-port stats: [raw rte_lcore_id()][port] ->
+     * (max_user_count+1) entry array, allocated once at init and freed only
+     * at shutdown (index max_user_count = unknown-user slot). Only EAL-lcore
+     * rows are allocated; each lcore writes only its own row, readers sum
+     * across rows. */
     struct per_ccb_stats    *per_subscriber_stats[RTE_MAX_LCORE][PORT_AMOUNT];
-    U16                     per_subscriber_stats_len;
-    struct rte_rcu_qsbr     *per_subscriber_stats_rcu; /* RCU for protecting per_subscriber_stats array pointer */
-    /* pdump_rcu does not protect a data pointer and is kept separate from the
-     * stats RCUs to avoid implying a dependency on them. It marks intervals
+    /* pdump_rcu does not protect a data pointer. It marks intervals
      * where data-plane lcores may be inside RX/TX bursts and therefore pdump
      * callbacks. Callback removal does not wait for callbacks already in
      * flight; teardown synchronizes this timeline after removal and frees the
      * ring, mempool, and filter only after every reader crosses a burst boundary. */
     struct rte_rcu_qsbr     *pdump_rcu;
-    rte_atomic16_t          per_subscriber_stats_updating; /* flag indicating stats array is being updated */
-    /* Per-lcore PPPoE session stats: [raw rte_lcore_id()] -> user_count-entry
-     * array. Same scheme as per_subscriber_stats; protected by ppp_ccb_rcu
-     * (resized with the ppp_ccb count, read inside the readers' ppp_ccb_rcu
-     * sections). Only EAL-lcore rows are allocated. */
+    /* Per-lcore PPPoE session stats: [raw rte_lcore_id()] ->
+     * (max_user_count+1) entry array, fixed like per_subscriber_stats. */
     struct pppoes_lcore_stats *pppoes_stats[RTE_MAX_LCORE];
-    U16                     pppoes_stats_len;
-    rte_atomic16_t          pppoes_stats_updating; /* flag indicating pppoes stats array is being updated */
     struct rte_timer        link;           /* for physical link checking timer */
     struct rte_timer        heartbeat_timer;/* for controller heartbeat timer */
     datapath_mode_t         datapath_mode;    /* RSS multi-queue vs software distributor */
@@ -185,29 +185,26 @@ STATUS fastrg_disable_subscriber_stats(FastRG_t *fastrg_ccb, U16 disable_count,
     U16 old_count);
 STATUS fastrg_gen_northbound_event(FastRG_t *fastrg_ccb, fastrg_event_type_t event_type,
     U8 cmd_type, U16 ccb_id);
-STATUS fastrg_modify_subscriber_count(FastRG_t *fastrg_ccb, U16 new_count, 
-    U16 old_count);
 
 /**
  * @fn FASTRG_GET_PER_SUBSCRIBER_STATS
- * 
- * @brief Get per subscriber stats pointer with RCU protection
- * 
+ *
+ * @brief Get the calling lcore's per-subscriber stats slot.
+ *
  * @param fastrg_ccb_ptr
  *      FastRG control block pointer
  * @param port_id
  *      Port ID (0 for LAN, 1 for WAN)
  * @param ccb_id
- *      CCB ID
- * @return 
- *      Pointer to per_ccb_stats or NULL if failed
+ *      CCB ID (max_user_count = unknown-user slot)
+ * @return
+ *      Pointer to per_ccb_stats or NULL if the caller has no row
  */
 #define FASTRG_GET_PER_SUBSCRIBER_STATS(fastrg_ccb_ptr, port_id, ccb_id) \
-    fastrg_get_per_subscriber_stats((fastrg_ccb_ptr)->per_subscriber_stats_rcu, \
-        (fastrg_ccb_ptr)->per_subscriber_stats, (port_id), (ccb_id))
+    fastrg_get_per_subscriber_stats((fastrg_ccb_ptr)->per_subscriber_stats, \
+        (port_id), (ccb_id))
 
 static __always_inline struct per_ccb_stats *fastrg_get_per_subscriber_stats(
-    struct rte_rcu_qsbr *stats_rcu,
     struct per_ccb_stats *(*stats_2d)[PORT_AMOUNT],
     U16 port_id, U16 ccb_id)
 {
@@ -221,39 +218,16 @@ static __always_inline struct per_ccb_stats *fastrg_get_per_subscriber_stats(
     if (unlikely(lcore_id == LCORE_ID_ANY))
         return NULL;
 
-    /* data-plane lcore: stays QSBR-online for life + quiescent once per burst,
-     * so just do the protected load — skip per-call online/quiescent/offline. */
-    if (likely(fastrg_rcu_persistent[lcore_id])) {
-        struct per_ccb_stats *stats_array =
-            __atomic_load_n(&stats_2d[lcore_id][port_id], __ATOMIC_ACQUIRE);
-        return likely(stats_array != NULL) ? &stats_array[ccb_id] : NULL;
-    }
-
-    // RCU read-side critical section
-    rte_rcu_qsbr_thread_online(stats_rcu, lcore_id);
-
-    // Atomically load this lcore's stats array pointer for this port
-    struct per_ccb_stats *stats_array =
-        __atomic_load_n(&stats_2d[lcore_id][port_id], __ATOMIC_ACQUIRE);
-
-    struct per_ccb_stats *result = NULL;
-    if (likely(stats_array != NULL))
-        result = &stats_array[ccb_id];
-
-    rte_rcu_qsbr_quiescent(stats_rcu, lcore_id);
-    rte_rcu_qsbr_thread_offline(stats_rcu, lcore_id);
-
-    return result;
+    struct per_ccb_stats *stats_array = stats_2d[lcore_id][port_id];
+    return likely(stats_array != NULL) ? &stats_array[ccb_id] : NULL;
 }
 
-/* Return the calling lcore's PPPoE-session stats slot for ccb_id, protected by
- * ppp_ccb_rcu (mirrors FASTRG_GET_PER_SUBSCRIBER_STATS; no port dimension). */
+/* Return the calling lcore's PPPoE-session stats slot for ccb_id (mirrors
+ * FASTRG_GET_PER_SUBSCRIBER_STATS; no port dimension). */
 #define FASTRG_GET_PPPOES_STATS(fastrg_ccb_ptr, ccb_id) \
-    fastrg_get_pppoes_stats((fastrg_ccb_ptr)->ppp_ccb_rcu, \
-        (fastrg_ccb_ptr)->pppoes_stats, (ccb_id))
+    fastrg_get_pppoes_stats((fastrg_ccb_ptr)->pppoes_stats, (ccb_id))
 
 static __always_inline struct pppoes_lcore_stats *fastrg_get_pppoes_stats(
-    struct rte_rcu_qsbr *stats_rcu,
     struct pppoes_lcore_stats **stats_1d,
     U16 ccb_id)
 {
@@ -262,26 +236,12 @@ static __always_inline struct pppoes_lcore_stats *fastrg_get_pppoes_stats(
     if (unlikely(lcore_id == LCORE_ID_ANY))
         return NULL;
 
-    /* data-plane lcore: persistently online on ppp_ccb_rcu + quiescent per burst,
-     * so just do the protected load — skip per-call online/quiescent/offline. */
-    if (likely(fastrg_rcu_persistent[lcore_id])) {
-        struct pppoes_lcore_stats *stats_array =
-            __atomic_load_n(&stats_1d[lcore_id], __ATOMIC_ACQUIRE);
-        return likely(stats_array != NULL) ? &stats_array[ccb_id] : NULL;
-    }
-
-    rte_rcu_qsbr_thread_online(stats_rcu, lcore_id);
-    struct pppoes_lcore_stats *stats_array = __atomic_load_n(&stats_1d[lcore_id], __ATOMIC_ACQUIRE);
-    struct pppoes_lcore_stats *result = (stats_array != NULL) ? &stats_array[ccb_id] : NULL;
-    rte_rcu_qsbr_quiescent(stats_rcu, lcore_id);
-    rte_rcu_qsbr_thread_offline(stats_rcu, lcore_id);
-    return result;
+    struct pppoes_lcore_stats *stats_array = stats_1d[lcore_id];
+    return likely(stats_array != NULL) ? &stats_array[ccb_id] : NULL;
 }
 
-/* Sum a subscriber's per-lcore packet stats across all lcores into *out. The
- * caller must be inside a per_subscriber_stats_rcu read-side section (rows are
- * freed on resize). Keeps the summation in C so the gRPC/metrics readers stay
- * thin marshalling shells. */
+/* Sum a subscriber's per-lcore packet stats across all lcores into *out.
+ * Keeps the summation in C so the gRPC/metrics readers stay thin marshalling shells. */
 static __always_inline void fastrg_sum_subscriber_stats(
     FastRG_t *fastrg_ccb, U16 port_id, U16 ccb_id, struct per_ccb_stats *out)
 {
@@ -305,8 +265,7 @@ static __always_inline void fastrg_sum_subscriber_stats(
     }
 }
 
-/* Sum a PPPoE session's per-lcore counters across all lcores into *out. Caller
- * must be inside a ppp_ccb_rcu read-side section. */
+/* Sum a PPPoE session's per-lcore counters across all lcores into *out. */
 static __always_inline void fastrg_sum_pppoes_stats(
     FastRG_t *fastrg_ccb, U16 ccb_id, struct pppoes_lcore_stats *out)
 {
@@ -326,53 +285,28 @@ static __always_inline void fastrg_sum_pppoes_stats(
 }
 
 /**
- * @fn fastrg_add_subscriber_stats
- *
- * @brief Add more subscriber stats entries
- * 
- * @param fastrg_ccb
- *      FastRG control block pointer
- * @param extra_count
- *      Number of extra entries to add
- * @return 
- *      SUCCESS if added successfully, ERROR if failed
- */
-STATUS fastrg_add_subscriber_stats(FastRG_t *fastrg_ccb, U16 extra_count);
-
-/**
- * @fn fastrg_remove_subscriber_stats
- * 
- * @brief Remove subscriber stats entries
- *
- * @param fastrg_ccb
- *      FastRG control block pointer
- * @param remove_count
- *      Number of entries to remove
- * @param old_count
- *      Old number of entries before removal
- * @return 
- *      SUCCESS if removed successfully, ERROR if failed
- */
-STATUS fastrg_remove_subscriber_stats(FastRG_t *fastrg_ccb, U16 remove_count, U16 old_count);
-
-/**
  * @fn fastrg_cleanup_subscriber_stats
- * 
- * @brief Cleanup all subscriber stats entries
- * 
+ *
+ * @brief Free every per-lcore per-subscriber stats row.
+ *
  * @param fastrg_ccb
  *      FastRG control block pointer
- * @param total_count
- *      Total number of entries
  */
-void fastrg_cleanup_subscriber_stats(FastRG_t *fastrg_ccb, U16 total_count);
+void fastrg_cleanup_subscriber_stats(FastRG_t *fastrg_ccb);
 
-/* Per-lcore PPPoE session stats resize — mirrors the per_subscriber_stats
- * helpers above and is called from the same subscriber-count-change sites. */
-STATUS fastrg_add_pppoes_stats(FastRG_t *fastrg_ccb, U16 extra_count);
-STATUS fastrg_remove_pppoes_stats(FastRG_t *fastrg_ccb, U16 remove_count, U16 old_count);
+/* Per-lcore PPPoE session stats: disable (zero a range) and shutdown
+ * cleanup. */
 STATUS fastrg_disable_pppoes_stats(FastRG_t *fastrg_ccb, U16 disable_count, U16 old_count);
-void fastrg_cleanup_pppoes_stats(FastRG_t *fastrg_ccb, U16 total_count);
+
+/**
+ * @fn fastrg_cleanup_pppoes_stats
+ *
+ * @brief Free every per-lcore per-pppoes stats row.
+ *
+ * @param fastrg_ccb
+ *      FastRG control block pointer
+ */
+void fastrg_cleanup_pppoes_stats(FastRG_t *fastrg_ccb);
 
 int fastrg_start(int argc, char **argv);
 

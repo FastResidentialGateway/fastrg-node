@@ -173,8 +173,14 @@ STATUS apply_hsi_config(FastRG_t *fastrg_ccb, int ccb_id, const hsi_config_t *co
     }
 
     // Apply DHCP configuration
-    dhcp_pool_init_by_user(dhcp_ccb, dhcp_gateway, 
-        dhcp_ip_start, dhcp_ip_end, dhcp_subnet_mask);
+    if (dhcp_pool_init_by_user(dhcp_ccb, dhcp_gateway,
+            dhcp_ip_start, dhcp_ip_end, dhcp_subnet_mask) == ERROR) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+            "config DHCP pool for user %u failed (range exceeds fixed per-user capacity)",
+            ccb_id + 1);
+        ret = ERROR;
+        goto out;
+    }
 
     /* Per-subscriber DNS proxy enable is sourced from etcd HSI config */
     dhcp_ccb->dns_state.dns_proxy_enabled = config->dns_proxy_enable;

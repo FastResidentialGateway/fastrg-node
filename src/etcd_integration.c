@@ -154,16 +154,23 @@ BOOL hsi_config_matches_local(const char *user_id,
         return FALSE;
     }
 
-    if (ppp_ccb->ppp_user_acc == NULL ||
-        strcmp((const char *)ppp_ccb->ppp_user_acc, etcd_config->account_name) != 0) {
+    /* Credential read side: compare under cred_lock (a config update on the
+     * gRPC thread may free+realloc the buffers concurrently). Logging is not
+     * allowed inside the critical section, so only the compare results are
+     * computed under the lock. */
+    rte_spinlock_lock(&ppp_ccb->cred_lock);
+    BOOL acc_match = (ppp_ccb->ppp_user_acc != NULL &&
+        strcmp((const char *)ppp_ccb->ppp_user_acc, etcd_config->account_name) == 0);
+    BOOL pwd_match = (ppp_ccb->ppp_passwd != NULL &&
+        strcmp((const char *)ppp_ccb->ppp_passwd, etcd_config->password) == 0);
+    rte_spinlock_unlock(&ppp_ccb->cred_lock);
+    if (!acc_match) {
         FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
-            "Sync match[%s]: account mismatch local=\"%s\" etcd=\"%s\"",
-            user_id, ppp_ccb->ppp_user_acc ? (const char *)ppp_ccb->ppp_user_acc : "(null)",
-            etcd_config->account_name);
+            "Sync match[%s]: account mismatch etcd=\"%s\"",
+            user_id, etcd_config->account_name);
         return FALSE;
     }
-    if (ppp_ccb->ppp_passwd == NULL ||
-        strcmp((const char *)ppp_ccb->ppp_passwd, etcd_config->password) != 0) {
+    if (!pwd_match) {
         FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
             "Sync match[%s]: password mismatch", user_id);
         return FALSE;
@@ -495,48 +502,15 @@ STATUS user_count_changed_callback(const char *node_id,
             }
 
             if (new_count > current_count) {
-                // Need to add CCBs
-                U16 to_add = (U16)(new_count - current_count);
+                /* Fixed-max prealloc: every CCB slot and stats row up to
+                 * max_user_count already exists (allocated at init), so
+                 * growing the subscriber count is purely exposing more
+                 * slots. Each ccb will be initialized when the dedicated config 
+                 * is received. */
+                fastrg_ccb->user_count = new_count;
                 FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
-                    "Adding %u CCBs (current: %d, target: %d)", to_add, current_count, new_count);
-
-                // Add PPPoE CCBs
-                if (pppd_add_ccb(fastrg_ccb, to_add) != SUCCESS) {
-                    FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
-                        "Failed to add %u PPPoE CCBs", to_add);
-                    /* Node is read-only on etcd: report the failure via Kafka
-                     * instead of writing the count back. The desired count stays
-                     * in etcd; the resulting drift is visible to the controller. */
-                    kafka_report_runtime_error("user_count", "CCB_ALLOC_FAILED",
-                        "failed to add PPPoE CCBs for subscriber-count increase", NULL);
-                    return ERROR;
-                }
-
-                // Add DHCP CCBs
-                if (dhcpd_add_ccb(fastrg_ccb, to_add) != SUCCESS) {
-                    FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
-                        "Failed to add %u DHCP CCBs", to_add);
-                    pppd_disable_ccb(fastrg_ccb, to_add, current_count + to_add); // Disable the PPPoE CCBs that were just added
-                    kafka_report_runtime_error("user_count", "CCB_ALLOC_FAILED",
-                        "failed to add DHCP CCBs for subscriber-count increase", NULL);
-                    return ERROR;
-                }
-
-                if (fastrg_modify_subscriber_count(fastrg_ccb, new_count, current_count) != SUCCESS) {
-                    FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
-                        "Failed to modify internal subscriber count to %d", new_count);
-                    pppd_disable_ccb(fastrg_ccb, to_add, current_count + to_add); // Disable the PPPoE CCBs that were just added
-                    dhcpd_disable_ccb(fastrg_ccb, to_add, current_count + to_add); // Disable the DHCP CCBs that were just added
-                    kafka_report_runtime_error("user_count", "COUNT_APPLY_FAILED",
-                        "failed to apply internal subscriber-count increase", NULL);
-                    return ERROR;
-                }
-
-                if (ret == SUCCESS) {
-                    fastrg_ccb->user_count = new_count;
-                    FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
-                        "Successfully added %u CCBs, new user_count: %d", to_add, fastrg_ccb->user_count);
-                }
+                    "Subscriber count raised %d -> %d (slots preallocated up to max %u)",
+                    current_count, new_count, fastrg_ccb->max_user_count);
             } else {
                 // Need to remove CCBs
                 U16 to_remove = (U16)(current_count - new_count);

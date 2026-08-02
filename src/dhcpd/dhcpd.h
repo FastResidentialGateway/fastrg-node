@@ -82,19 +82,6 @@ int dhcpd(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt,
 STATUS dhcp_init(FastRG_t *fastrg_ccb);
 
 /**
- * @fn dhcpd_add_ccb
- * 
- * @brief Add DHCP control blocks
- * @param fastrg_ccb 
- *      FastRG control block pointer
- * @param extra_ccb_count 
- *      Number of extra CCBs to add
- * @return 
- *      SUCCESS if added successfully, ERROR if failed
- */
-STATUS dhcpd_add_ccb(FastRG_t *fastrg_ccb, U16 extra_ccb_count);
-
-/**
  * @fn dhcpd_disable_ccb
  * 
  * @brief Disable DHCP control blocks, reserve memory region for future use
@@ -110,91 +97,51 @@ STATUS dhcpd_add_ccb(FastRG_t *fastrg_ccb, U16 extra_ccb_count);
 STATUS dhcpd_disable_ccb(FastRG_t *fastrg_ccb, U16 disable_ccb_count, U16 old_ccb_count);
 
 /**
- * @fn dhcpd_remove_ccb
- * 
- * @brief Remove DHCP control blocks
- * @param fastrg_ccb 
- *      FastRG control block pointer
- * @param remove_ccb_count 
- *      Number of CCBs to remove
- * @param old_ccb_count
- *      Old number of CCBs before removal
- * @return 
- *      SUCCESS if removed successfully, ERROR if failed
- */
-STATUS dhcpd_remove_ccb(FastRG_t *fastrg_ccb, U16 remove_ccb_count, U16 old_ccb_count);
-
-/**
  * @fn dhcpd_cleanup_ccb
- * 
- * @brief Cleanup DHCP control blocks
- * @param fastrg_ccb 
+ *
+ * @brief Cleanup DHCP control blocks. All threads must already be stopped.
+ * @param fastrg_ccb
  *      FastRG control block pointer
- * @param total_ccb_count
- *      Total number of CCBs
  */
-void dhcpd_cleanup_ccb(FastRG_t *fastrg_ccb, U16 total_ccb_count);
+void dhcpd_cleanup_ccb(FastRG_t *fastrg_ccb);
 
 /**
  * @fn dhcp_pool_init_by_user
- * 
- * @brief Initialize DHCP IP pool for a user/subscriber
- * @param dhcp_ccb 
+ *
+ * @brief Initialize (or re-window) the DHCP IP pool for a subscriber
+ * @param dhcp_ccb
  *      DHCP control block pointer
- * @param dhcp_server_ip 
+ * @param dhcp_server_ip
  *      DHCP server IP address
- * @param ip_start 
+ * @param ip_start
  *      Start IP address of the pool
- * @param ip_end 
+ * @param ip_end
  *      End IP address of the pool
- * @param subnet_mask 
+ * @param subnet_mask
  *      Subnet mask
+ * @return
+ *      SUCCESS if the window was applied, ERROR if the requested range
+ *      exceeds the dhcp pool maximum capacity (state left untouched)
  */
-void dhcp_pool_init_by_user(dhcp_ccb_t *dhcp_ccb, U32 dhcp_server_ip, 
+STATUS dhcp_pool_init_by_user(dhcp_ccb_t *dhcp_ccb, U32 dhcp_server_ip, 
     U32 ip_start, U32 ip_end, U32 subnet_mask);
 
 void release_lan_user(struct rte_timer *tim, 
     dhcp_ccb_per_lan_user_t *per_lan_user_pool);
 
 /**
- * @fn dhcpd_get_ccb
- * 
+ * @fn DHCPD_GET_CCB
+ *
  * @brief Get DHCP control block by ccb id
- * @param fastrg_ccb_ptr 
+ *
+ * @param fastrg_ccb_ptr
  *      FastRG control block pointer
- * @param ccb_id 
+ * @param ccb_id
  *      CCB ID
- * @return 
+ * @return
  *      dhcp_ccb_t *
  */
 #define DHCPD_GET_CCB(fastrg_ccb_ptr, ccb_id) \
-    dhcpd_get_ccb((fastrg_ccb_ptr)->dhcp_ccb_rcu, \
-        (dhcp_ccb_t ** const *)&(fastrg_ccb_ptr)->dhcp_ccb, \
-        (ccb_id))
-
-static __always_inline dhcp_ccb_t *dhcpd_get_ccb(struct rte_rcu_qsbr *dhcp_ccb_rcu, 
-    dhcp_ccb_t ** const *dhcp_ccb_array_ptr, U16 ccb_id)
-{
-    unsigned int lcore_id = 0;
-
-    if (likely(rte_lcore_id() != LCORE_ID_ANY))
-        lcore_id = rte_lcore_id();
-
-    /* data-plane lcore: stays QSBR-online for life + quiescent once per burst,
-     * so just do the protected load — skip per-call online/quiescent/offline. */
-    if (likely(fastrg_rcu_persistent[lcore_id])) {
-        dhcp_ccb_t **arr = __atomic_load_n(dhcp_ccb_array_ptr, __ATOMIC_ACQUIRE);
-        return __atomic_load_n(&arr[ccb_id], __ATOMIC_ACQUIRE);
-    }
-
-    // RCU read-side critical section
-    rte_rcu_qsbr_thread_online(dhcp_ccb_rcu, lcore_id);
-    dhcp_ccb_t **dhcp_ccb_array = __atomic_load_n(dhcp_ccb_array_ptr, __ATOMIC_ACQUIRE);
-    dhcp_ccb_t *result = __atomic_load_n(&dhcp_ccb_array[ccb_id], __ATOMIC_ACQUIRE);
-    rte_rcu_qsbr_quiescent(dhcp_ccb_rcu, lcore_id);
-    rte_rcu_qsbr_thread_offline(dhcp_ccb_rcu, lcore_id);
-
-    return result;
-}
+    ((dhcp_ccb_t *)(fastrg_ccb_ptr)->dhcp_ccb[(ccb_id)])
 
 #endif

@@ -4,12 +4,8 @@
   Prometheus text exposition for a FastRG node. See metrics.h. Runs on the
   lighthttp metrics thread (a plain pthread, not an EAL lcore).
 
-  RCU: ppp_ccb / dhcp_ccb / per_subscriber_stats are resized at runtime and
-  protected by QSBR. The metrics thread uses its own dedicated reader id (not
-  the lcore-0 slot the gRPC thread borrows). Each gather copies the needed
-  values into local arrays inside a short read-side section; formatting and the
-  socket write happen after the section closes, so a slow client never holds a
-  grace period open against a subscriber-array resize.
+  Each gather copies the needed values into local arrays
+  first; formatting and the socket write happen afterwards.
 /\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\*/
 
 #include <stdio.h>
@@ -32,13 +28,6 @@
 #include "pppd/header.h"
 #include "dhcpd/dhcpd.h"
 #include "metrics.h"
-
-/*
- * Dedicated RCU reader slot for the metrics thread. Avoids sharing the lcore-0
- * slot the gRPC server thread borrows for non-EAL reads. RTE_MAX_LCORE-1 is
- * well above the lcore ids this app assigns.
- */
-#define METRICS_RCU_THREAD_ID (RTE_MAX_LCORE - 1)
 
 #define MAX_MEMPOOLS 64
 
@@ -74,22 +63,6 @@ struct mp_ctx {
     int n;
     int cap;
 };
-
-void metrics_rcu_register(void *arg)
-{
-    FastRG_t *fastrg_ccb = (FastRG_t *)arg;
-    rte_rcu_qsbr_thread_register(fastrg_ccb->per_subscriber_stats_rcu, METRICS_RCU_THREAD_ID);
-    rte_rcu_qsbr_thread_register(fastrg_ccb->ppp_ccb_rcu, METRICS_RCU_THREAD_ID);
-    rte_rcu_qsbr_thread_register(fastrg_ccb->dhcp_ccb_rcu, METRICS_RCU_THREAD_ID);
-}
-
-void metrics_rcu_unregister(void *arg)
-{
-    FastRG_t *fastrg_ccb = (FastRG_t *)arg;
-    rte_rcu_qsbr_thread_unregister(fastrg_ccb->per_subscriber_stats_rcu, METRICS_RCU_THREAD_ID);
-    rte_rcu_qsbr_thread_unregister(fastrg_ccb->ppp_ccb_rcu, METRICS_RCU_THREAD_ID);
-    rte_rcu_qsbr_thread_unregister(fastrg_ccb->dhcp_ccb_rcu, METRICS_RCU_THREAD_ID);
-}
 
 /* Escape a Prometheus label value ( \, ", \n ) into dst. Returns dst. */
 static const char *esc(const char *s, char *dst, size_t dstsz)
@@ -184,9 +157,8 @@ int metrics_build(lighthttp_buf_t *out, const char **content_type, void *arg)
         if (user_count > 0)
             per_user[p] = calloc(user_count, sizeof(struct per_user_row));
     }
-    rte_rcu_qsbr_thread_online(fastrg_ccb->per_subscriber_stats_rcu, METRICS_RCU_THREAD_ID);
     /* C helper sums each subscriber across lcores; here we only copy into the
-     * gathered rows. Index user_count is the unknown-user slot. */
+     * gathered rows. Index max_user_count is the unknown-user slot. */
     for(int p=0; p<PORT_AMOUNT; p++) {
         struct per_ccb_stats sum;
         for(U16 i=0; i<user_count && per_user[p] != NULL; i++) {
@@ -198,7 +170,7 @@ int metrics_build(lighthttp_buf_t *out, const char **content_type, void *arg)
             per_user[p][i].dp  = sum.dropped_packets;
             per_user[p][i].db  = sum.dropped_bytes;
         }
-        fastrg_sum_subscriber_stats(fastrg_ccb, p, user_count, &sum);
+        fastrg_sum_subscriber_stats(fastrg_ccb, p, fastrg_ccb->max_user_count, &sum);
         unknown_user[p].rxp = sum.rx_packets;
         unknown_user[p].rxb = sum.rx_bytes;
         unknown_user[p].txp = sum.tx_packets;
@@ -206,16 +178,12 @@ int metrics_build(lighthttp_buf_t *out, const char **content_type, void *arg)
         unknown_user[p].dp  = sum.dropped_packets;
         unknown_user[p].db  = sum.dropped_bytes;
     }
-    rte_rcu_qsbr_quiescent(fastrg_ccb->per_subscriber_stats_rcu, METRICS_RCU_THREAD_ID);
-    rte_rcu_qsbr_thread_offline(fastrg_ccb->per_subscriber_stats_rcu, METRICS_RCU_THREAD_ID);
-
-    /* ---------- gather: PPPoE sessions (RCU) ---------- */
+    /* ---------- gather: PPPoE sessions ---------- */
     /* phase tallies: data, ipcp, auth, lcp, init, terminated, not_configured, error */
     uint64_t phase[8] = {0};
     struct ppp_row *ppp = (user_count > 0) ? calloc(user_count, sizeof(struct ppp_row)) : NULL;
-    rte_rcu_qsbr_thread_online(fastrg_ccb->ppp_ccb_rcu, METRICS_RCU_THREAD_ID);
     {
-        void **a = __atomic_load_n(&fastrg_ccb->ppp_ccb, __ATOMIC_ACQUIRE);
+        void **a = fastrg_ccb->ppp_ccb;
         for(U16 i=0; i<user_count; i++) {
             ppp_ccb_t *c = a ? (ppp_ccb_t *)a[i] : NULL;
             if (ppp)
@@ -235,8 +203,7 @@ int metrics_build(lighthttp_buf_t *out, const char **content_type, void *arg)
                 default:             phase[7]++; break;
             }
             if (ppp) {
-                /* C helper sums this session across lcores (ccb_id == i), within
-                 * the surrounding ppp_ccb_rcu online section. */
+                /* C helper sums this session across lcores (ccb_id == i). */
                 struct pppoes_lcore_stats sum;
                 fastrg_sum_pppoes_stats(fastrg_ccb, i, &sum);
                 ppp[i].rxp = sum.rx_packets;
@@ -252,15 +219,11 @@ int metrics_build(lighthttp_buf_t *out, const char **content_type, void *arg)
             }
         }
     }
-    rte_rcu_qsbr_quiescent(fastrg_ccb->ppp_ccb_rcu, METRICS_RCU_THREAD_ID);
-    rte_rcu_qsbr_thread_offline(fastrg_ccb->ppp_ccb_rcu, METRICS_RCU_THREAD_ID);
-
-    /* ---------- gather: DHCP servers (RCU) ---------- */
+    /* ---------- gather: DHCP servers ---------- */
     uint64_t dhcp_running = 0, dhcp_stopped = 0, dhcp_notcfg = 0;
     struct dhcp_row *dhcp = (user_count > 0) ? calloc(user_count, sizeof(struct dhcp_row)) : NULL;
-    rte_rcu_qsbr_thread_online(fastrg_ccb->dhcp_ccb_rcu, METRICS_RCU_THREAD_ID);
     {
-        void **a = __atomic_load_n(&fastrg_ccb->dhcp_ccb, __ATOMIC_ACQUIRE);
+        void **a = fastrg_ccb->dhcp_ccb;
         for(U16 i=0; i<user_count; i++) {
             dhcp_ccb_t *c = a ? (dhcp_ccb_t *)a[i] : NULL;
             int configured = 0;
@@ -289,9 +252,6 @@ int metrics_build(lighthttp_buf_t *out, const char **content_type, void *arg)
             }
         }
     }
-    rte_rcu_qsbr_quiescent(fastrg_ccb->dhcp_ccb_rcu, METRICS_RCU_THREAD_ID);
-    rte_rcu_qsbr_thread_offline(fastrg_ccb->dhcp_ccb_rcu, METRICS_RCU_THREAD_ID);
-
     /* ---------- gather: lcore usage ---------- */
     struct lcore_row lcores[RTE_MAX_LCORE];
     int n_lcores = 0;
