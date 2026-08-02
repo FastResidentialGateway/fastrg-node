@@ -138,7 +138,7 @@ For hugepages, NIC binding and other system configuration, please refer to DPDK 
 
 1. Subscriber devices behind FastRG should use DHCP to get IP address or set the default gateway address to their end device.
 	- The DHCP ip address pool can be configured via control plane or FastRG CLI.
-2. In configuration file ***config.cfg***, administrator should use the value ***MaxUserCount*** to specify the maximum number of FastRG subscribers and use ***UserCount*** to specify the initial number of subscribers. By default, the maximum number of subscribers is 10 and initial number of subscribers is 2.
+2. In configuration file ***config.cfg***, administrator should use the value ***MaxUserCount*** to specify the maximum number of FastRG subscribers. By default, the maximum number of subscribers is 10.
 	- This value can be configured via FastRG controller or FastRG CLI tool.
 	- The value range can be set from 1 to 4000.
 3. In data plane, all packets received at FastRG system should include a single tag vlan.
