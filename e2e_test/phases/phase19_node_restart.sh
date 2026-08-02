@@ -110,6 +110,11 @@ phase19_node_restart() {
     local _account2_after=""
     local _vlan1_after=""
     local _vlan2_after=""
+    local _p19_metrics=""
+    local _p19_restart_before=""
+    local _p19_restart_after=""
+    local _p19_start_before=""
+    local _p19_start_after=""
     local _step73_issue=""
     local _step74_issue=""
     local _step76_issue=""
@@ -178,6 +183,14 @@ phase19_node_restart() {
         _step73_issue="${_step73_issue} user1_desire='${_hsi1_desire:-empty}'"
     [[ "$_hsi2_desire" != "connect" ]] && \
         _step73_issue="${_step73_issue} user2_desire='${_hsi2_desire:-empty}'"
+
+    # fastrg_node_restart_total is a persisted process-start counter and
+    # fastrg_node_start_time_seconds is the current process's start epoch. This
+    # phase already performs a graceful stop + cold start, so both are sampled
+    # across it here instead of restarting the node a second time elsewhere.
+    _p19_metrics=$(e2e_metrics_body)
+    _p19_restart_before=$(e2e_metric_value "$_p19_metrics" fastrg_node_restart_total)
+    _p19_start_before=$(e2e_metric_value "$_p19_metrics" fastrg_node_start_time_seconds)
 
     info "  Sending SIGTERM to fastrg and waiting up to 30s for a clean exit..."
     _P19_RESTART_NEEDED=1
@@ -251,11 +264,24 @@ phase19_node_restart() {
             _step74_issue="${_step74_issue} user1_vlan='${_vlan1_after}' expected='${_hsi1_vlan}'"
         [[ "$_vlan2_after" != "$_hsi2_vlan" ]] && \
             _step74_issue="${_step74_issue} user2_vlan='${_vlan2_after}' expected='${_hsi2_vlan}'"
+
+        _p19_metrics=$(e2e_metrics_body)
+        _p19_restart_after=$(e2e_metric_value "$_p19_metrics" fastrg_node_restart_total)
+        _p19_start_after=$(e2e_metric_value "$_p19_metrics" fastrg_node_start_time_seconds)
+        if ! e2e_all_uint "$_p19_restart_before" "$_p19_restart_after" \
+                "$_p19_start_before" "$_p19_start_after"; then
+            _step74_issue="${_step74_issue} restart_total='${_p19_restart_before:-NA}'->'${_p19_restart_after:-NA}' start_time='${_p19_start_before:-NA}'->'${_p19_start_after:-NA}'"
+        else
+            [[ "$_p19_restart_after" -ne $(( _p19_restart_before + 1 )) ]] && \
+                _step74_issue="${_step74_issue} restart_total=${_p19_restart_before}->${_p19_restart_after} (expected +1 for one restart)"
+            [[ "$_p19_start_after" -le "$_p19_start_before" ]] && \
+                _step74_issue="${_step74_issue} start_time=${_p19_start_before}->${_p19_start_after} (expected to move forward)"
+        fi
     fi
 
     if [[ -z "$_step74_issue" ]]; then
         pass "Step 76: Cold restart autonomous recovery" \
-            "users 1/2 returned to Data phase with etcd account/vlan, without dial or config writes"
+            "users 1/2 returned to Data phase with etcd account/vlan, without dial or config writes; restart_total ${_p19_restart_before}->${_p19_restart_after}, start_time ${_p19_start_before}->${_p19_start_after}"
     else
         fail "Step 76: Cold restart autonomous recovery" "${_step74_issue# }"
     fi

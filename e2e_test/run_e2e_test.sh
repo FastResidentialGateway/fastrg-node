@@ -576,6 +576,8 @@ _ctrl_desire_status() {
 # ---------------------------------------------------------------------------
 _E2E_PHASES_DIR="${GRPC_CLIENT_DIR}/phases"
 # shellcheck source=/dev/null
+# Shared /metrics sampling helpers — not a phase; must be sourced first.
+source "${_E2E_PHASES_DIR}/metrics_lib.sh"
 source "${_E2E_PHASES_DIR}/phase0_setup.sh"
 source "${_E2E_PHASES_DIR}/phase1_subscriber_count_tests.sh"
 source "${_E2E_PHASES_DIR}/phase2_etcd_config_sync.sh"
@@ -610,7 +612,8 @@ source "${_E2E_PHASES_DIR}/phase28_chap_auth.sh"
 source "${_E2E_PHASES_DIR}/phase29_protocol_reject.sh"
 source "${_E2E_PHASES_DIR}/phase30_keepalive_failure.sh"
 source "${_E2E_PHASES_DIR}/phase31_subscriber_scale.sh"
-source "${_E2E_PHASES_DIR}/phase32_summary.sh"
+source "${_E2E_PHASES_DIR}/phase32_metric_values.sh"
+source "${_E2E_PHASES_DIR}/phase33_summary.sh"
 
 # ---------------------------------------------------------------------------
 # Cleanup — kill fastrg only if the script started it
@@ -739,7 +742,8 @@ main() {
     phase29_protocol_reject
     phase30_keepalive_failure
     phase31_subscriber_scale
-    phase32_summary || true
+    phase32_metric_values
+    phase33_summary || true
 }
 
 main "$@"
