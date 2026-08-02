@@ -12,6 +12,16 @@
      Used by port-forwarding reverse path to resolve destination MAC
      instead of broadcasting.
 
+     Implementation: a fixed-capacity DPDK rte_hash (created once at init,
+     never resized, never freed at runtime) keyed by the host IPv4 address.
+     The 6-byte MAC plus a 16-bit generation number are packed into the
+     64-bit application-data word of the hash, so learning / re-learning a
+     MAC is a single atomic pdata store inside rte_hash (release order) and
+     a lookup is a single atomic load — a concurrent reader can never
+     observe a torn MAC (this closes audit item A-L5: the old direct-index
+     table updated the 6-byte MAC non-atomically under a separate valid
+     flag).
+
   Designed by THE on 2026/03/29
 /\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\*/
 
@@ -22,6 +32,7 @@
 
 #include <rte_ether.h>
 #include <rte_atomic.h>
+#include <rte_hash.h>
 #include <rte_mbuf.h>
 #include <rte_mempool.h>
 #include <rte_ring.h>
@@ -30,11 +41,10 @@
 /*  MAC table sizing                                                  */
 /* ------------------------------------------------------------------ */
 
-/** Each dimension covers octets 0..254 (255 values). */
-#define MAC_TABLE_DIM           255
-/** Total MAC table entries: 255 * 255 * 255 = 16,581,375.
- *  Covers 10.0.0.0 ~ 10.254.254.254  (or any /8-class subnet). */
-#define MAC_TABLE_SIZE          ((U32)MAC_TABLE_DIM * MAC_TABLE_DIM * MAC_TABLE_DIM)
+/** Fixed per-subscriber capacity: 64K entries = one fully-populated /16.
+ *  Hard-wired by design decision (task-84): we cannot assume a LAN device
+ *  count, and 64K (~2MB/subscriber) is the ruled capacity. */
+#define MAC_TABLE_MAX_ENTRIES 65536
 
 /* ------------------------------------------------------------------ */
 /*  ARP pending queue sizing                                          */
@@ -51,15 +61,18 @@
 /* ------------------------------------------------------------------ */
 
 /**
- * @brief MAC table entry — 8 bytes.
+ * @brief Per-subscriber MAC table handle.
  *
- * Direct-indexed by ip_to_mac_idx().
- * Zero-initialised table ⇒ all entries start with valid == 0.
+ * hash data word layout (uintptr_t, 64-bit):
+ *   bits  0..47 : MAC address bytes 0..5 (byte 0 in bits 0..7)
+ *   bits 48..63 : generation stamp of the entry. This is used to invalidate 
+ *                 all entries in O(1) without calling rte_hash_reset.
  */
-typedef struct mac_table_entry {
-    struct rte_ether_addr mac;      /**< learned MAC address (6 B) */
-    rte_atomic16_t        valid;    /**< 0 = empty, 1 = learned   (2 B) */
-} mac_table_entry_t;
+typedef struct mac_table {
+    struct rte_hash *hash;       /**< key = U32 IP (BE), data = packed MAC+gen */
+    U16              generation; /**< current generation (RELAXED atomic access) */
+    U64              learn_fail; /**< learns dropped because the table is full  */
+} mac_table_t;
 
 /**
  * @brief ARP pending queue entry (allocated from rte_mempool).
@@ -85,99 +98,113 @@ typedef struct arp_pending_queue {
 /* ------------------------------------------------------------------ */
 
 /**
- * @fn ip_to_mac_idx
- * 
- * @brief Convert a host IP (network byte order) to MAC table index.
+ * @fn mac_table_pack
  *
- * Uses octets 2/3/4 (the "host" part of a /8 network):
- *   For IP a.B.C.D  →  index = B * 255*255 + C * 255 + D
- * where B, C, D ∈ [0, 254].  Octet 255 is out of range (broadcast).
+ * @brief Pack a MAC address and a generation stamp into the 64-bit hash
+ *        data word. bits 0..47 for MAC address bytes, bits 48..63 for generation.
  *
- * @param ip_be
- *      IP address in network byte order
- * @param[out] idx
- *      Resulting index
+ * @param mac
+ *      MAC address to pack
+ * @param gen
+ *      Generation stamp
  * @return
- *      SUCCESS on success, ERROR if any octet >= 255
+ *      Packed 64-bit value
  */
-static __always_inline STATUS ip_to_mac_idx(U32 ip_be, U32 *idx)
+static __always_inline uintptr_t mac_table_pack(const struct rte_ether_addr *mac, U16 gen)
 {
-    U32 ip = rte_be_to_cpu_32(ip_be);
-    U32 b  = (ip >> 16) & 0xFF;
-    U32 c  = (ip >> 8)  & 0xFF;
-    U32 d  = ip & 0xFF;
+    uintptr_t v = 0;
 
-    if (unlikely(b >= MAC_TABLE_DIM || c >= MAC_TABLE_DIM || d >= MAC_TABLE_DIM))
-        return ERROR;
+    for(int i=0; i<RTE_ETHER_ADDR_LEN; i++)
+        v |= (uintptr_t)mac->addr_bytes[i] << (i * 8);
+    v |= (uintptr_t)gen << 48;
+    return v;
+}
 
-    *idx = b * (U32)(MAC_TABLE_DIM * MAC_TABLE_DIM) + c * MAC_TABLE_DIM + d;
-    return SUCCESS;
+/**
+ * @fn mac_table_unpack
+ *
+ * @brief Unpack the 64-bit hash data word into a MAC address and its
+ *        generation stamp.
+ *
+ * @param v
+ *      Packed 64-bit value
+ * @param[out] mac
+ *      Unpacked MAC address
+ * @return
+ *      Generation stamp of the entry
+ */
+static __always_inline U16 mac_table_unpack(uintptr_t v, struct rte_ether_addr *mac)
+{
+    for(int i=0; i<RTE_ETHER_ADDR_LEN; i++)
+        mac->addr_bytes[i] = (U8)(v >> (i * 8));
+    return (U16)(v >> 48);
 }
 
 /**
  * @fn mac_table_lookup
- * 
- * @brief Look up a MAC address in the per-subscriber MAC table.
+ *
+ * @brief Look up the MAC learned for a host IP. Lock-free (LF hash lookup +
+ *        one atomic data-word load); safe against concurrent learns.
  *
  * @param table
- *      MAC table pointer (from ppp_ccb)
+ *      MAC table handle (from ppp_ccb)
  * @param ip_be
  *      Host IP address in network byte order
+ * @param[out] mac_out
+ *      Learned MAC address on SUCCESS
  * @return
- *      Pointer to the valid entry, or NULL if not found / out of range.
+ *      SUCCESS if a current-generation entry exists, ERROR otherwise.
  */
-static __always_inline mac_table_entry_t *mac_table_lookup(
-    mac_table_entry_t *table, U32 ip_be)
+static __always_inline STATUS mac_table_lookup(
+    mac_table_t *table, U32 ip_be, struct rte_ether_addr *mac_out)
 {
+    void *data;
+
     if (unlikely(table == NULL))
-        return NULL;
-
-    U32 idx;
-    if (unlikely(ip_to_mac_idx(ip_be, &idx) == ERROR))
-        return NULL;
-
-    mac_table_entry_t *e = &table[idx];
-    if (likely(rte_atomic16_read(&e->valid) != 0)) {
-        rte_rmb();      /* read MAC after checking valid flag */
-        return e;
-    }
-    return NULL;
+        return ERROR;
+    if (rte_hash_lookup_data(table->hash, &ip_be, &data) < 0)
+        return ERROR;
+    U16 gen = mac_table_unpack((uintptr_t)data, mac_out);
+    if (unlikely(gen != __atomic_load_n(&table->generation, __ATOMIC_RELAXED)))
+        return ERROR;   /* stale entry from before the last mac_table_reset */
+    return SUCCESS;
 }
 
 /**
  * @fn mac_table_learn
- * 
- * @brief Learn (store) a MAC ↔ IP mapping in the MAC table.
- * 
+ *
+ * @brief Learn (store) a MAC ↔ IP mapping. Called on the LAN uplink hot
+ *        path by multiple data lcores concurrently.
+ *
+ * Common case (already learned, same MAC, current generation) is a pure
+ * lock-free lookup with no store, so per-packet calls do not dirty the
+ * entry. Only a new IP, a changed MAC, or a stale generation performs the
+ * add (which atomically overwrites the packed data word for existing keys).
+ *
  * @param table
- *      MAC table pointer (from ppp_ccb)
+ *      MAC table handle (from ppp_ccb)
  * @param ip_be
  *      Host IP address in network byte order
  * @param mac
  *      MAC address to store
  */
 static __always_inline void mac_table_learn(
-    mac_table_entry_t *table, U32 ip_be,
-    const struct rte_ether_addr *mac)
+    mac_table_t *table, U32 ip_be, const struct rte_ether_addr *mac)
 {
+    void *data;
+
     if (unlikely(table == NULL))
         return;
 
-    U32 idx;
-    if (unlikely(ip_to_mac_idx(ip_be, &idx) == ERROR))
+    U16 gen = __atomic_load_n(&table->generation, __ATOMIC_RELAXED);
+    uintptr_t want = mac_table_pack(mac, gen);
+
+    if (likely(rte_hash_lookup_data(table->hash, &ip_be, &data) >= 0 &&
+               (uintptr_t)data == want))
         return;
 
-    mac_table_entry_t *e = &table[idx];
-    /* Common case: already learned with the same MAC → skip the write. Every
-     * uplink packet calls this; an unconditional store dirties the entry's
-     * cache line (126 MiB table) and forces a writeback that invalidates cores
-     * reading it. Re-writing the identical value buys nothing, so guard it. */
-    if (likely(rte_atomic16_read(&e->valid) == 1 &&
-               rte_is_same_ether_addr(&e->mac, mac)))
-        return;
-    rte_ether_addr_copy(mac, &e->mac);
-    rte_wmb();  /* ensure MAC is visible before valid flag */
-    rte_atomic16_set(&e->valid, 1);
+    if (unlikely(rte_hash_add_key_data(table->hash, &ip_be, (void *)want) < 0))
+        __atomic_fetch_add(&table->learn_fail, 1, __ATOMIC_RELAXED);
 }
 
 /* ------------------------------------------------------------------ */
@@ -186,26 +213,63 @@ static __always_inline void mac_table_learn(
 
 /**
  * @fn mac_table_alloc
- * 
- * @brief Allocate a MAC table (zero-initialised → all entries invalid).
- * 
- * @return Heap pointer on success, NULL on failure.
+ *
+ * @brief Allocate a MAC table: create the fixed-capacity lock free rte_hash.
+ *
+ * @param ccb_id
+ *      Subscriber slot index; makes the rte_hash name unique
+ *      process-wide.
+ * @return Table handle on success, NULL on failure.
  */
-mac_table_entry_t *mac_table_alloc(void);
+mac_table_t *mac_table_alloc(U16 ccb_id);
 
 /**
  * @fn mac_table_free
- * 
+ *
  * @brief Free a MAC table previously returned by mac_table_alloc().
- * 
+ *
  * @param table
- *      Pointer returned by mac_table_alloc()
+ *      Handle returned by mac_table_alloc()
  */
-void mac_table_free(mac_table_entry_t *table);
+void mac_table_free(mac_table_t *table);
+
+/**
+ * @fn mac_table_reset
+ *
+ * @brief Invalidate every learned entry by bumping the table generation.
+ *        O(1), control-plane, safe against concurrent data-plane learns
+ *        and lookups. Stale keys keep occupying hash slots until the same 
+ *        IP is re-learned; capacity is bounded by 64K distinct IPs ever learned.
+ *
+ * @param table
+ *      MAC table handle (NULL tolerated)
+ */
+void mac_table_reset(mac_table_t *table);
+
+/**
+ * @fn mac_table_iterate
+ *
+ * @brief Walk the table, returning only current-generation entries.
+ *        Control-plane diagnostics (gRPC GetArpTable); safe to run
+ *        concurrently with data-plane learns in lock free mode.
+ *
+ * @param table
+ *      MAC table handle
+ * @param[in,out] next
+ *      Iterator cursor; start from 0
+ * @param[out] ip_out
+ *      Entry host IP (network byte order)
+ * @param[out] mac_out
+ *      Entry MAC address
+ * @return
+ *      Hash position (>= 0) of the returned entry, or -1 at the end.
+ */
+int32_t mac_table_iterate(const mac_table_t *table, U32 *next, U32 *ip_out,
+    struct rte_ether_addr *mac_out);
 
 /**
  * @fn arp_pending_init_pool
- * 
+ *
  * @brief Create the global ARP-pending mempool.  Call once at sys_init.
  * Stores the pool pointer in fastrg_ccb->arp_pending_mp.
  *
@@ -218,10 +282,10 @@ STATUS arp_pending_init_pool(struct rte_mempool **arp_mp_out);
 
 /**
  * @fn arp_pending_cleanup_pool
- * 
+ *
  * @brief Free the global ARP-pending mempool.
  * Call once at sys_cleanup.
- * 
+ *
  * @param arp_mp_ptr
  *      Pointer to the mempool pointer (i.e. &fastrg_ccb->arp_pending_mp)
  */
@@ -229,7 +293,7 @@ void arp_pending_cleanup_pool(struct rte_mempool **arp_mp_ptr);
 
 /**
  * @fn arp_pending_init_queue
- * 
+ *
  * @brief Create a per-subscriber SPSC rte_ring for ARP pending packets.
  *
  * @param q
@@ -243,7 +307,7 @@ STATUS arp_pending_init_queue(arp_pending_queue_t *q, int ccb_id);
 
 /**
  * @fn arp_pending_cleanup_queue
- * 
+ *
  * @brief Destroy a per-subscriber ARP pending ring (flush + free ring).
  *
  * @param q
@@ -255,7 +319,7 @@ void arp_pending_cleanup_queue(arp_pending_queue_t *q, struct rte_mempool *mp);
 
 /**
  * @fn arp_pending_enqueue
- * 
+ *
  * @brief Enqueue a packet into a subscriber's ARP pending queue.
  *
  * If the queue is full the oldest entry is dropped (its mbuf freed,
@@ -277,7 +341,7 @@ STATUS arp_pending_enqueue(struct rte_mempool *mp, arp_pending_queue_t *q,
 
 /**
  * @fn arp_pending_drain
- * 
+ *
  * @brief Drain all pending packets matching a resolved IP.
  *
  * For each match the destination MAC in the Ethernet header is set,
@@ -305,7 +369,7 @@ void arp_pending_drain(struct rte_mempool *mp, arp_pending_queue_t *q,
 
 /**
  * @fn arp_pending_flush
- * 
+ *
  * @brief Flush (free) every entry in a subscriber's ARP pending queue.
  *
  * Call during subscriber cleanup / reconfiguration.

@@ -41,6 +41,10 @@ FastRG_t *init_ccb(int user_count)
         },
     };
     ccb->user_count = user_count;
+    /* Fixed-max prealloc: max_user_count is the capacity bound the getters,
+     * stats rows (max+1 unknown slot) and metrics unknown-user sum index on.
+     * The mock allocates exactly user_count slots, so cap == user_count. */
+    ccb->max_user_count = user_count;
 
     /* ---- ppp_ccb_rcu -------------------------------------------------- */
     size_t rcu_sz = rte_rcu_qsbr_get_memsize(RTE_MAX_LCORE);
@@ -52,16 +56,6 @@ FastRG_t *init_ccb(int user_count)
         goto err;
     rte_rcu_qsbr_thread_register(ppp_rcu, 0);
     ccb->ppp_ccb_rcu = ppp_rcu;
-
-    /* ---- dhcp_ccb_rcu ------------------------------------------------- */
-    struct rte_rcu_qsbr *dhcp_rcu = NULL;
-    if (posix_memalign((void **)&dhcp_rcu, RTE_CACHE_LINE_SIZE, rcu_sz) != 0)
-        goto err;
-    memset(dhcp_rcu, 0, rcu_sz);
-    if (rte_rcu_qsbr_init(dhcp_rcu, RTE_MAX_LCORE) != 0)
-        goto err;
-    rte_rcu_qsbr_thread_register(dhcp_rcu, 0);
-    ccb->dhcp_ccb_rcu = dhcp_rcu;
 
     /* ---- ppp_ccb pointer array + individual CCBs --------------------- */
     ccb->ppp_ccb = fastrg_calloc(ppp_ccb_t *, user_count, sizeof(ppp_ccb_t *), 0);

@@ -17,30 +17,6 @@ extern "C" {
 #endif
 
 /**
- * @fn metrics_rcu_register
- *
- * @brief Register the metrics thread as a dedicated RCU reader on the ppp_ccb,
- *        dhcp_ccb and per_subscriber_stats QSBR instances. Call once from the
- *        metrics server thread before serving any scrape.
- * @param fastrg_ccb
- *      FastRG control block (FastRG_t *)
- * @return
- *      void
- */
-void metrics_rcu_register(void *fastrg_ccb);
-
-/**
- * @fn metrics_rcu_unregister
- *
- * @brief Unregister the metrics thread's dedicated RCU reader slots
- * @param fastrg_ccb
- *      FastRG control block (FastRG_t *)
- * @return
- *      void
- */
-void metrics_rcu_unregister(void *fastrg_ccb);
-
-/**
  * @fn metrics_build
  *
  * @brief lighthttp handler that builds the Prometheus text exposition for this

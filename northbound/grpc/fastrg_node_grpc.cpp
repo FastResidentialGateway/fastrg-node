@@ -736,8 +736,8 @@ grpc::Status FastRGNodeServiceImpl::GetArpTable(::grpc::ServerContext* context, 
     }
 
     ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
-    /* The DHCP CCB only supplies the network prefix below; take it once here so the
-     * RCU-protected slots are fetched and NULL-checked together before any use. */
+    /* dhcp_ccb is only fetched for the joint not-initialized check below; the
+     * MAC-table walk stores full IPs, so no DHCP-derived prefix is needed. */
     dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
     if (!ppp_ccb || !dhcp_ccb) {
         std::string err = "Subscriber not initialized for user " + std::to_string(user_id);
@@ -754,41 +754,34 @@ grpc::Status FastRGNodeServiceImpl::GetArpTable(::grpc::ServerContext* context, 
     U32 total_count = 0;
     U32 returned = 0;
 
-    for(U32 idx=0; idx<MAC_TABLE_SIZE; idx++) {
-        if (rte_atomic16_read(&ppp_ccb->mac_table[idx].valid) != 0) {
-            total_count++;
-            if (returned < max_count) {
-                /* Reconstruct IP from index:
-                 * idx = B * 255*255 + C * 255 + D
-                 * First octet is the network prefix (e.g. 10 for 10.0.0.0/8)
-                 */
-                U32 d = idx % MAC_TABLE_DIM;
-                U32 c = (idx / MAC_TABLE_DIM) % MAC_TABLE_DIM;
-                U32 b = idx / (MAC_TABLE_DIM * MAC_TABLE_DIM);
+    /* The MAC table is a fixed LF rte_hash keyed by the full host IP, so the
+     * walk yields exact IPs (no /8-prefix reconstruction) and is safe against
+     * concurrent data-plane learns. Stale generations are filtered inside
+     * mac_table_iterate. */
+    U32 iter = 0, ip_be = 0;
+    struct rte_ether_addr mac;
+    int32_t pos;
+    while ((pos = mac_table_iterate(ppp_ccb->mac_table, &iter, &ip_be, &mac)) >= 0) {
+        total_count++;
+        if (returned < max_count) {
+            const U8 *ip_bytes = (const U8 *)&ip_be;
+            std::string ip_str = std::to_string(ip_bytes[0]) + "." +
+                std::to_string(ip_bytes[1]) + "." +
+                std::to_string(ip_bytes[2]) + "." +
+                std::to_string(ip_bytes[3]);
 
-                /* Use the DHCP server IP's first octet as the network prefix */
-                U32 net_ip = rte_be_to_cpu_32(dhcp_ccb->dhcp_server_ip);
-                U32 first_octet = (net_ip >> 24) & 0xFF;
+            char mac_buf[18];
+            snprintf(mac_buf, sizeof(mac_buf),
+                "%02x:%02x:%02x:%02x:%02x:%02x",
+                mac.addr_bytes[0], mac.addr_bytes[1],
+                mac.addr_bytes[2], mac.addr_bytes[3],
+                mac.addr_bytes[4], mac.addr_bytes[5]);
 
-                std::string ip_str = std::to_string(first_octet) + "." +
-                    std::to_string(b) + "." +
-                    std::to_string(c) + "." +
-                    std::to_string(d);
-
-                struct rte_ether_addr *mac = &ppp_ccb->mac_table[idx].mac;
-                char mac_buf[18];
-                snprintf(mac_buf, sizeof(mac_buf),
-                    "%02x:%02x:%02x:%02x:%02x:%02x",
-                    mac->addr_bytes[0], mac->addr_bytes[1],
-                    mac->addr_bytes[2], mac->addr_bytes[3],
-                    mac->addr_bytes[4], mac->addr_bytes[5]);
-
-                ArpTableEntry *entry = response->add_entries();
-                entry->set_entry_id(idx);
-                entry->set_ip(ip_str);
-                entry->set_mac(std::string(mac_buf));
-                returned++;
-            }
+            ArpTableEntry *entry = response->add_entries();
+            entry->set_entry_id((U32)pos);
+            entry->set_ip(ip_str);
+            entry->set_mac(std::string(mac_buf));
+            returned++;
         }
     }
 
@@ -829,19 +822,13 @@ int getNicStats(Statistics *stats, uint8_t port_id, FastRG_t *fastrg_ccb)
     stats->set_tx_errors(eth_stats.oerrors);
     stats->set_rx_dropped(eth_stats.imissed);
 
-    // per user stats - with RCU protection
-    unsigned int lcore_id = 0;
-    // gRPC usually runs on non-DPDK lcore
-    if (unlikely(rte_lcore_id() != LCORE_ID_ANY))
-        lcore_id = rte_lcore_id();
-    
-    rte_rcu_qsbr_thread_online(fastrg_ccb->per_subscriber_stats_rcu, lcore_id);
-
-    // Per-lcore stats: C helper sums each subscriber across lcores; here we only
-    // marshal into protobuf. Index user_count is the unknown-user slot (id 0).
+    /* user_count entries for the accessible subscribers, plus one final
+     * iteration for the unknown-user slot: it lives at the fixed index
+     * max_user_count and is reported with user_id 0. */
     for(int i=0; i<=fastrg_ccb->user_count; i++) {
+        U16 idx = (i < fastrg_ccb->user_count) ? (U16)i : fastrg_ccb->max_user_count;
         struct per_ccb_stats sum;
-        fastrg_sum_subscriber_stats(fastrg_ccb, port_id, (U16)i, &sum);
+        fastrg_sum_subscriber_stats(fastrg_ccb, port_id, idx, &sum);
         PerUserStatistics* per_user_stats = stats->add_per_user_stats();
         per_user_stats->set_user_id(i < fastrg_ccb->user_count ? i + 1 : 0);
         per_user_stats->set_rx_packets(sum.rx_packets);
@@ -851,9 +838,6 @@ int getNicStats(Statistics *stats, uint8_t port_id, FastRG_t *fastrg_ccb)
         per_user_stats->set_dropped_bytes(sum.dropped_bytes);
         per_user_stats->set_dropped_packets(sum.dropped_packets);
     }
-
-    rte_rcu_qsbr_quiescent(fastrg_ccb->per_subscriber_stats_rcu, lcore_id);
-    rte_rcu_qsbr_thread_offline(fastrg_ccb->per_subscriber_stats_rcu, lcore_id);
 
     return 0;
 }
@@ -1037,8 +1021,22 @@ grpc::Status FastRGNodeServiceImpl::GetFastrgHsiInfo(::grpc::ServerContext* cont
             continue;
         }
         hsi_info->set_vlan_id(rte_atomic16_read(&ppp_ccb->vlan_id));
-        hsi_info->set_account(std::string(reinterpret_cast<const char*>(ppp_ccb->ppp_user_acc)));
-        hsi_info->set_password(std::string(reinterpret_cast<const char*>(ppp_ccb->ppp_passwd)));
+        /* PPPoE credential read side: this runs on the gRPC thread while a config
+         * update (ctrl thread, or another gRPC call) may free+realloc the
+         * buffers. Copy under cred_lock into private duplicates, then
+         * marshal outside the lock (protobuf setters may block; only plain
+         * heap ops are allowed inside the critical section). */
+        rte_spinlock_lock(&ppp_ccb->cred_lock);
+        char *acc_dup = ppp_ccb->ppp_user_acc != NULL ?
+            strdup(reinterpret_cast<const char*>(ppp_ccb->ppp_user_acc)) : NULL;
+        char *pwd_dup = ppp_ccb->ppp_passwd != NULL ?
+            strdup(reinterpret_cast<const char*>(ppp_ccb->ppp_passwd)) : NULL;
+        rte_spinlock_unlock(&ppp_ccb->cred_lock);
+        hsi_info->set_account(std::string(acc_dup != NULL ? acc_dup : ""));
+        hsi_info->set_password(std::string(pwd_dup != NULL ? pwd_dup : ""));
+        free(acc_dup);
+        free(pwd_dup);
+
         switch (ppp_ccb->phase) {
             case END_PHASE:
                 hsi_info->set_status("End phase");
@@ -1082,17 +1080,9 @@ grpc::Status FastRGNodeServiceImpl::GetFastrgHsiInfo(::grpc::ServerContext* cont
                 hsi_info->set_status("unknown status");
                 break;
         }
-        /* PPPoE session counters are per-lcore; the C helper sums them across
-         * lcores. Must run inside a ppp_ccb_rcu section (rows freed on resize);
-         * the C++ side only manages the RCU section and marshals into protobuf. */
-        unsigned int lcore_id = 0;
-        if (unlikely(rte_lcore_id() != LCORE_ID_ANY))
-            lcore_id = rte_lcore_id();
-        rte_rcu_qsbr_thread_online(fastrg_ccb->ppp_ccb_rcu, lcore_id);
+
         struct pppoes_lcore_stats sum;
         fastrg_sum_pppoes_stats(fastrg_ccb, (U16)i, &sum);
-        rte_rcu_qsbr_quiescent(fastrg_ccb->ppp_ccb_rcu, lcore_id);
-        rte_rcu_qsbr_thread_offline(fastrg_ccb->ppp_ccb_rcu, lcore_id);
         hsi_info->set_pppoes_rx_packets(sum.rx_packets);
         hsi_info->set_pppoes_tx_packets(sum.tx_packets);
         hsi_info->set_pppoes_rx_bytes(sum.rx_bytes);
@@ -1118,7 +1108,7 @@ grpc::Status FastRGNodeServiceImpl::GetFastrgDhcpInfo(::grpc::ServerContext* con
             dhcp_info->set_user_id(i + 1);
             dhcp_info->set_status("DHCP server is on");
 
-			for(U8 j=0; j<dhcp_ccb->per_lan_user_pool_len; j++) {
+			for(U32 j=0; j<dhcp_ccb->per_lan_user_pool_len; j++) {
 				if (dhcp_ccb->per_lan_user_pool[j]->ip_pool.used) {
                     dhcp_info->add_inuse_ips(std::to_string(*(((U8 *)&(dhcp_ccb->per_lan_user_pool[j]->ip_pool.ip_addr)))) + "." +
                         std::to_string(*(((U8 *)&(dhcp_ccb->per_lan_user_pool[j]->ip_pool.ip_addr))+1)) + "." +

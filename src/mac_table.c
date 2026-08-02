@@ -18,6 +18,8 @@
 #include <rte_ethdev.h>
 #include <rte_byteorder.h>
 #include <rte_errno.h>
+#include <rte_hash.h>
+#include <rte_hash_crc.h>
 
 #include "mac_table.h"
 #include "init.h"
@@ -25,24 +27,81 @@
 #include "protocol.h"
 
 /* ------------------------------------------------------------------ */
-/*  MAC table allocation / free                                       */
+/*  MAC table allocation / free / reset / iterate                     */
 /* ------------------------------------------------------------------ */
 
-mac_table_entry_t *mac_table_alloc(void)
+mac_table_t *mac_table_alloc(U16 ccb_id)
 {
-    /*
-     * 255^3 × 8 B ≈ 132 MB — too large for DPDK hugepage memzones in
-     * most setups, so we use plain calloc (backed by regular pages).
-     * The table is still O(1)-indexed from the data path.
-     */
-    return fastrg_calloc(mac_table_entry_t, MAC_TABLE_SIZE, 
-        sizeof(mac_table_entry_t), 0);
+    mac_table_t *table = fastrg_calloc(mac_table_t, 1, sizeof(mac_table_t), 0);
+    if (table == NULL)
+        return NULL;
+
+    /* rte_hash names must be unique process-wide; one table per subscriber
+     * slot, so the slot index is a natural unique name. */
+    char name[RTE_HASH_NAMESIZE];
+    snprintf(name, sizeof(name), "mac_tbl_%u", ccb_id);
+
+    struct rte_hash_parameters params = {
+        .name = name,
+        .entries = MAC_TABLE_MAX_ENTRIES,
+        .key_len = sizeof(U32),
+        .hash_func = rte_hash_crc,
+        .hash_func_init_val = 0,
+        .socket_id = (int)rte_socket_id(),
+        /* Lock-free reads + multi-writer adds. */
+        .extra_flag = RTE_HASH_EXTRA_FLAGS_RW_CONCURRENCY_LF |
+                      RTE_HASH_EXTRA_FLAGS_MULTI_WRITER_ADD,
+    };
+    table->hash = rte_hash_create(&params);
+    if (table->hash == NULL) {
+        fastrg_mfree(table);
+        return NULL;
+    }
+
+    table->generation = 0;
+    table->learn_fail = 0;
+    return table;
 }
 
-void mac_table_free(mac_table_entry_t *table)
+void mac_table_free(mac_table_t *table)
 {
-    if (table != NULL)
-        fastrg_mfree(table);
+    if (table == NULL)
+        return;
+    if (table->hash != NULL)
+        rte_hash_free(table->hash);
+    fastrg_mfree(table);
+}
+
+void mac_table_reset(mac_table_t *table)
+{
+    if (table == NULL)
+        return;
+    /* Invalidate all entries in O(1): lookups compare the entry's packed
+     * generation stamp against this counter. rte_hash_reset() is unsafe with
+     * live lock free readers/writers, and data-plane learns are NOT gated by
+     * dp_start_bool, so a structural reset is never used at runtime. */
+    __atomic_fetch_add(&table->generation, 1, __ATOMIC_RELAXED);
+    __atomic_store_n(&table->learn_fail, 0, __ATOMIC_RELAXED);
+}
+
+int32_t mac_table_iterate(const mac_table_t *table, U32 *next, U32 *ip_out,
+    struct rte_ether_addr *mac_out)
+{
+    const void *key;
+    void *data;
+    int32_t pos;
+
+    if (table == NULL || next == NULL || ip_out == NULL || mac_out == NULL)
+        return -1;
+
+    U16 cur_gen = __atomic_load_n(&table->generation, __ATOMIC_RELAXED);
+    while ((pos = rte_hash_iterate(table->hash, &key, &data, next)) >= 0) {
+        if (mac_table_unpack((uintptr_t)data, mac_out) != cur_gen)
+            continue;   /* stale entry from before the last reset */
+        *ip_out = *(const U32 *)key;
+        return pos;
+    }
+    return -1;
 }
 
 /* ------------------------------------------------------------------ */

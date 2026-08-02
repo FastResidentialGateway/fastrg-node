@@ -338,10 +338,10 @@ static int decaps_udp(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt,
             increase_pppoes_rx_count(fastrg_ccb, ccb_id, single_pkt->pkt_len);
 
             /* Look up MAC table for destination host */
-            mac_table_entry_t *mac_entry = mac_table_lookup(
-                ppp_ccb->mac_table, fwd_dip);
-            if (likely(mac_entry != NULL)) {
-                rte_ether_addr_copy(&mac_entry->mac, &eth_hdr->dst_addr);
+            struct rte_ether_addr fwd_mac;
+            if (likely(mac_table_lookup(ppp_ccb->mac_table, fwd_dip,
+                    &fwd_mac) == SUCCESS)) {
+                rte_ether_addr_copy(&fwd_mac, &eth_hdr->dst_addr);
                 count_tx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                 return 1;
             }
@@ -400,10 +400,10 @@ static int decaps_tcp(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt,
             increase_pppoes_rx_count(fastrg_ccb, ccb_id, single_pkt->pkt_len);
 
             /* Look up MAC table for destination host */
-            mac_table_entry_t *mac_entry = mac_table_lookup(
-                ppp_ccb->mac_table, fwd_dip);
-            if (likely(mac_entry != NULL)) {
-                rte_ether_addr_copy(&mac_entry->mac, &eth_hdr->dst_addr);
+            struct rte_ether_addr fwd_mac;
+            if (likely(mac_table_lookup(ppp_ccb->mac_table, fwd_dip,
+                    &fwd_mac) == SUCCESS)) {
+                rte_ether_addr_copy(&fwd_mac, &eth_hdr->dst_addr);
                 count_tx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                 return 1;
             }

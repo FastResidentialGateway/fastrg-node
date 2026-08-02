@@ -341,14 +341,10 @@ void *metrics_server_run(void *arg)
     FastRG_t *fastrg_ccb = (FastRG_t *)arg;
     lighthttp_server_t *srv = &fastrg_ccb->metrics_server;
 
-    /* Register our dedicated RCU reader slot before serving any scrape. */
-    metrics_rcu_register(fastrg_ccb);
-
     if (lighthttp_init(srv, fastrg_ccb->metrics_ip_port) != 0) {
         FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
             "metrics: failed to start /metrics server on %s; Prometheus scrape disabled",
             fastrg_ccb->metrics_ip_port);
-        metrics_rcu_unregister(fastrg_ccb);
         return NULL;
     }
     lighthttp_add_route(srv, "GET", "/metrics", metrics_build, fastrg_ccb);
@@ -366,7 +362,6 @@ void *metrics_server_run(void *arg)
     else
         lighthttp_serve(srv); /* blocks until the listen socket fails */
 
-    metrics_rcu_unregister(fastrg_ccb);
     return NULL;
 }
 
@@ -394,32 +389,7 @@ STATUS sys_init(FastRG_t *fastrg_ccb, struct fastrg_config *fastrg_cfg)
     rte_timer_init(&fastrg_ccb->link);
     rte_timer_init(&fastrg_ccb->heartbeat_timer);
 
-    /* Initialize RCU for per_subscriber_stats */
     size_t rcu_size = rte_rcu_qsbr_get_memsize(RTE_MAX_LCORE);
-    fastrg_ccb->per_subscriber_stats_rcu = fastrg_calloc(struct rte_rcu_qsbr, 1, rcu_size, RTE_CACHE_LINE_SIZE);
-    if (fastrg_ccb->per_subscriber_stats_rcu == NULL) {
-        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, 
-            "Cannot allocate memory for per_subscriber_stats_rcu");
-        goto err;
-    }
-    ret = rte_rcu_qsbr_init(fastrg_ccb->per_subscriber_stats_rcu, RTE_MAX_LCORE);
-    if (ret != 0) {
-        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, 
-            "rte_rcu_qsbr_init failed for per_subscriber_stats_rcu: %s", rte_strerror(-ret));
-        goto err;
-    }
-
-    /* Register all lcores for per_subscriber_stats RCU */
-    unsigned int lcore_id;
-    RTE_LCORE_FOREACH(lcore_id) {
-        ret = rte_rcu_qsbr_thread_register(fastrg_ccb->per_subscriber_stats_rcu, lcore_id);
-        if (ret != 0) {
-            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, 
-                "rte_rcu_qsbr_thread_register failed for lcore %u: %s", 
-                lcore_id, rte_strerror(-ret));
-            goto err;
-        }
-    }
 
     fastrg_ccb->pdump_rcu = fastrg_calloc(struct rte_rcu_qsbr, 1, rcu_size, RTE_CACHE_LINE_SIZE);
     if (fastrg_ccb->pdump_rcu == NULL) {
@@ -433,6 +403,7 @@ STATUS sys_init(FastRG_t *fastrg_ccb, struct fastrg_config *fastrg_cfg)
             "rte_rcu_qsbr_init failed for pdump_rcu: %s", rte_strerror(-ret));
         goto err;
     }
+    unsigned int lcore_id;
     RTE_LCORE_FOREACH(lcore_id) {
         ret = rte_rcu_qsbr_thread_register(fastrg_ccb->pdump_rcu, lcore_id);
         if (ret != 0) {
@@ -442,8 +413,6 @@ STATUS sys_init(FastRG_t *fastrg_ccb, struct fastrg_config *fastrg_cfg)
             goto err;
         }
     }
-
-    rte_atomic16_init(&fastrg_ccb->per_subscriber_stats_updating);
 
     /* Initialize ARP pending mempool for MAC table resolution */
     ret = arp_pending_init_pool(&fastrg_ccb->arp_pending_mp);
@@ -461,15 +430,30 @@ STATUS sys_init(FastRG_t *fastrg_ccb, struct fastrg_config *fastrg_cfg)
         goto err;
     }
 
-    /* Initialize per_subscriber_stats using RCU-safe function */
-    ret = fastrg_add_subscriber_stats(fastrg_ccb, fastrg_ccb->user_count);
-    if (ret != SUCCESS) {
-        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, 
-            "Cannot initialize per_subscriber_stats");
-        goto err;
+    /* Fixed-max stats rows: allocate every EAL lcore's per-port subscriber
+     * row and PPPoE-session row once, sized max_user_count+1 (the last entry
+     * is the unknown-user slot). The rows are never resized or swapped at
+     * runtime; they are freed only at shutdown. */
+    RTE_LCORE_FOREACH(lcore_id) {
+        for(int i=0; i<PORT_AMOUNT; i++) {
+            fastrg_ccb->per_subscriber_stats[lcore_id][i] =
+                fastrg_calloc(struct per_ccb_stats,
+                    (fastrg_ccb->max_user_count + 1), sizeof(struct per_ccb_stats), 0);
+            if (fastrg_ccb->per_subscriber_stats[lcore_id][i] == NULL) {
+                FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+                    "Cannot allocate per_subscriber_stats[%u][%d]", lcore_id, i);
+                goto err;
+            }
+        }
+        fastrg_ccb->pppoes_stats[lcore_id] =
+            fastrg_calloc(struct pppoes_lcore_stats,
+                (fastrg_ccb->max_user_count + 1), sizeof(struct pppoes_lcore_stats), 0);
+        if (fastrg_ccb->pppoes_stats[lcore_id] == NULL) {
+            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+                "Cannot allocate pppoes_stats[%u]", lcore_id);
+            goto err;
+        }
     }
-    /* NOTE: pppoes_stats is initialised in fastrg_start() AFTER pppd_init(),
-     * because it is protected by ppp_ccb_rcu which pppd_init creates. */
 
     return SUCCESS;
 err:
@@ -483,10 +467,6 @@ err:
     if (fastrg_ccb->pdump_rcu) {
         fastrg_mfree(fastrg_ccb->pdump_rcu);
         fastrg_ccb->pdump_rcu = NULL;
-    }
-    if (fastrg_ccb->per_subscriber_stats_rcu) {
-        fastrg_mfree(fastrg_ccb->per_subscriber_stats_rcu);
-        fastrg_ccb->per_subscriber_stats_rcu = NULL;
     }
     if (fastrg_ccb->node_uuid != NULL) {
         fastrg_mfree(fastrg_ccb->node_uuid);

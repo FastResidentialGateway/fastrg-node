@@ -535,6 +535,13 @@ STATUS fastrg_pdump_start(FastRG_t *fastrg_ccb, int dir, U16 subscriber,
         if (err) snprintf(err, err_len, "subscriber %u does not exist", subscriber);
         return ERROR;
     }
+    /* user_count boots at 0 since InitUserCount was removed: subscriber==0
+     * ("all") would compute hi = user_count - 1 = 65535 and overrun the
+     * capture_on/filter arrays (sized max_user_count). Nothing to capture. */
+    if (fastrg_ccb->user_count == 0) {
+        if (err) snprintf(err, err_len, "no subscribers configured");
+        return ERROR;
+    }
 
     /* Clamp the requested size to (0, 2GB]; 0 (unset) defaults to the 2GB cap. */
     if (size_limit_mb == 0 || size_limit_mb > PDUMP_MAX_SIZE_MB)
@@ -615,6 +622,12 @@ STATUS fastrg_pdump_stop(FastRG_t *fastrg_ccb, int dir, U16 subscriber,
     }
     if (subscriber > fastrg_ccb->user_count) {
         if (err) snprintf(err, err_len, "subscriber %u does not exist", subscriber);
+        return ERROR;
+    }
+    /* Same guard as fastrg_pdump_start: subscriber==0 with user_count==0
+     * would underflow hi to 65535 and overrun the per-port slot arrays. */
+    if (fastrg_ccb->user_count == 0) {
+        if (err) snprintf(err, err_len, "no subscribers configured");
         return ERROR;
     }
 

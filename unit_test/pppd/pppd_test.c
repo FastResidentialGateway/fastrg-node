@@ -451,6 +451,62 @@ static void test_pppoe_send_pkt_padr_exhausted(void)
     TEST_ASSERT(test_ppp_ccb.phase == END_PHASE, "budget exhaustion tears down via exit_ppp", "got %u", test_ppp_ccb.phase);
 }
 
+
+/* ---- fixed-max refactor case (moved from the task-scoped file into the
+ * module test file per repo naming convention; additive only) ---- */
+
+static void test_credentials_overwrite(void)
+{
+    printf("\nTesting ppp_update_config_by_user (credential replacement):\n");
+    printf("=========================================\n\n");
+
+    /* Heap fixture: ppp_ccb_t embeds the ~16MB NAT slot pool. */
+    ppp_ccb_t *ccb = fastrg_calloc(ppp_ccb_t, 1, sizeof(ppp_ccb_t), 0);
+    TEST_ASSERT(ccb != NULL, "allocate credential fixture ccb", "");
+    if (ccb == NULL)
+        return;
+    ccb->fastrg_ccb = g_pppd_fastrg_ccb;
+    rte_spinlock_init(&ccb->cred_lock);
+    rte_atomic16_init(&ccb->vlan_id);
+
+    TEST_ASSERT(ppp_update_config_by_user(ccb, 100, "user-one", "pass-one") == SUCCESS,
+        "initial credential set succeeds", "");
+    TEST_ASSERT(ccb->ppp_user_acc != NULL &&
+        strcmp((const char *)ccb->ppp_user_acc, "user-one") == 0,
+        "account stored", "");
+    TEST_ASSERT(ccb->ppp_passwd != NULL &&
+        strcmp((const char *)ccb->ppp_passwd, "pass-one") == 0,
+        "password stored", "");
+    TEST_ASSERT(rte_atomic16_read(&ccb->vlan_id) == 100, "vlan applied", "");
+
+    /* equal-length overwrite */
+    TEST_ASSERT(ppp_update_config_by_user(ccb, 101, "user-two", "pass-two") == SUCCESS,
+        "equal-length overwrite succeeds", "");
+    TEST_ASSERT(strcmp((const char *)ccb->ppp_user_acc, "user-two") == 0 &&
+        strcmp((const char *)ccb->ppp_passwd, "pass-two") == 0,
+        "equal-length overwrite replaces both strings", "");
+
+    /* longer strings force reallocation (unbounded length support) */
+    const char *long_acc = "a-considerably-longer-account-name-with-no-upper-bound";
+    const char *long_pwd = "a-considerably-longer-password-value-with-no-upper-bound";
+    TEST_ASSERT(ppp_update_config_by_user(ccb, 102, long_acc, long_pwd) == SUCCESS,
+        "longer credential replacement succeeds", "");
+    TEST_ASSERT(strcmp((const char *)ccb->ppp_user_acc, long_acc) == 0 &&
+        strcmp((const char *)ccb->ppp_passwd, long_pwd) == 0,
+        "longer credentials stored intact", "");
+
+    /* shrink back */
+    TEST_ASSERT(ppp_update_config_by_user(ccb, 103, "u", "p") == SUCCESS,
+        "shrinking credential replacement succeeds", "");
+    TEST_ASSERT(strcmp((const char *)ccb->ppp_user_acc, "u") == 0 &&
+        strcmp((const char *)ccb->ppp_passwd, "p") == 0,
+        "short credentials stored intact", "");
+
+    fastrg_mfree(ccb->ppp_user_acc);
+    fastrg_mfree(ccb->ppp_passwd);
+    fastrg_mfree(ccb);
+}
+
 void test_pppd(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 {
     printf("\n");
@@ -488,6 +544,8 @@ void test_pppd(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_pppoe_send_pkt_padi_exhausted();
     test_pppoe_send_pkt_padr_under_budget();
     test_pppoe_send_pkt_padr_exhausted();
+
+    test_credentials_overwrite();
 
     /* Leave no armed timer behind, and restore the shared ccb slot other
      * suites expect to find untouched. */

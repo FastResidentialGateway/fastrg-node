@@ -309,7 +309,7 @@ int wan_ctrl_rx(void *arg)
                 rte_prefetch0(rte_pktmbuf_mtod(pkt[i + pf_k], void *));
             single_pkt = pkt[i];
             if (unlikely(parse_l2_hdr(fastrg_ccb, single_pkt, WAN_PORT) == ERROR)) {
-                drop_packet(fastrg_ccb, single_pkt, WAN_PORT, fastrg_ccb->user_count);
+                drop_packet(fastrg_ccb, single_pkt, WAN_PORT, fastrg_ccb->max_user_count);
                 continue;
             }
             mbuf_priv_t *mbuf_priv = rte_mbuf_to_priv(single_pkt);
@@ -443,7 +443,7 @@ int wan_data_rx(void *arg)
                 rte_prefetch0(rte_pktmbuf_mtod(pkt[i + pf_k], void *));
             single_pkt = pkt[i];
             if (unlikely(parse_l2_hdr(fastrg_ccb, single_pkt, WAN_PORT) == ERROR)) {
-                drop_packet(fastrg_ccb, single_pkt, WAN_PORT, fastrg_ccb->user_count);
+                drop_packet(fastrg_ccb, single_pkt, WAN_PORT, fastrg_ccb->max_user_count);
                 continue;
             }
             mbuf_priv_t *mbuf_priv = rte_mbuf_to_priv(single_pkt);
@@ -577,7 +577,7 @@ int lan_ctrl_rx(void *arg)
                 rte_prefetch0(rte_pktmbuf_mtod(rx_pkt[i + pf_k], void *));
             single_pkt = rx_pkt[i];
             if (unlikely(parse_l2_hdr(fastrg_ccb, single_pkt, LAN_PORT) == ERROR)) {
-                drop_packet(fastrg_ccb, single_pkt, LAN_PORT, fastrg_ccb->user_count);
+                drop_packet(fastrg_ccb, single_pkt, LAN_PORT, fastrg_ccb->max_user_count);
                 continue;
             }
             mbuf_priv_t *mbuf_priv = rte_mbuf_to_priv(single_pkt);
@@ -802,7 +802,7 @@ int lan_data_rx(void *arg)
                 rte_prefetch0(rte_pktmbuf_mtod(rx_pkt[i + pf_k], void *));
             single_pkt = rx_pkt[i];
             if (unlikely(parse_l2_hdr(fastrg_ccb, single_pkt, LAN_PORT) == ERROR)) {
-                drop_packet(fastrg_ccb, single_pkt, LAN_PORT, fastrg_ccb->user_count);
+                drop_packet(fastrg_ccb, single_pkt, LAN_PORT, fastrg_ccb->max_user_count);
                 continue;
             }
             mbuf_priv_t *mbuf_priv = rte_mbuf_to_priv(single_pkt);
@@ -1005,7 +1005,7 @@ int wan_dist_rx(void *arg)
                 rte_prefetch0(rte_pktmbuf_mtod(pkt[i + pf_k], void *));
             single_pkt = pkt[i];
             if (unlikely(parse_l2_hdr(fastrg_ccb, single_pkt, WAN_PORT) == ERROR)) {
-                drop_packet(fastrg_ccb, single_pkt, WAN_PORT, fastrg_ccb->user_count);
+                drop_packet(fastrg_ccb, single_pkt, WAN_PORT, fastrg_ccb->max_user_count);
                 continue;
             }
             mbuf_priv_t *mbuf_priv = rte_mbuf_to_priv(single_pkt);
@@ -1279,7 +1279,7 @@ int lan_dist_rx(void *arg)
                 rte_prefetch0(rte_pktmbuf_mtod(rx_pkt[i + pf_k], void *));
             single_pkt = rx_pkt[i];
             if (unlikely(parse_l2_hdr(fastrg_ccb, single_pkt, LAN_PORT) == ERROR)) {
-                drop_packet(fastrg_ccb, single_pkt, LAN_PORT, fastrg_ccb->user_count);
+                drop_packet(fastrg_ccb, single_pkt, LAN_PORT, fastrg_ccb->max_user_count);
                 continue;
             }
             mbuf_priv_t *mbuf_priv = rte_mbuf_to_priv(single_pkt);

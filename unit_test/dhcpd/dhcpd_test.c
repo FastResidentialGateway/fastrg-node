@@ -383,6 +383,82 @@ static void test_dhcpd_fsm_failure_releases_slot(void)
         "state reset to S_DHCP_INIT by release_lan_user", "");
 }
 
+
+/* ---- fixed-max refactor case (moved from the task-scoped file into the
+ * module test file per repo naming convention; additive only) ---- */
+
+#define FM_DHCP_POOL_FIXTURE_LEN 4
+
+static dhcp_ccb_per_lan_user_t fm_pool_users[FM_DHCP_POOL_FIXTURE_LEN];
+static dhcp_ccb_per_lan_user_t *fm_pool_array[FM_DHCP_POOL_FIXTURE_LEN];
+
+static void test_dhcp_pool_window_reinit(void)
+{
+    printf("\nTesting dhcp_pool_init_by_user (window re-init + over-cap reject):\n");
+    printf("=========================================\n\n");
+
+    static dhcp_ccb_t fm_dhcp_ccb;
+    memset(&fm_dhcp_ccb, 0, sizeof(fm_dhcp_ccb));
+    memset(fm_pool_users, 0, sizeof(fm_pool_users));
+    fm_dhcp_ccb.fastrg_ccb = g_dhcpd_fastrg_ccb;
+    fm_dhcp_ccb.per_lan_user_pool = fm_pool_array;
+    for(int i=0; i<FM_DHCP_POOL_FIXTURE_LEN; i++) {
+        fm_pool_array[i] = &fm_pool_users[i];
+        rte_timer_init(&fm_pool_users[i].lan_user_info.timer);
+    }
+
+    /* configure a 3-address window inside the fixture capacity */
+    U32 gw = rte_cpu_to_be_32(0xC0A80201);
+    U32 start = rte_cpu_to_be_32(0xC0A80210);
+    U32 end = rte_cpu_to_be_32(0xC0A80212);
+    U32 mask = rte_cpu_to_be_32(0xFFFFFF00);
+    TEST_ASSERT(dhcp_pool_init_by_user(&fm_dhcp_ccb, gw, start, end, mask) == SUCCESS,
+        "in-capacity pool window is accepted", "");
+    TEST_ASSERT(fm_dhcp_ccb.per_lan_user_pool_len == 3,
+        "pool window sized to configured range", "got %u",
+        fm_dhcp_ccb.per_lan_user_pool_len);
+    TEST_ASSERT(fm_pool_users[0].ip_pool.ip_addr == start &&
+        fm_pool_users[2].ip_pool.ip_addr == end,
+        "window entries carry sequential pool IPs", "");
+    TEST_ASSERT(fm_pool_users[0].pool_index == 0 && fm_pool_users[2].pool_index == 2,
+        "window entries re-bound to their indices", "");
+
+    /* re-init with a smaller window: lease state is scrubbed over
+     * max(old,new), so the trimmed entry is cleaned too */
+    fm_pool_users[0].ip_pool.used = TRUE;
+    fm_pool_users[0].lan_user_info.lan_user_used = TRUE;
+    fm_pool_users[2].ip_pool.used = TRUE;
+    U32 start2 = rte_cpu_to_be_32(0xC0A80220);
+    U32 end2 = rte_cpu_to_be_32(0xC0A80221);
+    TEST_ASSERT(dhcp_pool_init_by_user(&fm_dhcp_ccb, gw, start2, end2, mask) == SUCCESS,
+        "shrinking pool window is accepted", "");
+    TEST_ASSERT(fm_dhcp_ccb.per_lan_user_pool_len == 2,
+        "window shrinks with the new range", "got %u",
+        fm_dhcp_ccb.per_lan_user_pool_len);
+    TEST_ASSERT(fm_pool_users[0].ip_pool.used == FALSE &&
+        fm_pool_users[0].lan_user_info.lan_user_used == FALSE,
+        "window re-init clears per-entry lease state", "");
+    TEST_ASSERT(fm_pool_users[0].ip_pool.ip_addr == start2,
+        "window re-init rewrites entry IPs", "");
+    TEST_ASSERT(fm_pool_users[2].ip_pool.used == FALSE &&
+        fm_pool_users[2].ip_pool.ip_addr == 0,
+        "trimmed beyond-window entry is scrubbed (max(old,new) reset)", "");
+
+    /* over-capacity request (> fixed per-user capacity 1<<17) is rejected
+     * without touching the current window */
+    U32 huge_start = rte_cpu_to_be_32(0x0A000001);
+    U32 huge_end = rte_cpu_to_be_32(0x0A040001); /* 262145 addresses */
+    U32 before_len = fm_dhcp_ccb.per_lan_user_pool_len;
+    U32 before_ip = fm_pool_users[0].ip_pool.ip_addr;
+    TEST_ASSERT(dhcp_pool_init_by_user(&fm_dhcp_ccb, gw, huge_start, huge_end, mask) == ERROR,
+        "over-capacity pool request returns ERROR", "");
+    TEST_ASSERT(fm_dhcp_ccb.per_lan_user_pool_len == before_len,
+        "over-capacity pool request leaves window length untouched", "got %u",
+        fm_dhcp_ccb.per_lan_user_pool_len);
+    TEST_ASSERT(fm_pool_users[0].ip_pool.ip_addr == before_ip,
+        "over-capacity pool request leaves window contents untouched", "");
+}
+
 void test_dhcpd(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 {
     printf("\n");
@@ -411,6 +487,8 @@ void test_dhcpd(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_dhcpd_decode_failure_releases_slot();
     test_dhcpd_isp_id_event_releases_slot();
     test_dhcpd_fsm_failure_releases_slot();
+
+    test_dhcp_pool_window_reinit();
 
     /* Leave no armed timer behind for later suites, and restore the shared
      * ccb slot other suites (e.g. dnsd) expect to find untouched. */
