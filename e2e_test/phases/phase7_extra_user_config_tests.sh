@@ -269,11 +269,33 @@ phase7_extra_user_config_tests() {
         u=[h for h in d.get('dhcp_infos',[]) if h.get('user_id')==${U1}]; \
         print(u[0].get('status','') if u else '')" 2>/dev/null || true)
 
-    if [[ "$_dhcp22" == "DHCP server is on" ]]; then
-        pass "Step 23: DhcpServerStart user ${U1}" "status='${_dhcp22}'"
+    # The three fastrg_node_total_*_dhcp_server gauges partition the subscriber
+    # slots, so this start/stop pair is where their values are asserted: sample
+    # them here and again after Step 24 so the transition itself is checked and
+    # not just the totals. Requires MetricsListenPort on the node.
+    local _p7_uc="" _p7_metrics="" _p7_dhcp_issue=""
+    local _p7_run_a="" _p7_stop_a="" _p7_ncfg_a=""
+
+    _p7_uc=$(fastrg_grpc get_system_info 2>/dev/null | \
+        jq -r '.num_users // empty' 2>/dev/null | tr -d '[:space:]' || true)
+    _p7_metrics=$(e2e_metrics_body)
+    _p7_run_a=$(e2e_metric_value "$_p7_metrics" fastrg_node_total_running_dhcp_server)
+    _p7_stop_a=$(e2e_metric_value "$_p7_metrics" fastrg_node_total_stopped_dhcp_server)
+    _p7_ncfg_a=$(e2e_metric_value "$_p7_metrics" fastrg_node_total_not_configured_dhcp_server)
+    if ! e2e_all_uint "$_p7_uc" "$_p7_run_a" "$_p7_stop_a" "$_p7_ncfg_a"; then
+        _p7_dhcp_issue="DHCP server tallies unreadable (num_users='${_p7_uc:-NA}' running='${_p7_run_a:-NA}' stopped='${_p7_stop_a:-NA}' not_configured='${_p7_ncfg_a:-NA}')"
+    elif [[ $(( _p7_run_a + _p7_stop_a + _p7_ncfg_a )) -ne "$_p7_uc" ]]; then
+        _p7_dhcp_issue="DHCP server tallies sum $(( _p7_run_a + _p7_stop_a + _p7_ncfg_a )) != user_count ${_p7_uc}"
+    elif [[ "$_p7_run_a" -lt 1 ]]; then
+        _p7_dhcp_issue="running=0 while user ${U1} reports its server on"
+    fi
+
+    if [[ "$_dhcp22" == "DHCP server is on" && -z "$_p7_dhcp_issue" ]]; then
+        pass "Step 23: DhcpServerStart user ${U1}" \
+            "status='${_dhcp22}'; tallies running/stopped/not_configured=${_p7_run_a}/${_p7_stop_a}/${_p7_ncfg_a} sum to user_count=${_p7_uc}"
     else
         fail "Step 23: DhcpServerStart user ${U1}" \
-            "expected 'DHCP server is on', got '${_dhcp22:-empty}'"
+            "expected 'DHCP server is on', got '${_dhcp22:-empty}'${_p7_dhcp_issue:+; ${_p7_dhcp_issue}}"
     fi
 
     # ------------------------------------------------------------------
@@ -287,11 +309,36 @@ phase7_extra_user_config_tests() {
         u=[h for h in d.get('dhcp_infos',[]) if h.get('user_id')==${U1}]; \
         print(u[0].get('status','') if u else '')" 2>/dev/null || true)
 
-    if [[ "$_dhcp23" != "DHCP server is on" ]]; then
-        pass "Step 24: DhcpServerStop user ${U1}" "status='${_dhcp23:-off}'"
+    # Stopping a server only flips dhcp_bool; the pool stays configured, so the
+    # slot must move from running to stopped and not_configured must not move.
+    local _p7_run_b="" _p7_stop_b="" _p7_ncfg_b=""
+
+    _p7_dhcp_issue=""
+    _p7_metrics=$(e2e_metrics_body)
+    _p7_run_b=$(e2e_metric_value "$_p7_metrics" fastrg_node_total_running_dhcp_server)
+    _p7_stop_b=$(e2e_metric_value "$_p7_metrics" fastrg_node_total_stopped_dhcp_server)
+    _p7_ncfg_b=$(e2e_metric_value "$_p7_metrics" fastrg_node_total_not_configured_dhcp_server)
+    if ! e2e_all_uint "$_p7_run_b" "$_p7_stop_b" "$_p7_ncfg_b"; then
+        _p7_dhcp_issue="DHCP server tallies unreadable (running='${_p7_run_b:-NA}' stopped='${_p7_stop_b:-NA}' not_configured='${_p7_ncfg_b:-NA}')"
+    elif ! e2e_all_uint "$_p7_uc" "$_p7_run_a" "$_p7_stop_a" "$_p7_ncfg_a"; then
+        _p7_dhcp_issue="Step 23 tally baseline was unreadable"
+    else
+        [[ $(( _p7_run_b + _p7_stop_b + _p7_ncfg_b )) -ne "$_p7_uc" ]] && \
+            _p7_dhcp_issue="tallies sum $(( _p7_run_b + _p7_stop_b + _p7_ncfg_b )) != user_count ${_p7_uc}"
+        [[ "$_p7_run_b" -ne $(( _p7_run_a - 1 )) ]] && \
+            _p7_dhcp_issue="${_p7_dhcp_issue:+${_p7_dhcp_issue}; }running ${_p7_run_a}->${_p7_run_b}, expected $(( _p7_run_a - 1 ))"
+        [[ "$_p7_stop_b" -ne $(( _p7_stop_a + 1 )) ]] && \
+            _p7_dhcp_issue="${_p7_dhcp_issue:+${_p7_dhcp_issue}; }stopped ${_p7_stop_a}->${_p7_stop_b}, expected $(( _p7_stop_a + 1 ))"
+        [[ "$_p7_ncfg_b" -ne "$_p7_ncfg_a" ]] && \
+            _p7_dhcp_issue="${_p7_dhcp_issue:+${_p7_dhcp_issue}; }not_configured ${_p7_ncfg_a}->${_p7_ncfg_b}, expected unchanged"
+    fi
+
+    if [[ "$_dhcp23" != "DHCP server is on" && -z "$_p7_dhcp_issue" ]]; then
+        pass "Step 24: DhcpServerStop user ${U1}" \
+            "status='${_dhcp23:-off}'; tallies running/stopped/not_configured ${_p7_run_a}/${_p7_stop_a}/${_p7_ncfg_a} -> ${_p7_run_b}/${_p7_stop_b}/${_p7_ncfg_b}"
     else
         fail "Step 24: DhcpServerStop user ${U1}" \
-            "expected DHCP off, got '${_dhcp23}'"
+            "expected DHCP off, got '${_dhcp23}'${_p7_dhcp_issue:+; ${_p7_dhcp_issue}}"
     fi
 
     # ------------------------------------------------------------------

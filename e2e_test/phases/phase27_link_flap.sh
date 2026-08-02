@@ -13,6 +13,11 @@ set -euo pipefail
 # one of its VFs. Flapping the PF on its host is the only action that drops
 # the physical signal the node observes — in-guest admin down / unbind / PCI
 # reset all leave the SerDes lit.
+# Nominal link speed both ports negotiate on this bench (X710 10GbE SFP+ on the
+# WAN side, 10G fiber into the LAN PF). fastrg_nic_link_speed_mbps must report
+# exactly this while the link is up and 0 while it is down — the down side is
+# already required by _p27_wait_link_down.
+_P27_LINK_SPEED_MBPS=10000
 _P27_LAN_VLAN="vlan3"
 _P27_WAN_RETURN_ROUTE="192.168.200.128/25"
 _P27_WAN_RETURN_GATEWAY="192.168.201.1"
@@ -429,6 +434,9 @@ phase27_link_flap() {
         if ! _p27_wait_link_up 1 20; then
             _step110_ok=0
             _issue110="${_issue110:+${_issue110}; }port 1 did not recover link_up=1/speed>0 within 10s (up='${_P27_OBS_UP}' speed='${_P27_OBS_SPEED}')"
+        elif [[ "$_P27_OBS_SPEED" != "$_P27_LINK_SPEED_MBPS" ]]; then
+            _step110_ok=0
+            _issue110="${_issue110:+${_issue110}; }port 1 came back at ${_P27_OBS_SPEED} Mbps, expected ${_P27_LINK_SPEED_MBPS}"
         fi
     fi
     _p27_restore_wan
@@ -507,6 +515,10 @@ phase27_link_flap() {
             _issue111="${_issue111:+${_issue111}; }port 0 did not recover link_up=1/speed>0 within 15s (up='${_P27_OBS_UP}' speed='${_P27_OBS_SPEED}')"
         else
             _lan_up_elapsed=$(( SECONDS - _lan_up_started ))
+            if [[ "$_P27_OBS_SPEED" != "$_P27_LINK_SPEED_MBPS" ]]; then
+                _step111_ok=0
+                _issue111="${_issue111:+${_issue111}; }port 0 came back at ${_P27_OBS_SPEED} Mbps, expected ${_P27_LINK_SPEED_MBPS}"
+            fi
         fi
 
         # The peer's NIC (and vlan3 on top of it) follows the PF link; the
