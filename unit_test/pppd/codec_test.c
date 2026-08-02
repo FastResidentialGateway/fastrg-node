@@ -912,8 +912,91 @@ void test_build_auth_request_pap(FastRG_t *fastrg_ccb)
     build_auth_request_pap(buffer, &mulen, &s_ppp_ccb_1);
     TEST_ASSERT(mulen == sizeof(pkt_lcp_2), "build_auth_request_pap packet length", 
         "expected length %zu, got %u", sizeof(pkt_lcp_2), mulen);
-    TEST_ASSERT(memcmp(buffer, pkt_lcp_2, sizeof(pkt_lcp_2)) == 0, 
+    TEST_ASSERT(memcmp(buffer, pkt_lcp_2, sizeof(pkt_lcp_2)) == 0,
         "build_auth_request_pap packet content", "packet content mismatch");
+
+    /* Credentials have no configured upper bound, so the builder must refuse
+     * to emit a frame that does not fit the caller's PPP_MSG_BUF_LEN stack
+     * buffer. Frame overhead is 30 bytes plus the two PAP length fields, so
+     * account + password may not exceed 96 bytes. The canary region starts
+     * after the 30-byte header area the builder fills before probing the
+     * credential lengths. */
+#define PAP_CANARY_BYTE  0xa5
+#define PAP_FRAME_OVERHEAD (sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) + \
+                            sizeof(pppoe_header_t) + sizeof(ppp_payload_t) + sizeof(ppp_header_t))
+    U8 canary_buffer[PPP_MSG_BUF_LEN + 32];
+    U8 canary_pattern[sizeof(canary_buffer)];
+    char long_acc[257];
+    char long_pwd[257];
+    U16 overflow_mulen = 0;
+    size_t canary_off = PAP_FRAME_OVERHEAD;
+
+    memset(canary_pattern, PAP_CANARY_BYTE, sizeof(canary_pattern));
+
+    printf("Test 3: \"%s\"\n", "build_auth_request_pap() credentials exceed builder buffer");
+    memset(canary_buffer, PAP_CANARY_BYTE, sizeof(canary_buffer));
+    memset(long_acc, 'a', 60);
+    long_acc[60] = '\0';
+    memset(long_pwd, 'b', 60);
+    long_pwd[60] = '\0';
+    s_ppp_ccb_1.ppp_user_acc = (U8 *)long_acc;
+    s_ppp_ccb_1.ppp_passwd = (U8 *)long_pwd;
+    build_auth_request_pap(canary_buffer, &overflow_mulen, &s_ppp_ccb_1);
+    TEST_ASSERT(overflow_mulen == 0, "build_auth_request_pap oversized credentials refused",
+        "expected mulen 0, got %u", overflow_mulen);
+    TEST_ASSERT(memcmp(canary_buffer + canary_off, canary_pattern,
+        sizeof(canary_buffer) - canary_off) == 0,
+        "build_auth_request_pap writes no credential on refusal", "canary region was modified");
+
+    printf("Test 4: \"%s\"\n", "build_auth_request_pap() account longer than the PAP length field");
+    memset(canary_buffer, PAP_CANARY_BYTE, sizeof(canary_buffer));
+    memset(long_acc, 'a', 256);
+    long_acc[256] = '\0';
+    long_pwd[0] = '\0';
+    overflow_mulen = 0;
+    build_auth_request_pap(canary_buffer, &overflow_mulen, &s_ppp_ccb_1);
+    TEST_ASSERT(overflow_mulen == 0, "build_auth_request_pap 256-byte account refused",
+        "expected mulen 0, got %u", overflow_mulen);
+    TEST_ASSERT(memcmp(canary_buffer + canary_off, canary_pattern,
+        sizeof(canary_buffer) - canary_off) == 0,
+        "build_auth_request_pap 256-byte account writes nothing", "canary region was modified");
+
+    printf("Test 5: \"%s\"\n", "build_auth_request_pap() password longer than the PAP length field");
+    memset(canary_buffer, PAP_CANARY_BYTE, sizeof(canary_buffer));
+    long_acc[0] = '\0';
+    memset(long_pwd, 'b', 256);
+    long_pwd[256] = '\0';
+    overflow_mulen = 0;
+    build_auth_request_pap(canary_buffer, &overflow_mulen, &s_ppp_ccb_1);
+    TEST_ASSERT(overflow_mulen == 0, "build_auth_request_pap 256-byte password refused",
+        "expected mulen 0, got %u", overflow_mulen);
+
+    printf("Test 6: \"%s\"\n", "build_auth_request_pap() credentials exactly filling the buffer");
+    memset(canary_buffer, PAP_CANARY_BYTE, sizeof(canary_buffer));
+    memset(long_acc, 'a', 48);
+    long_acc[48] = '\0';
+    memset(long_pwd, 'b', 48);
+    long_pwd[48] = '\0';
+    overflow_mulen = 0;
+    build_auth_request_pap(canary_buffer, &overflow_mulen, &s_ppp_ccb_1);
+
+    ppp_header_t *pap_hdr = (ppp_header_t *)(canary_buffer + PAP_FRAME_OVERHEAD - sizeof(ppp_header_t));
+    pppoe_header_t *pap_pppoe_hdr = (pppoe_header_t *)(canary_buffer + sizeof(struct rte_ether_hdr) +
+        sizeof(vlan_header_t));
+
+    TEST_ASSERT(overflow_mulen == PPP_MSG_BUF_LEN,
+        "build_auth_request_pap boundary credentials accepted",
+        "expected mulen %u, got %u", PPP_MSG_BUF_LEN, overflow_mulen);
+    TEST_ASSERT(ntohs(pap_hdr->length) == sizeof(ppp_header_t) + 2 * sizeof(U8) + 96,
+        "build_auth_request_pap boundary PPP length", "got %u", ntohs(pap_hdr->length));
+    TEST_ASSERT(ntohs(pap_pppoe_hdr->length) == sizeof(ppp_payload_t) + sizeof(ppp_header_t) +
+        2 * sizeof(U8) + 96,
+        "build_auth_request_pap boundary PPPoE length", "got %u", ntohs(pap_pppoe_hdr->length));
+    TEST_ASSERT(memcmp(canary_buffer + PPP_MSG_BUF_LEN, canary_pattern,
+        sizeof(canary_buffer) - PPP_MSG_BUF_LEN) == 0,
+        "build_auth_request_pap boundary frame does not overflow", "canary region was modified");
+#undef PAP_CANARY_BYTE
+#undef PAP_FRAME_OVERHEAD
 }
 
 void test_build_auth_ack_pap(FastRG_t *fastrg_ccb)
@@ -1089,6 +1172,58 @@ void test_build_auth_response_chap(FastRG_t *fastrg_ccb)
     response_data = (U8 *)(ppp_hdr + 1);
     TEST_ASSERT(memcmp(response_data + sizeof(U8), expected_hash, sizeof(expected_hash)) == 0,
         "CHAP response honors 8-byte challenge length", "hash mismatch");
+
+    /* Only the account name goes into the CHAP response frame (the password is
+     * folded into the fixed 16-byte MD5 hash), so a long name alone can overrun
+     * the caller's PPP_MSG_BUF_LEN stack buffer: overhead 30 + value-size 1 +
+     * hash 16 leaves 81 bytes for the name. */
+#define CHAP_CANARY_BYTE 0x5a
+#define CHAP_FRAME_OVERHEAD (sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) + \
+                             sizeof(pppoe_header_t) + sizeof(ppp_payload_t) + sizeof(ppp_header_t))
+    U8 canary_buffer[PPP_MSG_BUF_LEN + 32];
+    U8 canary_pattern[sizeof(canary_buffer)];
+    char long_name[83];
+    U16 overflow_mulen = 0;
+
+    memset(canary_pattern, CHAP_CANARY_BYTE, sizeof(canary_pattern));
+    chap_data.val_size = sizeof(challenge);
+
+    printf("Test 3: \"%s\"\n", "build_auth_response_chap() account exceeds builder buffer");
+    memset(canary_buffer, CHAP_CANARY_BYTE, sizeof(canary_buffer));
+    memset(long_name, 'n', 82);
+    long_name[82] = '\0';
+    s_ppp_ccb.ppp_user_acc = (U8 *)long_name;
+    build_auth_response_chap(canary_buffer, &overflow_mulen, &s_ppp_ccb, &chap_data);
+    TEST_ASSERT(overflow_mulen == 0, "build_auth_response_chap oversized account refused",
+        "expected mulen 0, got %u", overflow_mulen);
+    TEST_ASSERT(memcmp(canary_buffer, canary_pattern, sizeof(canary_buffer)) == 0,
+        "build_auth_response_chap buffer untouched on refusal", "canary region was modified");
+
+    printf("Test 4: \"%s\"\n", "build_auth_response_chap() account exactly filling the buffer");
+    memset(canary_buffer, CHAP_CANARY_BYTE, sizeof(canary_buffer));
+    memset(long_name, 'n', 81);
+    long_name[81] = '\0';
+    overflow_mulen = 0;
+    build_auth_response_chap(canary_buffer, &overflow_mulen, &s_ppp_ccb, &chap_data);
+
+    ppp_header_t *chap_ppp_hdr = (ppp_header_t *)(canary_buffer + CHAP_FRAME_OVERHEAD -
+        sizeof(ppp_header_t));
+    pppoe_header_t *chap_pppoe_hdr = (pppoe_header_t *)(canary_buffer +
+        sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t));
+
+    TEST_ASSERT(overflow_mulen == PPP_MSG_BUF_LEN,
+        "build_auth_response_chap boundary account accepted",
+        "expected mulen %u, got %u", PPP_MSG_BUF_LEN, overflow_mulen);
+    TEST_ASSERT(ntohs(chap_ppp_hdr->length) == sizeof(ppp_header_t) + sizeof(U8) + 16 + 81,
+        "build_auth_response_chap boundary PPP length", "got %u", ntohs(chap_ppp_hdr->length));
+    TEST_ASSERT(ntohs(chap_pppoe_hdr->length) == sizeof(ppp_payload_t) + sizeof(ppp_header_t) +
+        sizeof(U8) + 16 + 81,
+        "build_auth_response_chap boundary PPPoE length", "got %u", ntohs(chap_pppoe_hdr->length));
+    TEST_ASSERT(memcmp(canary_buffer + PPP_MSG_BUF_LEN, canary_pattern,
+        sizeof(canary_buffer) - PPP_MSG_BUF_LEN) == 0,
+        "build_auth_response_chap boundary frame does not overflow", "canary region was modified");
+#undef CHAP_CANARY_BYTE
+#undef CHAP_FRAME_OVERHEAD
 }
 
 void test_build_proto_reject(FastRG_t *fastrg_ccb)
