@@ -74,6 +74,16 @@ STATUS apply_hsi_config(FastRG_t *fastrg_ccb, int ccb_id, const hsi_config_t *co
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Invalid DHCP gateway: %s", config->dhcp_gateway);
         return ERROR;
     }
+    /* Reject an inconsistent pool before anything is touched, so the rejection
+     * is atomic and the subscriber keeps whatever pool it is running with. */
+    if (dhcp_validate_pool_range(dhcp_gateway, dhcp_ip_start, dhcp_ip_end,
+            dhcp_subnet_mask) == ERROR) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+            "Invalid DHCP pool for user %d: pool %s must be ordered (start <= end) and inside "
+            "the DHCP server subnet (gateway %s, subnet mask %s)",
+            ccb_id + 1, config->dhcp_addr_pool, config->dhcp_gateway, config->dhcp_subnet);
+        return ERROR;
+    }
 
     U16 ori_ppp_status = rte_atomic16_exchange((volatile uint16_t *)&ppp_ccb->ppp_bool.cnt, 0);
     U16 ori_dp_status = rte_atomic16_exchange((volatile uint16_t *)&ppp_ccb->dp_start_bool.cnt, 0);

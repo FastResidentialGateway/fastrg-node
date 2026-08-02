@@ -931,6 +931,112 @@ void test_dhcp_reply_broadcast_flag(FastRG_t *fastrg_ccb)
     printf("  All BROADCAST-flag reply addressing tests passed!\n");
 }
 
+/**
+ * @fn test_dhcp_offer_skips_reserved_addresses
+ *
+ * @brief lease every address of a pool that crosses an octet boundary and
+ *      verify the network (.0) and broadcast (.255) addresses are never
+ *      offered
+ * @param fastrg_ccb
+ *      FastRG control block pointer
+ * @return
+ *      void
+ */
+void test_dhcp_offer_skips_reserved_addresses(FastRG_t *fastrg_ccb)
+{
+    printf("\nTesting build_dhcp_offer over a cross-octet pool:\n");
+    printf("=========================================\n\n");
+
+#define RSV_POOL_LEN 8
+    U8 recv_buffer[2048] = {0};
+
+    struct rte_ether_hdr *eth_hdr = (struct rte_ether_hdr *)recv_buffer;
+    eth_hdr->ether_type = rte_cpu_to_be_16(VLAN);
+
+    vlan_header_t *vlan_hdr = (vlan_header_t *)(eth_hdr + 1);
+    vlan_hdr->tci_union.tci_value = rte_cpu_to_be_16(0x0064);
+    vlan_hdr->next_proto = rte_cpu_to_be_16(ETH_P_IP);
+
+    struct rte_ipv4_hdr *ip_hdr = (struct rte_ipv4_hdr *)(vlan_hdr + 1);
+    ip_hdr->version_ihl = 0x45;
+    ip_hdr->fragment_offset = rte_cpu_to_be_16(0x4000);
+    ip_hdr->time_to_live = 64;
+    ip_hdr->next_proto_id = IPPROTO_UDP;
+
+    struct rte_udp_hdr *udp_hdr = (struct rte_udp_hdr *)(ip_hdr + 1);
+
+    dhcp_hdr_t *dhcp_hdr = (dhcp_hdr_t *)(udp_hdr + 1);
+    dhcp_hdr->msg_type = BOOT_REQUEST;
+    dhcp_hdr->hwr_type = 1;
+    dhcp_hdr->hwr_addr_len = 6;
+    dhcp_hdr->magic_cookie = rte_cpu_to_be_32(DHCP_MAGIC_COOKIE);
+
+    static dhcp_ccb_per_lan_user_t rsv_pool_users[RSV_POOL_LEN];
+    static dhcp_ccb_per_lan_user_t *rsv_pool_array[RSV_POOL_LEN];
+    memset(rsv_pool_users, 0, sizeof(rsv_pool_users));
+    for(int i=0; i<RSV_POOL_LEN; i++)
+        rsv_pool_array[i] = &rsv_pool_users[i];
+
+    static dhcp_ccb_t dhcp_ccb;
+    memset(&dhcp_ccb, 0, sizeof(dhcp_ccb));
+    dhcp_ccb.eth_hdr = eth_hdr;
+    dhcp_ccb.vlan_hdr = vlan_hdr;
+    dhcp_ccb.ip_hdr = ip_hdr;
+    dhcp_ccb.udp_hdr = udp_hdr;
+    dhcp_ccb.per_lan_user_pool = rsv_pool_array;
+    dhcp_ccb.fastrg_ccb = fastrg_ccb;
+
+    /* 192.168.5.253 ~ 192.168.6.4: 8 addresses, 6 of them leasable */
+    U32 gw = rte_cpu_to_be_32(0xC0A80501);
+    U32 mask = rte_cpu_to_be_32(0xFFFFFF00);
+    dhcp_pool_init_by_user(&dhcp_ccb, gw, rte_cpu_to_be_32(0xC0A805FD),
+        rte_cpu_to_be_32(0xC0A80604), mask);
+
+    dhcp_ccb_per_lan_user_t per_lan_user = {0};
+    per_lan_user.dhcp_hdr = dhcp_hdr;
+    per_lan_user.dhcp_ccb = &dhcp_ccb;
+
+    struct rte_ether_addr lan_mac = {
+        .addr_bytes = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66}
+    };
+
+    int offered = 0;
+    BOOL reserved_offered = FALSE;
+    BOOL offer_failed_early = FALSE;
+    for(int client=0; client<RSV_POOL_LEN; client++) {
+        struct rte_ether_addr client_mac = {
+            .addr_bytes = {0x02, 0x00, 0x00, 0x00, 0x00, (U8)client}
+        };
+        rte_ether_addr_copy(&client_mac, &eth_hdr->src_addr);
+        dhcp_hdr->ur_client_ip = 0;
+
+        if (build_dhcp_offer(&per_lan_user, &lan_mac) != SUCCESS) {
+            offer_failed_early = TRUE;
+            break;
+        }
+        offered++;
+        U32 offered_ip = rte_be_to_cpu_32(dhcp_hdr->ur_client_ip);
+        if ((offered_ip & 0xff) == 0x00 || (offered_ip & 0xff) == 0xff)
+            reserved_offered = TRUE;
+        /* the client accepts the offer: take the entry out of the pool */
+        for(int i=0; i<RSV_POOL_LEN; i++) {
+            if (rsv_pool_users[i].ip_pool.ip_addr == dhcp_hdr->ur_client_ip)
+                rsv_pool_users[i].ip_pool.used = TRUE;
+        }
+    }
+
+    TEST_ASSERT(reserved_offered == FALSE,
+        "no network/broadcast address is ever offered", "");
+    TEST_ASSERT(offered == 6, "every leasable address of the range is offered",
+        "got %d", offered);
+    TEST_ASSERT(offer_failed_early == TRUE,
+        "pool is reported exhausted once the leasable addresses are gone", "");
+    TEST_ASSERT(rsv_pool_users[2].ip_pool.used == FALSE &&
+        rsv_pool_users[3].ip_pool.used == FALSE,
+        "reserved entries stay free after the pool is drained", "");
+#undef RSV_POOL_LEN
+}
+
 void test_dhcp_codec(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 {
     printf("\n");
@@ -948,6 +1054,7 @@ void test_dhcp_codec(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_dhcp_decode(fastrg_ccb);
     test_build_dhcp_ack_inform(fastrg_ccb);
     test_dhcp_reply_broadcast_flag(fastrg_ccb);
+    test_dhcp_offer_skips_reserved_addresses(fastrg_ccb);
 
     printf("\n");
     printf("╔════════════════════════════════════════════════════════════╗\n");

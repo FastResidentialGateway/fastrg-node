@@ -54,8 +54,13 @@ STATUS dhcp_pool_init_by_user(dhcp_ccb_t *dhcp_ccb, U32 dhcp_server_ip,
         rte_ether_addr_copy(&zero_mac, &e->lan_user_info.mac_addr);
         rte_ether_addr_copy(&zero_mac, &e->ip_pool.mac_addr);
         e->lan_user_info.state = S_DHCP_INIT;
-        e->ip_pool.ip_addr = (i < new_pool_len) ?
-            rte_cpu_to_be_32((rte_be_to_cpu_32(ip_start) + i)) : 0;
+        U32 entry_ip = (i < new_pool_len) ? (rte_be_to_cpu_32(ip_start) + i) : 0;
+        e->ip_pool.ip_addr = rte_cpu_to_be_32(entry_ip);
+        /* A range crossing an octet boundary contains network (.0) and
+         * broadcast (.255) addresses a client cannot use. Keep them in the
+         * array so the index <-> IP mapping stays intact, but mark them as 
+         * reserved so the lease selection paths never hand them out. */
+        e->ip_pool.reserved = (i < new_pool_len) ? dhcp_ip_is_reserved(entry_ip) : FALSE;
         e->dhcp_ccb = dhcp_ccb;
         e->pool_index = i;
     }
@@ -64,6 +69,28 @@ STATUS dhcp_pool_init_by_user(dhcp_ccb_t *dhcp_ccb, U32 dhcp_server_ip,
         "DHCP: DHCP pool initialized: server_ip=0x%08x, pool_start=0x%08x, pool_end=0x%08x, pool_len=%d, subnet_mask=0x%08x\n", 
         rte_be_to_cpu_32(dhcp_ccb->dhcp_server_ip), rte_be_to_cpu_32(ip_start), 
         rte_be_to_cpu_32(ip_end), new_pool_len, rte_be_to_cpu_32(subnet_mask));
+    return SUCCESS;
+}
+
+STATUS dhcp_validate_pool_range(U32 dhcp_server_ip, U32 ip_start,
+    U32 ip_end, U32 subnet_mask)
+{
+    /* The all-zero call clears the pool (disable / init time) and carries no
+     * range to validate. */
+    if (dhcp_server_ip == 0 && ip_start == 0 && ip_end == 0 && subnet_mask == 0)
+        return SUCCESS;
+
+    if (rte_be_to_cpu_32(ip_start) > rte_be_to_cpu_32(ip_end))
+        return ERROR;
+
+    /* The data plane decides whether a packet belongs to a subscriber LAN with
+     * is_ip_in_range(ip, dhcp_server_ip, subnet_mask). A pool reaching outside
+     * that subnet would be leased out but never recognized afterwards, so
+     * refuse the configuration instead of accepting it silently. */
+    if ((ip_start & subnet_mask) != (dhcp_server_ip & subnet_mask) ||
+            (ip_end & subnet_mask) != (dhcp_server_ip & subnet_mask))
+        return ERROR;
+
     return SUCCESS;
 }
 

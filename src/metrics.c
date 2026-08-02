@@ -232,8 +232,12 @@ int metrics_build(lighthttp_buf_t *out, const char **content_type, void *arg)
                 c->per_lan_user_pool[0]->ip_pool.ip_addr != 0 &&
                 c->per_lan_user_pool[c->per_lan_user_pool_len - 1]->ip_pool.ip_addr != 0) {
                 configured = 1;
-                max = c->per_lan_user_pool_len;
+                /* Capacity is what can actually be leased: network/broadcast
+                 * addresses inside the range are never handed out. */
                 for(U32 j=0; j<c->per_lan_user_pool_len; j++) {
+                    if (c->per_lan_user_pool[j]->ip_pool.reserved)
+                        continue;
+                    max++;
                     if (c->per_lan_user_pool[j]->ip_pool.used)
                         cur++;
                 }
@@ -432,7 +436,7 @@ int metrics_build(lighthttp_buf_t *out, const char **content_type, void *arg)
                     uuid, (unsigned)dhcp[i].user_id, dhcp[i].cur);
     }
     emit_header(out, "fastrg_node_per_user_dhcp_max_lease_count", "gauge",
-        "Pool capacity (addresses) for this subscriber's DHCP server.");
+        "Leasable pool capacity (addresses, excluding .0/.255) for this subscriber's DHCP server.");
     if (dhcp) {
         for(U16 i=0; i<user_count; i++)
             if (dhcp[i].configured)

@@ -459,6 +459,148 @@ static void test_dhcp_pool_window_reinit(void)
         "over-capacity pool request leaves window contents untouched", "");
 }
 
+/* ---- pool range validation + .0/.255 reservation (additive only) ---- */
+
+#define RSV_DHCP_POOL_FIXTURE_LEN 8
+
+static dhcp_ccb_per_lan_user_t rsv_pool_users[RSV_DHCP_POOL_FIXTURE_LEN];
+static dhcp_ccb_per_lan_user_t *rsv_pool_array[RSV_DHCP_POOL_FIXTURE_LEN];
+
+/**
+ * @fn test_dhcp_pool_reserved_entries
+ *
+ * @brief a pool range crossing an octet boundary must keep its index <-> IP
+ *      mapping but flag the network (.0) and broadcast (.255) addresses as
+ *      reserved so they are never leased
+ * @return
+ *      void
+ */
+static void test_dhcp_pool_reserved_entries(void)
+{
+    printf("\nTesting dhcp_pool_init_by_user (.0/.255 reservation):\n");
+    printf("=========================================\n\n");
+
+    static dhcp_ccb_t rsv_dhcp_ccb;
+    memset(&rsv_dhcp_ccb, 0, sizeof(rsv_dhcp_ccb));
+    memset(rsv_pool_users, 0, sizeof(rsv_pool_users));
+    rsv_dhcp_ccb.fastrg_ccb = g_dhcpd_fastrg_ccb;
+    rsv_dhcp_ccb.per_lan_user_pool = rsv_pool_array;
+    for(int i=0; i<RSV_DHCP_POOL_FIXTURE_LEN; i++) {
+        rsv_pool_array[i] = &rsv_pool_users[i];
+        rte_timer_init(&rsv_pool_users[i].lan_user_info.timer);
+    }
+
+    /* 192.168.5.253 ~ 192.168.6.4 -> 8 addresses, two of them unusable */
+    U32 gw = rte_cpu_to_be_32(0xC0A80501);
+    U32 start = rte_cpu_to_be_32(0xC0A805FD);
+    U32 end = rte_cpu_to_be_32(0xC0A80604);
+    U32 mask = rte_cpu_to_be_32(0xFFFFFF00);
+
+    TEST_ASSERT(dhcp_pool_init_by_user(&rsv_dhcp_ccb, gw, start, end, mask) == SUCCESS,
+        "cross-octet pool window is accepted", "");
+    TEST_ASSERT(rsv_dhcp_ccb.per_lan_user_pool_len == RSV_DHCP_POOL_FIXTURE_LEN,
+        "cross-octet window covers every address in the range", "got %u",
+        rsv_dhcp_ccb.per_lan_user_pool_len);
+    TEST_ASSERT(rsv_pool_users[0].ip_pool.ip_addr == start &&
+        rsv_pool_users[RSV_DHCP_POOL_FIXTURE_LEN - 1].ip_pool.ip_addr == end,
+        "cross-octet window keeps the index <-> IP mapping", "");
+    TEST_ASSERT(rsv_pool_users[2].ip_pool.ip_addr == rte_cpu_to_be_32(0xC0A805FF) &&
+        rsv_pool_users[2].ip_pool.reserved == TRUE,
+        "broadcast address 192.168.5.255 is reserved", "");
+    TEST_ASSERT(rsv_pool_users[3].ip_pool.ip_addr == rte_cpu_to_be_32(0xC0A80600) &&
+        rsv_pool_users[3].ip_pool.reserved == TRUE,
+        "network address 192.168.6.0 is reserved", "");
+
+    BOOL others_assignable = TRUE;
+    for(int i=0; i<RSV_DHCP_POOL_FIXTURE_LEN; i++) {
+        if (i == 2 || i == 3)
+            continue;
+        if (rsv_pool_users[i].ip_pool.reserved != FALSE)
+            others_assignable = FALSE;
+    }
+    TEST_ASSERT(others_assignable, "every other address in the range stays assignable", "");
+
+    /* a range fully inside one /24 reserves nothing */
+    U32 plain_start = rte_cpu_to_be_32(0xC0A80510);
+    U32 plain_end = rte_cpu_to_be_32(0xC0A80512);
+    TEST_ASSERT(dhcp_pool_init_by_user(&rsv_dhcp_ccb, gw, plain_start, plain_end, mask) == SUCCESS,
+        "in-subnet pool window is accepted", "");
+    TEST_ASSERT(rsv_pool_users[0].ip_pool.reserved == FALSE &&
+        rsv_pool_users[1].ip_pool.reserved == FALSE &&
+        rsv_pool_users[2].ip_pool.reserved == FALSE,
+        "window re-init clears the reserved flag of a plain range", "");
+
+    for(int i=0; i<RSV_DHCP_POOL_FIXTURE_LEN; i++)
+        rte_timer_stop_sync(&rsv_pool_users[i].lan_user_info.timer);
+}
+
+/**
+ * @fn test_dhcp_validate_pool_range
+ *
+ * @brief config-apply validation: the pool must be ordered and live inside
+ *      the DHCP server subnet, and a rejected pool must leave the running
+ *      window untouched
+ * @return
+ *      void
+ */
+static void test_dhcp_validate_pool_range(void)
+{
+    printf("\nTesting dhcp_validate_pool_range:\n");
+    printf("=========================================\n\n");
+
+    U32 gw = rte_cpu_to_be_32(0xC0A80401);       /* 192.168.4.1   */
+    U32 mask = rte_cpu_to_be_32(0xFFFFFF00);
+    U32 ok_start = rte_cpu_to_be_32(0xC0A80402); /* 192.168.4.2   */
+    U32 ok_end = rte_cpu_to_be_32(0xC0A804FE);   /* 192.168.4.254 */
+
+    TEST_ASSERT(dhcp_validate_pool_range(gw, ok_start, ok_end, mask) == SUCCESS,
+        "range inside the server subnet is accepted", "");
+    TEST_ASSERT(dhcp_validate_pool_range(0, 0, 0, 0) == SUCCESS,
+        "all-zero pool clearing call is accepted", "");
+    TEST_ASSERT(dhcp_validate_pool_range(gw, ok_end, ok_start, mask) == ERROR,
+        "reversed range (start > end) is rejected", "");
+    TEST_ASSERT(dhcp_validate_pool_range(gw, ok_start,
+        rte_cpu_to_be_32(0xC0A80505), mask) == ERROR,
+        "range ending outside the server subnet is rejected", "");
+    TEST_ASSERT(dhcp_validate_pool_range(gw, rte_cpu_to_be_32(0xC0A80302),
+        ok_end, mask) == ERROR,
+        "range starting outside the server subnet is rejected", "");
+
+    /* config-apply order: validation runs first, so a rejected pool never
+     * reaches dhcp_pool_init_by_user and the current window survives intact */
+    static dhcp_ccb_t vr_dhcp_ccb;
+    memset(&vr_dhcp_ccb, 0, sizeof(vr_dhcp_ccb));
+    memset(rsv_pool_users, 0, sizeof(rsv_pool_users));
+    vr_dhcp_ccb.fastrg_ccb = g_dhcpd_fastrg_ccb;
+    vr_dhcp_ccb.per_lan_user_pool = rsv_pool_array;
+    for(int i=0; i<RSV_DHCP_POOL_FIXTURE_LEN; i++) {
+        rsv_pool_array[i] = &rsv_pool_users[i];
+        rte_timer_init(&rsv_pool_users[i].lan_user_info.timer);
+    }
+
+    U32 live_start = rte_cpu_to_be_32(0xC0A80410);
+    U32 live_end = rte_cpu_to_be_32(0xC0A80412);
+    dhcp_pool_init_by_user(&vr_dhcp_ccb, gw, live_start, live_end, mask);
+    rsv_pool_users[0].ip_pool.used = TRUE;
+
+    U32 bad_start = rte_cpu_to_be_32(0xC0A805FD); /* 192.168.5.253, other /24 */
+    U32 bad_end = rte_cpu_to_be_32(0xC0A80604);
+    if (dhcp_validate_pool_range(gw, bad_start, bad_end, mask) == SUCCESS)
+        dhcp_pool_init_by_user(&vr_dhcp_ccb, gw, bad_start, bad_end, mask);
+
+    TEST_ASSERT(vr_dhcp_ccb.per_lan_user_pool_len == 3,
+        "rejected pool leaves the window length untouched", "got %u",
+        vr_dhcp_ccb.per_lan_user_pool_len);
+    TEST_ASSERT(rsv_pool_users[0].ip_pool.ip_addr == live_start &&
+        rsv_pool_users[2].ip_pool.ip_addr == live_end,
+        "rejected pool leaves the window contents untouched", "");
+    TEST_ASSERT(rsv_pool_users[0].ip_pool.used == TRUE,
+        "rejected pool leaves existing lease state untouched", "");
+
+    for(int i=0; i<RSV_DHCP_POOL_FIXTURE_LEN; i++)
+        rte_timer_stop_sync(&rsv_pool_users[i].lan_user_info.timer);
+}
+
 void test_dhcpd(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 {
     printf("\n");
@@ -489,6 +631,8 @@ void test_dhcpd(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_dhcpd_fsm_failure_releases_slot();
 
     test_dhcp_pool_window_reinit();
+    test_dhcp_pool_reserved_entries();
+    test_dhcp_validate_pool_range();
 
     /* Leave no armed timer behind for later suites, and restore the shared
      * ccb slot other suites (e.g. dnsd) expect to find untouched. */
