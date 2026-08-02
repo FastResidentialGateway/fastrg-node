@@ -220,12 +220,15 @@ void build_echo_request(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb);
  * @fn build_auth_request_pap
  *
  * @brief For PAP auth, send after LCP nego complete.
- * 
- * @param buffer 
+ *
+ * @param buffer
  *      The buffer to be processed by the codec.
- * @param mulen 
- *      The length of the buffer.
- * @param s_ppp_ccb 
+ * @param mulen
+ *      The length of the buffer. Set to 0 when the builder refuses to emit the
+ *      frame, i.e. when either credential exceeds the PAP U8 length field or
+ *      the whole frame does not fit PPP_MSG_BUF_LEN. Callers must not transmit
+ *      the buffer in that case.
+ * @param s_ppp_ccb
  *      The ppp ccb.
  * 
  * @return 
@@ -254,12 +257,14 @@ void build_auth_ack_pap(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb);
  * @fn build_auth_request_chap
  *
  * @brief For CHAP auth, starting after LCP nego complete.
- * 
- * @param buffer 
+ *
+ * @param buffer
  *      The buffer to be processed by the codec.
- * @param mulen 
- *      The length of the buffer.
- * @param s_ppp_ccb 
+ * @param mulen
+ *      The length of the buffer. Set to 0 when the builder refuses to emit the
+ *      frame, i.e. when the account name makes the frame exceed
+ *      PPP_MSG_BUF_LEN. Callers must not transmit the buffer in that case.
+ * @param s_ppp_ccb
  *      The ppp ccb.
  * @param ppp_chap_data
  *      The chap data to be sent.

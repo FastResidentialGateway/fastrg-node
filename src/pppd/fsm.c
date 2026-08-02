@@ -764,7 +764,8 @@ STATUS lcp_layer_up(ppp_ccb_t *s_ppp_ccb)
     }
     if (s_ppp_ccb->auth_method == PAP_PROTOCOL) {
         build_auth_request_pap(buffer, &mulen, s_ppp_ccb);
-        wan_ctrl_tx(fastrg_ccb, s_ppp_ccb->user_num - 1, buffer, mulen);
+        if (mulen > 0)
+            wan_ctrl_tx(fastrg_ccb, s_ppp_ccb->user_num - 1, buffer, mulen);
     } else if (s_ppp_ccb->auth_method == CHAP_PROTOCOL)
         /* CHAP is authenticator-driven: enter AUTH phase and wait for the
          * server's challenge; nothing is sent at LCP-up. */

@@ -1170,9 +1170,11 @@ void build_auth_request_pap(unsigned char *buffer, U16 *mulen, ppp_ccb_t *s_ppp_
     pppoe_header_t       *pppoe_header = (pppoe_header_t *)(vlan_header + 1);
     ppp_payload_t        *ppp_payload = (ppp_payload_t *)(pppoe_header + 1);
     ppp_header_t         *ppp_pap_header = (ppp_header_t *)(ppp_payload + 1);
-    U8                   peer_id_length, peer_passwd_length;
+    size_t               peer_id_length, peer_passwd_length, frame_len;
     U8                   *pap_account = (U8 *)(ppp_pap_header + 1);
     U8                   *pap_password;
+
+    *mulen = 0;
 
     s_ppp_ccb->phase = AUTH_PHASE;
 
@@ -1193,15 +1195,30 @@ void build_auth_request_pap(unsigned char *buffer, U16 *mulen, ppp_ccb_t *s_ppp_
     rte_spinlock_lock(&s_ppp_ccb->cred_lock);
     peer_id_length = strlen((const char *)(s_ppp_ccb->ppp_user_acc));
     peer_passwd_length = strlen((const char *)(s_ppp_ccb->ppp_passwd));
+    frame_len = sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) + sizeof(pppoe_header_t) +
+                sizeof(ppp_payload_t) + sizeof(ppp_header_t) +
+                2 * sizeof(U8)/* pap account length and pap password length fields */ +
+                peer_id_length + peer_passwd_length;
+    /* The credentials have no configured upper bound, so both the PAP length
+     * fields (U8 on the wire) and the caller's stack buffer can be overrun.
+     * The reason we use UINT8_MAX as condition is both account and password 
+     * lengths field are U8 type, it can't exceed UINT8_MAX. */
+    if (peer_id_length > UINT8_MAX || peer_passwd_length > UINT8_MAX || frame_len > PPP_MSG_BUF_LEN) {
+        rte_spinlock_unlock(&s_ppp_ccb->cred_lock);
+        FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16
+            " pap request dropped: credential lengths (account %zu, password %zu) exceed builder buffer.",
+            s_ppp_ccb->user_num, peer_id_length, peer_passwd_length);
+        return;
+    }
     pap_password = pap_account + peer_id_length + sizeof(U8)/* pap account length field */;
-    *(U8 *)pap_account = peer_id_length;
+    *(U8 *)pap_account = (U8)peer_id_length;
     rte_memcpy(pap_account + sizeof(U8), s_ppp_ccb->ppp_user_acc, peer_id_length);
-    *(U8 *)pap_password = peer_passwd_length;
+    *(U8 *)pap_password = (U8)peer_passwd_length;
     rte_memcpy(pap_password + sizeof(U8), s_ppp_ccb->ppp_passwd, peer_passwd_length);
     rte_spinlock_unlock(&s_ppp_ccb->cred_lock);
 
-    ppp_pap_header->length = 2 * sizeof(U8)/* for pap account length and pap password length */
-    + peer_id_length + peer_passwd_length + sizeof(ppp_header_t);
+    ppp_pap_header->length = (U16)(2 * sizeof(U8)/* for pap account length and pap password length */
+    + peer_id_length + peer_passwd_length + sizeof(ppp_header_t));
     pppoe_header->length = ppp_pap_header->length + sizeof(ppp_payload_t);
     ppp_pap_header->length = rte_cpu_to_be_16(ppp_pap_header->length);
     pppoe_header->length = rte_cpu_to_be_16(pppoe_header->length);
@@ -1256,10 +1273,26 @@ void build_auth_response_chap(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb, ppp_
     ppp_header_t         *ppp_hdr = (ppp_header_t *)(ppp_payload + 1);
     U8                   *chap_data = (U8 *)(ppp_hdr + 1);
     U8                    chap_hash[16];
-    U16                   name_len = strlen((const char *)s_ppp_ccb->ppp_user_acc);
-    U16                   ppp_len = sizeof(ppp_header_t) + sizeof(U8) + sizeof(chap_hash) + name_len;
+    size_t                name_len = strlen((const char *)s_ppp_ccb->ppp_user_acc);
+    size_t                frame_len = sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) +
+                                      sizeof(pppoe_header_t) + sizeof(ppp_payload_t) + sizeof(ppp_header_t) +
+                                      sizeof(U8)/* value-size field */ + sizeof(chap_hash) + name_len;
+    U16                   ppp_len;
     struct rte_ether_addr tmp_mac;
     MD5_CTX                context;
+
+    *mulen = 0;
+
+    /* Only the account name goes into the frame (the password is folded into
+     * the fixed-size MD5 hash), so the name alone can overrun the caller's
+     * stack buffer. */
+    if (frame_len > PPP_MSG_BUF_LEN) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16
+            " chap response dropped: account length %zu exceeds builder buffer.",
+            s_ppp_ccb->user_num, name_len);
+        return;
+    }
+    ppp_len = (U16)(sizeof(ppp_header_t) + sizeof(U8) + sizeof(chap_hash) + name_len);
 
     MD5Init(&context);
     MD5Update(&context, &s_ppp_ccb->ppp_phase[0].ppp_hdr.identifier, 1);
@@ -1555,7 +1588,7 @@ STATUS decode_ppp(ppp_payload_t *ppp_payload, U16 payload_avail, U16 *event, ppp
             return ERROR;
         if (ppp_hdr->code == CHAP_CHALLENGE) {
             U8 buffer[PPP_MSG_BUF_LEN];
-            U16 mulen;
+            U16 mulen = 0;
             U16 chap_data_len = ppp_hdr_len - sizeof(ppp_header_t);
             U8 *chap_data = (U8 *)(ppp_hdr + 1);
             ppp_chap_data_t ppp_chap_data;
@@ -1614,7 +1647,8 @@ STATUS decode_ppp(ppp_payload_t *ppp_payload, U16 payload_avail, U16 *event, ppp
             }
 
             build_auth_response_chap(buffer, &mulen, tmp_s_ppp_ccb, &ppp_chap_data);
-            wan_ctrl_tx(fastrg_ccb, s_ppp_ccb->user_num - 1, buffer, mulen);
+            if (mulen > 0)
+                wan_ctrl_tx(fastrg_ccb, s_ppp_ccb->user_num - 1, buffer, mulen);
             FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " recv chap challenge.", s_ppp_ccb->user_num);
             fastrg_mfree(tmp_s_ppp_ccb->ppp_user_acc);
             fastrg_mfree(tmp_s_ppp_ccb->ppp_passwd);
