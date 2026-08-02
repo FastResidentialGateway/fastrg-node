@@ -6,14 +6,13 @@
 
 set -euo pipefail
 
-# LAN topology: the LAN link is fiber; the ixgbe PF
-# enp1s0f0 lives on the WAN host (same machine ssh_wan reaches) with SR-IOV
-# enabled, and the LAN peer VM consumes one of its VFs as enp8s0. Flapping
-# the PF on the host is the only action that drops the physical signal the
-# node observes — in-guest admin down / unbind / PCI reset all leave the
-# SerDes lit
-_P27_LAN_HOST_NIC="enp1s0f0"
-_P27_LAN_VM_NIC="enp8s0"
+# LAN topology comes from the suite-level LAN_FLAP_HOST / LAN_FLAP_NIC /
+# LAN_PEER_NIC variables (see run_e2e_test.sh) so this phase carries no
+# bench-specific interface names. On the default bench the LAN link is fiber
+# into a PF on the WAN host with SR-IOV enabled, and the LAN peer VM consumes
+# one of its VFs. Flapping the PF on its host is the only action that drops
+# the physical signal the node observes — in-guest admin down / unbind / PCI
+# reset all leave the SerDes lit.
 _P27_LAN_VLAN="vlan3"
 _P27_WAN_RETURN_ROUTE="192.168.200.128/25"
 _P27_WAN_RETURN_GATEWAY="192.168.201.1"
@@ -114,9 +113,9 @@ _p27_restore_wan() {
 }
 
 _p27_restore_lan() {
-    # The LAN PF lives on the WAN host; bringing it up is idempotent and safe
-    # from the EXIT trap. The peer's VF link (and vlan3 on top) follows the PF.
-    ssh_wan "ip link set '${_P27_LAN_HOST_NIC}' up" >/dev/null 2>&1 || true
+    # Bringing the LAN PF up is idempotent and safe from the EXIT trap. The
+    # peer's link (and vlan3 on top of it) follows the PF.
+    ssh_lan_flap "ip link set '${LAN_FLAP_NIC}' up" >/dev/null 2>&1 || true
 }
 
 _p27_start_bras() {
@@ -341,7 +340,7 @@ _p27_arm_lan_watchdog() {
     # Same guarantee for the LAN PF: even if the runner is interrupted the
     # physical link returns within eight seconds. No return route is involved
     # on the LAN side.
-    ssh_wan "nohup sh -c 'sleep 8; ip link set \"${_P27_LAN_HOST_NIC}\" up' \
+    ssh_lan_flap "nohup sh -c 'sleep 8; ip link set \"${LAN_FLAP_NIC}\" up' \
         >/dev/null 2>&1 </dev/null &" >/dev/null 2>&1
 }
 
@@ -474,9 +473,9 @@ phase27_link_flap() {
     elif ! _p27_arm_lan_watchdog; then
         _step111_ok=0
         _issue111="failed to arm the LAN PF eight-second recovery watchdog"
-    elif ! ssh_wan "ip link set '${_P27_LAN_HOST_NIC}' down" >/dev/null 2>&1; then
+    elif ! ssh_lan_flap "ip link set '${LAN_FLAP_NIC}' down" >/dev/null 2>&1; then
         _step111_ok=0
-        _issue111="failed to set LAN PF ${_P27_LAN_HOST_NIC} down"
+        _issue111="failed to set LAN PF ${LAN_FLAP_NIC} down"
     else
         _lan_down_started=$SECONDS
         if ! _p27_wait_link_down 0 14; then
@@ -490,9 +489,9 @@ phase27_link_flap() {
         # watchdog this keeps the total down window under ten seconds so the
         # node-side timers other than LSC handling are never exercised.
         _lan_up_started=$SECONDS
-        if ! ssh_wan "ip link set '${_P27_LAN_HOST_NIC}' up" >/dev/null 2>&1; then
+        if ! ssh_lan_flap "ip link set '${LAN_FLAP_NIC}' up" >/dev/null 2>&1; then
             _step111_ok=0
-            _issue111="${_issue111:+${_issue111}; }failed to set LAN PF ${_P27_LAN_HOST_NIC} up"
+            _issue111="${_issue111:+${_issue111}; }failed to set LAN PF ${LAN_FLAP_NIC} up"
         fi
 
         for _i in $(seq 1 30); do
@@ -510,12 +509,12 @@ phase27_link_flap() {
             _lan_up_elapsed=$(( SECONDS - _lan_up_started ))
         fi
 
-        # The peer's VF (and vlan3 on top of it) follows the PF link; the
+        # The peer's NIC (and vlan3 on top of it) follows the PF link; the
         # vlan device and its lease survive the flap, so this normally
-        # succeeds on the first probe once the VF link is re-established.
+        # succeeds on the first probe once the peer link is re-established.
         for _i in $(seq 1 30); do
             if ssh_lan "ip -o link show '${_P27_LAN_VLAN}' 2>/dev/null | \
-                    grep -q '${_P27_LAN_VLAN}@${_P27_LAN_VM_NIC}' && \
+                    grep -q '${_P27_LAN_VLAN}@${LAN_PEER_NIC}' && \
                     ip -4 -o addr show dev '${_P27_LAN_VLAN}' scope global | grep -q ' inet '" \
                     >/dev/null 2>&1; then
                 _lan_vlan_ready=1
@@ -525,7 +524,7 @@ phase27_link_flap() {
         done
         if [[ $_lan_vlan_ready -ne 1 ]]; then
             _step111_ok=0
-            _issue111="${_issue111:+${_issue111}; }${_P27_LAN_VLAN}@${_P27_LAN_VM_NIC} did not recover an IPv4 address within 30s"
+            _issue111="${_issue111:+${_issue111}; }${_P27_LAN_VLAN}@${LAN_PEER_NIC} did not recover an IPv4 address within 30s"
         fi
     fi
     _p27_restore_lan
@@ -543,7 +542,7 @@ phase27_link_flap() {
 
     if [[ $_step111_ok -eq 1 ]]; then
         pass "Step 112: LAN flap and per-port isolation" \
-            "port 0 link 1→0 in ${_lan_down_elapsed}s →1 in ${_lan_up_elapsed}s, speed 0→${_P27_OBS_SPEED} Mbps, flap ${_lan_flap_base}→${_lan_flap_after} (+2); ${_P27_LAN_VLAN}@${_P27_LAN_VM_NIC} has IPv4; port 1 remained ${_wan_after_lan}"
+            "port 0 link 1→0 in ${_lan_down_elapsed}s →1 in ${_lan_up_elapsed}s, speed 0→${_P27_OBS_SPEED} Mbps, flap ${_lan_flap_base}→${_lan_flap_after} (+2); ${_P27_LAN_VLAN}@${LAN_PEER_NIC} has IPv4; port 1 remained ${_wan_after_lan}"
     else
         fail "Step 112: LAN flap and per-port isolation" "$_issue111"
     fi

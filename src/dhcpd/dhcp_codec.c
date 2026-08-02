@@ -96,7 +96,11 @@ static inline BOOL check_and_set_single_pool_entry(dhcp_ccb_t *dhcp_ccb,
     int index, struct rte_ether_addr *mac_addr, int *cur_tmp_pool_index)
 {
     dhcp_ccb_per_lan_user_t *entry = dhcp_ccb->per_lan_user_pool[index];
-    
+
+    /* Network/broadcast addresses are never leased */
+    if (entry->ip_pool.reserved == TRUE)
+        return FALSE;
+
     if (entry->ip_pool.used == FALSE) {
         entry->ip_pool.used = TRUE;
         rte_ether_addr_copy(mac_addr, &entry->ip_pool.mac_addr);
@@ -115,12 +119,16 @@ STATUS check_pool(dhcp_ccb_t *dhcp_ccb, dhcp_ccb_per_lan_user_t *per_lan_user,
 {
     int i;
 
-    if (per_lan_user->ip_pool.used == FALSE) {
-        rte_ether_addr_copy(&mac_addr, &per_lan_user->ip_pool.mac_addr);
-        per_lan_user->ip_pool.used = TRUE;
-        return SUCCESS;
-    } else if (rte_is_same_ether_addr(&mac_addr, &per_lan_user->ip_pool.mac_addr)) {
-        return SUCCESS;
+    /* A reserved entry (network/broadcast address) is skipped here and picked
+     * up again by the scan below, exactly like an entry taken by someone else */
+    if (per_lan_user->ip_pool.reserved == FALSE) {
+        if (per_lan_user->ip_pool.used == FALSE) {
+            rte_ether_addr_copy(&mac_addr, &per_lan_user->ip_pool.mac_addr);
+            per_lan_user->ip_pool.used = TRUE;
+            return SUCCESS;
+        } else if (rte_is_same_ether_addr(&mac_addr, &per_lan_user->ip_pool.mac_addr)) {
+            return SUCCESS;
+        }
     }
 
     for(i=*cur_tmp_pool_index; i<dhcp_ccb->per_lan_user_pool_len; i++) {
@@ -165,6 +173,11 @@ DHCP_EVENT_TYPE decode_request(dhcp_ccb_per_lan_user_t *per_lan_user, int *cur_t
         if (client_ip < dhcp_ccb->pool_start || client_ip > dhcp_ccb->pool_end) {
             FastRG_LOG(WARN, dhcp_ccb->fastrg_ccb->fp, (U8 *)dhcp_ccb, DHCPLOGMSG,
                 "subscriber %u: DHCP ciaddr outside configured pool range\n", dhcp_ccb->ccb_id);
+            return E_BAD_REQUEST;
+        }
+        if (dhcp_ip_is_reserved(client_ip) == TRUE) {
+            FastRG_LOG(WARN, dhcp_ccb->fastrg_ccb->fp, (U8 *)dhcp_ccb, DHCPLOGMSG,
+                "subscriber %u: DHCP ciaddr is a network/broadcast address\n", dhcp_ccb->ccb_id);
             return E_BAD_REQUEST;
         }
         per_lan_user->dhcp_hdr->ur_client_ip = per_lan_user->dhcp_hdr->client_ip;
@@ -250,6 +263,11 @@ DHCP_EVENT_TYPE decode_request(dhcp_ccb_per_lan_user_t *per_lan_user, int *cur_t
                         "subscriber %u: DHCP Request IP outside configured pool range\n", dhcp_ccb->ccb_id);
                     return E_BAD_REQUEST;
                 }
+                if (dhcp_ip_is_reserved(requested_ip) == TRUE) {
+                    FastRG_LOG(WARN, dhcp_ccb->fastrg_ccb->fp, (U8 *)dhcp_ccb, DHCPLOGMSG,
+                        "subscriber %u: DHCP Request IP is a network/broadcast address\n", dhcp_ccb->ccb_id);
+                    return E_BAD_REQUEST;
+                }
             } else if (cur->opt_type == DHCP_SERVER_ID) {
                 if (cur->len != sizeof(U32)) {
                     FastRG_LOG(WARN, dhcp_ccb->fastrg_ccb->fp, 
@@ -276,6 +294,9 @@ STATUS pick_ip_from_pool(dhcp_ccb_t *dhcp_ccb, dhcp_ccb_per_lan_user_t *per_lan_
     int i;
 
     for(i=per_lan_user->pool_index; i<dhcp_ccb->per_lan_user_pool_len; i++) {
+        /* Network/broadcast addresses are never offered */
+        if (dhcp_ccb->per_lan_user_pool[i]->ip_pool.reserved == TRUE)
+            continue;
         if (rte_is_same_ether_addr(&mac_addr, &dhcp_ccb->per_lan_user_pool[i]->ip_pool.mac_addr)) {
             *ip_addr = dhcp_ccb->per_lan_user_pool[i]->ip_pool.ip_addr;
             return SUCCESS;
@@ -287,6 +308,8 @@ STATUS pick_ip_from_pool(dhcp_ccb_t *dhcp_ccb, dhcp_ccb_per_lan_user_t *per_lan_
         }
     }
     for(int j=0; j<i; j++) {
+        if (dhcp_ccb->per_lan_user_pool[j]->ip_pool.reserved == TRUE)
+            continue;
         if (rte_is_same_ether_addr(&mac_addr, &dhcp_ccb->per_lan_user_pool[j]->ip_pool.mac_addr)) {
             *ip_addr = dhcp_ccb->per_lan_user_pool[j]->ip_pool.ip_addr;
             return SUCCESS;
