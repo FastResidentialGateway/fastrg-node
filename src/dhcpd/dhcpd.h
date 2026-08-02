@@ -28,6 +28,11 @@ typedef struct ip_pool {
     struct rte_ether_addr   mac_addr;
     U32                     ip_addr;
     BOOL                    used;
+    /* TRUE when ip_addr is a network/broadcast address (lowest octet .0 or
+     * .255) that must never be leased. The flag is negative on purpose so a
+     * zero-initialized entry stays assignable, and it is kept separate from
+     * "used" because release_lan_user() clears "used" when a lease expires. */
+    BOOL                    reserved;
 }ip_pool_t;
 
 typedef struct lan_user_info {
@@ -125,6 +130,46 @@ void dhcpd_cleanup_ccb(FastRG_t *fastrg_ccb);
  */
 STATUS dhcp_pool_init_by_user(dhcp_ccb_t *dhcp_ccb, U32 dhcp_server_ip, 
     U32 ip_start, U32 ip_end, U32 subnet_mask);
+
+/**
+ * @fn dhcp_ip_is_reserved
+ *
+ * @brief Tell whether an address is a network/broadcast address that must
+ *      never be leased to a client. A pool range may cross an octet
+ *      boundary, so the decision is made on the address itself (lowest
+ *      octet) instead of being derived from the configured subnet mask.
+ * @param host_order_ip
+ *      IPv4 address in host byte order
+ * @return
+ *      TRUE if the lowest octet is 0 or 255, FALSE otherwise
+ */
+static inline BOOL dhcp_ip_is_reserved(U32 host_order_ip)
+{
+    U8 host_byte = host_order_ip & 0xff;
+
+    return (host_byte == 0x00 || host_byte == 0xff) ? TRUE : FALSE;
+}
+
+/**
+ * @fn dhcp_validate_pool_range
+ *
+ * @brief Validate a subscriber DHCP pool range before it is applied, so an
+ *      inconsistent configuration is rejected instead of silently producing
+ *      a pool the data plane cannot serve
+ * @param dhcp_server_ip
+ *      DHCP server IP address, network byte order
+ * @param ip_start
+ *      Start IP address of the pool, network byte order
+ * @param ip_end
+ *      End IP address of the pool, network byte order
+ * @param subnet_mask
+ *      Subnet mask, network byte order
+ * @return
+ *      SUCCESS if start <= end and both ends share the DHCP server subnet,
+ *      or if every parameter is 0 (the pool-clearing call); ERROR otherwise
+ */
+STATUS dhcp_validate_pool_range(U32 dhcp_server_ip, U32 ip_start,
+    U32 ip_end, U32 subnet_mask);
 
 void release_lan_user(struct rte_timer *tim, 
     dhcp_ccb_per_lan_user_t *per_lan_user_pool);
