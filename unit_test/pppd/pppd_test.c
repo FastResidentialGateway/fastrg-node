@@ -507,6 +507,20 @@ static void test_credentials_overwrite(void)
     fastrg_mfree(ccb);
 }
 
+static void test_port_fwd_entry_packing(void)
+{
+    printf("\nTesting port_fwd_entry_t layout:\n");
+    printf("=========================================\n\n");
+
+    /* Regression guard: the port forwarding table is direct-indexed by eport,
+     * so every byte of padding costs 64 KiB per subscriber.  A stray
+     * __rte_cache_aligned here silently inflated the table from 1 MiB to
+     * 4 MiB per ppp_ccb. */
+    TEST_ASSERT(sizeof(port_fwd_entry_t) == 16,
+        "port_fwd_entry_t stays packed to 16 bytes", "got %zu",
+        sizeof(port_fwd_entry_t));
+}
+
 void test_pppd(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 {
     printf("\n");
@@ -546,6 +560,8 @@ void test_pppd(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_pppoe_send_pkt_padr_exhausted();
 
     test_credentials_overwrite();
+
+    test_port_fwd_entry_packing();
 
     /* Leave no armed timer behind, and restore the shared ccb slot other
      * suites expect to find untouched. */
