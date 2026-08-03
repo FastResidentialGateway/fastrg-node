@@ -583,7 +583,6 @@ void exit_ppp(ppp_ccb_t *ppp_ccb)
     rte_timer_stop(&(ppp_ccb->ppp));
     rte_timer_stop(&(ppp_ccb->pppoe));
     rte_timer_stop(&(ppp_ccb->ppp_alive));
-    fastrg_ccb->cur_user--;
     ppp_ccb->phase = END_PHASE;
     ppp_ccb->ppp_phase[0].state = S_INIT;
     ppp_ccb->ppp_phase[1].state = S_INIT;

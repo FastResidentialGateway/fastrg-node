@@ -218,7 +218,6 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
                 if (pppoe_msg->cmd == PPPoE_CMD_DISABLE) {
                     FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "User %d pppoe is terminating\n", pppoe_msg->ccb_id + 1);
                     if (ppp_disconnect(ppp_ccb) == SUCCESS) {
-                        fastrg_ccb->cur_user--;
                         /* PPPoE "disconnecting" transition → controller via Kafka. */
                         char uid[8];
                         snprintf(uid, sizeof(uid), "%u", pppoe_msg->ccb_id + 1);
@@ -227,7 +226,6 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
                 } else if (pppoe_msg->cmd == PPPoE_CMD_ENABLE) {
                     FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "User %d pppoe is spawning\n", pppoe_msg->ccb_id + 1);
                     if (ppp_connect(ppp_ccb) == SUCCESS) {
-                        fastrg_ccb->cur_user++;
                         /* PPPoE "connecting" transition → controller via Kafka. */
                         char uid[8];
                         snprintf(uid, sizeof(uid), "%u", pppoe_msg->ccb_id + 1);
@@ -676,8 +674,6 @@ int fastrg_start(int argc, char **argv)
         FastRG_LOG(ERR, fastrg_ccb.fp, NULL, NULL, "DHCP initiation failed");
         goto err;
     }
-    /* Init the pppoe alive user count */
-    fastrg_ccb.cur_user = 0;
     rte_prefetch2(&fastrg_ccb);
     #ifdef RTE_LIB_PDUMP
     /* initialize packet capture framework */

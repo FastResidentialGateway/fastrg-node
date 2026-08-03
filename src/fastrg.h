@@ -95,7 +95,6 @@ struct lcore_usage_counter {
 
 /* FastRG system data structure */
 typedef struct FastRG {
-    U8                      cur_user;       /* pppoe alive user count */
     U8                      loglvl;         /* FastRG loglvl */
     BOOL                    is_standalone;  /* FastRG standalone mode */
     char                    *version;       /* FastRG version */
