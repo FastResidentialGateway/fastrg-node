@@ -1,3 +1,4 @@
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -13,6 +14,7 @@
 #include <json/json.h>
 
 #include "config_snapshot.h"
+#include "kafka_producer.h"
 
 #define SNAPSHOT_PATH_DEFAULT "/etc/fastrg/config_snapshot.json"
 #define SNAPSHOT_UPDATED_BY "fastrg-node-offline"
@@ -46,6 +48,10 @@ struct Entry {
 std::map<std::string, Entry> g_entries;
 std::mutex g_mutex;
 bool g_initialized = false;
+// Sticky persist-failure state, guarded by g_mutex. True after the last
+// persist attempt failed; cleared by the next successful persist. FALSE at
+// boot (nothing attempted yet counts as ok).
+bool g_persist_failed = false;
 
 std::string map_key(snapshot_kind_t kind, const char *user_id)
 {
@@ -72,8 +78,10 @@ std::string iso8601_now()
 }
 
 // Persist while holding g_mutex. Atomic replace, mirroring the pattern the
-// retired config queue used.
-void persist_locked()
+// retired config queue used. Returns false when any step fails and stores a
+// short failure description into *err_detail (errno is best-effort for the
+// iostream steps: the stream flags the failure, the errno may be stale).
+bool persist_locked(std::string *err_detail)
 {
     Json::Value arr(Json::arrayValue);
     for (const auto &it : g_entries) {
@@ -94,13 +102,72 @@ void persist_locked()
     w["indentation"] = "";
     std::string data = Json::writeString(w, root);
     std::string tmp = std::string(snapshot_path()) + ".tmp";
+    errno = 0;
     std::ofstream ofs(tmp, std::ios::trunc);
-    if (!ofs)
-        return;
+    if (!ofs) {
+        *err_detail = "cannot open " + tmp + ": " + strerror(errno);
+        return false;
+    }
     ofs << data;
     ofs.flush();
+    if (!ofs) {
+        // badbit/failbit after write/flush: this is where a full disk shows up.
+        *err_detail = "write to " + tmp + " failed: " + strerror(errno);
+        return false;
+    }
     ofs.close();
-    std::rename(tmp.c_str(), snapshot_path());
+    if (ofs.fail()) {
+        *err_detail = "close of " + tmp + " failed: " + strerror(errno);
+        return false;
+    }
+    if (std::rename(tmp.c_str(), snapshot_path()) != 0) {
+        *err_detail = std::string("rename to ") + snapshot_path() + " failed: " + strerror(errno);
+        return false;
+    }
+    return true;
+}
+
+// Outcome of one persist attempt, carried out of the g_mutex scope so the
+// slow reporting (stderr + Kafka) never runs under the snapshot lock.
+struct PersistOutcome {
+    enum Transition { NONE, FAILED, RECOVERED } transition = NONE;
+    std::string err; // failure detail, set when transition == FAILED
+};
+
+// Persist and update the sticky failure state; call with g_mutex held. Only
+// state *transitions* are surfaced: ok->fail reports once, fail->ok logs a
+// recovery once, fail->fail stays silent (a log line per mutation would make
+// a full disk worse, and the controller already has the first report).
+PersistOutcome persist_and_track_locked()
+{
+    PersistOutcome out;
+    std::string err;
+    bool ok = persist_locked(&err);
+    if (!ok && !g_persist_failed) {
+        out.transition = PersistOutcome::FAILED;
+        out.err = err;
+    } else if (ok && g_persist_failed) {
+        out.transition = PersistOutcome::RECOVERED;
+    }
+    g_persist_failed = !ok;
+    return out;
+}
+
+// Report a persist state transition. MUST be called without g_mutex held:
+// kafka_report_runtime_error takes librdkafka/WAL locks, and calling into it
+// while holding the snapshot lock would create a lock-ordering hazard with
+// any Kafka-side callback path. kafka_report_* is a no-op until the producer
+// is initialized, so this is safe in standalone mode.
+void report_persist_outcome(const PersistOutcome &out)
+{
+    if (out.transition == PersistOutcome::FAILED) {
+        std::fprintf(stderr, "[snapshot] persist failed: %s\n", out.err.c_str());
+        kafka_report_runtime_error("config_snapshot", "SNAPSHOT_PERSIST_FAILED",
+            "failed to persist config snapshot to disk, possibly out of disk space or permission denied",
+            out.err.c_str());
+    } else if (out.transition == PersistOutcome::RECOVERED) {
+        std::fprintf(stderr, "[snapshot] persist recovered: %s written\n", snapshot_path());
+    }
 }
 
 // Extract metadata.resourceVersion as an integer
@@ -174,11 +241,14 @@ STATUS config_snapshot_init(void)
 
 void config_snapshot_cleanup(void)
 {
-    std::lock_guard<std::mutex> lk(g_mutex);
+    std::unique_lock<std::mutex> lk(g_mutex);
+    PersistOutcome out;
     if (g_initialized)
-        persist_locked();
+        out = persist_and_track_locked();
     g_entries.clear();
     g_initialized = false;
+    lk.unlock(); // reporting must not run under the snapshot lock
+    report_persist_outcome(out);
 }
 
 void config_snapshot_watch_update(snapshot_kind_t kind, const char *user_id,
@@ -186,7 +256,7 @@ void config_snapshot_watch_update(snapshot_kind_t kind, const char *user_id,
 {
     if (!user_id)
         return;
-    std::lock_guard<std::mutex> lk(g_mutex);
+    std::unique_lock<std::mutex> lk(g_mutex);
     if (!g_initialized)
         return;
     Entry &e = g_entries[map_key(kind, user_id)];
@@ -194,7 +264,15 @@ void config_snapshot_watch_update(snapshot_kind_t kind, const char *user_id,
     e.exists = (value_json != nullptr);
     e.dirty = false;
     e.summary.clear();
-    persist_locked();
+    PersistOutcome out = persist_and_track_locked();
+    lk.unlock(); // reporting must not run under the snapshot lock
+    report_persist_outcome(out);
+}
+
+BOOL config_snapshot_persist_ok(void)
+{
+    std::lock_guard<std::mutex> lk(g_mutex);
+    return g_persist_failed ? FALSE : TRUE;
 }
 
 char *config_snapshot_get(snapshot_kind_t kind, const char *user_id)
@@ -219,7 +297,7 @@ STATUS config_snapshot_offline_edit(snapshot_kind_t kind, const char *user_id,
     if (!reader.parse(new_value_json, root) || !root.isObject())
         return ERROR;
 
-    std::lock_guard<std::mutex> lk(g_mutex);
+    std::unique_lock<std::mutex> lk(g_mutex);
     if (!g_initialized)
         return ERROR;
 
@@ -227,7 +305,7 @@ STATUS config_snapshot_offline_edit(snapshot_kind_t kind, const char *user_id,
 
     // Resource version from the current snapshot entry. A tombstone (offline
     // delete) keeps its pre-delete value: a recreate continues that rv
-    // chain instead of resetting to "1" — this will ensure the config always 
+    // chain instead of resetting to "1" — this will ensure the config always
     // win the etcd key if it still exists.
     long long cur = 0;
     std::string rv;
@@ -257,7 +335,13 @@ STATUS config_snapshot_offline_edit(snapshot_kind_t kind, const char *user_id,
             e.summary += "; ";
         e.summary += edit_summary;
     }
-    persist_locked();
+    PersistOutcome out = persist_and_track_locked();
+    lk.unlock(); // reporting must not run under the snapshot lock
+    report_persist_outcome(out);
+    // The in-memory edit is applied and dirty regardless of the persist
+    // outcome, so this is still a success for the caller: durability problems
+    // are surfaced out-of-band (stderr + Kafka runtime error), not as an
+    // operation failure.
     return SUCCESS;
 }
 
@@ -267,7 +351,7 @@ STATUS config_snapshot_offline_delete(snapshot_kind_t kind, const char *user_id,
     if (!user_id)
         return ERROR;
 
-    std::lock_guard<std::mutex> lk(g_mutex);
+    std::unique_lock<std::mutex> lk(g_mutex);
     if (!g_initialized)
         return ERROR;
 
@@ -288,7 +372,11 @@ STATUS config_snapshot_offline_delete(snapshot_kind_t kind, const char *user_id,
             e.summary += "; ";
         e.summary += edit_summary;
     }
-    persist_locked();
+    PersistOutcome out = persist_and_track_locked();
+    lk.unlock(); // reporting must not run under the snapshot lock
+    report_persist_outcome(out);
+    // Same decision as offline_edit: the tombstone is applied in memory, so
+    // report SUCCESS and surface persist failures out-of-band.
     return SUCCESS;
 }
 
@@ -370,7 +458,7 @@ void config_snapshot_clear_dirty(snapshot_kind_t kind, const char *user_id,
 {
     if (!user_id)
         return;
-    std::lock_guard<std::mutex> lk(g_mutex);
+    std::unique_lock<std::mutex> lk(g_mutex);
     auto it = g_entries.find(map_key(kind, user_id));
     if (it == g_entries.end())
         return;
@@ -381,7 +469,9 @@ void config_snapshot_clear_dirty(snapshot_kind_t kind, const char *user_id,
         return;
     it->second.dirty = false;
     it->second.summary.clear();
-    persist_locked();
+    PersistOutcome out = persist_and_track_locked();
+    lk.unlock(); // reporting must not run under the snapshot lock
+    report_persist_outcome(out);
 }
 
 // Field-level merge for the offline-edit kinds that touch a single aspect of

@@ -624,6 +624,65 @@ static void test_snapshot_clear_dirty_delete_race()
         !probe_dirty_entry(SNAPSHOT_KIND_HSI, "72").found);
 }
 
+/* ---- persist-failure cases: CONFIG_SNAPSHOT_PATH is re-read on every
+ * persist, so pointing it into a nonexistent directory makes the .tmp open
+ * fail deterministically (a read-only directory would not stop root).
+ * Teardown restores the good path and clears the dirty flag it created. ---- */
+
+static void test_snapshot_persist_failure_and_recovery(const char *good_path)
+{
+    std::cout << "Case 19: persist failure flips persist_ok, is sticky, and recovers" << std::endl;
+
+    expect_equal("case 19 baseline persist_ok", (BOOL)TRUE, config_snapshot_persist_ok());
+
+    // Break persistence: the snapshot's parent directory does not exist.
+    setenv("CONFIG_SNAPSHOT_PATH",
+        "/tmp/fastrg_test_snapshot_missing_dir/snapshot.json", 1);
+
+    // The API keeps its semantics: the edit is applied in memory and reports
+    // SUCCESS even though the disk write failed (durability is out-of-band).
+    expect_equal("case 19 edit returns SUCCESS despite persist failure", SUCCESS,
+        config_snapshot_offline_edit(SNAPSHOT_KIND_HSI, "80",
+            "{\"config\":{\"vlan_id\":\"80\"}}", "edit-80"));
+    expect_equal("case 19 persist_ok FALSE after failure", (BOOL)FALSE,
+        config_snapshot_persist_ok());
+
+    // The in-memory effect survives: get sees the new value, dirty is set.
+    char *v = config_snapshot_get(SNAPSHOT_KIND_HSI, "80");
+    Json::Value root;
+    expect_true("case 19 memory value present", v != NULL && parse_json(v, root));
+    expect_equal("case 19 memory value applied", std::string("80"),
+        root["config"]["vlan_id"].asString());
+    free(v);
+    expect_true("case 19 entry marked dirty",
+        probe_dirty_entry(SNAPSHOT_KIND_HSI, "80").found);
+
+    // Sticky failure: repeated mutations while persist keeps failing must not
+    // crash and keep persist_ok FALSE (the transition reporting itself only
+    // fires on ok->fail, which stderr shows but the test cannot assert).
+    for (int i = 0; i < 5; i++) {
+        expect_equal("case 19 repeated edit while failing", SUCCESS,
+            config_snapshot_offline_edit(SNAPSHOT_KIND_HSI, "80",
+                "{\"config\":{\"vlan_id\":\"81\"}}", "edit-80-again"));
+    }
+    expect_equal("case 19 delete while failing", SUCCESS,
+        config_snapshot_offline_delete(SNAPSHOT_KIND_HSI, "80", "delete-80"));
+    expect_equal("case 19 persist_ok stays FALSE while failing", (BOOL)FALSE,
+        config_snapshot_persist_ok());
+
+    // Recovery: restore the writable path; the next mutation persists again.
+    setenv("CONFIG_SNAPSHOT_PATH", good_path, 1);
+    expect_equal("case 19 recovery edit", SUCCESS,
+        config_snapshot_offline_edit(SNAPSHOT_KIND_HSI, "80",
+            "{\"config\":{\"vlan_id\":\"82\"}}", "recover-80"));
+    expect_equal("case 19 persist_ok TRUE after recovery", (BOOL)TRUE,
+        config_snapshot_persist_ok());
+
+    // Leave a clean dirty set for anything running after this case.
+    config_snapshot_clear_dirty(SNAPSHOT_KIND_HSI, "80",
+        dirty_seq_of(SNAPSHOT_KIND_HSI, "80"));
+}
+
 int main()
 {
     // Point the snapshot at a scratch file so the test never touches the
@@ -652,6 +711,7 @@ int main()
     test_snapshot_clear_dirty_matching_seq();
     test_snapshot_clear_dirty_edit_race();
     test_snapshot_clear_dirty_delete_race();
+    test_snapshot_persist_failure_and_recovery(path);
 
     config_snapshot_cleanup();
     std::remove(path);

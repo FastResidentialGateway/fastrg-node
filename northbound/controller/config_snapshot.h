@@ -56,6 +56,18 @@ void config_snapshot_watch_update(snapshot_kind_t kind, const char *user_id,
     const char *value_json);
 
 /**
+ * @fn config_snapshot_persist_ok
+ * @brief Report whether the last snapshot persist attempt succeeded. TRUE at
+ *        boot when nothing has been persisted yet. FALSE after a failed
+ *        persist (open/write/flush/close/rename), until the next successful
+ *        persist clears it (sticky state; the failure itself is reported
+ *        once via stderr and a Kafka runtime error on the ok->fail
+ *        transition). Intended for tests and future metrics.
+ * @return TRUE when the last persist succeeded (or none happened yet)
+ */
+BOOL config_snapshot_persist_ok(void);
+
+/**
  * @fn config_snapshot_get
  * @brief Return the current snapshot value for a key.
  * @param kind snapshot family
