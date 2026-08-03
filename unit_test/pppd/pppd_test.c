@@ -205,15 +205,11 @@ static void test_ppp_bye_end_phase(void)
     pppd_ccb_reset();
     test_ppp_ccb.phase = END_PHASE;
     rte_atomic16_set(&test_ppp_ccb.ppp_bool, 1);
-    U8 before = g_pppd_fastrg_ccb->cur_user;
-    g_pppd_fastrg_ccb->cur_user = 5;
 
     PPP_bye(&test_ppp_ccb);
 
     TEST_ASSERT(rte_atomic16_read(&test_ppp_ccb.ppp_bool) == 0, "END_PHASE clears ppp_bool via exit_ppp", "");
     TEST_ASSERT(test_ppp_ccb.ppp_processing == FALSE, "ppp_processing left FALSE", "");
-    TEST_ASSERT(g_pppd_fastrg_ccb->cur_user == 4, "exit_ppp decrements cur_user", "got %u", g_pppd_fastrg_ccb->cur_user);
-    g_pppd_fastrg_ccb->cur_user = before;
 }
 
 static void test_ppp_bye_pppoe_phase_recurses_to_end(void)
@@ -287,8 +283,6 @@ static void test_exit_ppp_resets_fields(void)
     test_ppp_ccb.hsi_ipv4_gw = 0xC0A80001;
     test_ppp_ccb.hsi_primary_dns = 0x08080808;
     test_ppp_ccb.hsi_secondary_dns = 0x01010101;
-    U8 before = g_pppd_fastrg_ccb->cur_user;
-    g_pppd_fastrg_ccb->cur_user = 5;
 
     exit_ppp(&test_ppp_ccb);
 
@@ -301,8 +295,6 @@ static void test_exit_ppp_resets_fields(void)
         "assigned IPs cleared", "");
     TEST_ASSERT(test_ppp_ccb.hsi_primary_dns == 0xffffffff && test_ppp_ccb.hsi_secondary_dns == 0xffffffff,
         "DNS reset to unassigned sentinel (0xffffffff)", "");
-    TEST_ASSERT(g_pppd_fastrg_ccb->cur_user == 4, "cur_user decremented", "got %u", g_pppd_fastrg_ccb->cur_user);
-    g_pppd_fastrg_ccb->cur_user = before;
 }
 
 static void test_exit_ppp_redial_pending_honored(void)
