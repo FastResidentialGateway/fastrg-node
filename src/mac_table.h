@@ -18,9 +18,8 @@
      64-bit application-data word of the hash, so learning / re-learning a
      MAC is a single atomic pdata store inside rte_hash (release order) and
      a lookup is a single atomic load — a concurrent reader can never
-     observe a torn MAC (this closes audit item A-L5: the old direct-index
-     table updated the 6-byte MAC non-atomically under a separate valid
-     flag).
+     observe a torn MAC (the old direct-index table updated the 6-byte
+     MAC non-atomically under a separate valid flag).
 
   Designed by THE on 2026/03/29
 /\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\*/
@@ -42,8 +41,8 @@
 /* ------------------------------------------------------------------ */
 
 /** Fixed per-subscriber capacity: 64K entries = one fully-populated /16.
- *  Hard-wired by design decision (task-84): we cannot assume a LAN device
- *  count, and 64K (~2MB/subscriber) is the ruled capacity. */
+ *  Hard-wired by design decision: we cannot assume a LAN device count,
+ *  and 64K (~2MB/subscriber) is the ruled capacity. */
 #define MAC_TABLE_MAX_ENTRIES 65536
 
 /* ------------------------------------------------------------------ */
