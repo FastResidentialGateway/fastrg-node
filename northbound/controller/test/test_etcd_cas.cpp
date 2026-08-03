@@ -258,15 +258,56 @@ struct DirtyProbe {
 
 static void dirty_probe_cb(snapshot_kind_t kind, const char *user_id,
     const char *value_json, const char *resource_version, int64_t edited_at,
-    const char *edit_summary, void *user_data)
+    const char *edit_summary, uint64_t edit_seq, void *user_data)
 {
-    (void)kind; (void)edited_at;
+    (void)kind; (void)edited_at; (void)edit_seq;
     DirtyProbe *p = (DirtyProbe *)user_data;
     p->count++;
     p->last_user = user_id;
     p->last_summary = edit_summary ? edit_summary : "";
     p->last_rv = resource_version ? resource_version : "";
     p->last_tombstone = (value_json == NULL);
+}
+
+/* Compare-and-clear support: config_snapshot_clear_dirty takes the edit
+ * sequence the caller observed via the foreach callback. This helper scans
+ * the dirty set for one entry and captures its current seq/value/tombstone
+ * state, so tests can clear with the up-to-date seq (or probe dirtiness). */
+struct DirtyEntryProbe {
+    snapshot_kind_t kind = SNAPSHOT_KIND_HSI;
+    const char *uid = "";
+    bool found = false;
+    bool tombstone = false;
+    uint64_t seq = 0;
+    std::string value;
+};
+
+static void dirty_entry_probe_cb(snapshot_kind_t kind, const char *user_id,
+    const char *value_json, const char *resource_version, int64_t edited_at,
+    const char *edit_summary, uint64_t edit_seq, void *user_data)
+{
+    (void)resource_version; (void)edited_at; (void)edit_summary;
+    DirtyEntryProbe *p = (DirtyEntryProbe *)user_data;
+    if (kind != p->kind || std::string(user_id) != p->uid)
+        return;
+    p->found = true;
+    p->tombstone = (value_json == NULL);
+    p->seq = edit_seq;
+    p->value = value_json ? value_json : "";
+}
+
+static DirtyEntryProbe probe_dirty_entry(snapshot_kind_t kind, const char *uid)
+{
+    DirtyEntryProbe p;
+    p.kind = kind;
+    p.uid = uid;
+    config_snapshot_foreach_dirty(dirty_entry_probe_cb, &p);
+    return p;
+}
+
+static uint64_t dirty_seq_of(snapshot_kind_t kind, const char *uid)
+{
+    return probe_dirty_entry(kind, uid).seq;
 }
 
 static void test_snapshot_dirty_semantics()
@@ -301,7 +342,8 @@ static void test_snapshot_dirty_semantics()
     expect_equal("case 10 summary accumulates", std::string("edit-a; edit-b"),
         p.last_summary);
     expect_equal("case 10 dirty rv matches", std::string("2"), p.last_rv);
-    config_snapshot_clear_dirty(SNAPSHOT_KIND_HSI, "9");
+    config_snapshot_clear_dirty(SNAPSHOT_KIND_HSI, "9",
+        dirty_seq_of(SNAPSHOT_KIND_HSI, "9"));
     p = DirtyProbe();
     config_snapshot_foreach_dirty(dirty_probe_cb, &p);
     expect_equal("case 10 clear_dirty removes entry", base, p.count);
@@ -365,7 +407,7 @@ static void test_snapshot_offline_delete()
         bool found = false; bool tombstone = false; std::string rv, summary;
     } ft;
     auto find_cb = [](snapshot_kind_t, const char *uid, const char *value_json,
-        const char *rv, int64_t, const char *summary, void *ud) {
+        const char *rv, int64_t, const char *summary, uint64_t, void *ud) {
         FindTomb *f = (FindTomb *)ud;
         if (std::string(uid) == "42") {
             f->found = true;
@@ -417,7 +459,7 @@ static void test_snapshot_boot_apply_skips_deleted()
         bool u50 = false, u51 = false, u52 = false;
     } seen;
     auto seen_cb = [](snapshot_kind_t, const char *uid, const char *value_json,
-        const char *, int64_t, const char *, void *ud) {
+        const char *, int64_t, const char *, uint64_t, void *ud) {
         SeenUsers *s = (SeenUsers *)ud;
         std::string u(uid);
         if (u == "50") s->u50 = (value_json != NULL);
@@ -430,7 +472,8 @@ static void test_snapshot_boot_apply_skips_deleted()
     expect_true("case 14 tombstoned entry skipped", !seen.u52);
 
     // Clean up the tombstone's dirty flag so later cases see a known state.
-    config_snapshot_clear_dirty(SNAPSHOT_KIND_HSI, "52");
+    config_snapshot_clear_dirty(SNAPSHOT_KIND_HSI, "52",
+        dirty_seq_of(SNAPSHOT_KIND_HSI, "52"));
 }
 
 static void test_snapshot_delete_recreate_rv_chain()
@@ -470,8 +513,115 @@ static void test_snapshot_delete_recreate_rv_chain()
         root2["metadata"]["resourceVersion"].asString());
     free(v);
 
-    config_snapshot_clear_dirty(SNAPSHOT_KIND_HSI, "60");
-    config_snapshot_clear_dirty(SNAPSHOT_KIND_HSI, "61");
+    config_snapshot_clear_dirty(SNAPSHOT_KIND_HSI, "60",
+        dirty_seq_of(SNAPSHOT_KIND_HSI, "60"));
+    config_snapshot_clear_dirty(SNAPSHOT_KIND_HSI, "61",
+        dirty_seq_of(SNAPSHOT_KIND_HSI, "61"));
+}
+
+/* ---- compare-and-clear cases (dirty-flag read-send-clear race): the report
+ * path copies the dirty set out of the lock, does slow I/O per entry, then
+ * clears dirty. An offline edit landing inside that window must survive the
+ * clear. The race is reproduced deterministically by editing the entry from
+ * inside the foreach_dirty callback — same interleaving as a gRPC-thread
+ * edit racing the watchdog-thread report, no timing involved. ---- */
+
+static void test_snapshot_clear_dirty_matching_seq()
+{
+    std::cout << "Case 16: clear_dirty with the observed seq clears (no concurrent edit)" << std::endl;
+
+    config_snapshot_offline_edit(SNAPSHOT_KIND_HSI, "70",
+        "{\"config\":{\"vlan_id\":\"40\"}}", "edit-70");
+    DirtyEntryProbe before = probe_dirty_entry(SNAPSHOT_KIND_HSI, "70");
+    expect_true("case 16 entry is dirty after edit", before.found);
+
+    // No edit happened since the foreach copy: the seq matches and the clear
+    // goes through, exactly like the pre-seq behaviour.
+    config_snapshot_clear_dirty(SNAPSHOT_KIND_HSI, "70", before.seq);
+    DirtyEntryProbe after = probe_dirty_entry(SNAPSHOT_KIND_HSI, "70");
+    expect_true("case 16 matching seq clears dirty", !after.found);
+}
+
+// Simulates the racing edit: runs inside the foreach_dirty callback for the
+// target entry, i.e. after the dirty set was copied but before the report
+// path clears the flag.
+struct RaceCtx {
+    const char *uid = "";
+    bool hit = false;
+    bool delete_in_window = false;   // in-window edit is an offline_delete
+};
+
+static void race_edit_cb(snapshot_kind_t kind, const char *user_id,
+    const char *value_json, const char *resource_version, int64_t edited_at,
+    const char *edit_summary, uint64_t edit_seq, void *user_data)
+{
+    (void)value_json; (void)resource_version; (void)edited_at; (void)edit_summary;
+    RaceCtx *r = (RaceCtx *)user_data;
+    if (kind != SNAPSHOT_KIND_HSI || std::string(user_id) != r->uid)
+        return;
+    r->hit = true;
+    // The in-window edit (what the gRPC thread would do while the watchdog
+    // thread is mid-report on the copied value)...
+    if (r->delete_in_window)
+        config_snapshot_offline_delete(SNAPSHOT_KIND_HSI, r->uid, "in-window delete");
+    else
+        config_snapshot_offline_edit(SNAPSHOT_KIND_HSI, r->uid,
+            "{\"config\":{\"vlan_id\":\"51\"}}", "in-window edit");
+    // ...then the report path finishes and clears with the seq it observed
+    // before the edit. The stale seq must NOT clear the new edit's dirty flag.
+    config_snapshot_clear_dirty(kind, user_id, edit_seq);
+}
+
+static void test_snapshot_clear_dirty_edit_race()
+{
+    std::cout << "Case 17: edit inside the report window survives a stale clear" << std::endl;
+
+    config_snapshot_offline_edit(SNAPSHOT_KIND_HSI, "71",
+        "{\"config\":{\"vlan_id\":\"50\"}}", "edit-71");
+
+    RaceCtx r;
+    r.uid = "71";
+    config_snapshot_foreach_dirty(race_edit_cb, &r);
+    expect_true("case 17 race callback ran", r.hit);
+
+    // The stale-seq clear must have been a no-op: still dirty, and the next
+    // scan (the next report tick) sees the in-window value.
+    DirtyEntryProbe p = probe_dirty_entry(SNAPSHOT_KIND_HSI, "71");
+    expect_true("case 17 entry stays dirty", p.found);
+    Json::Value root;
+    expect_true("case 17 next scan value parses", parse_json(p.value, root));
+    expect_equal("case 17 next scan sees the new value", std::string("51"),
+        root["config"]["vlan_id"].asString());
+
+    // With the up-to-date seq the clear works again (window closed).
+    config_snapshot_clear_dirty(SNAPSHOT_KIND_HSI, "71", p.seq);
+    expect_true("case 17 fresh seq clears dirty",
+        !probe_dirty_entry(SNAPSHOT_KIND_HSI, "71").found);
+}
+
+static void test_snapshot_clear_dirty_delete_race()
+{
+    std::cout << "Case 18: delete inside the report window survives a stale clear" << std::endl;
+
+    config_snapshot_offline_edit(SNAPSHOT_KIND_HSI, "72",
+        "{\"config\":{\"vlan_id\":\"60\"}}", "edit-72");
+
+    RaceCtx r;
+    r.uid = "72";
+    r.delete_in_window = true;
+    config_snapshot_foreach_dirty(race_edit_cb, &r);
+    expect_true("case 18 race callback ran", r.hit);
+
+    // The offline delete landed in the window: the stale clear must not eat
+    // it, and the next scan surfaces the tombstone (delete proposal).
+    DirtyEntryProbe p = probe_dirty_entry(SNAPSHOT_KIND_HSI, "72");
+    expect_true("case 18 entry stays dirty", p.found);
+    expect_true("case 18 next scan sees the tombstone", p.tombstone);
+
+    // With the up-to-date seq the tombstone's flag clears normally.
+    config_snapshot_clear_dirty(SNAPSHOT_KIND_HSI, "72", p.seq);
+    expect_true("case 18 fresh seq clears dirty",
+        !probe_dirty_entry(SNAPSHOT_KIND_HSI, "72").found);
 }
 
 int main()
@@ -499,6 +649,9 @@ int main()
     test_snapshot_offline_delete();
     test_snapshot_boot_apply_skips_deleted();
     test_snapshot_delete_recreate_rv_chain();
+    test_snapshot_clear_dirty_matching_seq();
+    test_snapshot_clear_dirty_edit_race();
+    test_snapshot_clear_dirty_delete_race();
 
     config_snapshot_cleanup();
     std::remove(path);

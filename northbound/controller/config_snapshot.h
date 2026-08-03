@@ -110,11 +110,14 @@ BOOL config_snapshot_content_equal(const char *json_a, const char *json_b);
 /* Callback for config_snapshot_foreach_dirty. resource_version is the value
  * stamped into the entry's metadata; edited_at is the unix time (seconds) of
  * the last offline edit; edit_summary accumulates all edits since the entry
- * last became clean. value_json == NULL marks a tombstone (offline delete); 
- * resource_version then carries the key's last-known rv. */
+ * last became clean. value_json == NULL marks a tombstone (offline delete);
+ * resource_version then carries the key's last-known rv. edit_seq is the
+ * entry's edit sequence number at copy time; pass it back to
+ * config_snapshot_clear_dirty so a concurrent edit made after the copy is
+ * never clobbered (compare-and-clear). */
 typedef void (*snapshot_dirty_cb_t)(snapshot_kind_t kind, const char *user_id,
     const char *value_json, const char *resource_version, int64_t edited_at,
-    const char *edit_summary, void *user_data);
+    const char *edit_summary, uint64_t edit_seq, void *user_data);
 
 /**
  * @fn config_snapshot_foreach
@@ -139,12 +142,20 @@ void config_snapshot_foreach_dirty(snapshot_dirty_cb_t cb, void *user_data);
 /**
  * @fn config_snapshot_clear_dirty
  * @brief Clear an entry's dirty flag and accumulated summary (after the
- *        reconnect sync handled it).
+ *        reconnect sync handled it). Compare-and-clear: the flag is only
+ *        cleared when the entry's current edit sequence still equals
+ *        seen_edit_seq (the value the foreach callback received). When they
+ *        differ a new offline edit landed after the dirty set was copied out
+ *        — the reported value is stale, so the entry stays dirty and the next
+ *        tick re-reports it with the new value.
  * @param kind snapshot family
  * @param user_id subscriber id
+ * @param seen_edit_seq edit sequence observed by the caller (from the
+ *        snapshot_dirty_cb_t edit_seq argument)
  * @return void
  */
-void config_snapshot_clear_dirty(snapshot_kind_t kind, const char *user_id);
+void config_snapshot_clear_dirty(snapshot_kind_t kind, const char *user_id,
+    uint64_t seen_edit_seq);
 
 /* Offline field-edit kinds for config_snapshot_field_merge(): the node applies
  * the change locally and merges the same edit onto its persisted snapshot;
