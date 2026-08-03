@@ -43,13 +43,17 @@
  * The array index IS the external port number, so no eport field needed.
  * Maps WAN PPPoE IP:eport → LAN dip:iport.
  * Packed to 16 bytes so total table = 65536 * 16 = 1 MB per ppp_ccb.
+ *
+ * Do not make this struct cache line aligned. Each entry is parallel accessed 
+ * in different lcores, even we align it to cache line, it still has false sharing
+ * issue. Therefore, we keep it unaligned to save memory usage. 
  */
 typedef struct port_fwd_entry {
     U32            dip;         /**< destination IP on LAN (network byte order) */
     U16            iport;       /**< internal port on LAN (host byte order) */
     rte_atomic16_t is_active;   /**< 1 = active, 0 = free */
     rte_atomic64_t hit_count;   /**< number of packets matched by this rule */
-} __rte_cache_aligned port_fwd_entry_t;
+} port_fwd_entry_t;
 /**
  * @brief hsi nat table structure
  */
