@@ -7,8 +7,13 @@
 #include <string.h>
 #include <unistd.h>
 
+#include <sys/stat.h>
+
+#include <uuid/uuid.h>
+
 #include <common.h>
 
+#include "../src/config.h"
 #include "../src/utils.h"
 #include "../src/fastrg.h"
 #include "test_helper.h"
@@ -265,6 +270,106 @@ static void test_create_pthread_out_param(FastRG_t *fastrg_ccb)
         ret, join_ret, thread_result);
 }
 
+static void test_uuid_str_is_valid(void)
+{
+    printf("\nTesting fastrg_uuid_str_is_valid function:\n");
+    printf("=========================================\n\n");
+
+    printf("Test 1: valid canonical UUID\n");
+    TEST_ASSERT(fastrg_uuid_str_is_valid("123e4567-e89b-12d3-a456-426614174000") == TRUE,
+        "Test 1: valid canonical UUID accepted", "");
+
+    printf("Test 2: too short (35 chars)\n");
+    TEST_ASSERT(fastrg_uuid_str_is_valid("123e4567-e89b-12d3-a456-42661417400") == FALSE,
+        "Test 2: too short UUID rejected", "");
+
+    printf("Test 3: too long (37 chars)\n");
+    TEST_ASSERT(fastrg_uuid_str_is_valid("123e4567-e89b-12d3-a456-4266141740000") == FALSE,
+        "Test 3: too long UUID rejected", "");
+
+    printf("Test 4: dash at wrong position\n");
+    TEST_ASSERT(fastrg_uuid_str_is_valid("123e45677e89b-12d3-a456-42661417400-") == FALSE,
+        "Test 4: misplaced dash rejected", "");
+
+    printf("Test 5: non-hex character\n");
+    TEST_ASSERT(fastrg_uuid_str_is_valid("123e4567-e89b-12d3-a456-42661417400g") == FALSE,
+        "Test 5: non-hex character rejected", "");
+
+    printf("Test 6: NULL and empty string\n");
+    TEST_ASSERT(fastrg_uuid_str_is_valid(NULL) == FALSE && fastrg_uuid_str_is_valid("") == FALSE,
+        "Test 6: NULL and empty string rejected", "");
+}
+
+static void test_get_id(void)
+{
+    printf("\nTesting fastrg_get_id function:\n");
+    printf("=========================================\n\n");
+
+    char uuid_path[512];
+    snprintf(uuid_path, sizeof(uuid_path), "%snode_uuid", CONFIG_DIR_PATH);
+    mkdir(CONFIG_DIR_PATH, 0755); /* ignore EEXIST, only ensure the dir is there */
+
+    /* Back up any pre-existing node identity file so the test leaves the
+     * machine exactly as it found it. */
+    char backup[256] = {0};
+    size_t backup_len = 0;
+    int had_file = 0;
+    FILE *fp = fopen(uuid_path, "r");
+    if (fp) {
+        had_file = 1;
+        backup_len = fread(backup, 1, sizeof(backup), fp);
+        fclose(fp);
+    }
+
+    /* Case 1: a valid stored UUID must be returned verbatim. */
+    const char *stored = "123e4567-e89b-12d3-a456-426614174000";
+    fp = fopen(uuid_path, "w");
+    TEST_ASSERT(fp != NULL, "Test 1: UUID file is writable", "cannot write %s", uuid_path);
+    if (fp) {
+        fprintf(fp, "%s\n", stored);
+        fclose(fp);
+
+        char node_id[UUID_STR_LEN] = {0};
+        STATUS ret = fastrg_get_id(stdout, node_id);
+        TEST_ASSERT(ret == SUCCESS && strcmp(node_id, stored) == 0,
+            "Test 1: valid stored UUID returned verbatim", "ret=%d got %s", ret, node_id);
+
+        /* Case 2: an over-long / malformed first line must trigger the
+         * regeneration path: the returned UUID is valid, differs from the
+         * garbage, and the file is rewritten with the new identity. */
+        fp = fopen(uuid_path, "w");
+        if (fp) {
+            fprintf(fp, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n");
+            fclose(fp);
+        }
+        char regen_id[UUID_STR_LEN] = {0};
+        ret = fastrg_get_id(stdout, regen_id);
+        TEST_ASSERT(ret == SUCCESS && fastrg_uuid_str_is_valid(regen_id) == TRUE,
+            "Test 2: malformed file triggers regeneration of a valid UUID", "ret=%d got %s", ret, regen_id);
+
+        char file_line[128] = {0};
+        fp = fopen(uuid_path, "r");
+        if (fp) {
+            if (fgets(file_line, sizeof(file_line), fp) != NULL)
+                file_line[strcspn(file_line, "\n")] = '\0';
+            fclose(fp);
+        }
+        TEST_ASSERT(strcmp(file_line, regen_id) == 0,
+            "Test 2: regenerated UUID persisted back to the file", "file has %s", file_line);
+    }
+
+    /* Restore the original file (or remove the one the test created). */
+    if (had_file) {
+        fp = fopen(uuid_path, "w");
+        if (fp) {
+            fwrite(backup, 1, backup_len, fp);
+            fclose(fp);
+        }
+    } else {
+        remove(uuid_path);
+    }
+}
+
 void test_utils(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 {
     printf("\n");
@@ -283,6 +388,8 @@ void test_utils(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_create_dir_if_not_exists();
     test_parse_pci_ids();
     test_create_pthread_out_param(fastrg_ccb);
+    test_uuid_str_is_valid();
+    test_get_id();
 
     printf("\n");
     printf("╔════════════════════════════════════════════════════════════╗\n");

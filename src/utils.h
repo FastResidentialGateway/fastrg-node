@@ -1,6 +1,7 @@
 #ifndef _UTILS_H_
 #define _UTILS_H_
 
+#include <stdio.h>
 #include <pthread.h>
 
 #include <common.h>
@@ -279,15 +280,31 @@ STATUS fastrg_create_pthread(const char *thread_name,
     void *(*thread_func)(void *), void *arg, unsigned int cpu_id, pthread_t *out_thread);
 
 /**
+ * @fn fastrg_uuid_str_is_valid
+ *
+ * @brief Check whether a string is a canonical textual UUID
+ *        (36 chars in the 8-4-4-4-12 hex-and-dash layout)
+ * @param uuid_str
+ *     NUL-terminated string to validate (NULL is treated as invalid)
+ * @return
+ *     TRUE if the string is a valid canonical UUID, FALSE otherwise
+ */
+BOOL fastrg_uuid_str_is_valid(const char *uuid_str);
+
+/**
  * @fn fastrg_get_id
- * 
- * @brief Get previously stored unique node ID (UUID)
+ *
+ * @brief Get previously stored unique node ID (UUID). A missing, empty or
+ *        malformed UUID file causes a fresh UUID to be generated and
+ *        persisted back to the file
+ * @param log_fp
+ *     Log file pointer for diagnostics
  * @param node_id
  *     Buffer to store the node ID (UUID), must be at least 37 bytes
  * @return
  *     SUCCESS on success, ERROR on failure
  */
-STATUS fastrg_get_id(char node_id[]);
+STATUS fastrg_get_id(FILE *log_fp, char node_id[]);
 
 /**
  * @fn parse_unix_sock_path
