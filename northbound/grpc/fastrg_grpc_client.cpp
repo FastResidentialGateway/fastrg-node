@@ -345,14 +345,17 @@ void fastrg_grpc_get_system_stats() {
                 std::cout << "          Dropped packets: " << per_user_stats.dropped_packets() << std::endl;
                 std::cout << "          Dropped bytes: " << per_user_stats.dropped_bytes() << std::endl;
             }
-            const PerUserStatistics& per_user_stats = stats.per_user_stats(stats.per_user_stats_size()-1);
-            std::cout << "        Unknown user: " << std::endl;
-            std::cout << "          Rx packets: " << per_user_stats.rx_packets() << std::endl;
-            std::cout << "          Tx packets: " << per_user_stats.tx_packets() << std::endl;
-            std::cout << "          Rx bytes: " << per_user_stats.rx_bytes() << std::endl;
-            std::cout << "          Tx bytes: " << per_user_stats.tx_bytes() << std::endl;
-            std::cout << "          Dropped packets: " << per_user_stats.dropped_packets() << std::endl;
-            std::cout << "          Dropped bytes: " << per_user_stats.dropped_bytes() << std::endl;
+            /* the last entry is the unknown-user slot; skip it if the server sent an empty list */
+            if (stats.per_user_stats_size() >= 1) {
+                const PerUserStatistics& per_user_stats = stats.per_user_stats(stats.per_user_stats_size()-1);
+                std::cout << "        Unknown user: " << std::endl;
+                std::cout << "          Rx packets: " << per_user_stats.rx_packets() << std::endl;
+                std::cout << "          Tx packets: " << per_user_stats.tx_packets() << std::endl;
+                std::cout << "          Rx bytes: " << per_user_stats.rx_bytes() << std::endl;
+                std::cout << "          Tx bytes: " << per_user_stats.tx_bytes() << std::endl;
+                std::cout << "          Dropped packets: " << per_user_stats.dropped_packets() << std::endl;
+                std::cout << "          Dropped bytes: " << per_user_stats.dropped_bytes() << std::endl;
+            }
         }
         if (reply.lcore_usage_size() > 0 || reply.stats_size() > 0) {
             std::map<uint32_t, std::pair<uint64_t, uint64_t>> prev;
