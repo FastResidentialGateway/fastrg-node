@@ -429,7 +429,7 @@ struct OfflineReportCtx {
 
 void offline_report_cb(snapshot_kind_t kind, const char *user_id,
     const char *value_json, const char *resource_version, int64_t edited_at,
-    const char *edit_summary, void *user_data) {
+    const char *edit_summary, uint64_t edit_seq, void *user_data) {
     OfflineReportCtx *ctx = (OfflineReportCtx *)user_data;
 
     std::string key;
@@ -463,13 +463,13 @@ void offline_report_cb(snapshot_kind_t kind, const char *user_id,
     if (value_json == NULL) {
         if (st == ETCD_KEY_NOT_FOUND) {
             // Already gone in etcd: idempotent, nothing to propose.
-            config_snapshot_clear_dirty(kind, user_id);
+            config_snapshot_clear_dirty(kind, user_id, edit_seq);
             free(current);
             return;
         }
         kafka_report_config_offline_delete(kkind, user_id,
             resource_version, edited_at, edit_summary);
-        config_snapshot_clear_dirty(kind, user_id);
+        config_snapshot_clear_dirty(kind, user_id, edit_seq);
         std::fprintf(stderr, "[kafka] offline delete reported for %s (last rv=%s)\n",
             key.c_str(), resource_version ? resource_version : "");
         free(current);
@@ -478,8 +478,9 @@ void offline_report_cb(snapshot_kind_t kind, const char *user_id,
 
     if (st == ETCD_SUCCESS &&
             config_snapshot_content_equal(value_json, current) == TRUE) {
-        // Identical content is never sent.
-        config_snapshot_clear_dirty(kind, user_id);
+        // Identical content is never sent. Still compare-and-clear: an edit
+        // that landed after the dirty copy must survive this clear too.
+        config_snapshot_clear_dirty(kind, user_id, edit_seq);
         free(current);
         return;
     }
@@ -488,7 +489,7 @@ void offline_report_cb(snapshot_kind_t kind, const char *user_id,
     // discards edits whose key was deleted.
     kafka_report_config_offline_edit(kkind, user_id, value_json,
         resource_version, edited_at, edit_summary);
-    config_snapshot_clear_dirty(kind, user_id);
+    config_snapshot_clear_dirty(kind, user_id, edit_seq);
     std::fprintf(stderr, "[kafka] offline edit reported for %s (rv=%s)\n",
         key.c_str(), resource_version ? resource_version : "");
     free(current);
@@ -496,9 +497,9 @@ void offline_report_cb(snapshot_kind_t kind, const char *user_id,
 
 void count_dirty_cb(snapshot_kind_t kind, const char *user_id,
     const char *value_json, const char *resource_version, int64_t edited_at,
-    const char *edit_summary, void *user_data) {
+    const char *edit_summary, uint64_t edit_seq, void *user_data) {
     (void)kind; (void)user_id; (void)value_json; (void)resource_version;
-    (void)edited_at; (void)edit_summary;
+    (void)edited_at; (void)edit_summary; (void)edit_seq;
     (*(int *)user_data)++;
 }
 

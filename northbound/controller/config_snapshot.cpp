@@ -32,6 +32,14 @@ struct Entry {
     bool dirty = false;
     int64_t edited_at = 0;
     std::string summary;
+    // Edit sequence number, bumped under g_mutex on every offline edit/delete.
+    // In-memory only (never persisted): after a restart dirty entries are
+    // re-reported wholesale anyway, so restarting the sequence at 0 is
+    // harmless and the snapshot file format stays unchanged. Used by
+    // config_snapshot_clear_dirty's compare-and-clear so a report built from
+    // a copied dirty set can never wipe the flag of an edit that landed after
+    // the copy (gRPC thread editing while the watchdog thread reports).
+    uint64_t edit_seq = 0;
 };
 
 // key: "<kind>/<user_id>"
@@ -242,6 +250,7 @@ STATUS config_snapshot_offline_edit(snapshot_kind_t kind, const char *user_id,
     e.value = Json::writeString(w, root);
     e.exists = true;
     e.dirty = true;
+    e.edit_seq++;
     e.edited_at = (int64_t)std::time(nullptr);
     if (edit_summary && edit_summary[0] != '\0') {
         if (!e.summary.empty())
@@ -272,6 +281,7 @@ STATUS config_snapshot_offline_delete(snapshot_kind_t kind, const char *user_id,
     // never leaks as live config.
     e.exists = false;
     e.dirty = true;
+    e.edit_seq++;
     e.edited_at = (int64_t)std::time(nullptr);
     if (edit_summary && edit_summary[0] != '\0') {
         if (!e.summary.empty())
@@ -318,6 +328,7 @@ static void foreach_impl(snapshot_dirty_cb_t cb, void *user_data, bool dirty_onl
         int64_t edited_at;
         std::string summary;
         bool tombstone;   // offline delete: value_json passed as NULL
+        uint64_t edit_seq; // entry's edit sequence at copy time
     };
     std::vector<DirtyItem> items;
     {
@@ -345,21 +356,28 @@ static void foreach_impl(snapshot_dirty_cb_t cb, void *user_data, bool dirty_onl
             std::string rv = parse_rv(it.second.value, &rv_num)
                 ? std::to_string(rv_num) : std::string("");
             items.push_back({kind, it.first.substr(slash + 1), it.second.value,
-                rv, it.second.edited_at, it.second.summary, tombstone});
+                rv, it.second.edited_at, it.second.summary, tombstone,
+                it.second.edit_seq});
         }
     }
     for (const auto &i : items)
         cb(i.kind, i.user_id.c_str(), i.tombstone ? nullptr : i.value.c_str(),
-            i.rv.c_str(), i.edited_at, i.summary.c_str(), user_data);
+            i.rv.c_str(), i.edited_at, i.summary.c_str(), i.edit_seq, user_data);
 }
 
-void config_snapshot_clear_dirty(snapshot_kind_t kind, const char *user_id)
+void config_snapshot_clear_dirty(snapshot_kind_t kind, const char *user_id,
+    uint64_t seen_edit_seq)
 {
     if (!user_id)
         return;
     std::lock_guard<std::mutex> lk(g_mutex);
     auto it = g_entries.find(map_key(kind, user_id));
     if (it == g_entries.end())
+        return;
+    // Compare-and-clear: a mismatch means a new offline edit landed after the
+    // caller copied the dirty set (its reported value is stale). Leave the
+    // entry dirty so the next report tick sends the new value.
+    if (it->second.edit_seq != seen_edit_seq)
         return;
     it->second.dirty = false;
     it->second.summary.clear();
@@ -495,9 +513,9 @@ struct SnapshotApplyCtx {
 
 static void snapshot_apply_cb(snapshot_kind_t kind, const char *user_id,
     const char *value_json, const char *resource_version, int64_t edited_at,
-    const char *edit_summary, void *user_data)
+    const char *edit_summary, uint64_t edit_seq, void *user_data)
 {
-    (void)resource_version; (void)edited_at; (void)edit_summary;
+    (void)resource_version; (void)edited_at; (void)edit_summary; (void)edit_seq;
     SnapshotApplyCtx *ctx = (SnapshotApplyCtx *)user_data;
 
     if (ctx->count_pass) {
