@@ -75,7 +75,7 @@ phase32_metric_values() {
     local _pools="" _pool_name="" _size="" _avail="" _in_use=""
     local _sockets="" _sid="" _total="" _used="" _free="" _largest="" _pinned="" _slack=0
     local _lcores="" _lid="" _busy1="" _tot1="" _busy2="" _tot2="" _advanced=0
-    local _port="" _info_value="" _model="" _driver="" _pci="" _mac="" _start_time=""
+    local _port="" _info_value="" _model="" _driver="" _pci="" _mac="" _start_time="" _persist_ok=""
     local _family="" _nic="" _v1="" _v2="" _checked=0
 
     _body=$(e2e_metrics_body)
@@ -335,9 +335,16 @@ phase32_metric_values() {
         _issue="${_issue:+${_issue}; }start_time=${_start_time} is not in (0, now=${_now}]"
     fi
 
+    # The config snapshot persist gauge must read 1 on a healthy node: the
+    # disk is writable, so the last snapshot persist (or the boot default
+    # before any persist) reports success.
+    _persist_ok=$(e2e_metric_value "$_body" fastrg_node_snapshot_persist_ok)
+    [[ "$_persist_ok" == "1" ]] || \
+        _issue="${_issue:+${_issue}; }snapshot_persist_ok='${_persist_ok:-NA}', expected 1"
+
     if [[ -z "$_issue" ]]; then
         pass "Step 133: NIC info and node start time" \
-            "ports 0/1 expose fastrg_nic_info=1 with model/driver/pci/mac set; start_time=${_start_time} is $(( _now - _start_time ))s in the past"
+            "ports 0/1 expose fastrg_nic_info=1 with model/driver/pci/mac set; start_time=${_start_time} is $(( _now - _start_time ))s in the past; snapshot_persist_ok=1"
     else
         fail "Step 133: NIC info and node start time" "$_issue"
     fi

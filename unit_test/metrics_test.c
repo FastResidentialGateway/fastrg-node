@@ -168,6 +168,25 @@ static void test_pppoe_phase_tallies(FastRG_t *fastrg_ccb)
     fastrg_ccb->node_uuid = saved_uuid;
 }
 
+static void test_snapshot_persist_gauge(FastRG_t *fastrg_ccb)
+{
+    lighthttp_buf_t out = {0};
+    const char *content_type = NULL;
+    char *saved_uuid = fastrg_ccb->node_uuid;
+
+    /* With no snapshot ever persisted (and no failure recorded),
+     * config_snapshot_persist_ok() reports TRUE, so the gauge must read 1. */
+    fastrg_ccb->node_uuid = NULL;
+    metrics_build(&out, &content_type, fastrg_ccb);
+    TEST_ASSERT(strstr(out.data, "# TYPE fastrg_node_snapshot_persist_ok gauge\n") != NULL,
+        "snapshot persist gauge family is declared", "missing TYPE line");
+    TEST_ASSERT(strstr(out.data, "fastrg_node_snapshot_persist_ok{node_uuid=\"\"} 1\n") != NULL,
+        "snapshot persist gauge reads 1 when persisting never failed", "sample missing or not 1");
+
+    fastrg_ccb->node_uuid = saved_uuid;
+    lighthttp_buf_free(&out);
+}
+
 static void test_per_user_stats(FastRG_t *fastrg_ccb)
 {
     unsigned int lcore_id = rte_get_main_lcore();
@@ -248,6 +267,7 @@ void test_metrics(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_uuid_escaping(fastrg_ccb);
     test_pppoe_phase_tallies(fastrg_ccb);
     test_per_user_stats(fastrg_ccb);
+    test_snapshot_persist_gauge(fastrg_ccb);
 
     fastrg_ccb->node_uuid = saved_uuid;
     free(fastrg_ccb->per_subscriber_stats[lcore_id][LAN_PORT]);

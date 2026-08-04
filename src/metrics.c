@@ -20,9 +20,9 @@
 #include <rte_malloc.h>
 #include <rte_memory.h>
 #include <rte_mempool.h>
-#include <rte_rcu_qsbr.h>
 #include <rte_lcore.h>
 
+#include "config_snapshot.h"
 #include "fastrg.h"
 #include "pppd/pppd.h"
 #include "pppd/header.h"
@@ -310,6 +310,12 @@ int metrics_build(lighthttp_buf_t *out, const char **content_type, void *arg)
         "Cumulative fastrg process start count, persisted across restarts.");
     lighthttp_buf_appendf(out, "fastrg_node_restart_total{node_uuid=\"%s\"} %" PRIu64 "\n",
         uuid, fastrg_ccb->node_restart_total);
+
+    emit_header(out, "fastrg_node_snapshot_persist_ok", "gauge",
+        "1 when the last config snapshot persist to disk succeeded (also 1 at boot "
+        "before any persist happened), 0 while the last persist attempt failed.");
+    lighthttp_buf_appendf(out, "fastrg_node_snapshot_persist_ok{node_uuid=\"%s\"} %d\n",
+        uuid, config_snapshot_persist_ok() ? 1 : 0);
 
     /* ---- NIC port counters ---- */
     static const struct nic_metric nic_metrics[] = {
