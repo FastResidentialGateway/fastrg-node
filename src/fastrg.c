@@ -327,7 +327,7 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
                     ip_hdr, udp_hdr, ccb_id);
                 if (ret > 0) {
                     U16 out_len = sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) +
-                        sizeof(struct rte_ipv4_hdr) + rte_be_to_cpu_16(ip_hdr->total_length);
+                        rte_be_to_cpu_16(ip_hdr->total_length);
                     lan_ctrl_tx(fastrg_ccb, ccb_id, pkt_data, out_len);
                 } else if (ret == 0) {
                     wan_ctrl_tx(fastrg_ccb, ccb_id, pkt_data, mail[i]->len);
