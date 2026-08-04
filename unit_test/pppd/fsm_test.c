@@ -680,6 +680,42 @@ static void test_fsm_peer_requires_auth_keeps_auth_phase(FastRG_t *fastrg_ccb)
     free_test_ppp_ccb(ccb);
 }
 
+/**
+ * Test 30: rolling the phase back two steps must clamp at END_PHASE instead
+ * of wrapping the unsigned phase field around to a huge value.
+ */
+static void test_fsm_phase_rollback_underflow_guard(FastRG_t *fastrg_ccb)
+{
+    printf("\nTest 30: \"phase rollback clamps instead of underflowing\"\n");
+    printf("=========================================\n\n");
+
+    ppp_ccb_t *ccb = create_test_ppp_ccb(fastrg_ccb, 1, S_OPENED);
+
+    /* Normal rollbacks are unchanged */
+    ccb->phase = IPCP_PHASE;
+    ppp_phase_rollback(ccb);
+    TEST_ASSERT(ccb->phase == LCP_PHASE,
+        "IPCP_PHASE rolls back to LCP_PHASE", "got phase %u", ccb->phase);
+
+    ccb->phase = DATA_PHASE;
+    ppp_phase_rollback(ccb);
+    TEST_ASSERT(ccb->phase == AUTH_PHASE,
+        "DATA_PHASE rolls back to AUTH_PHASE", "got phase %u", ccb->phase);
+
+    /* Low phases clamp at END_PHASE instead of wrapping around */
+    ccb->phase = PPPOE_PHASE;
+    ppp_phase_rollback(ccb);
+    TEST_ASSERT(ccb->phase == END_PHASE,
+        "PPPOE_PHASE clamps to END_PHASE", "got phase %u", ccb->phase);
+
+    ccb->phase = END_PHASE;
+    ppp_phase_rollback(ccb);
+    TEST_ASSERT(ccb->phase == END_PHASE,
+        "END_PHASE stays at END_PHASE without underflow", "got phase %u", ccb->phase);
+
+    free_test_ppp_ccb(ccb);
+}
+
 // ============================================================================
 // Main test function
 // ============================================================================
@@ -729,6 +765,7 @@ void test_ppp_fsm(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_fsm_chap_lcp_up_enters_auth_phase(fastrg_ccb);
     test_fsm_auth_rejected_lcp_up_skips_auth_phase(fastrg_ccb);
     test_fsm_peer_requires_auth_keeps_auth_phase(fastrg_ccb);
+    test_fsm_phase_rollback_underflow_guard(fastrg_ccb);
 
     printf("\n");
     printf("╔════════════════════════════════════════════════════════════╗\n");

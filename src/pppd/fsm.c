@@ -1041,14 +1041,25 @@ STATUS A_send_padt(__attribute__((unused)) struct rte_timer *ppp_timer, ppp_ccb_
     return SUCCESS;
 }
 
+void ppp_phase_rollback(ppp_ccb_t *s_ppp_ccb)
+{
+    /* phase is an unsigned bitfield: rolling back two phases from below
+     * LCP_PHASE would wrap around to a huge value, so clamp to END_PHASE,
+     * the lowest phase, instead. */
+    if (s_ppp_ccb->phase >= LCP_PHASE)
+        s_ppp_ccb->phase -= 2;
+    else
+        s_ppp_ccb->phase = END_PHASE;
+}
+
 STATUS A_create_close_to_lower_layer(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb)
 {
     FastRG_t *fastrg_ccb = s_ppp_ccb->fastrg_ccb;
 
-    FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 
+    FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16
         " notify lower layer to close connection.\n", s_ppp_ccb->user_num);
     s_ppp_ccb->cp = 0;
-    s_ppp_ccb->phase -= 2;
+    ppp_phase_rollback(s_ppp_ccb);
     rte_timer_stop(&(s_ppp_ccb->ppp_alive));
     PPP_FSM(ppp_timer, s_ppp_ccb, E_CLOSE);
 
