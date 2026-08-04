@@ -259,7 +259,26 @@ void config_snapshot_watch_update(snapshot_kind_t kind, const char *user_id,
     std::unique_lock<std::mutex> lk(g_mutex);
     if (!g_initialized)
         return;
-    Entry &e = g_entries[map_key(kind, user_id)];
+    std::string key = map_key(kind, user_id);
+    auto it = g_entries.find(key);
+    if (it != g_entries.end() && it->second.dirty) {
+        // The entry carries an offline edit that has not been reported to the
+        // controller yet. Mirroring the etcd value now would overwrite the
+        // proposal and clear its dirty flag, losing the edit forever — this
+        // covers both the boot-time load (a dirty entry persisted across a
+        // restart) and a watch/reconcile racing an edit that landed after the
+        // last report. Skip the whole mirror write (value/exists/dirty/
+        // summary/edit_seq untouched, nothing persisted): the next report tick
+        // sends the proposal, the report path clears dirty (compare-and-clear
+        // or content match), and the following watch event for this key lands
+        // normally — so the deferral always converges.
+        lk.unlock(); // logging must not run under the snapshot lock
+        std::fprintf(stderr,
+            "[snapshot] INFO: etcd mirror of %s deferred: entry holds an unreported offline edit\n",
+            key.c_str());
+        return;
+    }
+    Entry &e = g_entries[key];
     e.value = value_json ? value_json : "";
     e.exists = (value_json != nullptr);
     e.dirty = false;
