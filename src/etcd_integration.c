@@ -119,7 +119,7 @@ int parse_user_id(const char *user_id_str, int max_count)
 
     // Convert to 0-based index and validate range
     int ccb_id = (int)val - 1;
-    if (ccb_id < 0)
+    if (ccb_id < 0 || ccb_id >= max_count)
         return -1;
 
     return ccb_id;
