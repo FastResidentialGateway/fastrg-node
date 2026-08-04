@@ -106,57 +106,6 @@ static inline uint64_t simulate_get_timer_hz(void)
 #define fastrg_get_cur_cycles rte_rdtsc
 #endif
 
-/**
- * @fn fastrg_ring_enqueue
- * 
- * @brief fastrg lockless ring enqueue, it will try to enqueue all mails
- * @param ring
- *      ring pointer
- * @param mails
- *      mail array
- * @param enqueue_num
- *      mail amount
- * @return
- *      void
- */ 
-static inline void fastrg_ring_enqueue(struct rte_ring *ring, void **mails, unsigned int enqueue_num)
-{
-    unsigned int burst_size = 0;
-    unsigned int rest_num = enqueue_num;
-
-    for(;;) {
-        int rest_mails_index = enqueue_num - rest_num;
-        burst_size = rte_ring_enqueue_burst(ring, &mails[rest_mails_index], rest_num, NULL);
-        rest_num -= burst_size;
-        if (likely(rest_num == 0))
-            break;
-    }
-}
-
-/**
- * @fn fastrg_ring_dequeue
- * 
- * @brief fastrg lockless ring dequeue, it will return once there is a mail
- * @param ring
- *      ring pointer
- * @param mails
- *      mail array
- * @return
- *      mail amount
- */ 
-static inline int fastrg_ring_dequeue(struct rte_ring *ring, void **mail)
-{
-    U16 burst_size;
-
-    while(likely(rte_atomic16_read(&stop_flag) == 0)) {
-        burst_size = rte_ring_dequeue_burst(ring, mail, RING_BURST_SIZE, NULL);
-        if (likely(burst_size == 0))
-            continue;
-        break;
-    }
-    return burst_size;
-}
-
 #define MAX_DATA_QUEUES 16
 
 /**
