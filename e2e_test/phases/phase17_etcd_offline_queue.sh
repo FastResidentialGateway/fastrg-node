@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # ---------------------------------------------------------------------------
-# Phase 17 — Offline Edits via Snapshot + Kafka (Steps 68-69)
+# Phase 17 — Offline Edits via Snapshot + Kafka (Steps 68-69, 69b, 69c)
 #
 # Controller-is-all: the node never writes etcd. While etcd is unreachable
 # (simulated with a REJECT iptables rule, which flips the SDN guard on the
@@ -56,6 +56,15 @@ _cleanup_phase17_etcd_offline_queue() {
         info "Cleanup(phase17): removing node->etcd iptables block..."
         _p17_unblock_etcd
     fi
+    # Step 69c safety: never leave the node down after its restart scenario.
+    if [[ "${_P17C_RESTART_NEEDED:-0}" -eq 1 ]]; then
+        warn "Cleanup(phase17): step-69c restart did not complete; retrying fastrg startup best-effort."
+        if ! ssh_node "pgrep -x fastrg >/dev/null 2>&1"; then
+            ssh_node "nohup ${_FASTRG_START_CMD} >/var/log/fastrg.log 2>&1 &" >/dev/null 2>&1 || true
+            _FASTRG_STARTED_BY_SCRIPT=1
+        fi
+        _P17C_RESTART_NEEDED=0
+    fi
     if [[ -n "${_P17_UID:-}" ]] && [[ -n "${NODE_UUID:-}" ]]; then
         info "Cleanup(phase17): removing user ${_P17_UID} config with verification..."
         remove_hsi_config_verified "${_P17_UID}" || true
@@ -83,7 +92,7 @@ _p17_snapshot_entry() {
 
 phase17_etcd_offline_queue() {
     bold "═══════════════════════════════════════════════════════"
-    bold " Phase 17 — Offline Edits via Snapshot + Kafka (Steps 68-69)"
+    bold " Phase 17 — Offline Edits via Snapshot + Kafka (Steps 68-69, 69b, 69c)"
     bold "═══════════════════════════════════════════════════════"
 
     if ! ssh_node "command -v iptables >/dev/null 2>&1"; then
@@ -390,6 +399,155 @@ phase17_etcd_offline_queue() {
             "tombstone reported (deleted=true) and cleared; controller arbitration deleted the etcd key; snapshot converged via watch"
     else
         fail "Step 69b: offline delete arbitrated end-to-end" "$_p17b_issue"
+    fi
+
+    # ------------------------------------------------------------------
+    # Step 69c — offline edit persisted across a restart: while etcd is
+    # unreachable an offline edit lands in the snapshot as a dirty entry; the
+    # node is then stopped gracefully and cold-started with etcd reachable
+    # again. The boot-time etcd load must NOT overwrite the dirty entry (the
+    # mirror defers to unreported offline edits), so the edit is still
+    # reported as a ConfigOfflineEdit after boot. Without the deferral the
+    # boot mirror clears the dirty flag before the first report and the edit
+    # is lost silently — no Kafka event ever appears.
+    # (Suffixed step id — same precedent as Step 69b.)
+    # ------------------------------------------------------------------
+    info "Step 69c: seeding etcd HSI key for user ${_P17_UID} to test the boot-time dirty preserve..."
+    local _p17c_issue=""
+    local _p17c_key="configs/${NODE_UUID}/hsi/${_P17_UID}"
+    ssh_node "ETCDCTL_API=3 etcdctl --endpoints=${ETCD_ENDPOINT} put ${_p17c_key} '{\"config\":{\"account_name\":\"p18test\",\"desire_status\":\"disconnect\",\"dhcp_addr_pool\":\"10.188.0.2-10.188.0.9\",\"dhcp_gateway\":\"10.188.0.1\",\"dhcp_subnet\":\"255.255.255.0\",\"dns_proxy_enable\":true,\"password\":\"p18pw\",\"tcp_conntrack_enable\":true,\"user_id\":\"${_P17_UID}\",\"vlan_id\":\"889\"},\"metadata\":{\"node\":\"${NODE_UUID}\",\"resourceVersion\":\"7\",\"updatedAt\":\"2026-01-01T00:00:00Z\",\"updatedBy\":\"e2e-step69c\"}}'" \
+        >/dev/null 2>&1
+    local _p17c_mirrored=0
+    for _i in $(seq 1 15); do
+        sleep 2
+        _p17_entry=$(_p17_snapshot_entry)
+        if [[ "$(printf '%s' "$_p17_entry" | jq -r '.exists' 2>/dev/null)" == "true" ]] && \
+           [[ "$(printf '%s' "$_p17_entry" | jq -r '.dirty' 2>/dev/null)" == "false" ]]; then
+            _p17c_mirrored=1
+            break
+        fi
+    done
+    if [[ $_p17c_mirrored -eq 0 ]]; then
+        fail "Step 69c: boot-time load preserves the unreported offline edit" \
+            "etcd-seeded config for user ${_P17_UID} was not mirrored into the snapshot within 30s"
+        _cleanup_phase17_etcd_offline_queue
+        return
+    fi
+
+    info "Step 69c: blocking node->etcd and applying an offline edit (vlan 890)..."
+    _p17_block_etcd
+    local _p17c_vlan=890
+    local _p17c_accepted=0 _p17c_out=""
+    for _i in $(seq 1 45); do
+        sleep 2
+        _p17c_out=$(_p17_apply_config_direct "${_P17_UID}" "${_p17c_vlan}" 2>/dev/null || true)
+        if ! printf '%s' "$_p17c_out" | grep -qi "FailedPrecondition"; then
+            _p17c_accepted=1
+            info "  ${_i}x2s: ApplyConfig no longer rejected by SDN guard (node is offline)"
+            break
+        fi
+        info "  ${_i}x2s: still SDN-guard-rejected (etcd still looks reachable to the node)"
+    done
+
+    if [[ $_p17c_accepted -eq 0 ]]; then
+        fail "Step 69c: boot-time load preserves the unreported offline edit" \
+            "SDN guard never released within 90s; last output: $(printf '%s' "$_p17c_out" | tr '\n' '|' | tail -c 200)"
+        _cleanup_phase17_etcd_offline_queue
+        return
+    fi
+    if ! printf '%s' "$_p17c_out" | grep -qi "Configuration successful\|\"status\""; then
+        _p17c_issue="offline ApplyConfig did not report success: $(printf '%s' "$_p17c_out" | tr '\n' '|' | tail -c 160)"
+    fi
+
+    # The dirty edit must be persisted to disk before the node stops.
+    local _p17c_dirty _p17c_snap_vlan
+    _p17_entry=$(_p17_snapshot_entry)
+    _p17c_dirty=$(printf '%s' "$_p17_entry" | jq -r '.dirty' 2>/dev/null || true)
+    _p17c_snap_vlan=$(printf '%s' "$_p17_entry" | jq -r '.value // ""' 2>/dev/null | \
+        jq -r '.config.vlan_id // empty' 2>/dev/null || true)
+    if [[ "$_p17c_dirty" != "true" ]] || [[ "$_p17c_snap_vlan" != "$_p17c_vlan" ]]; then
+        _p17c_issue="${_p17c_issue:+${_p17c_issue}; }snapshot dirty entry not persisted (dirty='${_p17c_dirty:-none}' vlan='${_p17c_snap_vlan:-none}', want ${_p17c_vlan})"
+    fi
+
+    info "Step 69c: gracefully stopping fastrg with the dirty edit persisted..."
+    _P17C_RESTART_NEEDED=1
+    local _p17c_stopped=0
+    ssh_node "pkill -x fastrg" >/dev/null 2>&1 || true
+    for _i in $(seq 1 30); do
+        if ! ssh_node "pgrep -x fastrg >/dev/null 2>&1"; then
+            _p17c_stopped=1
+            break
+        fi
+        sleep 1
+    done
+    if [[ $_p17c_stopped -ne 1 ]]; then
+        _p17c_issue="${_p17c_issue:+${_p17c_issue}; }fastrg did not exit within 30s of SIGTERM"
+    fi
+
+    # Kafka baseline while the node is down: every message after this offset
+    # was produced by the restarted process.
+    local _p17c_kafka_baseline
+    _p17c_kafka_baseline=$(ssh_node "timeout 10 kcat -b ${_p17_brokers} -t fastrg.node.events -C -e -f '%o\n' -o -1 2>/dev/null | tail -1" || true)
+    [[ "$_p17c_kafka_baseline" =~ ^[0-9]+$ ]] || _p17c_kafka_baseline=-1
+
+    info "Step 69c: restoring node->etcd connectivity and cold-starting fastrg..."
+    _p17_unblock_etcd
+    if [[ $_p17c_stopped -eq 1 ]]; then
+        ssh_node "nohup ${_FASTRG_START_CMD} >/var/log/fastrg.log 2>&1 &" >/dev/null 2>&1 || \
+            _p17c_issue="${_p17c_issue:+${_p17c_issue}; }cold start command failed"
+        _FASTRG_STARTED_BY_SCRIPT=1
+    fi
+
+    # The boot load must leave the entry dirty; the first reachable watchdog
+    # tick then reports it and clears the flag (~60s interval + boot time).
+    local _p17c_reported=0
+    for _i in $(seq 1 90); do
+        sleep 2
+        _p17_entry=$(_p17_snapshot_entry)
+        if [[ "$(printf '%s' "$_p17_entry" | jq -r '.dirty' 2>/dev/null)" == "false" ]]; then
+            _p17c_reported=1
+            info "  ${_i}x2s: snapshot entry no longer dirty after the restart"
+            break
+        fi
+        info "  ${_i}x2s: snapshot entry still dirty (report pending)"
+    done
+    [[ $_p17c_reported -eq 1 ]] || \
+        _p17c_issue="${_p17c_issue:+${_p17c_issue}; }dirty flag never cleared within 180s of the cold start"
+
+    # The regression discriminator: without the boot-time deferral the dirty
+    # flag is wiped by the boot mirror and the edit is never reported — the
+    # ConfigOfflineEdit with the offline vlan must exist after the baseline.
+    local _p17c_kafka_out
+    _p17c_kafka_out=$(ssh_node "timeout 20 kcat -b ${_p17_brokers} -t fastrg.node.events -C -o $(( _p17c_kafka_baseline + 1 )) -e -q 2>/dev/null | strings" || true)
+    if ! printf '%s' "$_p17c_kafka_out" | grep -q "apply config" || \
+       ! printf '%s' "$_p17c_kafka_out" | grep -q "\"vlan_id\":\"${_p17c_vlan}\""; then
+        _p17c_issue="${_p17c_issue:+${_p17c_issue}; }no post-boot ConfigOfflineEdit observed on Kafka after offset ${_p17c_kafka_baseline} (markers 'apply config'/vlan ${_p17c_vlan} missing) — the boot mirror swallowed the offline edit"
+    fi
+
+    # Node back to steady state: both e2e subscribers must return to Data
+    # phase before the next phase runs (same recovery criterion as phase19).
+    local _p17c_recovered=0 _p17c_s1="" _p17c_s2=""
+    for _i in $(seq 1 30); do
+        sleep 5
+        _p17c_s1=$(fastrg_grpc get_hsi_info 2>/dev/null | \
+            jq -r '.hsi_infos[]? | select(.user_id == 1) | .status' 2>/dev/null || true)
+        _p17c_s2=$(fastrg_grpc get_hsi_info 2>/dev/null | \
+            jq -r '.hsi_infos[]? | select(.user_id == 2) | .status' 2>/dev/null || true)
+        if [[ "$_p17c_s1" == "Data phase" && "$_p17c_s2" == "Data phase" ]]; then
+            _p17c_recovered=1
+            _P17C_RESTART_NEEDED=0
+            break
+        fi
+        info "  still recovering... (${_i}x5s, user1='${_p17c_s1:-unreachable}', user2='${_p17c_s2:-unreachable}')"
+    done
+    [[ $_p17c_recovered -eq 1 ]] || \
+        _p17c_issue="${_p17c_issue:+${_p17c_issue}; }subscribers did not return to Data phase within 150s of the restart (user1='${_p17c_s1:-none}' user2='${_p17c_s2:-none}')"
+
+    if [[ -z "$_p17c_issue" ]]; then
+        pass "Step 69c: boot-time load preserves the unreported offline edit" \
+            "dirty edit (vlan ${_p17c_vlan}) survived the restart, was reported over Kafka after boot and cleared; node returned to steady state"
+    else
+        fail "Step 69c: boot-time load preserves the unreported offline edit" "$_p17c_issue"
     fi
 
     _cleanup_phase17_etcd_offline_queue

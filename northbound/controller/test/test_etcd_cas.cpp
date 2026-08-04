@@ -312,7 +312,7 @@ static uint64_t dirty_seq_of(snapshot_kind_t kind, const char *uid)
 
 static void test_snapshot_dirty_semantics()
 {
-    std::cout << "Case 10: offline edits set dirty; watch updates clear it" << std::endl;
+    std::cout << "Case 10: offline edits set dirty; watch updates defer to dirty entries" << std::endl;
     DirtyProbe p;
     config_snapshot_foreach_dirty(dirty_probe_cb, &p);
     int base = p.count;
@@ -324,13 +324,28 @@ static void test_snapshot_dirty_semantics()
     config_snapshot_foreach_dirty(dirty_probe_cb, &p);
     expect_equal("case 10 dirty count grows", base + 1, p.count);
 
-    // A stale-refresh (watch update) clears dirty — a merely-stale snapshot
-    // never becomes a proposal
+    // A watch update on a dirty entry is skipped — the mirror must never
+    // overwrite an offline edit that has not been reported yet.
     config_snapshot_watch_update(SNAPSHOT_KIND_DNS, "5",
         "{\"records\":[],\"metadata\":{\"resourceVersion\":\"9\"}}");
     p = DirtyProbe();
     config_snapshot_foreach_dirty(dirty_probe_cb, &p);
-    expect_equal("case 10 watch clears dirty", base, p.count);
+    expect_equal("case 10 watch defers to the dirty entry", base + 1, p.count);
+
+    // Once the report flow clears dirty, the next watch update lands.
+    config_snapshot_clear_dirty(SNAPSHOT_KIND_DNS, "5",
+        dirty_seq_of(SNAPSHOT_KIND_DNS, "5"));
+    config_snapshot_watch_update(SNAPSHOT_KIND_DNS, "5",
+        "{\"records\":[],\"metadata\":{\"resourceVersion\":\"9\"}}");
+    p = DirtyProbe();
+    config_snapshot_foreach_dirty(dirty_probe_cb, &p);
+    expect_equal("case 10 mirror lands after the report clears dirty", base, p.count);
+    char *v10 = config_snapshot_get(SNAPSHOT_KIND_DNS, "5");
+    Json::Value root10;
+    expect_true("case 10 mirrored value parses", v10 != NULL && parse_json(v10, root10));
+    expect_equal("case 10 mirrored rv", std::string("9"),
+        root10["metadata"]["resourceVersion"].asString());
+    free(v10);
 
     // Summaries accumulate across edits and reset with clear_dirty.
     config_snapshot_offline_edit(SNAPSHOT_KIND_HSI, "9",
@@ -423,12 +438,24 @@ static void test_snapshot_offline_delete()
     expect_equal("case 13 summary accumulates delete", std::string("apply config; remove config"),
         ft.summary);
 
-    // A real etcd delete arriving on the watch clears the tombstone — the
-    // controller deleted it too, so the proposal is moot.
+    // An etcd delete arriving on the watch is skipped while the tombstone is
+    // still dirty — the delete proposal has not been reported yet, and the
+    // mirror must never swallow an unreported offline edit.
     config_snapshot_watch_update(SNAPSHOT_KIND_HSI, "42", NULL);
     FindTomb ft2;
     config_snapshot_foreach_dirty(find_cb, &ft2);
-    expect_true("case 13 watch delete clears the tombstone", !ft2.found);
+    expect_true("case 13 watch delete defers to the dirty tombstone",
+        ft2.found && ft2.tombstone);
+
+    // Report pass, moot branch: the etcd key is already gone (the controller
+    // deleted it too), so the delete proposal is moot — the report clears the
+    // flag with the seq it observed and sends nothing. After that the
+    // tombstone is clean and the dirty scan no longer surfaces it.
+    config_snapshot_clear_dirty(SNAPSHOT_KIND_HSI, "42",
+        dirty_seq_of(SNAPSHOT_KIND_HSI, "42"));
+    FindTomb ft2b;
+    config_snapshot_foreach_dirty(find_cb, &ft2b);
+    expect_true("case 13 moot proposal clears via the report pass", !ft2b.found);
 
     // Deleting an already-absent key is an idempotent no-op (no new proposal).
     expect_equal("case 13 delete absent key is a no-op", SUCCESS,
@@ -683,6 +710,119 @@ static void test_snapshot_persist_failure_and_recovery(const char *good_path)
         dirty_seq_of(SNAPSHOT_KIND_HSI, "80"));
 }
 
+/* ---- watch-update dirty-skip cases: the etcd mirror
+ * (config_snapshot_watch_update) must never overwrite an entry holding an
+ * unreported offline edit — boot load and reconcile both funnel through it,
+ * so the skip inside the function covers every mirror entry point. ---- */
+
+static void test_snapshot_watch_update_dirty_skip()
+{
+    std::cout << "Case 20: watch update skips dirty entries until the report clears them" << std::endl;
+
+    // (a) Dirty live entry: the whole mirror write is skipped —
+    // value/exists/dirty/summary/edit_seq all untouched.
+    config_snapshot_offline_edit(SNAPSHOT_KIND_HSI, "90",
+        "{\"config\":{\"vlan_id\":\"90\"}}", "edit-90");
+    DirtyEntryProbe before = probe_dirty_entry(SNAPSHOT_KIND_HSI, "90");
+    expect_true("case 20 entry is dirty after the edit", before.found);
+
+    struct SummaryProbe {
+        std::string summary;
+        bool found = false;
+    } sp_before, sp_after;
+    auto summary_cb = [](snapshot_kind_t kind, const char *uid, const char *,
+        const char *, int64_t, const char *summary, uint64_t, void *ud) {
+        SummaryProbe *s = (SummaryProbe *)ud;
+        if (kind == SNAPSHOT_KIND_HSI && std::string(uid) == "90") {
+            s->found = true;
+            s->summary = summary ? summary : "";
+        }
+    };
+    config_snapshot_foreach_dirty(summary_cb, &sp_before);
+
+    config_snapshot_watch_update(SNAPSHOT_KIND_HSI, "90",
+        "{\"config\":{\"vlan_id\":\"900\"},\"metadata\":{\"resourceVersion\":\"9\"}}");
+    DirtyEntryProbe after = probe_dirty_entry(SNAPSHOT_KIND_HSI, "90");
+    expect_true("case 20 entry stays dirty after the watch", after.found);
+    expect_equal("case 20 edit_seq unchanged", before.seq, after.seq);
+    expect_equal("case 20 proposal value unchanged", before.value, after.value);
+    config_snapshot_foreach_dirty(summary_cb, &sp_after);
+    expect_true("case 20 summary probe found the entry", sp_before.found && sp_after.found);
+    expect_equal("case 20 summary unchanged", sp_before.summary, sp_after.summary);
+    char *v = config_snapshot_get(SNAPSHOT_KIND_HSI, "90");
+    Json::Value root;
+    expect_true("case 20 offline value still readable", v != NULL && parse_json(v, root));
+    expect_equal("case 20 offline value kept", std::string("90"),
+        root["config"]["vlan_id"].asString());
+    free(v);
+
+    // (b) Clean entry: watch updates land exactly as before and never set
+    // dirty.
+    config_snapshot_watch_update(SNAPSHOT_KIND_HSI, "91",
+        "{\"config\":{\"vlan_id\":\"91\"},\"metadata\":{\"resourceVersion\":\"3\"}}");
+    v = config_snapshot_get(SNAPSHOT_KIND_HSI, "91");
+    expect_true("case 20 clean mirror lands", v != NULL && parse_json(v, root));
+    expect_equal("case 20 clean mirrored value", std::string("91"),
+        root["config"]["vlan_id"].asString());
+    free(v);
+    expect_true("case 20 clean entry stays clean",
+        !probe_dirty_entry(SNAPSHOT_KIND_HSI, "91").found);
+    config_snapshot_watch_update(SNAPSHOT_KIND_HSI, "91",
+        "{\"config\":{\"vlan_id\":\"910\"},\"metadata\":{\"resourceVersion\":\"4\"}}");
+    v = config_snapshot_get(SNAPSHOT_KIND_HSI, "91");
+    expect_true("case 20 clean re-mirror lands", v != NULL && parse_json(v, root));
+    expect_equal("case 20 clean re-mirrored value", std::string("910"),
+        root["config"]["vlan_id"].asString());
+    free(v);
+
+    // (c) Dirty tombstone (offline delete): watch updates — value or delete —
+    // are skipped the same way.
+    config_snapshot_watch_update(SNAPSHOT_KIND_HSI, "92",
+        "{\"config\":{\"vlan_id\":\"92\"},\"metadata\":{\"resourceVersion\":\"5\"}}");
+    expect_equal("case 20 offline delete", SUCCESS,
+        config_snapshot_offline_delete(SNAPSHOT_KIND_HSI, "92", "delete-92"));
+    DirtyEntryProbe tomb = probe_dirty_entry(SNAPSHOT_KIND_HSI, "92");
+    expect_true("case 20 tombstone is dirty", tomb.found && tomb.tombstone);
+
+    config_snapshot_watch_update(SNAPSHOT_KIND_HSI, "92",
+        "{\"config\":{\"vlan_id\":\"920\"},\"metadata\":{\"resourceVersion\":\"6\"}}");
+    DirtyEntryProbe tomb2 = probe_dirty_entry(SNAPSHOT_KIND_HSI, "92");
+    expect_true("case 20 tombstone survives a watch value", tomb2.found && tomb2.tombstone);
+    expect_equal("case 20 tombstone edit_seq unchanged", tomb.seq, tomb2.seq);
+    v = config_snapshot_get(SNAPSHOT_KIND_HSI, "92");
+    expect_true("case 20 tombstone still hides the value", v == NULL);
+    free(v);
+
+    config_snapshot_watch_update(SNAPSHOT_KIND_HSI, "92", NULL);
+    DirtyEntryProbe tomb3 = probe_dirty_entry(SNAPSHOT_KIND_HSI, "92");
+    expect_true("case 20 tombstone survives a watch delete", tomb3.found && tomb3.tombstone);
+
+    // (d) Convergence: the report flow (foreach_dirty + compare-and-clear with
+    // the observed seq) clears dirty, then the next watch update lands.
+    config_snapshot_clear_dirty(SNAPSHOT_KIND_HSI, "90", after.seq);
+    config_snapshot_watch_update(SNAPSHOT_KIND_HSI, "90",
+        "{\"config\":{\"vlan_id\":\"900\"},\"metadata\":{\"resourceVersion\":\"9\"}}");
+    expect_true("case 20 reported entry is clean",
+        !probe_dirty_entry(SNAPSHOT_KIND_HSI, "90").found);
+    v = config_snapshot_get(SNAPSHOT_KIND_HSI, "90");
+    expect_true("case 20 mirror lands after the report", v != NULL && parse_json(v, root));
+    expect_equal("case 20 mirrored value after the report", std::string("900"),
+        root["config"]["vlan_id"].asString());
+    free(v);
+
+    config_snapshot_clear_dirty(SNAPSHOT_KIND_HSI, "92", tomb3.seq);
+    config_snapshot_watch_update(SNAPSHOT_KIND_HSI, "92",
+        "{\"config\":{\"vlan_id\":\"920\"},\"metadata\":{\"resourceVersion\":\"6\"}}");
+    expect_true("case 20 reported tombstone is clean",
+        !probe_dirty_entry(SNAPSHOT_KIND_HSI, "92").found);
+    v = config_snapshot_get(SNAPSHOT_KIND_HSI, "92");
+    expect_true("case 20 tombstone mirror lands after the report",
+        v != NULL && parse_json(v, root));
+    expect_equal("case 20 recreated value after the report", std::string("920"),
+        root["config"]["vlan_id"].asString());
+    free(v);
+}
+
 int main()
 {
     // Point the snapshot at a scratch file so the test never touches the
@@ -712,6 +852,7 @@ int main()
     test_snapshot_clear_dirty_edit_race();
     test_snapshot_clear_dirty_delete_race();
     test_snapshot_persist_failure_and_recovery(path);
+    test_snapshot_watch_update_dirty_skip();
 
     config_snapshot_cleanup();
     std::remove(path);
