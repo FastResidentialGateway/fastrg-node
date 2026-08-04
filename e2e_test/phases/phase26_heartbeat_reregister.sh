@@ -261,10 +261,14 @@ phase26_heartbeat_reregister() {
         _step106_ok=0
         _issue106="failed to remove node->controller iptables REJECT rule"
     else
-        info "Step 109: controller path restored; waiting 50s for heartbeat recovery..."
-        sleep 50
+        # Poll with a deadline instead of a fixed sleep: after repeated
+        # tcp-resets the gRPC channel reconnects with exponential backoff
+        # (up to ~120s between attempts), so recovery lands when the next
+        # 30s heartbeat tick follows the backoff expiry. 150s covers that
+        # worst case; the poll passes as soon as the heartbeat succeeds.
+        info "Step 109: controller path restored; polling up to 150s for heartbeat recovery..."
         if ! _p26_wait_for_new_log "$_P26_LOG_PATH" "$_recovery_baseline" \
-            "Heartbeat sent successfully" 1; then
+            "Heartbeat sent successfully" 150; then
             _step106_ok=0
             _issue106="heartbeat success was not logged after unblock; log='$(_p26_log_snippet "$_P26_LOG_PATH" "$_recovery_baseline")'"
         fi

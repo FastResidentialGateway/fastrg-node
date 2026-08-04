@@ -158,6 +158,13 @@ phase28_chap_auth() {
         fail "Step 114: CHAP dial reaches Data phase" "$_issue113"
     fi
 
+    # After the CHAP redial, "Data phase" only reflects the PPP FSM state;
+    # the data plane (flow rules, first-packet path) can lag slightly behind.
+    # Settle briefly and send one throwaway warm-up ping so the strict
+    # 0%-loss assertion below measures steady state, not the readiness gap.
+    sleep 2
+    ssh_lan "ping -c 1 -W 3 ${WAN_IP}" >/dev/null 2>&1 || true
+
     _ping_out=$(ssh_lan "ping -c 4 -W 3 ${WAN_IP}" 2>&1 || true)
     if ! printf '%s\n' "$_ping_out" | grep -qE '0% packet loss|0\.0% packet loss'; then
         _step114_ok=0
