@@ -23,6 +23,24 @@ int main() {
         printf("Failed to get local IP\n");
     }
 
+    // Malformed addresses must fail cleanly instead of terminating the process
+    char scratch_ip[16];
+    if (get_local_ip_for_server("127.0.0.1:notaport", scratch_ip, sizeof(scratch_ip)) == 0) {
+        printf("ERROR: non-numeric port unexpectedly succeeded\n");
+        return -1;
+    }
+    printf("Non-numeric port rejected\n");
+    if (get_local_ip_for_server("127.0.0.1:99999999999", scratch_ip, sizeof(scratch_ip)) == 0) {
+        printf("ERROR: out-of-range port unexpectedly succeeded\n");
+        return -1;
+    }
+    printf("Out-of-range port rejected\n");
+    if (get_local_ip_for_server("127.0.0.1:0", scratch_ip, sizeof(scratch_ip)) == 0) {
+        printf("ERROR: port 0 unexpectedly succeeded\n");
+        return -1;
+    }
+    printf("Port 0 rejected\n");
+
     // Test node registration (will fail without server, but tests the call)
     const char* node_uuid = "test-uuid-12345";
     const char* version = "1.0.0-test";
