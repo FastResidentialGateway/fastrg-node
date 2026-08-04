@@ -295,9 +295,30 @@ STATUS fastrg_create_pthread(const char *thread_name,
     return SUCCESS;
 }
 
-STATUS fastrg_get_id(char node_id[])
+BOOL fastrg_uuid_str_is_valid(const char *uuid_str)
 {
-    if (!node_id)
+    if (uuid_str == NULL)
+        return FALSE;
+
+    /* Canonical textual UUID: 36 chars in the 8-4-4-4-12 layout, hex digits
+     * everywhere except the four fixed dash positions. A '\0' inside the first
+     * 36 positions (too short) fails the hex/dash check, and anything other
+     * than '\0' at index 36 (too long) fails the final check. */
+    for(int i=0; i<UUID_STR_LEN-1; i++) {
+        if (i == 8 || i == 13 || i == 18 || i == 23) {
+            if (uuid_str[i] != '-')
+                return FALSE;
+        } else if (!isxdigit((unsigned char)uuid_str[i])) {
+            return FALSE;
+        }
+    }
+
+    return uuid_str[UUID_STR_LEN - 1] == '\0' ? TRUE : FALSE;
+}
+
+STATUS fastrg_get_id(FILE *log_fp, char node_id[])
+{
+    if (node_id == NULL || log_fp == NULL)
         return ERROR;
 
     // Try to read existing UUID from CONFIG_DIR_PATH/node_uuid
@@ -307,7 +328,7 @@ STATUS fastrg_get_id(char node_id[])
     char buf[128] = {0};
     int generated_new = 0;
     FILE *fp = fopen(uuid_path, "r");
-    if (fp) {
+    if (fp != NULL) {
         if (fgets(buf, sizeof(buf), fp) != NULL) {
             // trim newline and whitespace
             size_t len = strlen(buf);
@@ -319,10 +340,17 @@ STATUS fastrg_get_id(char node_id[])
         fclose(fp);
     }
 
-    if (buf[0] != '\0') {
-        // use existing uuid from file
+    if (fastrg_uuid_str_is_valid(buf)) {
+        // use existing uuid from file (exactly 36 chars + NUL, validated above)
         rte_memcpy(node_id, buf, UUID_STR_LEN);
     } else {
+        if (buf[0] != '\0') {
+            /* The file exists but its first line is not a valid UUID (hand
+             * edited or corrupted). Treat it like a missing file: regenerate
+             * and persist a fresh identity instead of propagating garbage. */
+            FastRG_LOG(WARN, log_fp, NULL, NULL,
+                "Node UUID file %s is malformed, regenerating a new node UUID\n", uuid_path);
+        }
         // Generate UUID for this node
         uuid_t uuid_bytes;
         uuid_generate(uuid_bytes);
@@ -330,10 +358,10 @@ STATUS fastrg_get_id(char node_id[])
         generated_new = 1;
     }
 
-    // If we generated a new uuid (no file or empty file), write it back to the file
+    // If we generated a new uuid (no file, empty file or malformed file), write it back to the file
     if (generated_new) {
         FILE *wf = fopen(uuid_path, "w");
-        if (wf) {
+        if (wf != NULL) {
             fprintf(wf, "%s\n", node_id);
             fclose(wf);
         }

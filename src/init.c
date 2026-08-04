@@ -279,7 +279,7 @@ STATUS init_port(FastRG_t *fastrg_ccb, struct fastrg_config *fastrg_cfg)
 		FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Cannot allocate memory for node_uuid");
 		return ERROR;
 	}
-    if (fastrg_get_id(fastrg_ccb->node_uuid) == ERROR) {
+    if (fastrg_get_id(fastrg_ccb->fp, fastrg_ccb->node_uuid) == ERROR) {
 		FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Get node ID failed");
 		return ERROR;
 	}
