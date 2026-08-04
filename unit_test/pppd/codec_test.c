@@ -2080,6 +2080,82 @@ void test_ppp_decode_config_ack_options(FastRG_t *fastrg_ccb)
     codec_cleanup_ppp_ccb(&decode_ccb);
 }
 
+void test_ppp_decode_ipcp_option_hardening(FastRG_t *fastrg_ccb)
+{
+    printf("\nTesting IPCP option length hardening:\n");
+    printf("=========================================\n\n");
+
+    U8 frame[128];
+    U16 event;
+    U16 frame_len;
+    U8 *opts;
+
+    decode_env_init(fastrg_ccb);
+
+    /* Test 1: an IP_ADDRESS option truncated to the bare type/length header
+     * must not be read as a 4-byte value */
+    printf("Test 1: \"truncated IP_ADDRESS option in IPCP Configure-Ack is rejected\"\n");
+    decode_ccb_reset(fastrg_ccb, IPCP_PHASE);
+    decode_ccb.identifier[1] = 1;
+    decode_ccb.config_request_pending[1] = TRUE;
+    decode_ccb.hsi_ipv4 = 0;
+    frame_len = build_session_frame(frame, IPCP_PROTOCOL, CONFIG_ACK,
+        sizeof(ppp_header_t) + 2, 2);
+    opts = frame + sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) +
+        sizeof(pppoe_header_t) + sizeof(ppp_payload_t) + sizeof(ppp_header_t);
+    const U8 truncated_ip_opt[] = {IP_ADDRESS, 0x02};
+    rte_memcpy(opts, truncated_ip_opt, sizeof(truncated_ip_opt));
+    event = E_UNKNOWN;
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == ERROR,
+        "truncated IP_ADDRESS option returns ERROR", NULL);
+    TEST_ASSERT(decode_ccb.hsi_ipv4 == 0,
+        "truncated IP_ADDRESS option does not store a 4-byte value",
+        "hsi_ipv4=0x%x", decode_ccb.hsi_ipv4);
+
+    /* Test 2: an option length overrunning the remaining IPCP payload is
+     * rejected instead of walking past the option buffer */
+    printf("Test 2: \"overrunning option length in IPCP Configure-Ack is rejected\"\n");
+    decode_ccb_reset(fastrg_ccb, IPCP_PHASE);
+    decode_ccb.identifier[1] = 1;
+    decode_ccb.config_request_pending[1] = TRUE;
+    decode_ccb.hsi_ipv4 = 0;
+    frame_len = build_session_frame(frame, IPCP_PROTOCOL, CONFIG_ACK,
+        sizeof(ppp_header_t) + 6, 6);
+    opts = frame + sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) +
+        sizeof(pppoe_header_t) + sizeof(ppp_payload_t) + sizeof(ppp_header_t);
+    const U8 overrun_ip_opt[] = {IP_ADDRESS, 0x08, 0x01, 0x02, 0x03, 0x04};
+    rte_memcpy(opts, overrun_ip_opt, sizeof(overrun_ip_opt));
+    event = E_UNKNOWN;
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == ERROR,
+        "overrunning IP_ADDRESS option returns ERROR", NULL);
+    TEST_ASSERT(decode_ccb.hsi_ipv4 == 0,
+        "overrunning IP_ADDRESS option does not store a value",
+        "hsi_ipv4=0x%x", decode_ccb.hsi_ipv4);
+
+    /* Test 3: a well-formed IP_ADDRESS option still stores the address */
+    printf("Test 3: \"valid IP_ADDRESS option in IPCP Configure-Ack is accepted\"\n");
+    decode_ccb_reset(fastrg_ccb, IPCP_PHASE);
+    decode_ccb.identifier[1] = 1;
+    decode_ccb.config_request_pending[1] = TRUE;
+    decode_ccb.hsi_ipv4 = 0;
+    frame_len = build_session_frame(frame, IPCP_PROTOCOL, CONFIG_ACK,
+        sizeof(ppp_header_t) + 6, 6);
+    opts = frame + sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) +
+        sizeof(pppoe_header_t) + sizeof(ppp_payload_t) + sizeof(ppp_header_t);
+    const U8 valid_ip_opt[] = {IP_ADDRESS, 0x06, 0x01, 0x02, 0x03, 0x04};
+    rte_memcpy(opts, valid_ip_opt, sizeof(valid_ip_opt));
+    event = E_UNKNOWN;
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == SUCCESS,
+        "valid IP_ADDRESS Configure-Ack returns SUCCESS", NULL);
+    TEST_ASSERT(event == E_RECV_CONFIG_ACK,
+        "valid IP_ADDRESS Configure-Ack emits E_RECV_CONFIG_ACK", "event=%u", event);
+    TEST_ASSERT(decode_ccb.hsi_ipv4 == rte_cpu_to_be_32(0x01020304),
+        "valid IP_ADDRESS Configure-Ack stores the negotiated address",
+        "hsi_ipv4=0x%x", decode_ccb.hsi_ipv4);
+
+    codec_cleanup_ppp_ccb(&decode_ccb);
+}
+
 void test_build_config_request_auth_option(FastRG_t *fastrg_ccb)
 {
     printf("\nTesting build_config_request AUTH option:\n");
@@ -2399,6 +2475,7 @@ void test_ppp_codec(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_ppp_decode_frame_chap_challenge_phase_guard(fastrg_ccb);
     test_ppp_decode_config_ack_request_matching(fastrg_ccb);
     test_ppp_decode_config_ack_options(fastrg_ccb);
+    test_ppp_decode_ipcp_option_hardening(fastrg_ccb);
     test_build_config_request_auth_option(fastrg_ccb);
     test_ppp_decode_config_nak_rej_options(fastrg_ccb);
 

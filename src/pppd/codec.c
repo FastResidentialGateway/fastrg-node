@@ -440,8 +440,24 @@ STATUS decode_ipcp(U16 ppp_hdr_len, U16 *event, struct rte_timer *tim, ppp_ccb_t
                 U16 opt_total = sizeof(ppp_header_t);
                 for(ppp_options_t *cur=ppp_options; opt_total<ppp_hdr_len;
                         cur = (ppp_options_t *)((char *)cur + cur->length)) {
-                    if (cur->length < sizeof(ppp_options_t))
-                        break;
+                    if (cur->length < sizeof(ppp_options_t) || cur->length > ppp_hdr_len - opt_total) {
+                        FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+                            "User %" PRIu16 " recv IPCP Configure-Request with invalid option length %u.",
+                            s_ppp_ccb->user_num, cur->length);
+                        return ERROR;
+                    }
+                    /* IP_ADDRESS / PRIMARY_DNS / SECONDARY_DNS all carry a 4-byte
+                     * value (RFC 1332/1877 option length 6); reject shorter options
+                     * so the fixed 4-byte copies below cannot read past the option
+                     * buffer. */
+                    if ((cur->type == IP_ADDRESS || cur->type == PRIMARY_DNS ||
+                            cur->type == SECONDARY_DNS) &&
+                            cur->length < sizeof(ppp_options_t) + sizeof(U32)) {
+                        FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+                            "User %" PRIu16 " recv IPCP Configure-Request option %u with truncated length %u.",
+                            s_ppp_ccb->user_num, cur->type, cur->length);
+                        return ERROR;
+                    }
                     if (cur->type == IP_ADDRESS)
                         rte_memcpy(&(s_ppp_ccb->hsi_ipv4_gw), cur->val, sizeof(s_ppp_ccb->hsi_ipv4_gw));
                     else if (cur->type == PRIMARY_DNS)
@@ -470,8 +486,22 @@ STATUS decode_ipcp(U16 ppp_hdr_len, U16 *event, struct rte_timer *tim, ppp_ccb_t
                 U16 opt_total = sizeof(ppp_header_t);
                 for(ppp_options_t *cur=ppp_options; opt_total<ppp_hdr_len;
                         cur = (ppp_options_t *)((char *)cur + cur->length)) {
-                    if (cur->length < sizeof(ppp_options_t))
-                        break;
+                    if (cur->length < sizeof(ppp_options_t) || cur->length > ppp_hdr_len - opt_total) {
+                        FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+                            "User %" PRIu16 " recv IPCP Configure-Ack with invalid option length %u.",
+                            s_ppp_ccb->user_num, cur->length);
+                        return ERROR;
+                    }
+                    /* See the Configure-Request loop: these options carry a 4-byte
+                     * value, guard the fixed-size copies below. */
+                    if ((cur->type == IP_ADDRESS || cur->type == PRIMARY_DNS ||
+                            cur->type == SECONDARY_DNS) &&
+                            cur->length < sizeof(ppp_options_t) + sizeof(U32)) {
+                        FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+                            "User %" PRIu16 " recv IPCP Configure-Ack option %u with truncated length %u.",
+                            s_ppp_ccb->user_num, cur->type, cur->length);
+                        return ERROR;
+                    }
                     if (cur->type == IP_ADDRESS)
                         rte_memcpy(&(s_ppp_ccb->hsi_ipv4), cur->val, sizeof(s_ppp_ccb->hsi_ipv4));
                     else if (cur->type == PRIMARY_DNS)
@@ -502,6 +532,16 @@ STATUS decode_ipcp(U16 ppp_hdr_len, U16 *event, struct rte_timer *tim, ppp_ccb_t
                         FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
                             "User %" PRIu16 " recv IPCP Configure-Nak with invalid option length %u.",
                             s_ppp_ccb->user_num, cur->length);
+                        return ERROR;
+                    }
+                    /* See the Configure-Request loop: these options carry a 4-byte
+                     * value, guard the fixed-size copies below. */
+                    if ((cur->type == IP_ADDRESS || cur->type == PRIMARY_DNS ||
+                            cur->type == SECONDARY_DNS) &&
+                            cur->length < sizeof(ppp_options_t) + sizeof(U32)) {
+                        FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+                            "User %" PRIu16 " recv IPCP Configure-Nak option %u with truncated length %u.",
+                            s_ppp_ccb->user_num, cur->type, cur->length);
                         return ERROR;
                     }
                     if (cur->type == IP_ADDRESS)
