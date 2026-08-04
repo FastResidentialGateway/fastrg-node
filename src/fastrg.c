@@ -292,10 +292,17 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
                 }
                 if (link_port == 1) {
                     if (mail[i]->refp[0] == LINK_DOWN) {
-                        rte_timer_reset(&fastrg_ccb->link, 
-                            LINK_DOWN_TIMEOUT * fastrg_get_cycles_in_sec(), // 10 seconds
-                            SINGLE, fastrg_ccb->lcore.timer_thread, 
-                            (rte_timer_cb_t)link_disconnect, fastrg_ccb);
+                        if (rte_timer_reset(&fastrg_ccb->link,
+                                LINK_DOWN_TIMEOUT * fastrg_get_cycles_in_sec(), // 10 seconds
+                                SINGLE, fastrg_ccb->lcore.timer_thread,
+                                (rte_timer_cb_t)link_disconnect, fastrg_ccb) == -1) {
+                            /* -1 only when the timer is RUNNING, i.e. link_disconnect
+                             * is executing on the timer lcore at this very moment: the
+                             * disconnect this rearm would schedule is already happening,
+                             * so skipping the redundant rearm loses no protection. */
+                            FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                                "Link-down timer rearm skipped: its disconnect callback is running on another lcore and already handling this link down");
+                        }
                     } else if (mail[i]->refp[0] == LINK_UP) {
                         rte_timer_stop(&fastrg_ccb->link);
                     }
