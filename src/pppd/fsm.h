@@ -85,6 +85,23 @@ STATUS A_padr_timer_func(struct rte_timer *tim, ppp_ccb_t *s_ppp_ccb);
 STATUS lcp_layer_up(ppp_ccb_t *s_ppp_ccb);
 STATUS ipcp_layer_up(ppp_ccb_t *s_ppp_ccb);
 
+/**
+ * @fn ppp_phase_rollback
+ *
+ * @brief roll the PPPoE connection phase back two phases toward the lower
+ *      layer (e.g. IPCP_PHASE -> LCP_PHASE) when an NCP layer closes. The
+ *      phase field is unsigned, so a phase below LCP_PHASE cannot roll back
+ *      a full two steps and clamps to END_PHASE, the lowest phase value,
+ *      instead of wrapping around
+ *
+ * @param s_ppp_ccb
+ *      PPP control block pointer
+ *
+ * @return
+ *      void
+ */
+void ppp_phase_rollback(ppp_ccb_t *s_ppp_ccb);
+
 #ifdef __cplusplus
 }
 #endif
