@@ -57,6 +57,7 @@ phase15_metrics_route() {
     local _want=(
         fastrg_node_start_time_seconds
         fastrg_node_restart_total
+        fastrg_node_snapshot_persist_ok
         fastrg_node_rx_packets_total
         fastrg_node_lcore_busy_cycles_total
         fastrg_nic_link_up

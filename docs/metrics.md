@@ -58,6 +58,7 @@ Prometheus also adds `instance` (the scraped `host:port`) and `job` automaticall
 |--------|------|--------|-------------|
 | `fastrg_node_start_time_seconds` | gauge | `node_uuid` | Unix time (seconds) the process started; changes on restart. |
 | `fastrg_node_restart_total` | counter | `node_uuid` | Cumulative process start count, persisted across restarts (`/var/lib/fastrg/restart_count`) — crashloop detection. |
+| `fastrg_node_snapshot_persist_ok` | gauge | `node_uuid` | `1` when the last config snapshot persist to disk succeeded (also `1` at boot before any persist happened), `0` while the last persist attempt failed — surfaces disk-full snapshot failures on the dashboard. |
 
 ```promql
 increase(fastrg_node_restart_total[15m]) > 2      # crashlooping
