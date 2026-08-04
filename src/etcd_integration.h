@@ -197,9 +197,10 @@ void etcd_event_dispatch(FastRG_t *fastrg_ccb, etcd_event_t *ev);
  * @param user_id_str
  *      User identifier string (1-based)
  * @param max_count
- *      Unused; kept for signature stability
+ *      Exclusive upper bound for the resulting ccb_id
  * @return
- *      0-based ccb_id, or -1 if the string is not a valid user id
+ *      0-based ccb_id in [0, max_count), or -1 if the string is not a
+ *      valid user id or the id is out of range
  */
 int parse_user_id(const char *user_id_str, int max_count);
 
