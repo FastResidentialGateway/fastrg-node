@@ -7,11 +7,13 @@
 #include <json/json.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
 #include <fstream>
+#include <future>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -303,12 +305,25 @@ void kafka_producer_cleanup(void) {
 
     /* rd_kafka_destroy() blocks until all internal threads exit.  When the
      * broker is unreachable the reconnect-backoff thread may sleep for up to
-     * reconnect.backoff.max.ms before it notices the terminate signal.  Run
-     * destroy in a detached thread so shutdown is never gated on it — the
-     * process is exiting and the OS cleans up any leftover handle. */
+     * reconnect.backoff.max.ms before it notices the terminate signal, so
+     * shutdown must never be gated on it unconditionally.  In the normal case
+     * destroy finishes almost immediately, though, and a detached thread racing
+     * process exit (atexit handlers, static destructors) can crash during
+     * teardown.  Wait up to 2 seconds for the common fast path and only fall
+     * back to detaching when destroy is actually stuck — the process is
+     * exiting and the OS cleans up any leftover handle. */
     rd_kafka_t *rk = g_rk;
     g_rk = nullptr;
-    std::thread([rk] { rd_kafka_destroy(rk); }).detach();
+    std::packaged_task<void()> destroy_task([rk] { rd_kafka_destroy(rk); });
+    std::future<void> destroy_done = destroy_task.get_future();
+    std::thread destroy_thread(std::move(destroy_task));
+    if (destroy_done.wait_for(std::chrono::seconds(2)) == std::future_status::ready) {
+        destroy_thread.join();
+    } else {
+        std::fprintf(stderr,
+            "[kafka] destroy still blocked after 2s, detaching it for process exit\n");
+        destroy_thread.detach();
+    }
 }
 
 int kafka_producer_is_ready(void) {
