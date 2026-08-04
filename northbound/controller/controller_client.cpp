@@ -11,6 +11,7 @@
 #include <cstring>
 #include <fstream>
 #include <sstream>
+#include <stdexcept>
 
 using grpc::Channel;
 using grpc::ClientContext;
@@ -191,7 +192,17 @@ int get_local_ip_for_server(const char* server_address, unsigned char* local_ip,
     }
 
     std::string server_ip = server_str.substr(0, colon_pos);
-    int server_port = std::stoi(server_str.substr(colon_pos + 1));
+    int server_port;
+    try {
+        server_port = std::stoi(server_str.substr(colon_pos + 1));
+    } catch (const std::invalid_argument&) {
+        return -1;
+    } catch (const std::out_of_range&) {
+        return -1;
+    }
+    if (server_port < 1 || server_port > 65535) {
+        return -1;
+    }
 
     // Create a socket and connect to the server to get local IP
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
