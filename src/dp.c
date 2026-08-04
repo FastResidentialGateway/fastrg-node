@@ -611,7 +611,8 @@ int lan_ctrl_rx(void *arg)
                     arphdr->arp_opcode = rte_cpu_to_be_16(RTE_ARP_OP_REPLY);
                     count_tx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                     count_rx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
-                    rte_eth_tx_burst(LAN_PORT, lan_tx_q, &single_pkt, 1);
+                    if (rte_eth_tx_burst(LAN_PORT, lan_tx_q, &single_pkt, 1) == 0)
+                        drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                 } else if (arphdr->arp_opcode == rte_cpu_to_be_16(RTE_ARP_OP_REPLY) &&
                         arphdr->arp_data.arp_tip == dhcp_server_ip) {
                     /* ARP reply to us → drain pending queue */
@@ -635,7 +636,8 @@ int lan_ctrl_rx(void *arg)
                     /* ARP to other → forward to WAN */
                     count_rx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                     count_tx_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
-                    rte_eth_tx_burst(WAN_PORT, wan_tx_q, &single_pkt, 1);
+                    if (rte_eth_tx_burst(WAN_PORT, wan_tx_q, &single_pkt, 1) == 0)
+                        drop_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
                 }
                 continue;
             }
@@ -685,10 +687,12 @@ int lan_ctrl_rx(void *arg)
                             cksum = (cksum & 0xffff) + (cksum >> 16);
                             cksum = (cksum & 0xffff) + (cksum >> 16);
                             icmphdr->icmp_cksum = ~cksum;
-                            rte_eth_tx_burst(LAN_PORT, lan_tx_q, &single_pkt, 1);
+                            if (rte_eth_tx_burst(LAN_PORT, lan_tx_q, &single_pkt, 1) == 0)
+                                drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                         } else {
                             /* ICMP to other host in subnet → forward on LAN */
-                            rte_eth_tx_burst(LAN_PORT, lan_tx_q, &single_pkt, 1);
+                            if (rte_eth_tx_burst(LAN_PORT, lan_tx_q, &single_pkt, 1) == 0)
+                                drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                         }
                     } else {
                         drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
@@ -1312,7 +1316,8 @@ int lan_dist_rx(void *arg)
                     arphdr->arp_opcode = rte_cpu_to_be_16(RTE_ARP_OP_REPLY);
                     count_tx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                     count_rx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
-                    rte_eth_tx_burst(LAN_PORT, lan_tx_q, &single_pkt, 1);
+                    if (rte_eth_tx_burst(LAN_PORT, lan_tx_q, &single_pkt, 1) == 0)
+                        drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                 } else if (arphdr->arp_opcode == rte_cpu_to_be_16(RTE_ARP_OP_REPLY) &&
                         arphdr->arp_data.arp_tip == dhcp_server_ip) {
                     /* ARP reply to us → drain pending queue */
@@ -1335,7 +1340,8 @@ int lan_dist_rx(void *arg)
                 } else {
                     count_rx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                     count_tx_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
-                    rte_eth_tx_burst(WAN_PORT, wan_tx_q, &single_pkt, 1);
+                    if (rte_eth_tx_burst(WAN_PORT, wan_tx_q, &single_pkt, 1) == 0)
+                        drop_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
                 }
                 continue;
             }
@@ -1386,9 +1392,11 @@ int lan_dist_rx(void *arg)
                             cksum = (cksum & 0xffff) + (cksum >> 16);
                             cksum = (cksum & 0xffff) + (cksum >> 16);
                             icmphdr->icmp_cksum = ~cksum;
-                            rte_eth_tx_burst(LAN_PORT, lan_tx_q, &single_pkt, 1);
+                            if (rte_eth_tx_burst(LAN_PORT, lan_tx_q, &single_pkt, 1) == 0)
+                                drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                         } else {
-                            rte_eth_tx_burst(LAN_PORT, lan_tx_q, &single_pkt, 1);
+                            if (rte_eth_tx_burst(LAN_PORT, lan_tx_q, &single_pkt, 1) == 0)
+                                drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                         }
                     } else if (ip_hdr->next_proto_id == PROTO_TYPE_UDP) {
                         /* DHCP and DNS on gateway subnet */
