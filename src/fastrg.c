@@ -522,6 +522,33 @@ void fastrg_stop()
     if (fastrg_ccb.controller_address)
         controller_cleanup(&fastrg_ccb);
 
+    /* Drain any mail left unconsumed before freeing the ring. EV_DP_* mails own
+     * an mbuf that must be freed; EV_LINK mails are individually allocated (see
+     * lsi_event_callback) and are freed here. Every other mail is a borrowed
+     * pool slot: hand it back to free_mail_ring so the pool teardown
+     * (cleanup_ring) frees every slot in one place — a slot stuck in cp_q is
+     * invisible to that teardown otherwise. The ring holds all 31 slots, so
+     * the give-back cannot fail. */
+    if (fastrg_ccb.cp_q) {
+        tFastRG_MBX *left_mail;
+        while (rte_ring_dequeue(fastrg_ccb.cp_q, (void **)&left_mail) == 0) {
+            switch (left_mail->type) {
+            case EV_DP_PPPoE:
+            case EV_DP_DNS:
+            case EV_DP_DHCP:
+                if (left_mail->mbuf)
+                    rte_pktmbuf_free(left_mail->mbuf);
+                rte_ring_enqueue(fastrg_ccb.free_mail_ring, left_mail);
+                break;
+            case EV_LINK:
+                fastrg_mfree(left_mail);
+                break;
+            default:
+                rte_ring_enqueue(fastrg_ccb.free_mail_ring, left_mail);
+                break;
+            }
+        }
+    }
     rte_ring_free(fastrg_ccb.cp_q);
     /* drain any etcd events left unconsumed before freeing the ring */
     etcd_event_t *ev;
