@@ -16,7 +16,7 @@ phase5_dnat_test() {
     PM_COUNT=$(printf '%s' "$_HSI_ETCD" | jq -r '(.config["port-mapping"] // []) | length' 2>/dev/null || echo "0")
 
     if [[ "$PM_COUNT" -eq 0 ]]; then
-        skip "Step 16: WAN→LAN DNAT" "No port-mapping in etcd — cannot perform DNAT test"
+        fail "Step 16: WAN→LAN DNAT" "fixture precondition missing: no port-mapping in etcd (canonical fixture guarantees one)"
         return
     fi
 

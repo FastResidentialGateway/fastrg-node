@@ -21,11 +21,11 @@ phase15_metrics_route() {
     _mport_raw=$(ssh_node "grep 'MetricsListenPort' /etc/fastrg/config.cfg 2>/dev/null" | awk -F'"' '{print $2}')
     _mport="${_mport_raw##*:}"
     if [[ -z "$_mport" ]]; then
-        skip "Step 61: read MetricsListenPort" "MetricsListenPort not set in /etc/fastrg/config.cfg"
-        skip "Step 62: /metrics returns 200"     "no metrics port"
-        skip "Step 63: expected metric families" "no metrics port"
-        skip "Step 64: well-formed exposition"   "no metrics port"
-        skip "Step 65: unknown path returns 404"  "no metrics port"
+        fail "Step 61: read MetricsListenPort" "fixture precondition missing: MetricsListenPort not set in /etc/fastrg/config.cfg"
+        fail "Step 62: /metrics returns 200"     "fixture precondition missing: no metrics port"
+        fail "Step 63: expected metric families" "fixture precondition missing: no metrics port"
+        fail "Step 64: well-formed exposition"   "fixture precondition missing: no metrics port"
+        fail "Step 65: unknown path returns 404"  "fixture precondition missing: no metrics port"
         return
     fi
     info "Metrics endpoint: ${FASTRG_NODE}:${_mport}/metrics"

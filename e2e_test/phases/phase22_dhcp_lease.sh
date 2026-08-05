@@ -404,4 +404,9 @@ PY
         fail "Step 97: DHCP RELEASE and isolation" \
             "release='$(_p22_snippet "$_release")'; metric='${_P22_OBS_METRIC:-}' ips='${_P22_OBS_IPS:-}'; real lease=${_P22_REAL_LEASE} iface='${_P22_LAN_IFACE}'"
     fi
+
+    # Tear down the virtual client here so nothing leaks into later phases;
+    # the runner's EXIT trap keeps calling this as a backstop on early aborts.
+    _cleanup_phase22_dhcp_lease || true
+    return 0
 }
