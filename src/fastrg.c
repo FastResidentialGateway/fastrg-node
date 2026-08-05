@@ -529,13 +529,51 @@ void fastrg_stop()
     if (fastrg_ccb.controller_address)
         controller_cleanup(&fastrg_ccb);
 
-    /* Drain any mail left unconsumed before freeing the ring. EV_DP_* mails own
-     * an mbuf that must be freed; EV_LINK mails are individually allocated (see
+    /* Drain any etcd events left unconsumed (their payloads are only freeable
+     * via etcd_event_free); the ring itself is freed by sys_cleanup below. The
+     * producers (etcd watcher threads) were stopped by etcd_integration_cleanup
+     * above, so nothing can enqueue after this drain. */
+    etcd_event_t *ev;
+    if (fastrg_ccb.etcd_event_q) {
+        while (rte_ring_dequeue(fastrg_ccb.etcd_event_q, (void **)&ev) == 0)
+            etcd_event_free(ev);
+    }
+    if (fastrg_ccb.unix_sock_fd > 0)
+        close(fastrg_ccb.unix_sock_fd);
+    fastrg_ccb.user_count = 0;
+    pppd_cleanup_ccb(&fastrg_ccb);
+    dhcpd_cleanup_ccb(&fastrg_ccb);
+    /* stop any active CLI capture session and free its state */
+    fastrg_pdump_capture_cleanup(&fastrg_ccb);
+    /* pdump_rcu is owned here, not by sys_cleanup: it must be freed right
+     * after fastrg_pdump_capture_cleanup(), whose QSBR grace period is its
+     * last reader. sys_cleanup never touches pdump_rcu. */
+    if (fastrg_ccb.pdump_rcu != NULL) {
+        fastrg_mfree(fastrg_ccb.pdump_rcu);
+        fastrg_ccb.pdump_rcu = NULL;
+    }
+    #ifdef RTE_LIB_PDUMP
+    /*uninitialize packet capture framework */
+    rte_pdump_uninit();
+    #endif
+    /* Stop and close both ports before any ring/pool teardown: closing a port
+     * makes the driver return every mbuf still sitting in its RX/TX queue
+     * descriptors to the mempools, so cleanup_mem (via sys_cleanup below) only
+     * frees pools the NIC no longer references. Must come after
+     * rte_pdump_uninit so the pdump RX/TX callbacks are detached first, and
+     * before the cp_q drain so the LSC callback is unregistered before the
+     * drain runs. */
+    for(U16 port=0; port<PORT_AMOUNT; port++)
+        PORT_CLOSE(&fastrg_ccb, port);
+    /* Drain any mail left unconsumed in cp_q; the ring itself is freed by
+     * sys_cleanup below. Placed after PORT_CLOSE: the LSC callback (the last
+     * possible producer, running on the interrupt thread) is unregistered
+     * there, so nothing can enqueue after this drain. EV_DP_* mails own an
+     * mbuf that must be freed; EV_LINK mails are individually allocated (see
      * lsi_event_callback) and are freed here. Every other mail is a borrowed
-     * pool slot: hand it back to free_mail_ring so the pool teardown
-     * (cleanup_ring) frees every slot in one place — a slot stuck in cp_q is
-     * invisible to that teardown otherwise. The ring holds all 31 slots, so
-     * the give-back cannot fail. */
+     * pool slot: hand it back to free_mail_ring so cleanup_ring (via
+     * sys_cleanup) frees every slot in one place. The ring holds all 31
+     * slots, so the give-back cannot fail. */
     if (fastrg_ccb.cp_q) {
         tFastRG_MBX *left_mail;
         while (rte_ring_dequeue(fastrg_ccb.cp_q, (void **)&left_mail) == 0) {
@@ -556,33 +594,23 @@ void fastrg_stop()
             }
         }
     }
-    rte_ring_free(fastrg_ccb.cp_q);
-    /* drain any etcd events left unconsumed before freeing the ring */
-    etcd_event_t *ev;
-    if (fastrg_ccb.etcd_event_q) {
-        while (rte_ring_dequeue(fastrg_ccb.etcd_event_q, (void **)&ev) == 0)
-            etcd_event_free(ev);
-    }
-    rte_ring_free(fastrg_ccb.etcd_event_q);
-    if (fastrg_ccb.unix_sock_fd > 0)
-        close(fastrg_ccb.unix_sock_fd);
-    fastrg_ccb.user_count = 0;
-    pppd_cleanup_ccb(&fastrg_ccb);
-    dhcpd_cleanup_ccb(&fastrg_ccb);
-    /* stop any active CLI capture session and free its state */
-    fastrg_pdump_capture_cleanup(&fastrg_ccb);
-    if (fastrg_ccb.pdump_rcu != NULL) {
-        fastrg_mfree(fastrg_ccb.pdump_rcu);
-        fastrg_ccb.pdump_rcu = NULL;
-    }
-    #ifdef RTE_LIB_PDUMP
-    /*uninitialize packet capture framework */
-    rte_pdump_uninit();
-    #endif
     //rte_trace_save();
-    FastRG_LOG(INFO, fastrg_ccb.fp, NULL, NULL, "bye!");
     grpc_shutdown();
-    // Free allocated strings
+    if (fastrg_ccb.vlan_userid_map != NULL) {
+        fastrg_mfree(fastrg_ccb.vlan_userid_map);
+        fastrg_ccb.vlan_userid_map = NULL;
+    }
+    fastrg_cleanup_subscriber_stats(&fastrg_ccb);
+    fastrg_cleanup_pppoes_stats(&fastrg_ccb);
+    /* Single-owner teardown of everything sys_init created: the stats rows
+     * (already NULL after the two cleanups above, so the guarded loops are
+     * no-ops), the arp_pending pool (its per-ccb queues were returned by
+     * pppd_cleanup_ccb above), node_uuid, lcore_usage, all three rings
+     * (cp_q / etcd_event_q / free_mail_ring including the 31 mail slots) and
+     * the mbuf pools. Must precede rte_eal_cleanup(): the rings and pools
+     * live in EAL hugepage memory. */
+    sys_cleanup(&fastrg_ccb);
+    // Free allocated memory from config file
     if (fastrg_ccb.eal_args) free(fastrg_ccb.eal_args);
     if (fastrg_ccb.log_path) free(fastrg_ccb.log_path);
     if (fastrg_ccb.unix_sock_path) free(fastrg_ccb.unix_sock_path);
@@ -592,10 +620,9 @@ void fastrg_stop()
     if (fastrg_ccb.kafka_brokers) free(fastrg_ccb.kafka_brokers);
     if (fastrg_ccb.central_office_location) free(fastrg_ccb.central_office_location);
     if (fastrg_ccb.metrics_ip_port) free(fastrg_ccb.metrics_ip_port);
-    if (fastrg_ccb.node_uuid) fastrg_mfree(fastrg_ccb.node_uuid);
-    fastrg_mfree(fastrg_ccb.vlan_userid_map);
-    fastrg_cleanup_subscriber_stats(&fastrg_ccb);
-    fastrg_cleanup_pppoes_stats(&fastrg_ccb);
+    /* Logged after every teardown step above: a crash during teardown leaves
+     * the log without this line, so a missing "bye!" is itself a signal. */
+    FastRG_LOG(INFO, fastrg_ccb.fp, NULL, NULL, "bye!");
 
     rte_eal_cleanup();
 

@@ -210,6 +210,22 @@ err_unregister_callback:
     return ERROR;
 }
 
+void PORT_CLOSE(FastRG_t *fastrg_ccb, U16 port)
+{
+    int ret;
+
+    if (!rte_eth_dev_is_valid_port(port))
+        return;
+    rte_eth_dev_callback_unregister(port, RTE_ETH_EVENT_INTR_LSC,
+        (rte_eth_dev_cb_fn)lsi_event_callback, fastrg_ccb);
+    ret = rte_eth_dev_stop(port);
+    if (ret < 0)
+        FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL, "Cannot stop port %u: %s", port, strerror(-ret));
+    ret = rte_eth_dev_close(port);
+    if (ret < 0)
+        FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL, "Cannot close port %u: %s", port, strerror(-ret));
+}
+
 /**
  * @fn rx_prefetch_prologue
  *

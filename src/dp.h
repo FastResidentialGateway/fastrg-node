@@ -46,7 +46,34 @@ int wan_dist_rx(void *arg);
 int lan_dist_rx(void *arg);
 int wan_dist_worker(void *arg);
 int lan_dist_worker(void *arg);
+
+/**
+ * @fn PORT_INIT
+ * 
+ * @brief Initialize a port for data-plane operation.
+ * @param fastrg_ccb 
+ *      FastRG main control block
+ * @param port
+ *      port id to initialize
+ * @return SUCCESS on success, ERROR on failure
+ */
 STATUS PORT_INIT(FastRG_t *fastrg_ccb, U16 port);
+
+/**
+ * @fn PORT_CLOSE
+ * 
+ * @brief Shutdown-time counterpart of PORT_INIT. Unregisters the LSC
+ *        callback first so a stop-time link-down interrupt can no longer
+ *        enqueue an EV_LINK mail, then stops and closes the port so the
+ *        driver hands every mbuf still held in its RX/TX queues back to
+ *        the mempools before those pools are freed (cleanup_mem).
+ * @param fastrg_ccb 
+ *      FastRG main control block
+ * @param port 
+ *      port id to close
+ * @return void
+ */
+void PORT_CLOSE(FastRG_t *fastrg_ccb, U16 port);
 
 typedef struct mbuf_priv {
     U16 ccb_id;
