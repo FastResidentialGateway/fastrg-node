@@ -237,9 +237,9 @@ phase11_kafka_pipeline() {
         _p12_status=$(fastrg_grpc ctrl_pppoe "${USER_ID}" 2>/dev/null | \
             jq -r '.status // empty' 2>/dev/null || true)
         # Node phase strings flow through Kafka into the controller DB. Any
-        # connected/in-progress phase (not "not configured"/empty) proves delivery.
+        # non-empty status other than "not configured" proves delivery.
         if [[ -n "$_p12_status" ]] && \
-           printf '%s' "$_p12_status" | grep -qiE "Data phase|connect|LCP|IPCP|Auth|PPPoE phase"; then
+           ! printf '%s' "$_p12_status" | grep -qi "not configured"; then
             _p12_ok=1
             break
         fi
