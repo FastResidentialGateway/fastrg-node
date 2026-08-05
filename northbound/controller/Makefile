@@ -9,6 +9,17 @@ PROTO_FILE = $(PROTOS_PATH)/controller.proto
 CXXFLAGS = -std=c++17 -g -O3 -DNB_TEST $(shell pkg-config --cflags protobuf grpc++) $(shell pkg-config --cflags jsoncpp) $(shell pkg-config --cflags rdkafka)
 LDFLAGS = $(shell pkg-config --libs protobuf grpc++) $(shell pkg-config --libs jsoncpp) -letcd-cpp-api $(shell pkg-config --libs rdkafka)
 
+# Coverage build, driven by the top-level `make coverage` target (which
+# exports COVERAGE=1): swap -O3 for -O0 so gcov line data maps 1:1 to source
+# lines, add gcov instrumentation, and link with --coverage so the test
+# binaries (which also link instrumented ../../src objects) pull in libgcov.
+ifeq ($(COVERAGE),1)
+CXXFLAGS := $(filter-out -O3,$(CXXFLAGS)) -O0 --coverage
+# -lcpprest: at -O0 the pplx/cpprest calls in etcd_client.cpp are no longer
+# inlined away, so the link needs libcpprest spelled out explicitly.
+LDFLAGS += --coverage -lcpprest
+endif
+
 PROTO_SOURCES = $(PROTOS_PATH)/controller.pb.cc $(PROTOS_PATH)/controller.grpc.pb.cc
 PROTO_HEADERS = $(PROTOS_PATH)/controller.pb.h $(PROTOS_PATH)/controller.grpc.pb.h
 PROTO_OBJECTS = $(PROTOS_PATH)/controller.pb.o $(PROTOS_PATH)/controller.grpc.pb.o

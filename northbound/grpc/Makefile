@@ -9,7 +9,14 @@ CC = g++
 INCLUDE =
 CFLAGS = $(INCLUDE) -Wall -g -O3
 
-LDFLAGS = -lutils 
+LDFLAGS = -lutils
+
+# Coverage build, driven by the top-level `make coverage` target (which
+# exports COVERAGE=1): swap -O3 for -O0 so gcov line data maps 1:1 to source
+# lines, and add gcov instrumentation.
+ifeq ($(COVERAGE),1)
+CFLAGS := $(filter-out -O3,$(CFLAGS)) -O0 --coverage
+endif
 
 PROTO_SRC = fastrg_node.proto
 GRPC_SRC = $(wildcard *.cpp)

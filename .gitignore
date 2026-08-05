@@ -7,6 +7,9 @@ build
 **/fastrg_northbound
 **/.libs
 unit_test/unit-tester
+**/*.gcda
+**/*.gcno
+coverage/
 **/fastrg_cli
 **/libfastrg_northbound.a
 **/*.pb.*
@@ -14,10 +17,3 @@ src/version.h
 northbound/controller/proto
 .github/*.md
 CLAUDE.md
-root_plan.md
-SETUP.md
-WORKFLOW.md
-AGENTS.md
-.codex
-.claude
-artifacts
