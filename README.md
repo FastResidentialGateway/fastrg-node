@@ -159,6 +159,29 @@ For hugepages, NIC binding and other system configuration, please refer to DPDK 
 ### Testbed topology:
 ![FastRG dataplane testbed](./docs/fastrgtestbed.drawio.png)
 
+## Test coverage:
+
+Run `make coverage` to measure line/function coverage of the unit test run (C unit suites plus the controller C++ test suite). It rebuilds the tree at `-O0` with gcov instrumentation, runs the tests, writes an lcov report to `coverage/` (per-module summary in `coverage/module-summary.txt`, per-file summary in `coverage/file-summary.txt`, HTML report in `coverage/html/index.html`), then restores a clean, uninstrumented tree. Files that are compiled but never executed by the tests are counted as 0% instead of being omitted.
+
+Snapshot taken on 2026-08-05 at commit `3e5ffdf`:
+
+| Module | Line coverage | Function coverage |
+|---|---|---|
+| src (core) | 24.5% (1029/4207) | 40.0% (72/180) |
+| src/pppd | 65.2% (1421/2181) | 66.1% (74/112) |
+| src/dhcpd | 76.5% (630/824) | 75.8% (25/33) |
+| src/dnsd | 90.7% (631/696) | 97.2% (35/36) |
+| northbound/grpc | 0.0% (0/1686) | 0.0% (0/64) |
+| northbound/controller | 23.3% (441/1894) | 27.0% (33/122) |
+| northbound/cmdline | 93.8% (15/16) | 100.0% (1/1) |
+| **Total** | **36.2% (4167/11504)** | **43.8% (240/548)** |
+
+Notes on reading these numbers:
+
+- Unit tests run under `UNIT_TEST`, which stubs out the DPDK runtime, so areas that depend on real DPDK devices and threads — the `dp.c` hot path, EAL/port init, flow rules, the gRPC server — are naturally low or zero at the unit level. Combined unit + e2e coverage requires instrumenting the e2e run and is not included here.
+- `northbound/controller/etcd_client.cpp` shows 0% even though the controller test suite exercises it: the test harness stops the etcd watcher process with a signal, so its gcov counters are never flushed to disk.
+- Only `ip_pool_range.c` from `northbound/cmdline` is linked into the unit tester; the rest of the CLI tool is not measured.
+
 ## TODO:
 
 1. Increase unit tests converage

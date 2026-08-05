@@ -11,6 +11,20 @@ CFLAGS = $(INCLUDE) -Wall -g $(shell pkg-config --cflags libdpdk) -DALLOW_EXPERI
 
 LDFLAGS = $(shell pkg-config --static --libs libdpdk) -lutils -lconfig -luuid -Wl,--start-group -lstdc++ $(shell pkg-config --libs grpc++ protobuf jsoncpp) -letcd-cpp-api $(shell pkg-config --libs rdkafka) -lgrpc_unsecure -lgrpc++_unsecure -laddress_sorting -lpthread -Wl,--end-group
 
+# Coverage build, driven by the top-level `make coverage` target (which
+# exports COVERAGE=1): the ../src and ../northbound objects are
+# gcov-instrumented there, so the link needs --coverage to pull in libgcov.
+# Instrumenting the local objects also covers product sources compiled here
+# (e.g. ../northbound/cmdline/ip_pool_range.c); the unit_test/ harness files
+# themselves are filtered out of the report by the top-level target.
+ifeq ($(COVERAGE),1)
+CFLAGS += --coverage
+# -lcpprest: at -O0 the pplx/cpprest calls in ../northbound/controller/
+# etcd_client.o are no longer inlined away, so the link needs libcpprest
+# spelled out explicitly.
+LDFLAGS += --coverage -lcpprest
+endif
+
 TARGET = unit-tester
 SRC = $(wildcard *.c) $(wildcard pppd/*.c) $(wildcard dhcpd/*.c) $(wildcard dnsd/*.c) $(wildcard cmdline/*.c)
 CLI_TEST_OBJ = ip_pool_range_test_impl.o
