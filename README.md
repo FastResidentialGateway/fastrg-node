@@ -161,26 +161,38 @@ For hugepages, NIC binding and other system configuration, please refer to DPDK 
 
 ## Test coverage:
 
-Run `make coverage` to measure line/function coverage of the unit test run (C unit suites plus the controller C++ test suite). It rebuilds the tree at `-O0` with gcov instrumentation, runs the tests, writes an lcov report to `coverage/` (per-module summary in `coverage/module-summary.txt`, per-file summary in `coverage/file-summary.txt`, HTML report in `coverage/html/index.html`), then restores a clean, uninstrumented tree. Files that are compiled but never executed by the tests are counted as 0% instead of being omitted.
+Coverage is measured on demand at two levels:
 
-Snapshot taken on 2026-08-05 at commit `3e5ffdf`:
+- **Unit**: `make coverage` rebuilds the `UNIT_TEST` tree with gcov instrumentation, runs the C unit suites plus the controller C++ test suite, and writes an lcov report to `coverage/` (module/file summaries and an HTML report), then restores a clean tree.
+- **E2E**: `make coverage-e2e-build`, run `e2e_test/run_e2e_test.sh` as usual (must be all-green), then `make coverage-e2e-report`; finish with `make clean && make`. The report writes `coverage/e2e.info` and, when unit data is present, `coverage/combined.info`. See `e2e_test/coverage.mk` for the mechanics and rationale.
+- **Per-feature view**: run `make coverage-features` to group functions into product features by name/path rules (`e2e_test/feature_coverage.py`) and print per-feature line/function coverage (`coverage/feature-summary.txt`). It uses `coverage/combined.info` when present, otherwise falls back to the unit tracefile.
 
-| Module | Line coverage | Function coverage |
+| Module | Unit test lines | E2E lines | Combined lines | Combined functions |
+|---|---|---|---|---|
+| src (core) | 24.5% (1029/4207) | 66.6% (3063/4602) | 67.8% (3272/4829) | 88.3% (173/196) |
+| src/pppd | 65.2% (1421/2181) | 70.3% (1512/2151) | 84.5% (1898/2247) | 92.9% (104/112) |
+| src/dhcpd | 76.5% (630/824) | 66.9% (542/810) | 86.0% (737/857) | 87.9% (29/33) |
+| src/dnsd | 90.7% (631/696) | 79.9% (496/621) | 90.7% (644/710) | 97.2% (35/36) |
+| northbound/grpc | 0.0% (0/1686) | 35.6% (618/1735) | 35.3% (618/1752) | 46.9% (30/64) |
+| northbound/controller | 23.3% (441/1894) | 71.2% (1331/1869) | 71.9% (1459/2028) | 86.9% (106/122) |
+| northbound/cmdline | 93.8% (15/16) | — | 93.8% (15/16) | 100.0% (1/1) |
+| **Total** | **36.2% (4167/11504)** | **64.1% (7562/11788)** | **69.5% (8643/12439)** | **84.8% (478/564)** |
+
+Per-feature view (`make coverage-features`):
+
+| Feature | Lines | Functions |
 |---|---|---|
-| src (core) | 24.5% (1029/4207) | 40.0% (72/180) |
-| src/pppd | 65.2% (1421/2181) | 66.1% (74/112) |
-| src/dhcpd | 76.5% (630/824) | 75.8% (25/33) |
-| src/dnsd | 90.7% (631/696) | 97.2% (35/36) |
-| northbound/grpc | 0.0% (0/1686) | 0.0% (0/64) |
-| northbound/controller | 23.3% (441/1894) | 27.0% (33/122) |
-| northbound/cmdline | 93.8% (15/16) | 100.0% (1/1) |
-| **Total** | **36.2% (4167/11504)** | **43.8% (240/548)** |
-
-Notes on reading these numbers:
-
-- Unit tests run under `UNIT_TEST`, which stubs out the DPDK runtime, so areas that depend on real DPDK devices and threads — the `dp.c` hot path, EAL/port init, flow rules, the gRPC server — are naturally low or zero at the unit level. Combined unit + e2e coverage requires instrumenting the e2e run and is not included here.
-- `northbound/controller/etcd_client.cpp` shows 0% even though the controller test suite exercises it: the test harness stops the etcd watcher process with a signal, so its gcov counters are never flushed to disk.
-- Only `ip_pool_range.c` from `northbound/cmdline` is linked into the unit tester; the rest of the CLI tool is not measured.
+| SNAT/NAT + conntrack | 89.5% (437/488) | 95.5% (42/44) |
+| PPPoE control plane | 83.2% (1488/1788) | 91.8% (67/73) |
+| PPPoE data plane (encap/decap) | 76.2% (211/277) | 100.0% (8/8) |
+| dp core (rx/tx loops, distributor, flow rules) | 48.8% (730/1496) | 73.8% (31/42) |
+| DHCP server | 86.0% (737/857) | 87.9% (29/33) |
+| DNS proxy | 89.3% (669/749) | 97.4% (37/38) |
+| MAC/ARP resolution | 84.7% (127/150) | 100.0% (13/13) |
+| Metrics/observability | 85.4% (648/759) | 100.0% (41/41) |
+| Controller sync (SDN) | 56.9% (2433/4273) | 75.0% (153/204) |
+| Config/lifecycle | 56.3% (1310/2327) | 69.9% (79/113) |
+| CLI | 93.8% (15/16) | 100.0% (1/1) |
 
 ## TODO:
 
