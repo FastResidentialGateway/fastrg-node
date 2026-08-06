@@ -18,6 +18,13 @@ ifeq ($(COVERAGE),1)
 CFLAGS := $(filter-out -O3,$(CFLAGS)) -O0 --coverage
 endif
 
+# E2E coverage build, driven by the top-level `make coverage-e2e-build`
+# (COVERAGE_E2E=1 arrives through MAKEFLAGS): keep -O3 production codegen
+# and only add gcov instrumentation.
+ifeq ($(COVERAGE_E2E),1)
+CFLAGS += --coverage -fprofile-update=atomic
+endif
+
 PROTO_SRC = fastrg_node.proto
 GRPC_SRC = $(wildcard *.cpp)
 PB_HDR    = $(PB_SRC:.cc=.h)

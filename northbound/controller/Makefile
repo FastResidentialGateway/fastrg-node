@@ -20,6 +20,14 @@ CXXFLAGS := $(filter-out -O3,$(CXXFLAGS)) -O0 --coverage
 LDFLAGS += --coverage -lcpprest
 endif
 
+# E2E coverage build, driven by the top-level `make coverage-e2e-build`
+# (COVERAGE_E2E=1 arrives through MAKEFLAGS): keep -O3 production codegen
+# and only add gcov instrumentation.
+ifeq ($(COVERAGE_E2E),1)
+CXXFLAGS += --coverage -fprofile-update=atomic
+LDFLAGS += --coverage
+endif
+
 PROTO_SOURCES = $(PROTOS_PATH)/controller.pb.cc $(PROTOS_PATH)/controller.grpc.pb.cc
 PROTO_HEADERS = $(PROTOS_PATH)/controller.pb.h $(PROTOS_PATH)/controller.grpc.pb.h
 PROTO_OBJECTS = $(PROTOS_PATH)/controller.pb.o $(PROTOS_PATH)/controller.grpc.pb.o
