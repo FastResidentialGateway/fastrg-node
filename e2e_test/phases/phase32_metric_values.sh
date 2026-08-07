@@ -82,11 +82,11 @@ phase32_metric_values() {
     _body=$(e2e_metrics_body)
     _uc=$(fastrg_grpc get_system_info 2>/dev/null | \
         jq -r '.num_users // empty' 2>/dev/null | tr -d '[:space:]' || true)
-    _max=$(ssh_node "grep -E '^[[:space:]]*MaxUserCount[[:space:]]*=' /etc/fastrg/config.cfg 2>/dev/null" \
-        2>/dev/null | awk -F'[=;]' '{gsub(/[[:space:]]/, "", $2); print $2; exit}' || true)
+    _max=$(e2e_metric_value "$_body" fastrg_node_max_user_count)
 
-    if [[ -z "$_body" ]] || ! e2e_is_uint "$_uc" || [[ "$_uc" -lt 1 ]]; then
-        _issue="metrics scrape empty or subscriber count unreadable (port='$(e2e_metrics_port)', num_users='${_uc:-empty}')"
+    if [[ -z "$_body" ]] || ! e2e_is_uint "$_uc" || [[ "$_uc" -lt 1 ]] || \
+       ! e2e_is_uint "$_max" || [[ "${_max:-0}" -lt 1 ]]; then
+        _issue="metrics scrape, subscriber count, or capacity gauge invalid (port='$(e2e_metrics_port)', num_users='${_uc:-empty}', max_user_count='${_max:-empty}')"
         fail "Step 128: PPPoE phase tallies"        "$_issue"
         fail "Step 129: DHCP lease and server gauges" "$_issue"
         fail "Step 130: DPDK mempool accounting"    "$_issue"
@@ -178,7 +178,7 @@ phase32_metric_values() {
 
     # ------------------------------------------------------------------
     # Step 130 — every mempool row is self-consistent, and the two CCB
-    # pools show the fixed-max preallocation: all MaxUserCount objects are
+    # pools show the fixed-max preallocation: all node-capacity objects are
     # taken at init and never returned while the node runs.
     # ------------------------------------------------------------------
     _issue=""
@@ -202,10 +202,8 @@ phase32_metric_values() {
         [[ $(( _avail + _in_use )) -ne "$_size" ]] && \
             _issue="${_issue:+${_issue}; }pool ${_pool_name}: avail+in_use=$(( _avail + _in_use )) != size=${_size}"
         if [[ "$_pool_name" == "ppp_ccb_pool" || "$_pool_name" == "dhcp_ccb_pool" ]]; then
-            if ! e2e_is_uint "$_max"; then
-                _issue="${_issue:+${_issue}; }cannot read MaxUserCount from the node config to check ${_pool_name}"
-            elif [[ "$_in_use" -ne "$_max" ]]; then
-                _issue="${_issue:+${_issue}; }pool ${_pool_name}: in_use=${_in_use} != MaxUserCount=${_max} (fixed-max preallocation)"
+            if [[ "$_in_use" -ne "$_max" ]]; then
+                _issue="${_issue:+${_issue}; }pool ${_pool_name}: in_use=${_in_use} != node capacity=${_max} (fixed-max preallocation)"
             fi
         fi
     done
@@ -216,7 +214,7 @@ phase32_metric_values() {
 
     if [[ -z "$_issue" ]]; then
         pass "Step 130: DPDK mempool accounting" \
-            "${_checked} pool(s): avail+in_use == size; ppp_ccb_pool/dhcp_ccb_pool in_use == MaxUserCount=${_max}"
+            "${_checked} pool(s): avail+in_use == size; ppp_ccb_pool/dhcp_ccb_pool in_use == node capacity=${_max}"
     else
         fail "Step 130: DPDK mempool accounting" "$_issue"
     fi

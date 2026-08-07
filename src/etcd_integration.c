@@ -481,17 +481,17 @@ STATUS user_count_changed_callback(const char *node_id,
                 return ERROR;
             }
 
-            /* Local capacity guard: MaxUserCount is node-local configuration
-             * (memory capacity), so the node must refuse a count beyond it no
+            /* Local capacity guard: the node computes its memory capacity at
+             * startup, so it must refuse a count beyond that limit no
              * matter who asked. The node is read-only on etcd: the desired
              * count stays there and the refusal is reported via Kafka, making
              * the drift visible instead of silently exhausting the mempool. */
             if (new_count > fastrg_ccb->max_user_count) {
                 FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
-                    "Requested user count %d exceeds configured MaxUserCount %u; rejecting",
+                    "Requested user count %d exceeds node capacity %u; rejecting",
                     new_count, fastrg_ccb->max_user_count);
                 kafka_report_runtime_error("user_count", "COUNT_EXCEEDS_MAX",
-                    "requested subscriber count exceeds configured MaxUserCount", NULL);
+                    "requested subscriber count exceeds node capacity", NULL);
                 return ERROR;
             }
 

@@ -12,6 +12,7 @@
 #include <rte_mbuf.h>
 #include <rte_byteorder.h>
 #include <rte_ethdev.h>
+#include <rte_malloc.h>
 
 #include <uuid/uuid.h>
 
@@ -34,12 +35,73 @@
 #define RING_SIZE 		16384
 #define ETCD_EVENT_RING_SIZE 4096
 
+/* Keep headroom for the pdump capture pool and miscellaneous runtime rte_malloc calls. */
+#define HUGEPAGE_RESERVE_BYTES (512ULL * 1024ULL * 1024ULL)
+/* README documents the measured 150-175 MiB range; use the conservative endpoint. */
+#define HUGEPAGE_BYTES_PER_SUBSCRIBER (175ULL * 1024ULL * 1024ULL)
+
 /* Persisted restart counter for crashloop detection (fastrg_node_restart_total). */
 #define RESTART_COUNT_DIR  "/var/lib/fastrg"
 #define RESTART_COUNT_FILE RESTART_COUNT_DIR "/restart_count"
 
 struct rte_mempool *direct_pool[PORT_AMOUNT];
 struct rte_mempool *indirect_pool[PORT_AMOUNT];
+
+#ifdef UNIT_TEST
+static uint64_t test_hugepage_free_bytes;
+
+void fastrg_set_hugepage_free_bytes_for_test(uint64_t free_bytes)
+{
+    test_hugepage_free_bytes = free_bytes;
+}
+
+static int fastrg_get_socket_stats(int socket_id, struct rte_malloc_socket_stats *stats)
+{
+    if (socket_id != 0)
+        return -1;
+
+    memset(stats, 0, sizeof(*stats));
+    stats->heap_freesz_bytes = test_hugepage_free_bytes;
+    return 0;
+}
+#else
+static int fastrg_get_socket_stats(int socket_id, struct rte_malloc_socket_stats *stats)
+{
+    return rte_malloc_get_socket_stats(socket_id, stats);
+}
+#endif
+
+/**
+ * @fn fastrg_compute_max_user_count
+ * @brief Compute subscriber capacity from the hugepage heap remaining after
+ *        fixed startup allocations.
+ *
+ * @param fastrg_ccb
+ *      FastRG control block
+ */
+void fastrg_compute_max_user_count(FastRG_t *fastrg_ccb)
+{
+    uint64_t free_bytes = 0;
+
+    for(int socket_id=0; socket_id<RTE_MAX_NUMA_NODES; socket_id++) {
+        struct rte_malloc_socket_stats stats;
+        if (fastrg_get_socket_stats(socket_id, &stats) == 0)
+            free_bytes += stats.heap_freesz_bytes;
+    }
+
+    uint64_t subscriber_budget = free_bytes > HUGEPAGE_RESERVE_BYTES ?
+        free_bytes - HUGEPAGE_RESERVE_BYTES : 0;
+    uint64_t computed = subscriber_budget / HUGEPAGE_BYTES_PER_SUBSCRIBER;
+    if (computed < MIN_USER_COUNT)
+        computed = MIN_USER_COUNT;
+    else if (computed > MAX_USER_COUNT)
+        computed = MAX_USER_COUNT;
+
+    fastrg_ccb->max_user_count = (U16)computed;
+    FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+        "Subscriber capacity: free bytes=%" PRIu64 ", per-sub cost=%" PRIu64 ", computed max=%u",
+        free_bytes, HUGEPAGE_BYTES_PER_SUBSCRIBER, fastrg_ccb->max_user_count);
+}
 
 struct nic_info vendor[] = {
     { "mlx5_pci", NIC_VENDOR_MLX5 },
@@ -382,6 +444,8 @@ STATUS sys_init(FastRG_t *fastrg_ccb, struct fastrg_config *fastrg_cfg)
     ret = init_port(fastrg_ccb, fastrg_cfg);
     if (ret != 0)
         goto err;
+
+    fastrg_compute_max_user_count(fastrg_ccb);
 
     /* Seed Prometheus observability state now that NIC ports are up. */
     init_node_runtime_state(fastrg_ccb);

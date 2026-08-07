@@ -139,10 +139,9 @@ For hugepages, NIC binding and other system configuration, please refer to DPDK 
 
 1. Subscriber devices behind FastRG should use DHCP to get IP address or set the default gateway address to their end device.
 	- The DHCP ip address pool can be configured via control plane or FastRG CLI.
-2. In configuration file ***config.cfg***, administrator should use the value ***MaxUserCount*** to specify the maximum number of FastRG subscribers. By default, the maximum number of subscribers is 10.
-	- This value can be configured via FastRG controller or FastRG CLI tool.
-	- The value range can be set from 1 to 4000.
-	- All subscriber resources are fully preallocated from hugepage memory at startup, so ***MaxUserCount*** is bounded by the hugepage budget. Plan for roughly **150–175 MiB of hugepages per subscriber**.
+2. FastRG automatically computes its maximum subscriber capacity from the free DPDK hugepage heap at startup. It reserves 512 MiB for packet capture and runtime allocations, then budgets **175 MiB per subscriber**.
+	- All subscriber resources are fully preallocated at startup, so increasing the hugepage allocation increases the computed capacity. Restart FastRG after changing the hugepage allocation.
+	- The resulting capacity is clamped to the supported range of 1–2000 subscribers and is exposed as the `fastrg_node_max_user_count` metric.
 3. In data plane, all packets received at FastRG system should include a single tag vlan.
 4. All DPDK EAL lcores should be on the same CPU socket.
 5. The FastRG node supports PPPoE RSS while using Intel E800 and X700 series NICs. For every two more CPU cores, the FastRG node uses 1 more Rx queue pair for LAN and WAN port. Minimum Rx queue count is 2, the maximum is 16. 

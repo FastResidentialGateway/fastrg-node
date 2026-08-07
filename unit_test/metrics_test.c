@@ -189,6 +189,26 @@ static void test_snapshot_persist_gauge(FastRG_t *fastrg_ccb)
     lighthttp_buf_free(&out);
 }
 
+static void test_max_user_count_gauge(FastRG_t *fastrg_ccb)
+{
+    lighthttp_buf_t out = {0};
+    const char *content_type = NULL;
+    char *saved_uuid = fastrg_ccb->node_uuid;
+    U16 saved_max_user_count = fastrg_ccb->max_user_count;
+
+    fastrg_ccb->node_uuid = NULL;
+    fastrg_ccb->max_user_count = 37;
+    metrics_build(&out, &content_type, fastrg_ccb);
+    TEST_ASSERT(strstr(out.data, "# TYPE fastrg_node_max_user_count gauge\n") != NULL,
+        "max user count gauge family is declared", "missing TYPE line");
+    TEST_ASSERT(strstr(out.data, "fastrg_node_max_user_count{node_uuid=\"\"} 37\n") != NULL,
+        "max user count gauge exposes effective capacity", "sample missing or not 37");
+
+    fastrg_ccb->max_user_count = saved_max_user_count;
+    fastrg_ccb->node_uuid = saved_uuid;
+    lighthttp_buf_free(&out);
+}
+
 static void test_per_user_stats(FastRG_t *fastrg_ccb)
 {
     unsigned int lcore_id = rte_get_main_lcore();
@@ -346,6 +366,7 @@ void test_metrics(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_pppoe_phase_tallies(fastrg_ccb);
     test_per_user_stats(fastrg_ccb);
     test_snapshot_persist_gauge(fastrg_ccb);
+    test_max_user_count_gauge(fastrg_ccb);
     test_lcore_traffic_stats(fastrg_ccb);
 
     fastrg_ccb->node_uuid = saved_uuid;

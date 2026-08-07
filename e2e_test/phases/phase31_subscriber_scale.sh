@@ -3,15 +3,10 @@
 # ---------------------------------------------------------------------------
 # Phase 31 — Subscriber slot scale boundary (Steps 124-127)
 #
-# MaxUserCount is read from the node after the runner temporarily sets it from
-# E2E_MAX_USER_COUNT (default 63). In the IOVA PA bench environment, each added
-# CCB consumes a measured 175 MiB of hugepage heap. At max=63, measured heap
-# allocation is 14.76 GiB, leaving 2.24 GiB of the bench's 17 1-GiB pages free.
-# The node must start with --socket-mem 17408 so rte_malloc owns all 17 pages up
-# front; otherwise PA-mode expansion fails despite free system hugepages. The
-# apply timeout has a fixed 60-second base plus one second per four slots; keep
-# any future adjustment proportional to the configured scale rather than using
-# a fixed timeout.
+# The capacity is read from fastrg_node_max_user_count after startup. The node
+# computes it from the hugepage heap using the measured 175 MiB per-subscriber
+# cost. The apply timeout has a fixed 60-second base plus one second per four
+# slots; keep any future adjustment proportional to the computed capacity.
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
@@ -85,7 +80,7 @@ _cleanup_phase31_subscriber_scale() {
 }
 
 phase31_subscriber_scale() {
-    local _config_line="" _max="" _over="" _timeout=0 _reply="" _status=""
+    local _body="" _max="" _over="" _timeout=0 _reply="" _status=""
     local _before_avail="" _before_in_use="" _at_max_avail="" _at_max_in_use=""
     local _over_avail="" _over_in_use="" _shrink_avail="" _shrink_in_use=""
     local _issue123="" _issue124="" _issue125="" _issue126=""
@@ -95,16 +90,13 @@ phase31_subscriber_scale() {
     bold " Phase 31 — Subscriber Slot Scale Boundary (Steps 124-127)"
     bold "═══════════════════════════════════════════════════════"
 
-    _config_line=$(ssh_node \
-        "grep -E '^[[:space:]]*MaxUserCount[[:space:]]*=' /etc/fastrg/config.cfg 2>/dev/null" \
-        2>/dev/null || true)
-    _max=$(printf '%s' "$_config_line" | awk -F'[=;]' \
-        '{gsub(/[[:space:]]/, "", $2); print $2; exit}' || true)
+    _body=$(e2e_metrics_body)
+    _max=$(e2e_metric_value "$_body" fastrg_node_max_user_count)
 
     if [[ ! "$_max" =~ ^[0-9]+$ || "$_max" -lt 2 ]]; then
-        _issue123="cannot read a valid MaxUserCount from node config: ${_config_line:-empty}"
-        fail "Step 124: expand subscriber slots to configured max" "$_issue123"
-        fail "Step 125: node rejects count beyond configured max" "precondition failed: $_issue123"
+        _issue123="cannot read a valid node capacity from fastrg_node_max_user_count: ${_max:-empty}"
+        fail "Step 124: expand subscriber slots to node capacity" "$_issue123"
+        fail "Step 125: node rejects count beyond capacity" "precondition failed: $_issue123"
         fail "Step 126: shrink subscriber slots to canonical count" "precondition failed: $_issue123"
         fail "Step 127: data plane healthy after resize" "precondition failed: $_issue123"
         _cleanup_phase31_subscriber_scale
@@ -113,7 +105,7 @@ phase31_subscriber_scale() {
 
     _over=$(( _max + 1 ))
     _timeout=$(( 60 + (_max / 4) ))
-    info "Node MaxUserCount=${_max}; resize timeout=${_timeout}s."
+    info "Node capacity=${_max}; resize timeout=${_timeout}s."
 
     _p31_read_count_state
     if ! _p31_read_ppp_mempool; then
@@ -150,13 +142,13 @@ phase31_subscriber_scale() {
     fi
 
     if [[ -z "$_issue123" ]]; then
-        pass "Step 124: expand subscriber slots to configured max" \
+        pass "Step 124: expand subscriber slots to node capacity" \
             "max=${_max}; local/etcd stable; ppp_ccb_pool avail ${_before_avail}->${_at_max_avail}, in_use ${_before_in_use}->${_at_max_in_use}; node responsive"
     else
-        fail "Step 124: expand subscriber slots to configured max" "$_issue123"
+        fail "Step 124: expand subscriber slots to node capacity" "$_issue123"
     fi
 
-    # The node validates the configured MaxUserCount on its etcd apply path:
+    # The node validates its computed capacity on the etcd apply path:
     # max+1 lands in etcd (the controller-side validation is tracked in the
     # controller repo), but the node refuses to apply it — the local count and
     # the mempool stay at max, and the drift is visible instead of silently
@@ -199,10 +191,10 @@ phase31_subscriber_scale() {
     fi
 
     if [[ -z "$_issue124" ]]; then
-        pass "Step 125: node rejects count beyond configured max" \
-            "configured max=${_max}: etcd holds ${_over} (drift visible, controller-side validation pending), node held local=${_max}, ppp_ccb_pool in_use=${_over_in_use} unchanged; node responsive"
+        pass "Step 125: node rejects count beyond capacity" \
+            "node capacity=${_max}: etcd holds ${_over} (drift visible, controller-side validation pending), node held local=${_max}, ppp_ccb_pool in_use=${_over_in_use} unchanged; node responsive"
     else
-        fail "Step 125: node rejects count beyond configured max" "$_issue124"
+        fail "Step 125: node rejects count beyond capacity" "$_issue124"
     fi
 
     _reply=$(fastrg_grpc set_subscriber_count 2 2>/dev/null || true)
