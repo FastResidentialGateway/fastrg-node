@@ -49,6 +49,9 @@ struct lcore_row {
     uint32_t id;
     const char *role;
     uint64_t busy, total;
+    /* Per-port traffic handled by this lcore: its per_subscriber_stats row
+     * summed over the subscriber axis (unknown-user slot included). */
+    uint64_t rxp[PORT_AMOUNT], txp[PORT_AMOUNT];
 };
 struct heap_row {
     int socket_id;
@@ -275,6 +278,26 @@ int metrics_build(lighthttp_buf_t *out, const char **content_type, void *arg)
             lcores[n_lcores].role = __atomic_load_n(&fastrg_ccb->lcore_usage[id].role, __ATOMIC_RELAXED);
             lcores[n_lcores].busy = __atomic_load_n(&fastrg_ccb->lcore_usage[id].busy_cycles, __ATOMIC_RELAXED);
             lcores[n_lcores].total = __atomic_load_n(&fastrg_ccb->lcore_usage[id].total_cycles, __ATOMIC_RELAXED);
+            /* Per-lcore traffic: reader-side aggregation of the same
+             * per_subscriber_stats rows the per-user metrics read, just
+             * summed over the subscriber axis instead of the lcore axis.
+             * Same RELAXED single-word reads as fastrg_sum_subscriber_stats;
+             * no data-plane (writer) code is involved. Each data lcore maps
+             * 1:1 to an RSS queue, so these rows expose the per-queue
+             * traffic distribution. */
+            for(int p=0; p<PORT_AMOUNT; p++) {
+                uint64_t rxp = 0, txp = 0;
+                struct per_ccb_stats *rows =
+                    __atomic_load_n(&fastrg_ccb->per_subscriber_stats[id][p], __ATOMIC_ACQUIRE);
+                if (rows != NULL) {
+                    for(U32 s=0; s<=(U32)fastrg_ccb->max_user_count; s++) {
+                        rxp += __atomic_load_n(&rows[s].rx_packets, __ATOMIC_RELAXED);
+                        txp += __atomic_load_n(&rows[s].tx_packets, __ATOMIC_RELAXED);
+                    }
+                }
+                lcores[n_lcores].rxp[p] = rxp;
+                lcores[n_lcores].txp[p] = txp;
+            }
             n_lcores++;
         }
     }
@@ -470,6 +493,24 @@ int metrics_build(lighthttp_buf_t *out, const char **content_type, void *arg)
     for(int i=0; i<n_lcores; i++)
         lighthttp_buf_appendf(out, "fastrg_node_lcore_total_cycles_total{node_uuid=\"%s\",lcore_id=\"%u\",role=\"%s\"} %" PRIu64 "\n",
             uuid, lcores[i].id, esc(lcores[i].role ? lcores[i].role : "", ebuf, sizeof(ebuf)), lcores[i].total);
+
+    /* ---- per-lcore traffic (RSS queue distribution) ---- */
+    emit_header(out, "fastrg_node_lcore_rx_packets_total", "gauge",
+        "Packets received on this NIC port and processed by this lcore "
+        "(per-subscriber rows summed over subscribers, unknown-user slot included).");
+    for(int i=0; i<n_lcores; i++)
+        for(int p=0; p<PORT_AMOUNT; p++)
+            lighthttp_buf_appendf(out,
+                "fastrg_node_lcore_rx_packets_total{node_uuid=\"%s\",lcore_id=\"%u\",role=\"%s\",nic_index=\"%d\"} %" PRIu64 "\n",
+                uuid, lcores[i].id, esc(lcores[i].role ? lcores[i].role : "", ebuf, sizeof(ebuf)), p, lcores[i].rxp[p]);
+    emit_header(out, "fastrg_node_lcore_tx_packets_total", "gauge",
+        "Packets transmitted on this NIC port by this lcore "
+        "(per-subscriber rows summed over subscribers, unknown-user slot included).");
+    for(int i=0; i<n_lcores; i++)
+        for(int p=0; p<PORT_AMOUNT; p++)
+            lighthttp_buf_appendf(out,
+                "fastrg_node_lcore_tx_packets_total{node_uuid=\"%s\",lcore_id=\"%u\",role=\"%s\",nic_index=\"%d\"} %" PRIu64 "\n",
+                uuid, lcores[i].id, esc(lcores[i].role ? lcores[i].role : "", ebuf, sizeof(ebuf)), p, lcores[i].txp[p]);
 
     /* ---- DPDK heap ---- */
     static const struct row_metric heap_metrics[] = {

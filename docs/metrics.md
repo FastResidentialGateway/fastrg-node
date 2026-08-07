@@ -194,6 +194,31 @@ busy ratio in PromQL.
     / rate(fastrg_node_lcore_total_cycles_total[1m])
 ```
 
+### Per-lcore traffic (RSS queue distribution)
+
+Labels: `node_uuid`, `lcore_id`, `role`, `nic_index`. Each row is the lcore's
+`per_subscriber_stats` row summed over the subscriber axis (unknown-user slot
+included) — the same data source as the per-subscriber traffic metrics,
+aggregated along the lcore axis instead of the user axis. Data lcores map 1:1
+to RSS queues, so these rows expose the per-queue traffic distribution: with
+RSS healthy, `role="wan_data"` / `role="lan_data"` rows share the session
+traffic; if RSS silently degrades, one queue absorbs it all.
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `fastrg_node_lcore_rx_packets_total` | gauge | Packets received on `nic_index` and processed by this lcore. |
+| `fastrg_node_lcore_tx_packets_total` | gauge | Packets transmitted on `nic_index` by this lcore. |
+
+For a given `nic_index`, summing these rows over all lcores equals the
+per-subscriber total plus the unknown-user row for the same port.
+
+```promql
+# per-queue share of WAN session RX (RSS balance check)
+fastrg_node_lcore_rx_packets_total{role="wan_data",nic_index="1"}
+  / on(node_uuid) group_left
+    sum(fastrg_node_lcore_rx_packets_total{role="wan_data",nic_index="1"})
+```
+
 ## 8. DPDK memory
 
 ### Heap — labels: `node_uuid`, `socket_id`

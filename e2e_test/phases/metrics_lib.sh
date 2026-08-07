@@ -116,6 +116,27 @@ e2e_metric_label() {
     ' || true
 }
 
+# e2e_metric_label_values BODY FAMILY LABEL [label=value ...] — the LABEL value
+# of EVERY matching row, one per line (empty when no row matches).
+e2e_metric_label_values() {
+    local _body="$1" _family="$2" _label="$3"
+
+    shift 3
+    printf '%s\n' "$_body" | awk -v family="$_family" -v label="$_label" -v filters="$*" '
+        BEGIN { nfilters = split(filters, want, " ") }
+        index($1, family "{") != 1 { next }
+        {
+            for (i = 1; i <= nfilters; i++) {
+                split(want[i], kv, "=")
+                if (index($0, kv[1] "=\"" kv[2] "\"") == 0)
+                    next
+            }
+            if (match($0, label "=\"[^\"]*\""))
+                print substr($0, RSTART + length(label) + 2, RLENGTH - length(label) - 3)
+        }
+    ' || true
+}
+
 # All values are unsigned integers in the exposition; a non-numeric read means
 # the family or the labelled row was missing.
 e2e_is_uint() {

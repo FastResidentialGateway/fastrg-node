@@ -75,6 +75,7 @@ phase32_metric_values() {
     local _pools="" _pool_name="" _size="" _avail="" _in_use=""
     local _sockets="" _sid="" _total="" _used="" _free="" _largest="" _pinned="" _slack=0
     local _lcores="" _lid="" _busy1="" _tot1="" _busy2="" _tot2="" _advanced=0
+    local _lrx="" _ltx="" _lsum="" _usum="" _uu="" _dir=""
     local _port="" _info_value="" _model="" _driver="" _pci="" _mac="" _start_time="" _persist_ok=""
     local _family="" _nic="" _v1="" _v2="" _checked=0
 
@@ -301,9 +302,40 @@ phase32_metric_values() {
     [[ -n "$_lcores" && $_advanced -eq 0 ]] && \
         _issue="${_issue:+${_issue}; }no lcore advanced its total cycles across the two samples"
 
+    # Per-lcore traffic rows: every lcore that reports cycles must also report
+    # a numeric rx/tx packet row for each NIC port.
+    for _lid in $_lcores; do
+        for _nic in 0 1; do
+            _lrx=$(e2e_metric_value "$_body" fastrg_node_lcore_rx_packets_total "lcore_id=${_lid}" "nic_index=${_nic}")
+            _ltx=$(e2e_metric_value "$_body" fastrg_node_lcore_tx_packets_total "lcore_id=${_lid}" "nic_index=${_nic}")
+            e2e_all_uint "$_lrx" "$_ltx" || \
+                _issue="${_issue:+${_issue}; }lcore ${_lid} nic ${_nic}: traffic rows rx='${_lrx:-NA}' tx='${_ltx:-NA}'"
+        done
+    done
+    # The per-lcore rows and the per-user (+unknown-user) rows read the same
+    # per-lcore stats counters, just aggregated along different axes, so for
+    # each port the two sums must agree. The families are gathered a moment
+    # apart inside one scrape, so allow the same 100-packet skew slack the
+    # NIC-vs-per-user containment checks use.
+    for _nic in 0 1; do
+        for _dir in rx tx; do
+            _lsum=$(e2e_metric_sum "$_body" "fastrg_node_lcore_${_dir}_packets_total" "nic_index=${_nic}")
+            _usum=$(e2e_metric_sum "$_body" "fastrg_node_per_user_${_dir}_packets_total" "nic_index=${_nic}")
+            _uu=$(e2e_metric_value "$_body" "fastrg_node_unknown_user_${_dir}_packets_total" "nic_index=${_nic}")
+            if ! e2e_all_uint "$_lsum" "$_usum" "$_uu"; then
+                _issue="${_issue:+${_issue}; }nic ${_nic} ${_dir}: lcore/user sums unreadable (lcore='${_lsum:-NA}' user='${_usum:-NA}' unknown='${_uu:-NA}')"
+                continue
+            fi
+            _usum=$(( _usum + _uu ))
+            if (( _lsum > _usum + 100 || _lsum + 100 < _usum )); then
+                _issue="${_issue:+${_issue}; }nic ${_nic} ${_dir}: lcore-axis sum ${_lsum} != user-axis sum ${_usum} (100-packet slack)"
+            fi
+        done
+    done
+
     if [[ -z "$_issue" ]]; then
         pass "Step 132: lcore cycle counters" \
-            "$(printf '%s\n' "$_lcores" | wc -l | tr -d '[:space:]') lcore(s) monotonic with busy <= total; ${_advanced} advanced total cycles between samples"
+            "$(printf '%s\n' "$_lcores" | wc -l | tr -d '[:space:]') lcore(s) monotonic with busy <= total; ${_advanced} advanced total cycles between samples; per-lcore traffic rows numeric on both ports and lcore-axis sums match user-axis sums (100-packet slack)"
     else
         fail "Step 132: lcore cycle counters" "$_issue"
     fi

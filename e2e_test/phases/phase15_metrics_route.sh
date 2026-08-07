@@ -60,6 +60,8 @@ phase15_metrics_route() {
         fastrg_node_snapshot_persist_ok
         fastrg_node_rx_packets_total
         fastrg_node_lcore_busy_cycles_total
+        fastrg_node_lcore_rx_packets_total
+        fastrg_node_lcore_tx_packets_total
         fastrg_nic_link_up
         fastrg_nic_link_flaps_total
         fastrg_nic_info

@@ -1,11 +1,41 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # ---------------------------------------------------------------------------
-# Phase 25 — Sustained UDP / ICMP traffic across NAT timeout (Steps 104-106)
+# Phase 25 — Sustained UDP / ICMP traffic across NAT timeout, plus RSS
+# queue-distribution check (Steps 104-106b)
 # ---------------------------------------------------------------------------
 
 _P25_IPERF_PORT=5902
 _P25_METRICS_PORT=""
+
+# RSS distribution probe (Step 106b)
+_P25_RSS_ECHO_PORT=5903
+_P25_RSS_FLOWS=16
+_P25_RSS_PKTS_PER_FLOW=20
+_P25_RSS_SRC_BASE=43000
+_P25_RSS_ECHO_PID=/tmp/e2e_rss_echo.pid
+_P25_RSS_ECHO_OUT=/tmp/e2e_rss_echo.out
+_P25_RSS_ECHO_READY=/tmp/e2e_rss_echo.ready
+
+_p25_stop_echo_server() {
+    local _i
+
+    ssh_wan "if [ -s '${_P25_RSS_ECHO_PID}' ]; then
+            _pid=\$(cat '${_P25_RSS_ECHO_PID}' 2>/dev/null || true)
+            [ -n \"\$_pid\" ] && kill -0 \"\$_pid\" 2>/dev/null && kill -TERM \"\$_pid\" 2>/dev/null || true
+        fi" >/dev/null 2>&1 || true
+    for _i in $(seq 1 5); do
+        if ! ssh_wan "_pid=\$(cat '${_P25_RSS_ECHO_PID}' 2>/dev/null); \
+            test -n \"\$_pid\" && kill -0 \"\$_pid\" 2>/dev/null" 2>/dev/null; then
+            ssh_wan "rm -f '${_P25_RSS_ECHO_PID}' '${_P25_RSS_ECHO_OUT}' '${_P25_RSS_ECHO_READY}'" \
+                >/dev/null 2>&1 || true
+            return 0
+        fi
+        sleep 1
+    done
+    warn "Phase 25 UDP echo server did not exit within 5s after SIGTERM"
+    return 1
+}
 
 _p25_snippet() {
     printf '%s' "$1" | tr '\n' ' ' | cut -c 1-500 || true
@@ -62,6 +92,7 @@ _p25_stop_server() {
 _cleanup_phase25_udp_icmp_traffic() {
     _p25_stop_client || true
     _p25_stop_server || true
+    _p25_stop_echo_server || true
     return 0
 }
 
@@ -204,7 +235,7 @@ _p25_ping_loss() {
 
 phase25_udp_icmp_traffic() {
     bold "═══════════════════════════════════════════════════════"
-    bold " Phase 25 — Sustained UDP / ICMP Traffic (Steps 104-106)"
+    bold " Phase 25 — Sustained UDP / ICMP Traffic (Steps 104-106b)"
     bold "═══════════════════════════════════════════════════════"
 
     local _i _server_ready=0
@@ -320,6 +351,165 @@ phase25_udp_icmp_traffic() {
     else
         fail "Step 106: sustained ICMP echo" \
             "loss=${_ping_loss:-NA}%; entries=${_entries_base:-NA}->${_entries_after:-NA}; first='$(_p25_snippet "$_ping_out")' retry='$(_p25_snippet "$_ping_retry_out")'"
+    fi
+
+    # ------------------------------------------------------------------
+    # Step 106b — RSS spreads PPPoE session traffic across the data lcores.
+    #
+    # Each data lcore polls exactly one RSS queue, so the per-lcore traffic
+    # rows expose the per-queue distribution. A WAN-side UDP echo server
+    # reflects >= 16 LAN flows with distinct source ports; each flow gets a
+    # distinct NAT external port, so the echoed (downstream) packets are >= 16
+    # distinct inner tuples that WAN RSS must spread over queues 1..N. The
+    # assertions:
+    #   - at least 2 wan_data lcores saw their WAN rx grow (with 16 flows and
+    #     uniform 2-queue hashing, all-on-one-queue happens with probability
+    #     ~2^-15, so the check is deterministic in practice);
+    #   - the wan_ctrl lcore (queue 0) did not absorb the bulk of the session
+    #     data (its delta stays below a quarter of the data-lcore total).
+    # A collapse to a single queue or to queue 0 — the silent RSS/DDP
+    # degradation this step exists for — fails both.
+    # ------------------------------------------------------------------
+    info "Step 106b: probing RSS distribution with ${_P25_RSS_FLOWS} UDP echo flows..."
+    local _rss_issue="" _rss_before="" _rss_after="" _rss_client_out=""
+    local _wd_lcores="" _wc_lcores="" _wd_count=0 _wd_hit=0 _wd_sum=0 _wc_delta=0
+    local _lid="" _delta="" _flows_ok="" _replies="" _echo_ready=0
+
+    _rss_before=$(e2e_metrics_body)
+    _wd_lcores=$(e2e_metric_label_values "$_rss_before" \
+        fastrg_node_lcore_rx_packets_total lcore_id "role=wan_data" "nic_index=1")
+    _wc_lcores=$(e2e_metric_label_values "$_rss_before" \
+        fastrg_node_lcore_rx_packets_total lcore_id "role=wan_ctrl" "nic_index=1")
+    _wd_count=$(printf '%s\n' "$_wd_lcores" | grep -c . || true)
+    if [[ "$_wd_count" -lt 2 ]]; then
+        _rss_issue="expected >= 2 wan_data lcore rows, found ${_wd_count} (RSS datapath inactive or single data queue; the spread assertion needs a redesign, not a waiver)"
+    fi
+
+    if [[ -z "$_rss_issue" ]]; then
+        ssh_wan "rm -f '${_P25_RSS_ECHO_PID}' '${_P25_RSS_ECHO_OUT}' '${_P25_RSS_ECHO_READY}';
+nohup python3 -u - '${WAN_IP}' '${_P25_RSS_ECHO_PORT}' '${_P25_RSS_ECHO_READY}' \
+    >'${_P25_RSS_ECHO_OUT}' 2>&1 <<'PY' &
+import socket
+import sys
+import time
+
+bind_ip, port, ready_path = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+sock.bind((bind_ip, port))
+sock.settimeout(0.5)
+with open(ready_path, 'w', encoding='ascii') as ready:
+    ready.write('ready\n')
+deadline = time.monotonic() + 60
+while time.monotonic() < deadline:
+    try:
+        payload, peer = sock.recvfrom(2048)
+    except socket.timeout:
+        continue
+    sock.sendto(payload, peer)
+PY
+echo \$! >'${_P25_RSS_ECHO_PID}'" >/dev/null 2>&1 || true
+        for _i in $(seq 1 5); do
+            if ssh_wan "test -s '${_P25_RSS_ECHO_READY}'" 2>/dev/null; then
+                _echo_ready=1
+                break
+            fi
+            sleep 1
+        done
+        [[ $_echo_ready -eq 1 ]] || _rss_issue="UDP echo server did not become ready within 5s"
+    fi
+
+    if [[ -z "$_rss_issue" ]]; then
+        _rss_client_out=$(ssh_lan "python3 -u - '${WAN_IP}' '${_P25_RSS_ECHO_PORT}' \
+            '${_P25_RSS_FLOWS}' '${_P25_RSS_SRC_BASE}' '${_P25_RSS_PKTS_PER_FLOW}' <<'PY'
+import socket
+import sys
+import time
+
+wan_ip = sys.argv[1]
+echo_port = int(sys.argv[2])
+flows = int(sys.argv[3])
+src_base = int(sys.argv[4])
+pkts = int(sys.argv[5])
+
+socks = []
+for i in range(flows):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(('0.0.0.0', src_base + i))
+    sock.setblocking(False)
+    socks.append(sock)
+
+def drain(got):
+    for i, sock in enumerate(socks):
+        while True:
+            try:
+                sock.recvfrom(2048)
+                got[i] += 1
+            except (BlockingIOError, OSError):
+                break
+
+got = [0] * flows
+sent = 0
+for _round in range(pkts):
+    for i, sock in enumerate(socks):
+        try:
+            sock.sendto(b'rss-probe-flow-%d' % i, (wan_ip, echo_port))
+            sent += 1
+        except OSError:
+            pass
+    time.sleep(0.05)
+    drain(got)
+deadline = time.monotonic() + 3
+while time.monotonic() < deadline:
+    time.sleep(0.1)
+    drain(got)
+print('flows_with_reply=%d replies=%d sent=%d'
+      % (sum(1 for count in got if count > 0), sum(got), sent))
+PY" 2>&1 || true)
+        _rss_after=$(e2e_metrics_body)
+        _flows_ok=$(printf '%s\n' "$_rss_client_out" | \
+            sed -nE 's/.*flows_with_reply=([0-9]+).*/\1/p' | tail -1 || true)
+        _replies=$(printf '%s\n' "$_rss_client_out" | \
+            sed -nE 's/.*replies=([0-9]+).*/\1/p' | tail -1 || true)
+        if ! e2e_is_uint "$_flows_ok" || (( _flows_ok < 12 )); then
+            _rss_issue="echo traffic did not run end-to-end (flows_with_reply='${_flows_ok:-NA}' of ${_P25_RSS_FLOWS}, replies='${_replies:-NA}'); fix the probe path before judging RSS; client output='$(_p25_snippet "$_rss_client_out")'"
+        fi
+    fi
+
+    if [[ -z "$_rss_issue" ]]; then
+        _wd_hit=0
+        _wd_sum=0
+        for _lid in $_wd_lcores; do
+            _delta=$(_p25_delta "$_rss_before" "$_rss_after" \
+                fastrg_node_lcore_rx_packets_total "lcore_id=${_lid}" "nic_index=1")
+            if ! [[ "$_delta" =~ ^-?[0-9]+$ ]]; then
+                _rss_issue="${_rss_issue:+${_rss_issue}; }wan_data lcore ${_lid} rx row unreadable"
+                continue
+            fi
+            (( _delta > 0 )) && _wd_hit=$(( _wd_hit + 1 ))
+            _wd_sum=$(( _wd_sum + _delta ))
+        done
+        _wc_delta=0
+        for _lid in $_wc_lcores; do
+            _delta=$(_p25_delta "$_rss_before" "$_rss_after" \
+                fastrg_node_lcore_rx_packets_total "lcore_id=${_lid}" "nic_index=1")
+            [[ "$_delta" =~ ^-?[0-9]+$ ]] && _wc_delta=$(( _wc_delta + _delta ))
+        done
+        if (( _wd_hit < 2 )); then
+            _rss_issue="${_rss_issue:+${_rss_issue}; }only ${_wd_hit}/${_wd_count} wan_data lcore(s) received session traffic (data-lcore rx deltas sum=${_wd_sum}) — RSS is not spreading"
+        fi
+        if (( _wc_delta * 4 > _wd_sum )); then
+            _rss_issue="${_rss_issue:+${_rss_issue}; }wan_ctrl rx delta=${_wc_delta} is not clearly below the data-lcore total=${_wd_sum} — session data is landing on queue 0"
+        fi
+    fi
+
+    _p25_stop_echo_server || true
+    if [[ -z "$_rss_issue" ]]; then
+        pass "Step 106b: RSS queue distribution" \
+            "${_wd_hit}/${_wd_count} wan_data lcores took rx (deltas sum=${_wd_sum}); wan_ctrl delta=${_wc_delta}; flows_with_reply=${_flows_ok}/${_P25_RSS_FLOWS}"
+    else
+        fail "Step 106b: RSS queue distribution" "$_rss_issue"
     fi
 
     _cleanup_phase25_udp_icmp_traffic

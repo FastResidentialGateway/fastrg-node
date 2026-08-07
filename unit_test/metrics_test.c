@@ -58,6 +58,8 @@ static const char *metric_families[] = {
     "fastrg_node_total_not_configured_dhcp_server",
     "fastrg_node_lcore_busy_cycles_total",
     "fastrg_node_lcore_total_cycles_total",
+    "fastrg_node_lcore_rx_packets_total",
+    "fastrg_node_lcore_tx_packets_total",
     "fastrg_node_heap_total_bytes",
     "fastrg_node_heap_used_bytes",
     "fastrg_node_heap_free_bytes",
@@ -228,6 +230,82 @@ static void test_per_user_stats(FastRG_t *fastrg_ccb)
     lighthttp_buf_free(&out);
 }
 
+static void test_lcore_traffic_stats(FastRG_t *fastrg_ccb)
+{
+    unsigned int lcore_id = rte_get_main_lcore();
+    unsigned int other1 = lcore_id + 1, other2 = lcore_id + 2;
+    struct per_ccb_stats *stats = fastrg_ccb->per_subscriber_stats[lcore_id][WAN_PORT];
+    struct lcore_usage_counter *usage = calloc(RTE_MAX_LCORE, sizeof(*usage));
+    struct lcore_map saved_lcore = fastrg_ccb->lcore;
+    struct lcore_usage_counter *saved_usage = fastrg_ccb->lcore_usage;
+    struct per_ccb_stats *saved_other1[PORT_AMOUNT], *saved_other2[PORT_AMOUNT];
+    char *saved_uuid = fastrg_ccb->node_uuid;
+    lighthttp_buf_t out = {0};
+    const char *content_type = NULL;
+    char sample[192];
+
+    TEST_ASSERT(usage != NULL, "allocate lcore_usage fixture", "calloc failed");
+    if (usage == NULL)
+        return;
+
+    /* Three distinct fixed-thread ids; the two extra lcores have no stats
+     * rows, exercising the NULL-row path. */
+    for(int p=0; p<PORT_AMOUNT; p++) {
+        saved_other1[p] = fastrg_ccb->per_subscriber_stats[other1][p];
+        saved_other2[p] = fastrg_ccb->per_subscriber_stats[other2][p];
+        fastrg_ccb->per_subscriber_stats[other1][p] = NULL;
+        fastrg_ccb->per_subscriber_stats[other2][p] = NULL;
+    }
+    fastrg_ccb->node_uuid = NULL;
+    usage[lcore_id].role = "ctrl";
+    fastrg_ccb->lcore_usage = usage;
+    fastrg_ccb->lcore.ctrl_thread = (U8)lcore_id;
+    fastrg_ccb->lcore.wan_ctrl_thread = (U8)other1;
+    fastrg_ccb->lcore.lan_ctrl_thread = (U8)other2;
+    fastrg_ccb->lcore.num_data_queues = 0;
+
+    /* user slot + unknown-user slot (index max_user_count == 1) must both
+     * be part of the per-lcore aggregation. */
+    stats[0].rx_packets = 7;
+    stats[1].rx_packets = 5;
+    stats[0].tx_packets = 11;
+    stats[1].tx_packets = 3;
+
+    metrics_build(&out, &content_type, fastrg_ccb);
+
+    snprintf(sample, sizeof(sample),
+        "fastrg_node_lcore_rx_packets_total{node_uuid=\"\",lcore_id=\"%u\",role=\"ctrl\",nic_index=\"%d\"} 12\n",
+        lcore_id, WAN_PORT);
+    TEST_ASSERT(strstr(out.data, sample) != NULL,
+        "per-lcore RX sums subscribers including the unknown-user slot", "missing sample=%s", sample);
+    snprintf(sample, sizeof(sample),
+        "fastrg_node_lcore_tx_packets_total{node_uuid=\"\",lcore_id=\"%u\",role=\"ctrl\",nic_index=\"%d\"} 14\n",
+        lcore_id, WAN_PORT);
+    TEST_ASSERT(strstr(out.data, sample) != NULL,
+        "per-lcore TX sums subscribers including the unknown-user slot", "missing sample=%s", sample);
+    snprintf(sample, sizeof(sample),
+        "fastrg_node_lcore_rx_packets_total{node_uuid=\"\",lcore_id=\"%u\",role=\"ctrl\",nic_index=\"%d\"} 0\n",
+        lcore_id, LAN_PORT);
+    TEST_ASSERT(strstr(out.data, sample) != NULL,
+        "per-lcore RX emits a zero row for the idle port", "missing sample=%s", sample);
+    snprintf(sample, sizeof(sample),
+        "fastrg_node_lcore_rx_packets_total{node_uuid=\"\",lcore_id=\"%u\",role=\"\",nic_index=\"%d\"} 0\n",
+        other1, WAN_PORT);
+    TEST_ASSERT(strstr(out.data, sample) != NULL,
+        "per-lcore RX emits a zero row for a lcore without stats rows", "missing sample=%s", sample);
+
+    memset(&stats[0], 0, 2 * sizeof(stats[0]));
+    for(int p=0; p<PORT_AMOUNT; p++) {
+        fastrg_ccb->per_subscriber_stats[other1][p] = saved_other1[p];
+        fastrg_ccb->per_subscriber_stats[other2][p] = saved_other2[p];
+    }
+    fastrg_ccb->lcore = saved_lcore;
+    fastrg_ccb->lcore_usage = saved_usage;
+    fastrg_ccb->node_uuid = saved_uuid;
+    free(usage);
+    lighthttp_buf_free(&out);
+}
+
 void test_metrics(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 {
     unsigned int lcore_id = rte_get_main_lcore();
@@ -268,6 +346,7 @@ void test_metrics(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_pppoe_phase_tallies(fastrg_ccb);
     test_per_user_stats(fastrg_ccb);
     test_snapshot_persist_gauge(fastrg_ccb);
+    test_lcore_traffic_stats(fastrg_ccb);
 
     fastrg_ccb->node_uuid = saved_uuid;
     free(fastrg_ccb->per_subscriber_stats[lcore_id][LAN_PORT]);
