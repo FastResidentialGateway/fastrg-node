@@ -26,8 +26,13 @@ typedef enum {
 } nic_vendor_t;
 
 int setup_signalfd(void);
+void fastrg_compute_max_user_count(FastRG_t *fastrg_ccb);
 STATUS sys_init(FastRG_t *fastrg_ccb, struct fastrg_config *fastrg_cfg);
 void sys_cleanup(FastRG_t *fastrg_ccb);
+
+#ifdef UNIT_TEST
+void fastrg_set_hugepage_free_bytes_for_test(uint64_t free_bytes);
+#endif
 
 /**
  * @fn metrics_server_run
