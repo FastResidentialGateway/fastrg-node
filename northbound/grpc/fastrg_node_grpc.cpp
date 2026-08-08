@@ -117,6 +117,8 @@ grpc::Status FastRGNodeServiceImpl::ApplyConfig(::grpc::ServerContext* context, 
     strncpy(hsi_config.dhcp_gateway, dhcp_gateway.c_str(), sizeof(hsi_config.dhcp_gateway) - 1);
     hsi_config.dns_proxy_enable = TRUE;
     hsi_config.tcp_conntrack_enable = TRUE;
+    // Local/CLI-created configs default to IPv6 disabled.
+    hsi_config.ipv6_enable = FALSE;
     // New config defaults to disconnect. TODO(slice 10): for updates, read-modify-write
     // to preserve the existing desire_status instead of resetting it here.
     strncpy(hsi_config.desire_status, DESIRE_STATUS_DISCONNECT, sizeof(hsi_config.desire_status) - 1);

@@ -311,6 +311,9 @@ STATUS ppp_init_config_by_user(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb, U16 ccb
     /* Default before any HSI config is applied; overridden per-subscriber
      * by apply_hsi_config() using tcp_conntrack_enable from etcd. */
     ppp_ccb->tcp_conntrack_enabled = TRUE;
+    /* Default before any HSI config is applied; overridden per-subscriber
+     * by apply_hsi_config() using ipv6_enable from etcd. */
+    ppp_ccb->ipv6_enabled = FALSE;
 
     /* All elements below were preallocated by pppd_construct_ccb_elements()
      * at init; a (re)configuration only resets their logical content. No
