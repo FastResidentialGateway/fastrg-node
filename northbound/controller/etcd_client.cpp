@@ -848,7 +848,7 @@ public:
     // by the offline-edit snapshot path so serialization stays identical to
     // the controller's schema. Metadata fields are placeholders; the snapshot
     // layer re-stamps them.
-    std::string build_hsi_config_json(const char* node_id, const hsi_config_t* config,
+    static std::string build_hsi_config_json(const char* node_id, const hsi_config_t* config,
         const char* updated_by) {
         Json::Value root;
         Json::Value cfg;
@@ -861,6 +861,7 @@ public:
         cfg["dhcp_gateway"] = std::string(config->dhcp_gateway);
         cfg["dns_proxy_enable"] = (config->dns_proxy_enable == TRUE);
         cfg["tcp_conntrack_enable"] = (config->tcp_conntrack_enable == TRUE);
+        cfg["ipv6_enable"] = (config->ipv6_enable == TRUE);
         // PPPoE desired state; default to disconnect when unset.
         cfg["desire_status"] = (config->desire_status[0] != '\0')
             ? std::string(config->desire_status) : std::string(DESIRE_STATUS_DISCONNECT);
@@ -1051,6 +1052,18 @@ public:
                     output->config.tcp_conntrack_enable = (v.asString() == "false") ? FALSE : TRUE;
                 else if (v.isIntegral())
                     output->config.tcp_conntrack_enable = v.asInt() != 0 ? TRUE : FALSE;
+            }
+
+            // ipv6_enable defaults to FALSE when absent in etcd
+            output->config.ipv6_enable = FALSE;
+            if (config_obj.isMember("ipv6_enable")) {
+                const Json::Value& v = config_obj["ipv6_enable"];
+                if (v.isBool())
+                    output->config.ipv6_enable = v.asBool() ? TRUE : FALSE;
+                else if (v.isString())
+                    output->config.ipv6_enable = (v.asString() == "true") ? TRUE : FALSE;
+                else if (v.isIntegral())
+                    output->config.ipv6_enable = v.asInt() != 0 ? TRUE : FALSE;
             }
 
             // desire_status: "connect"/"disconnect"; empty/absent treated as disconnect.
@@ -1339,7 +1352,7 @@ public:
         }
     }
 
-    bool parse_hsi_config(const std::string& json_str, hsi_config_t* config, bool* is_enabled) {
+    static bool parse_hsi_config(const std::string& json_str, hsi_config_t* config, bool* is_enabled) {
         try {
             Json::Value root;
             Json::Reader reader;
@@ -1404,6 +1417,18 @@ public:
                     config->tcp_conntrack_enable = (v.asString() == "false") ? FALSE : TRUE;
                 else if (v.isIntegral())
                     config->tcp_conntrack_enable = v.asInt() != 0 ? TRUE : FALSE;
+            }
+
+            // ipv6_enable defaults to FALSE when the field is absent in etcd
+            config->ipv6_enable = FALSE;
+            if (config_obj.isMember("ipv6_enable")) {
+                const Json::Value& v = config_obj["ipv6_enable"];
+                if (v.isBool())
+                    config->ipv6_enable = v.asBool() ? TRUE : FALSE;
+                else if (v.isString())
+                    config->ipv6_enable = (v.asString() == "true") ? TRUE : FALSE;
+                else if (v.isIntegral())
+                    config->ipv6_enable = v.asInt() != 0 ? TRUE : FALSE;
             }
 
             // desire_status: "connect"/"disconnect"; empty/absent treated as disconnect.
@@ -1894,18 +1919,18 @@ int etcd_client_is_connected(void) {
 // etcd is unreachable at startup. The subscriber count is applied first so HSI 
 // configs land within range.
 char *etcd_client_render_hsi_config(const char* node_id, const hsi_config_t* config) {
-    if (!g_etcd_client || !node_id || !config) return NULL;
-    std::string s = g_etcd_client->build_hsi_config_json(node_id, config,
+    if (!node_id || !config) return NULL;
+    std::string s = EtcdClientImpl::build_hsi_config_json(node_id, config,
         "fastrg-node-offline");
     return strdup(s.c_str());
 }
 
 STATUS etcd_client_parse_hsi_config(const char *value_json, hsi_config_t *out_config,
     BOOL *out_is_enabled) {
-    if (!g_etcd_client || !value_json || !out_config)
+    if (!value_json || !out_config)
         return ERROR;
     bool is_enabled = false;
-    if (!g_etcd_client->parse_hsi_config(value_json, out_config, &is_enabled))
+    if (!EtcdClientImpl::parse_hsi_config(value_json, out_config, &is_enabled))
         return ERROR;
     if (out_is_enabled)
         *out_is_enabled = is_enabled == true? TRUE : FALSE;
