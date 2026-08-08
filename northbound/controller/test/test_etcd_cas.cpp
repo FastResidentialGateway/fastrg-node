@@ -823,6 +823,82 @@ static void test_snapshot_watch_update_dirty_skip()
     free(v);
 }
 
+static void test_hsi_ipv6_parse_defaults()
+{
+    std::cout << "Case 21: HSI IPv6 parsing keeps legacy defaults" << std::endl;
+    hsi_config_t config = { 0 };
+    BOOL is_enabled = TRUE;
+
+    expect_equal("case 21 legacy HSI parses", SUCCESS,
+        etcd_client_parse_hsi_config(MERGE_SEED_HSI, &config, &is_enabled));
+    expect_equal("case 21 ipv6 defaults false", FALSE, config.ipv6_enable);
+    expect_equal("case 21 dns proxy defaults true", TRUE, config.dns_proxy_enable);
+    expect_equal("case 21 conntrack defaults true", TRUE, config.tcp_conntrack_enable);
+    hsi_config_free_port_mappings(&config);
+
+    const char *missing_flags = "{\"config\":{\"user_id\":\"8\"}}";
+    config = hsi_config_t{ 0 };
+    expect_equal("case 21 missing flags HSI parses", SUCCESS,
+        etcd_client_parse_hsi_config(missing_flags, &config, NULL));
+    expect_equal("case 21 missing ipv6 defaults false", FALSE, config.ipv6_enable);
+    expect_equal("case 21 missing dns proxy defaults true", TRUE, config.dns_proxy_enable);
+    expect_equal("case 21 missing conntrack defaults true", TRUE, config.tcp_conntrack_enable);
+}
+
+static void expect_ipv6_parse(const std::string& assertion, const char *json, BOOL expected)
+{
+    hsi_config_t config = { 0 };
+    expect_equal(assertion + " parses", SUCCESS,
+        etcd_client_parse_hsi_config(json, &config, NULL));
+    expect_equal(assertion + " value", expected, config.ipv6_enable);
+    hsi_config_free_port_mappings(&config);
+}
+
+static void test_hsi_ipv6_parse_explicit_values()
+{
+    std::cout << "Case 22: HSI IPv6 parsing accepts bool, string, and integer values" << std::endl;
+    expect_ipv6_parse("case 22 bool true", "{\"config\":{\"ipv6_enable\":true}}", TRUE);
+    expect_ipv6_parse("case 22 bool false", "{\"config\":{\"ipv6_enable\":false}}", FALSE);
+    expect_ipv6_parse("case 22 string true", "{\"config\":{\"ipv6_enable\":\"true\"}}", TRUE);
+    expect_ipv6_parse("case 22 string false", "{\"config\":{\"ipv6_enable\":\"false\"}}", FALSE);
+    expect_ipv6_parse("case 22 integer one", "{\"config\":{\"ipv6_enable\":1}}", TRUE);
+    expect_ipv6_parse("case 22 integer zero", "{\"config\":{\"ipv6_enable\":0}}", FALSE);
+}
+
+static void expect_ipv6_round_trip(const std::string& assertion, BOOL expected)
+{
+    hsi_config_t source = { 0 };
+    source.dns_proxy_enable = TRUE;
+    source.tcp_conntrack_enable = TRUE;
+    source.ipv6_enable = expected;
+
+    char *rendered = etcd_client_render_hsi_config("cas-test-node", &source);
+    expect_true(assertion + " renders", rendered != NULL);
+    if (!rendered)
+        return;
+
+    Json::Value root;
+    expect_true(assertion + " rendered JSON parses", parse_json(rendered, root));
+    expect_true(assertion + " rendered field exists",
+        root["config"].isMember("ipv6_enable"));
+    expect_equal(assertion + " rendered value", expected == TRUE,
+        root["config"]["ipv6_enable"].asBool());
+
+    hsi_config_t parsed = { 0 };
+    expect_equal(assertion + " parses back", SUCCESS,
+        etcd_client_parse_hsi_config(rendered, &parsed, NULL));
+    expect_equal(assertion + " round-trip value", expected, parsed.ipv6_enable);
+    hsi_config_free_port_mappings(&parsed);
+    free(rendered);
+}
+
+static void test_hsi_ipv6_render_round_trip()
+{
+    std::cout << "Case 23: HSI IPv6 render round-trip preserves both values" << std::endl;
+    expect_ipv6_round_trip("case 23 true", TRUE);
+    expect_ipv6_round_trip("case 23 false", FALSE);
+}
+
 int main()
 {
     // Point the snapshot at a scratch file so the test never touches the
@@ -853,6 +929,9 @@ int main()
     test_snapshot_clear_dirty_delete_race();
     test_snapshot_persist_failure_and_recovery(path);
     test_snapshot_watch_update_dirty_skip();
+    test_hsi_ipv6_parse_defaults();
+    test_hsi_ipv6_parse_explicit_values();
+    test_hsi_ipv6_render_round_trip();
 
     config_snapshot_cleanup();
     std::remove(path);
