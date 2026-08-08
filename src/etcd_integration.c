@@ -235,6 +235,16 @@ BOOL hsi_config_matches_local(const char *user_id,
         return FALSE;
     }
 
+    BOOL local_ipv6_enable = ppp_ccb->ipv6_enabled;
+    BOOL etcd_ipv6_enable = etcd_config->ipv6_enable;
+    if (local_ipv6_enable != etcd_ipv6_enable) {
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "Sync match[%s]: ipv6_enable mismatch local=%s etcd=%s",
+            user_id, local_ipv6_enable ? "true" : "false",
+            etcd_ipv6_enable ? "true" : "false");
+        return FALSE;
+    }
+
     int local_active = 0;
     for(int i=0; i<PORT_FWD_TABLE_SIZE; i++) {
         if (rte_atomic16_read(&ppp_ccb->port_fwd_table[i].is_active) == 1)

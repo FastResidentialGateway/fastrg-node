@@ -189,6 +189,10 @@ typedef struct {
      * by data-plane cores. 1-byte aligned store/load is atomic on x86 (TSO);
      * volatile blocks the compiler from hoisting/caching the load. */
     volatile BOOL         tcp_conntrack_enabled;
+    /* Per-subscriber IPv6 enable. Written by apply_hsi_config(), then read by
+     * the PPP control plane when IPV6CP negotiation is implemented. The
+     * 1-byte aligned store/load follows the same atomicity rule as conntrack. */
+    volatile BOOL         ipv6_enabled;
 }__rte_cache_aligned ppp_ccb_t;
 
 void   exit_ppp(ppp_ccb_t *ppp_ccb);

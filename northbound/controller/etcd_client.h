@@ -51,6 +51,7 @@ typedef struct {
     char dhcp_gateway[32];
     BOOL dns_proxy_enable;      /* per-subscriber DNS proxy enable; defaults to TRUE when absent in etcd */
     BOOL tcp_conntrack_enable;  /* per-subscriber TCP SPI enable; defaults to TRUE when absent in etcd */
+    BOOL ipv6_enable;           /* per-subscriber IPv6 enable; defaults to FALSE when absent in etcd */
     char desire_status[16];     /* "connect"/"disconnect"; empty = disconnect. Only CLI/controller set it. */
     port_mapping_t *port_mappings;  // heap-allocated; use hsi_config_free_port_mappings() to free
     int port_mapping_count;
