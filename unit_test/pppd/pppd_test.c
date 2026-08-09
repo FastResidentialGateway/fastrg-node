@@ -100,8 +100,8 @@ static void pppd_ccb_reset(void)
     rte_atomic16_init(&test_ppp_ccb.ppp_bool);
     rte_atomic16_init(&test_ppp_ccb.dp_start_bool);
     rte_atomic16_init(&test_ppp_ccb.redial_pending);
-    test_ppp_ccb.ppp_phase[0].state = S_INIT;
-    test_ppp_ccb.ppp_phase[1].state = S_INIT;
+    test_ppp_ccb.control_protocol[PPP_CP_LCP].state = S_INIT;
+    test_ppp_ccb.control_protocol[PPP_CP_IPCP].state = S_INIT;
     test_ppp_ccb.phase = END_PHASE;
     test_ppp_ccb.pppoe_phase.pppoe_header_tag = g_padr_tag_buf;
 
@@ -192,7 +192,7 @@ static void test_ppp_disconnect_normal(void)
     TEST_ASSERT(ret == SUCCESS, "normal disconnect returns SUCCESS", "got %d", ret);
     TEST_ASSERT(test_ppp_ccb.ppp_processing == TRUE,
         "PPP_bye's LCP_PHASE branch marks ppp_processing (delegates to PPP_bye)", "");
-    TEST_ASSERT(test_ppp_ccb.cp == 0, "cp reset to LCP", "");
+    TEST_ASSERT(test_ppp_ccb.cp_id == PPP_CP_LCP, "cp reset to LCP", "");
 }
 
 /* ---- PPP_bye state walk-down ---- */
@@ -236,15 +236,15 @@ static void test_ppp_bye_lcp_phase(void)
 
     pppd_ccb_reset();
     test_ppp_ccb.phase = LCP_PHASE;
-    test_ppp_ccb.cp = 1;
-    test_ppp_ccb.ppp_phase[1].state = S_OPENED;
+    test_ppp_ccb.cp_id = PPP_CP_IPCP;
+    test_ppp_ccb.control_protocol[PPP_CP_IPCP].state = S_OPENED;
 
     PPP_bye(&test_ppp_ccb);
 
     TEST_ASSERT(test_ppp_ccb.ppp_processing == TRUE, "LCP_PHASE marks ppp_processing", "");
-    TEST_ASSERT(test_ppp_ccb.cp == 0, "cp forced back to LCP (0)", "");
-    TEST_ASSERT(test_ppp_ccb.ppp_phase[1].state == S_INIT,
-        "NCP state force-reset to S_INIT", "got %u", test_ppp_ccb.ppp_phase[1].state);
+    TEST_ASSERT(test_ppp_ccb.cp_id == PPP_CP_LCP, "cp forced back to LCP (0)", "");
+    TEST_ASSERT(test_ppp_ccb.control_protocol[PPP_CP_IPCP].state == S_INIT,
+        "NCP state force-reset to S_INIT", "got %u", test_ppp_ccb.control_protocol[PPP_CP_IPCP].state);
 }
 
 static void test_ppp_bye_data_phase_downgrades_to_lcp(void)
@@ -255,7 +255,7 @@ static void test_ppp_bye_data_phase_downgrades_to_lcp(void)
     pppd_ccb_reset();
     test_ppp_ccb.phase = DATA_PHASE;
     rte_atomic16_set(&test_ppp_ccb.dp_start_bool, 1);
-    test_ppp_ccb.cp = 1;
+    test_ppp_ccb.cp_id = PPP_CP_IPCP;
 
     PPP_bye(&test_ppp_ccb);
 
@@ -263,7 +263,7 @@ static void test_ppp_bye_data_phase_downgrades_to_lcp(void)
         "DATA_PHASE downgrades to LCP_PHASE (RFC 1661 SS3.7 -- LCP close is sufficient)",
         "got %u", test_ppp_ccb.phase);
     TEST_ASSERT(rte_atomic16_read(&test_ppp_ccb.dp_start_bool) == 0, "dp_start_bool cleared", "");
-    TEST_ASSERT(test_ppp_ccb.cp == 0, "cp forced back to LCP (0)", "");
+    TEST_ASSERT(test_ppp_ccb.cp_id == PPP_CP_LCP, "cp forced back to LCP (0)", "");
 }
 
 /* ---- exit_ppp ---- */
@@ -276,8 +276,8 @@ static void test_exit_ppp_resets_fields(void)
     pppd_ccb_reset();
     test_ppp_ccb.phase = LCP_PHASE;
     rte_atomic16_set(&test_ppp_ccb.ppp_bool, 1);
-    test_ppp_ccb.ppp_phase[0].state = S_OPENED;
-    test_ppp_ccb.ppp_phase[1].state = S_OPENED;
+    test_ppp_ccb.control_protocol[PPP_CP_LCP].state = S_OPENED;
+    test_ppp_ccb.control_protocol[PPP_CP_IPCP].state = S_OPENED;
     test_ppp_ccb.pppoe_phase.active = TRUE;
     test_ppp_ccb.hsi_ipv4 = 0xC0A80101;
     test_ppp_ccb.hsi_ipv4_gw = 0xC0A80001;
@@ -288,7 +288,7 @@ static void test_exit_ppp_resets_fields(void)
 
     TEST_ASSERT(rte_atomic16_read(&test_ppp_ccb.ppp_bool) == 0, "ppp_bool cleared", "");
     TEST_ASSERT(test_ppp_ccb.phase == END_PHASE, "phase set to END_PHASE", "");
-    TEST_ASSERT(test_ppp_ccb.ppp_phase[0].state == S_INIT && test_ppp_ccb.ppp_phase[1].state == S_INIT,
+    TEST_ASSERT(test_ppp_ccb.control_protocol[PPP_CP_LCP].state == S_INIT && test_ppp_ccb.control_protocol[PPP_CP_IPCP].state == S_INIT,
         "both cp states reset to S_INIT", "");
     TEST_ASSERT(test_ppp_ccb.pppoe_phase.active == FALSE, "pppoe_phase.active cleared", "");
     TEST_ASSERT(test_ppp_ccb.hsi_ipv4 == 0 && test_ppp_ccb.hsi_ipv4_gw == 0,

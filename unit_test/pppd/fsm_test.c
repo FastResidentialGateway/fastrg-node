@@ -20,17 +20,18 @@
 static int test_count = 0;
 static int pass_count = 0;
 
-static ppp_ccb_t* create_test_ppp_ccb(FastRG_t *fastrg_ccb, U8 cp, U8 state) {
+static ppp_ccb_t* create_test_ppp_ccb(FastRG_t *fastrg_ccb, U8 cp_id, U8 state) {
     ppp_ccb_t *ccb = (ppp_ccb_t*)calloc(1, sizeof(ppp_ccb_t));
     assert(ccb != NULL);
 
-    ccb->cp = cp;
-    ccb->ppp_phase[cp].state = state;
+    ccb->cp_id = cp_id;
+    ccb->control_protocol[cp_id].state = state;
     ccb->user_num = 1;
     ccb->session_id = rte_cpu_to_be_16(0x1234);
-    ccb->ppp_phase[cp].timer_counter = 10;
-    ccb->ppp_phase[cp].ppp_payload.ppp_protocol = 
-        rte_cpu_to_be_16(cp == 0 ? LCP_PROTOCOL : IPCP_PROTOCOL);
+    ccb->control_protocol[cp_id].timer_counter = 10;
+    ccb->control_protocol[cp_id].ppp_payload.ppp_protocol =
+        rte_cpu_to_be_16(cp_id == PPP_CP_LCP ? LCP_PROTOCOL :
+            (cp_id == PPP_CP_IPCP ? IPCP_PROTOCOL : IPV6CP_PROTOCOL));
     ccb->fastrg_ccb = fastrg_ccb;
 
     return ccb;
@@ -38,10 +39,12 @@ static ppp_ccb_t* create_test_ppp_ccb(FastRG_t *fastrg_ccb, U8 cp, U8 state) {
 
 static void free_test_ppp_ccb(ppp_ccb_t *ccb) {
     if (ccb) {
-        if (ccb->ppp_phase[0].ppp_options)
-            free(ccb->ppp_phase[0].ppp_options);
-        if (ccb->ppp_phase[1].ppp_options)
-            free(ccb->ppp_phase[1].ppp_options);
+        if (ccb->control_protocol[PPP_CP_LCP].ppp_options)
+            free(ccb->control_protocol[PPP_CP_LCP].ppp_options);
+        if (ccb->control_protocol[PPP_CP_IPCP].ppp_options)
+            free(ccb->control_protocol[PPP_CP_IPCP].ppp_options);
+        if (ccb->control_protocol[PPP_CP_IPV6CP].ppp_options)
+            free(ccb->control_protocol[PPP_CP_IPV6CP].ppp_options);
         free(ccb);
     }
 }
@@ -61,8 +64,8 @@ void test_fsm_init_to_closed(FastRG_t *fastrg_ccb)
     STATUS result = PPP_FSM(&timer, ccb, E_UP);
 
     TEST_ASSERT(result == SUCCESS, "PPP_FSM returns SUCCESS", "got %d", result);
-    TEST_ASSERT(ccb->ppp_phase[0].state == S_CLOSED, 
-        "State transitions to S_CLOSED", "got state %d", ccb->ppp_phase[0].state);
+    TEST_ASSERT(ccb->control_protocol[PPP_CP_LCP].state == S_CLOSED, 
+        "State transitions to S_CLOSED", "got state %d", ccb->control_protocol[PPP_CP_LCP].state);
 
     free_test_ppp_ccb(ccb);
 }
@@ -78,8 +81,8 @@ void test_fsm_init_to_starting(FastRG_t *fastrg_ccb)
     STATUS result = PPP_FSM(&timer, ccb, E_OPEN);
 
     TEST_ASSERT(result == SUCCESS, "PPP_FSM returns SUCCESS", "got %d", result);
-    TEST_ASSERT(ccb->ppp_phase[0].state == S_STARTING, 
-        "State transitions to S_STARTING", "got state %d", ccb->ppp_phase[0].state);
+    TEST_ASSERT(ccb->control_protocol[PPP_CP_LCP].state == S_STARTING, 
+        "State transitions to S_STARTING", "got state %d", ccb->control_protocol[PPP_CP_LCP].state);
 
     free_test_ppp_ccb(ccb);
 }
@@ -95,8 +98,8 @@ void test_fsm_starting_to_request_sent(FastRG_t *fastrg_ccb)
     STATUS result = PPP_FSM(&timer, ccb, E_UP);
 
     TEST_ASSERT(result == SUCCESS, "PPP_FSM returns SUCCESS", "got %d", result);
-    TEST_ASSERT(ccb->ppp_phase[0].state == S_REQUEST_SENT, 
-        "State transitions to S_REQUEST_SENT", "got state %d", ccb->ppp_phase[0].state);
+    TEST_ASSERT(ccb->control_protocol[PPP_CP_LCP].state == S_REQUEST_SENT,
+        "State transitions to S_REQUEST_SENT", "got state %d", ccb->control_protocol[PPP_CP_LCP].state);
 
     free_test_ppp_ccb(ccb);
 }
@@ -112,8 +115,8 @@ void test_fsm_closed_to_request_sent(FastRG_t *fastrg_ccb)
     STATUS result = PPP_FSM(&timer, ccb, E_OPEN);
 
     TEST_ASSERT(result == SUCCESS, "PPP_FSM returns SUCCESS", "got %d", result);
-    TEST_ASSERT(ccb->ppp_phase[0].state == S_REQUEST_SENT, 
-        "State transitions to S_REQUEST_SENT", "got state %d", ccb->ppp_phase[0].state);
+    TEST_ASSERT(ccb->control_protocol[PPP_CP_LCP].state == S_REQUEST_SENT,
+        "State transitions to S_REQUEST_SENT", "got state %d", ccb->control_protocol[PPP_CP_LCP].state);
 
     free_test_ppp_ccb(ccb);
 }
@@ -129,8 +132,8 @@ void test_fsm_request_sent_to_ack_received(FastRG_t *fastrg_ccb)
     STATUS result = PPP_FSM(&timer, ccb, E_RECV_CONFIG_ACK);
 
     TEST_ASSERT(result == SUCCESS, "PPP_FSM returns SUCCESS", "got %d", result);
-    TEST_ASSERT(ccb->ppp_phase[0].state == S_ACK_RECEIVED, 
-        "State transitions to S_ACK_RECEIVED", "got state %d", ccb->ppp_phase[0].state);
+    TEST_ASSERT(ccb->control_protocol[PPP_CP_LCP].state == S_ACK_RECEIVED,
+        "State transitions to S_ACK_RECEIVED", "got state %d", ccb->control_protocol[PPP_CP_LCP].state);
 
     free_test_ppp_ccb(ccb);
 }
@@ -146,8 +149,8 @@ void test_fsm_ack_received_to_opened(FastRG_t *fastrg_ccb)
     STATUS result = PPP_FSM(&timer, ccb, E_RECV_GOOD_CONFIG_REQUEST);
 
     TEST_ASSERT(result == SUCCESS, "PPP_FSM returns SUCCESS", "got %d", result);
-    TEST_ASSERT(ccb->ppp_phase[0].state == S_OPENED, 
-        "State transitions to S_OPENED", "got state %d", ccb->ppp_phase[0].state);
+    TEST_ASSERT(ccb->control_protocol[PPP_CP_LCP].state == S_OPENED,
+        "State transitions to S_OPENED", "got state %d", ccb->control_protocol[PPP_CP_LCP].state);
 
     free_test_ppp_ccb(ccb);
 }
@@ -163,8 +166,8 @@ void test_fsm_ack_sent_to_opened(FastRG_t *fastrg_ccb)
     STATUS result = PPP_FSM(&timer, ccb, E_RECV_CONFIG_ACK);
 
     TEST_ASSERT(result == SUCCESS, "PPP_FSM returns SUCCESS", "got %d", result);
-    TEST_ASSERT(ccb->ppp_phase[0].state == S_OPENED, 
-        "State transitions to S_OPENED", "got state %d", ccb->ppp_phase[0].state);
+    TEST_ASSERT(ccb->control_protocol[PPP_CP_LCP].state == S_OPENED,
+        "State transitions to S_OPENED", "got state %d", ccb->control_protocol[PPP_CP_LCP].state);
 
     free_test_ppp_ccb(ccb);
 }
@@ -180,8 +183,8 @@ void test_fsm_opened_to_closing(FastRG_t *fastrg_ccb)
     STATUS result = PPP_FSM(&timer, ccb, E_CLOSE);
 
     TEST_ASSERT(result == SUCCESS, "PPP_FSM returns SUCCESS", "got %d", result);
-    TEST_ASSERT(ccb->ppp_phase[0].state == S_CLOSING, 
-        "State transitions to S_CLOSING", "got state %d", ccb->ppp_phase[0].state);
+    TEST_ASSERT(ccb->control_protocol[PPP_CP_LCP].state == S_CLOSING,
+        "State transitions to S_CLOSING", "got state %d", ccb->control_protocol[PPP_CP_LCP].state);
 
     free_test_ppp_ccb(ccb);
 }
@@ -197,8 +200,8 @@ void test_fsm_closing_to_closed(FastRG_t *fastrg_ccb)
     STATUS result = PPP_FSM(&timer, ccb, E_RECV_TERMINATE_ACK);
 
     TEST_ASSERT(result == SUCCESS, "PPP_FSM returns SUCCESS", "got %d", result);
-    TEST_ASSERT(ccb->ppp_phase[0].state == S_CLOSED, 
-        "State transitions to S_CLOSED", "got state %d", ccb->ppp_phase[0].state);
+    TEST_ASSERT(ccb->control_protocol[PPP_CP_LCP].state == S_CLOSED,
+        "State transitions to S_CLOSED", "got state %d", ccb->control_protocol[PPP_CP_LCP].state);
 
     free_test_ppp_ccb(ccb);
 }
@@ -241,14 +244,14 @@ void test_fsm_invalid_event_in_valid_state(FastRG_t *fastrg_ccb)
 
     ppp_ccb_t *ccb = create_test_ppp_ccb(fastrg_ccb, 0, S_INIT);
     struct rte_timer timer = {0};
-    U8 initial_state = ccb->ppp_phase[0].state;
+    U8 initial_state = ccb->control_protocol[PPP_CP_LCP].state;
 
     // E_RECV_CONFIG_ACK is invalid in INIT state
     STATUS result = PPP_FSM(&timer, ccb, E_RECV_CONFIG_ACK);
 
     TEST_ASSERT(result == SUCCESS, "PPP_FSM returns SUCCESS (but does nothing)", "got %d", result);
-    TEST_ASSERT(ccb->ppp_phase[0].state == initial_state, 
-        "State unchanged for invalid event", "expected %d, got %d", initial_state, ccb->ppp_phase[0].state);
+    TEST_ASSERT(ccb->control_protocol[PPP_CP_LCP].state == initial_state,
+        "State unchanged for invalid event", "expected %d, got %d", initial_state, ccb->control_protocol[PPP_CP_LCP].state);
 
     free_test_ppp_ccb(ccb);
 }
@@ -268,9 +271,9 @@ void test_fsm_lcp_phase(FastRG_t *fastrg_ccb)
     STATUS result = PPP_FSM(&timer, ccb, E_OPEN);
 
     TEST_ASSERT(result == SUCCESS, "PPP_FSM returns SUCCESS", "got %d", result);
-    TEST_ASSERT(ccb->cp == 0, "CCB indicates LCP phase", "got cp=%d", ccb->cp);
-    TEST_ASSERT(ccb->ppp_phase[0].state == S_STARTING, 
-        "LCP state transitions correctly", "got state %d", ccb->ppp_phase[0].state);
+    TEST_ASSERT(ccb->cp_id == PPP_CP_LCP, "CCB indicates LCP phase", "got cp=%d", ccb->cp_id);
+    TEST_ASSERT(ccb->control_protocol[PPP_CP_LCP].state == S_STARTING,
+        "LCP state transitions correctly", "got state %d", ccb->control_protocol[PPP_CP_LCP].state);
 
     free_test_ppp_ccb(ccb);
 }
@@ -286,9 +289,9 @@ void test_fsm_ipcp_phase(FastRG_t *fastrg_ccb)
     STATUS result = PPP_FSM(&timer, ccb, E_OPEN);
 
     TEST_ASSERT(result == SUCCESS, "PPP_FSM returns SUCCESS", "got %d", result);
-    TEST_ASSERT(ccb->cp == 1, "CCB indicates IPCP phase", "got cp=%d", ccb->cp);
-    TEST_ASSERT(ccb->ppp_phase[1].state == S_STARTING, 
-        "IPCP state transitions correctly", "got state %d", ccb->ppp_phase[1].state);
+    TEST_ASSERT(ccb->cp_id == PPP_CP_IPCP, "CCB indicates IPCP phase", "got cp=%d", ccb->cp_id);
+    TEST_ASSERT(ccb->control_protocol[PPP_CP_IPCP].state == S_STARTING,
+        "IPCP state transitions correctly", "got state %d", ccb->control_protocol[PPP_CP_IPCP].state);
 
     free_test_ppp_ccb(ccb);
 }
@@ -307,23 +310,23 @@ void test_fsm_full_connection_establishment(FastRG_t *fastrg_ccb)
 
     // INIT -> STARTING (E_OPEN)
     PPP_FSM(&timer, ccb, E_OPEN);
-    TEST_ASSERT(ccb->ppp_phase[0].state == S_STARTING, 
-        "Step 1: INIT -> STARTING", "got state %d", ccb->ppp_phase[0].state);
+    TEST_ASSERT(ccb->control_protocol[PPP_CP_LCP].state == S_STARTING,
+        "Step 1: INIT -> STARTING", "got state %d", ccb->control_protocol[PPP_CP_LCP].state);
 
     // STARTING -> REQUEST_SENT (E_UP)
     PPP_FSM(&timer, ccb, E_UP);
-    TEST_ASSERT(ccb->ppp_phase[0].state == S_REQUEST_SENT, 
-        "Step 2: STARTING -> REQUEST_SENT", "got state %d", ccb->ppp_phase[0].state);
+    TEST_ASSERT(ccb->control_protocol[PPP_CP_LCP].state == S_REQUEST_SENT,
+        "Step 2: STARTING -> REQUEST_SENT", "got state %d", ccb->control_protocol[PPP_CP_LCP].state);
 
     // REQUEST_SENT -> ACK_RECEIVED (E_RECV_CONFIG_ACK)
     PPP_FSM(&timer, ccb, E_RECV_CONFIG_ACK);
-    TEST_ASSERT(ccb->ppp_phase[0].state == S_ACK_RECEIVED, 
-                "Step 3: REQUEST_SENT -> ACK_RECEIVED", "got state %d", ccb->ppp_phase[0].state);
+    TEST_ASSERT(ccb->control_protocol[PPP_CP_LCP].state == S_ACK_RECEIVED,
+                "Step 3: REQUEST_SENT -> ACK_RECEIVED", "got state %d", ccb->control_protocol[PPP_CP_LCP].state);
 
     // ACK_RECEIVED -> OPENED (E_RECV_GOOD_CONFIG_REQUEST)
     PPP_FSM(&timer, ccb, E_RECV_GOOD_CONFIG_REQUEST);
-    TEST_ASSERT(ccb->ppp_phase[0].state == S_OPENED, 
-                "Step 4: ACK_RECEIVED -> OPENED", "got state %d", ccb->ppp_phase[0].state);
+    TEST_ASSERT(ccb->control_protocol[PPP_CP_LCP].state == S_OPENED,
+                "Step 4: ACK_RECEIVED -> OPENED", "got state %d", ccb->control_protocol[PPP_CP_LCP].state);
 
     free_test_ppp_ccb(ccb);
 }
@@ -338,13 +341,13 @@ void test_fsm_full_connection_termination(FastRG_t *fastrg_ccb)
 
     // OPENED -> CLOSING (E_CLOSE)
     PPP_FSM(&timer, ccb, E_CLOSE);
-    TEST_ASSERT(ccb->ppp_phase[0].state == S_CLOSING, 
-        "Step 1: OPENED -> CLOSING", "got state %d", ccb->ppp_phase[0].state);
+    TEST_ASSERT(ccb->control_protocol[PPP_CP_LCP].state == S_CLOSING,
+        "Step 1: OPENED -> CLOSING", "got state %d", ccb->control_protocol[PPP_CP_LCP].state);
 
     // CLOSING -> CLOSED (E_RECV_TERMINATE_ACK)
     PPP_FSM(&timer, ccb, E_RECV_TERMINATE_ACK);
-    TEST_ASSERT(ccb->ppp_phase[0].state == S_CLOSED, 
-        "Step 2: CLOSING -> CLOSED", "got state %d", ccb->ppp_phase[0].state);
+    TEST_ASSERT(ccb->control_protocol[PPP_CP_LCP].state == S_CLOSED,
+        "Step 2: CLOSING -> CLOSED", "got state %d", ccb->control_protocol[PPP_CP_LCP].state);
 
     free_test_ppp_ccb(ccb);
 }
@@ -359,13 +362,13 @@ void test_fsm_alternate_path_to_opened(FastRG_t *fastrg_ccb)
 
     // REQUEST_SENT -> ACK_SENT (E_RECV_GOOD_CONFIG_REQUEST)
     PPP_FSM(&timer, ccb, E_RECV_GOOD_CONFIG_REQUEST);
-    TEST_ASSERT(ccb->ppp_phase[0].state == S_ACK_SENT, 
-        "Step 1: REQUEST_SENT -> ACK_SENT", "got state %d", ccb->ppp_phase[0].state);
+    TEST_ASSERT(ccb->control_protocol[PPP_CP_LCP].state == S_ACK_SENT,
+        "Step 1: REQUEST_SENT -> ACK_SENT", "got state %d", ccb->control_protocol[PPP_CP_LCP].state);
 
     // ACK_SENT -> OPENED (E_RECV_CONFIG_ACK)
     PPP_FSM(&timer, ccb, E_RECV_CONFIG_ACK);
-    TEST_ASSERT(ccb->ppp_phase[0].state == S_OPENED, 
-        "Step 2: ACK_SENT -> OPENED", "got state %d", ccb->ppp_phase[0].state);
+    TEST_ASSERT(ccb->control_protocol[PPP_CP_LCP].state == S_OPENED,
+        "Step 2: ACK_SENT -> OPENED", "got state %d", ccb->control_protocol[PPP_CP_LCP].state);
 
     free_test_ppp_ccb(ccb);
 }
@@ -382,12 +385,12 @@ void test_fsm_timer_counter_reset(FastRG_t *fastrg_ccb)
     ppp_ccb_t *ccb = create_test_ppp_ccb(fastrg_ccb, 0, S_INIT);
     struct rte_timer timer = {0};
 
-    ccb->ppp_phase[0].timer_counter = 5;
+    ccb->control_protocol[PPP_CP_LCP].timer_counter = 5;
 
     PPP_FSM(&timer, ccb, E_OPEN);
 
-    TEST_ASSERT(ccb->ppp_phase[0].timer_counter == 10, 
-        "Timer counter reset to 10", "got %d", ccb->ppp_phase[0].timer_counter);
+    TEST_ASSERT(ccb->control_protocol[PPP_CP_LCP].timer_counter == 10,
+        "Timer counter reset to 10", "got %d", ccb->control_protocol[PPP_CP_LCP].timer_counter);
 
     free_test_ppp_ccb(ccb);
 }
@@ -402,8 +405,8 @@ void test_fsm_closed_down_event(FastRG_t *fastrg_ccb)
 
     PPP_FSM(&timer, ccb, E_DOWN);
 
-    TEST_ASSERT(ccb->ppp_phase[0].state == S_INIT, 
-        "State transitions to INIT", "got state %d", ccb->ppp_phase[0].state);
+    TEST_ASSERT(ccb->control_protocol[PPP_CP_LCP].state == S_INIT,
+        "State transitions to INIT", "got state %d", ccb->control_protocol[PPP_CP_LCP].state);
 
     free_test_ppp_ccb(ccb);
 }
@@ -418,8 +421,8 @@ void test_fsm_request_sent_bad_config_request(FastRG_t *fastrg_ccb)
 
     PPP_FSM(&timer, ccb, E_RECV_BAD_CONFIG_REQUEST);
 
-    TEST_ASSERT(ccb->ppp_phase[0].state == S_REQUEST_SENT, 
-        "State remains REQUEST_SENT", "got state %d", ccb->ppp_phase[0].state);
+    TEST_ASSERT(ccb->control_protocol[PPP_CP_LCP].state == S_REQUEST_SENT,
+        "State remains REQUEST_SENT", "got state %d", ccb->control_protocol[PPP_CP_LCP].state);
 
     free_test_ppp_ccb(ccb);
 }
@@ -435,8 +438,8 @@ void test_fsm_ack_received_invalid_ack(FastRG_t *fastrg_ccb)
     // Receiving CONFIG_ACK in ACK_RECEIVED state is invalid (RFC 1661)
     PPP_FSM(&timer, ccb, E_RECV_CONFIG_ACK);
 
-    TEST_ASSERT(ccb->ppp_phase[0].state == S_REQUEST_SENT, 
-        "State transitions back to REQUEST_SENT", "got state %d", ccb->ppp_phase[0].state);
+    TEST_ASSERT(ccb->control_protocol[PPP_CP_LCP].state == S_REQUEST_SENT,
+        "State transitions back to REQUEST_SENT", "got state %d", ccb->control_protocol[PPP_CP_LCP].state);
 
     free_test_ppp_ccb(ccb);
 }
@@ -469,8 +472,8 @@ void test_fsm_max_cp_value(FastRG_t *fastrg_ccb)
     STATUS result = PPP_FSM(&timer, ccb, E_UP);
 
     TEST_ASSERT(result == SUCCESS, "PPP_FSM handles cp=1", "got %d", result);
-    TEST_ASSERT(ccb->ppp_phase[1].state == S_CLOSED, 
-        "IPCP state transitions correctly", "got state %d", ccb->ppp_phase[1].state);
+    TEST_ASSERT(ccb->control_protocol[PPP_CP_IPCP].state == S_CLOSED,
+        "IPCP state transitions correctly", "got state %d", ccb->control_protocol[PPP_CP_IPCP].state);
 
     free_test_ppp_ccb(ccb);
 }
@@ -485,8 +488,8 @@ void test_fsm_stopped_open_event(FastRG_t *fastrg_ccb)
 
     PPP_FSM(&timer, ccb, E_OPEN);
 
-    TEST_ASSERT(ccb->ppp_phase[0].state == S_STOPPED, 
-        "State remains STOPPED", "got state %d", ccb->ppp_phase[0].state);
+    TEST_ASSERT(ccb->control_protocol[PPP_CP_LCP].state == S_STOPPED,
+        "State remains STOPPED", "got state %d", ccb->control_protocol[PPP_CP_LCP].state);
 
     free_test_ppp_ccb(ccb);
 }
@@ -546,9 +549,9 @@ static void test_fsm_full_table_scan(FastRG_t *fastrg_ccb)
 
                 if (ret != SUCCESS)
                     retval_fails++;
-                if (ccb->ppp_phase[cp].state != want && state_fails++ == 0) {
+                if (ccb->control_protocol[cp].state != want && state_fails++ == 0) {
                     first_bad_event = ev;
-                    first_bad_state = ccb->ppp_phase[cp].state;
+                    first_bad_state = ccb->control_protocol[cp].state;
                 }
                 free_test_ppp_ccb(ccb);
             }
@@ -584,22 +587,22 @@ static void test_fsm_timer_counter_reset_requires_handler(FastRG_t *fastrg_ccb)
 
     /* STOPPING + E_RECV_TERMINATE_ACK → STOPPED has handlers → counter reset */
     ppp_ccb_t *ccb = create_test_ppp_ccb(fastrg_ccb, 0, S_STOPPING);
-    ccb->ppp_phase[0].timer_counter = 7;
+    ccb->control_protocol[PPP_CP_LCP].timer_counter = 7;
     PPP_FSM(&timer, ccb, E_RECV_TERMINATE_ACK);
-    TEST_ASSERT(ccb->ppp_phase[0].state == S_STOPPED &&
-        ccb->ppp_phase[0].timer_counter == 10,
+    TEST_ASSERT(ccb->control_protocol[PPP_CP_LCP].state == S_STOPPED &&
+        ccb->control_protocol[PPP_CP_LCP].timer_counter == 10,
         "handler row resets timer_counter to 10",
-        "state=%u counter=%u", ccb->ppp_phase[0].state, ccb->ppp_phase[0].timer_counter);
+        "state=%u counter=%u", ccb->control_protocol[PPP_CP_LCP].state, ccb->control_protocol[PPP_CP_LCP].timer_counter);
     free_test_ppp_ccb(ccb);
 
     /* REQUEST_SENT + E_RECV_TERMINATE_ACK stays with no handlers → untouched */
     ccb = create_test_ppp_ccb(fastrg_ccb, 0, S_REQUEST_SENT);
-    ccb->ppp_phase[0].timer_counter = 7;
+    ccb->control_protocol[PPP_CP_LCP].timer_counter = 7;
     PPP_FSM(&timer, ccb, E_RECV_TERMINATE_ACK);
-    TEST_ASSERT(ccb->ppp_phase[0].state == S_REQUEST_SENT &&
-        ccb->ppp_phase[0].timer_counter == 7,
+    TEST_ASSERT(ccb->control_protocol[PPP_CP_LCP].state == S_REQUEST_SENT &&
+        ccb->control_protocol[PPP_CP_LCP].timer_counter == 7,
         "handler-less row leaves timer_counter alone",
-        "state=%u counter=%u", ccb->ppp_phase[0].state, ccb->ppp_phase[0].timer_counter);
+        "state=%u counter=%u", ccb->control_protocol[PPP_CP_LCP].state, ccb->control_protocol[PPP_CP_LCP].timer_counter);
     free_test_ppp_ccb(ccb);
 }
 
@@ -642,16 +645,16 @@ static void test_fsm_auth_rejected_lcp_up_skips_auth_phase(FastRG_t *fastrg_ccb)
     ccb->phase = LCP_PHASE;
     ccb->lcp_auth_rejected = TRUE;
     ccb->peer_requires_auth = FALSE;
-    ccb->ppp_phase[1].state = S_INIT;
+    ccb->control_protocol[PPP_CP_IPCP].state = S_INIT;
 
     TEST_ASSERT(lcp_layer_up(ccb) == SUCCESS,
         "AUTH-rejected LCP-up returns SUCCESS", "");
-    TEST_ASSERT(ccb->phase == IPCP_PHASE && ccb->cp == 1,
+    TEST_ASSERT(ccb->phase == IPCP_PHASE && ccb->cp_id == PPP_CP_IPCP,
         "AUTH-rejected LCP-up opens IPCP directly",
-        "got phase %u cp %u", ccb->phase, ccb->cp);
-    TEST_ASSERT(ccb->ppp_phase[1].state == S_STARTING,
+        "got phase %u cp %u", ccb->phase, ccb->cp_id);
+    TEST_ASSERT(ccb->control_protocol[PPP_CP_IPCP].state == S_STARTING,
         "AUTH-rejected LCP-up drives the NCP FSM through E_OPEN",
-        "got state %u", ccb->ppp_phase[1].state);
+        "got state %u", ccb->control_protocol[PPP_CP_IPCP].state);
 
     free_test_ppp_ccb(ccb);
 }
@@ -716,6 +719,100 @@ static void test_fsm_phase_rollback_underflow_guard(FastRG_t *fastrg_ccb)
     free_test_ppp_ccb(ccb);
 }
 
+/**
+ * Test 31: IPV6CP shares the NCP state table, so every state/event pair must
+ * produce the same result as IPCP.
+ */
+static void test_fsm_ipv6cp_table_matches_ipcp(FastRG_t *fastrg_ccb)
+{
+    printf("\nTest 31: \"IPV6CP state table matches IPCP\"\n");
+    printf("=========================================\n\n");
+
+    struct rte_timer timer = {0};
+    int mismatches = 0;
+    U8 first_state = 0;
+    U16 first_event = 0;
+
+    for (U8 state = 0; state < S_INVLD; state++) {
+        for (U16 event = 0; event <= E_UNKNOWN; event++) {
+            ppp_ccb_t *ipcp_ccb = create_test_ppp_ccb(fastrg_ccb, 1, state);
+            ppp_ccb_t *ipv6cp_ccb = create_test_ppp_ccb(fastrg_ccb, PPP_CP_IPV6CP, state);
+            STATUS ipcp_ret = PPP_FSM(&timer, ipcp_ccb, event);
+            STATUS ipv6cp_ret = PPP_FSM(&timer, ipv6cp_ccb, event);
+
+            if ((ipcp_ret != ipv6cp_ret ||
+                    ipcp_ccb->control_protocol[PPP_CP_IPCP].state != ipv6cp_ccb->control_protocol[PPP_CP_IPV6CP].state) &&
+                    mismatches++ == 0) {
+                first_state = state;
+                first_event = event;
+            }
+            free_test_ppp_ccb(ipcp_ccb);
+            free_test_ppp_ccb(ipv6cp_ccb);
+        }
+    }
+
+    TEST_ASSERT(mismatches == 0,
+        "IPV6CP and IPCP tables have identical transitions",
+        "%d mismatches; first state=%u event=%u", mismatches,
+        first_state, first_event);
+}
+
+/**
+ * Test 32: IPV6CP uses the normal NCP kickoff transition.
+ */
+static void test_fsm_ipv6cp_kickoff(FastRG_t *fastrg_ccb)
+{
+    printf("\nTest 32: \"IPV6CP INIT + OPEN enters STARTING\"\n");
+    printf("=========================================\n\n");
+
+    ppp_ccb_t *ccb = create_test_ppp_ccb(fastrg_ccb, PPP_CP_IPV6CP, S_INIT);
+    struct rte_timer timer = {0};
+
+    TEST_ASSERT(PPP_FSM(&timer, ccb, E_OPEN) == SUCCESS,
+        "IPV6CP kickoff returns SUCCESS", "");
+    TEST_ASSERT(ccb->control_protocol[PPP_CP_IPV6CP].state == S_STARTING,
+        "IPV6CP kickoff enters S_STARTING", "state=%u",
+        ccb->control_protocol[PPP_CP_IPV6CP].state);
+
+    free_test_ppp_ccb(ccb);
+}
+
+/**
+ * Test 33: an exhausted IPV6CP negotiation becomes quiescent without
+ * changing IPv4 readiness or the main PPP phase.
+ */
+static void test_fsm_ipv6cp_timeout_quiescence(FastRG_t *fastrg_ccb)
+{
+    printf("\nTest 33: \"IPV6CP timeout is IPv4-independent and quiescent\"\n");
+    printf("=========================================\n\n");
+
+    ppp_ccb_t *ccb = create_test_ppp_ccb(fastrg_ccb, PPP_CP_IPV6CP, S_REQUEST_SENT);
+    struct rte_timer timer = {0};
+
+    ccb->phase = DATA_PHASE;
+    ccb->ipv6cp_up = TRUE;
+    ccb->config_request_pending[PPP_CP_IPV6CP] = TRUE;
+    ccb->identifier[PPP_CP_IPV6CP] = 9;
+    rte_atomic16_set(&ccb->dp_start_bool, 1);
+
+    PPP_FSM(&timer, ccb, E_TIMEOUT_COUNTER_EXPIRED);
+    ipv6cp_stop(ccb);
+
+    TEST_ASSERT(ccb->control_protocol[PPP_CP_IPV6CP].state == S_STOPPED &&
+        ccb->config_request_pending[PPP_CP_IPV6CP] == FALSE && ccb->ipv6cp_up == FALSE,
+        "IPV6CP timeout leaves no active negotiation",
+        "state=%u pending=%u up=%u", ccb->control_protocol[PPP_CP_IPV6CP].state,
+        ccb->config_request_pending[PPP_CP_IPV6CP], ccb->ipv6cp_up);
+    TEST_ASSERT(ccb->phase == DATA_PHASE && rte_atomic16_read(&ccb->dp_start_bool) == 1,
+        "IPV6CP timeout preserves IPv4 data-plane readiness",
+        "phase=%u dp=%d", ccb->phase, rte_atomic16_read(&ccb->dp_start_bool));
+    TEST_ASSERT(ccb->identifier[PPP_CP_IPV6CP] == 9,
+        "IPV6CP timeout does not generate another Configure-Request",
+        "identifier=%u", ccb->identifier[PPP_CP_IPV6CP]);
+
+    free_test_ppp_ccb(ccb);
+}
+
 // ============================================================================
 // Main test function
 // ============================================================================
@@ -766,6 +863,9 @@ void test_ppp_fsm(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_fsm_auth_rejected_lcp_up_skips_auth_phase(fastrg_ccb);
     test_fsm_peer_requires_auth_keeps_auth_phase(fastrg_ccb);
     test_fsm_phase_rollback_underflow_guard(fastrg_ccb);
+    test_fsm_ipv6cp_table_matches_ipcp(fastrg_ccb);
+    test_fsm_ipv6cp_kickoff(fastrg_ccb);
+    test_fsm_ipv6cp_timeout_quiescence(fastrg_ccb);
 
     printf("\n");
     printf("╔════════════════════════════════════════════════════════════╗\n");

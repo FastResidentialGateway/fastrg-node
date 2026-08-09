@@ -137,18 +137,19 @@ typedef struct {
     struct rte_ether_hdr  eth_hdr;
     vlan_header_t         vlan_header __rte_aligned(sizeof(vlan_header_t));
     pppoe_header_t        pppoe_header __rte_aligned(sizeof(vlan_header_t));
-    ppp_phase_t           ppp_phase[2];      /* store lcp and ipcp info, index 0 means lcp, index 1 means ipcp */
+    control_protocol_t    control_protocol[PPP_CP_COUNT]; /* per-control-protocol negotiation automata;
+                                                           * connection stage is stored in phase */
     pppoe_phase_t         pppoe_phase;       /* store pppoe info */
-    U8                    cp:1;              /* cp is "control protocol", means we need to determine cp is LCP or NCP after parsing packet */
-    U8                    phase:7;           /* pppoe connection phase */
+    U8                    cp_id;             /* current control protocol: PPP_CP_* */
+    U8                    phase;             /* pppoe connection phase */
     U16                   session_id;        /* pppoe session id */
     struct rte_ether_addr PPP_dst_mac;       /* pppoe server mac addr */
     U32                   hsi_ipv4;          /* ip addr pppoe server assign to pppoe client */
     U32                   hsi_ipv4_gw;       /* ip addr gateway pppoe server assign to pppoe client */
     U32                   hsi_primary_dns;   /* 1st dns addr pppoe server assign to pppoe client */
     U32                   hsi_secondary_dns; /* 2nd dns addr pppoe server assign to pppoe client */
-    U8                    identifier[2];     /* per-CP (LCP=0/IPCP=1) Configure-Request id; auth frames reuse [0] */
-    BOOL                  config_request_pending[2]; /* outstanding LCP/IPCP Configure-Request */
+    U8                    identifier[PPP_CP_COUNT]; /* per-CP Configure-Request id; auth frames reuse LCP [0] */
+    BOOL                  config_request_pending[PPP_CP_COUNT]; /* outstanding per-CP Configure-Request */
     U32                   magic_num;         /* ppp pkt magic number, in network order */
     U16                   mru;               /* MRU we propose in LCP Configure-Request, host order; 0 = default */
     BOOL                  lcp_auth_rejected; /* peer Configure-Rejected our authentication-protocol option */
@@ -193,7 +194,18 @@ typedef struct {
      * the PPP control plane when IPV6CP negotiation is implemented. The
      * 1-byte aligned store/load follows the same atomicity rule as conntrack. */
     volatile BOOL         ipv6_enabled;
+    struct rte_timer      ppp_ipv6cp;         /* IPV6CP retransmit timer */
+    U8                    ipv6cp_local_iid[8]; /* negotiated local interface identifier */
+    U8                    ipv6cp_peer_iid[8];  /* negotiated peer interface identifier */
+    /* IPv6 readiness is written by the control plane. The volatile access is
+     * reserved for the data-plane reader introduced with IPv6 forwarding. */
+    volatile BOOL         ipv6cp_up;
 }__rte_cache_aligned ppp_ccb_t;
+
+static inline struct rte_timer *ppp_cp_timer(ppp_ccb_t *ppp_ccb)
+{
+    return ppp_ccb->cp_id == PPP_CP_IPV6CP ? &ppp_ccb->ppp_ipv6cp : &ppp_ccb->ppp;
+}
 
 void   exit_ppp(ppp_ccb_t *ppp_ccb);
 
