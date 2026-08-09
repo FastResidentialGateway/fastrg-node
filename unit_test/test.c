@@ -157,6 +157,10 @@ int main()
     test_dhcpd(fastrg_ccb, &total_tests, &total_pass);
     puts("ok!");
 
+    puts("====================test dhcp6/dhcp6.c====================");
+    test_dhcp6(fastrg_ccb, &total_tests, &total_pass);
+    puts("ok!");
+
     puts("====================test utils.c====================");
     test_utils(fastrg_ccb, &total_tests, &total_pass);
     puts("ok!");
