@@ -354,6 +354,7 @@ int wan_ctrl_rx(void *arg)
                     ppp_payload->ppp_protocol == rte_cpu_to_be_16(CHAP_PROTOCOL) ||
                     ppp_payload->ppp_protocol == rte_cpu_to_be_16(IPCP_PROTOCOL) ||
                     ppp_payload->ppp_protocol == rte_cpu_to_be_16(MPLSCP_PROTOCOL) ||
+                    ppp_payload->ppp_protocol == rte_cpu_to_be_16(PPP_IPV6_PROTOCOL) ||
                     ppp_payload->ppp_protocol == rte_cpu_to_be_16(IPV6CP_PROTOCOL)))) {
                 /* Check whether ppp_bool is enabled */
                 if (unlikely(rte_atomic16_read(&ppp_ccb->ppp_bool) == 0)) {
@@ -1057,6 +1058,7 @@ int wan_dist_rx(void *arg)
                     ppp_payload->ppp_protocol == rte_cpu_to_be_16(CHAP_PROTOCOL) ||
                     ppp_payload->ppp_protocol == rte_cpu_to_be_16(IPCP_PROTOCOL) ||
                     ppp_payload->ppp_protocol == rte_cpu_to_be_16(MPLSCP_PROTOCOL) ||
+                    ppp_payload->ppp_protocol == rte_cpu_to_be_16(PPP_IPV6_PROTOCOL) ||
                     ppp_payload->ppp_protocol == rte_cpu_to_be_16(IPV6CP_PROTOCOL)))) {
                 if (unlikely(rte_atomic16_read(&ppp_ccb->ppp_bool) == 0)) {
                     drop_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);

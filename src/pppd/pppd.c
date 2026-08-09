@@ -28,6 +28,7 @@
 #include "../init.h"
 #include "../dp_flow.h"
 #include "../dhcpd/dhcpd.h"
+#include "../dhcp6/dhcp6.h"
 #include "../fastrg.h"
 #include "../utils.h"
 #include "../etcd_integration.h"
@@ -70,8 +71,10 @@ void PPP_bye(ppp_ccb_t *s_ppp_ccb)
 {
     rte_timer_stop(&(s_ppp_ccb->ppp));
     rte_timer_stop(&(s_ppp_ccb->ppp_ipv6cp));
+    rte_timer_stop(&(s_ppp_ccb->dhcp6_timer));
     rte_timer_stop(&(s_ppp_ccb->pppoe));
     rte_timer_stop(&(s_ppp_ccb->ppp_alive));
+    dhcp6_pd_stop(s_ppp_ccb);
     s_ppp_ccb->ipv6cp_up = FALSE;
     s_ppp_ccb->config_request_pending[PPP_CP_IPV6CP] = FALSE;
     rte_atomic16_cmpset((volatile uint16_t *)&s_ppp_ccb->dp_start_bool.cnt, (S16)1, (S16)0);
@@ -312,6 +315,7 @@ STATUS ppp_init_config_by_user(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb, U16 ccb
     rte_timer_init(&(ppp_ccb->pppoe));
     rte_timer_init(&(ppp_ccb->ppp));
     rte_timer_init(&(ppp_ccb->ppp_ipv6cp));
+    rte_timer_init(&(ppp_ccb->dhcp6_timer));
     rte_timer_init(&(ppp_ccb->ppp_alive));
     rte_atomic16_init(&ppp_ccb->dp_start_bool);
     rte_atomic16_init(&ppp_ccb->ppp_bool);
@@ -325,6 +329,7 @@ STATUS ppp_init_config_by_user(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb, U16 ccb
     memset(ppp_ccb->ipv6cp_local_iid, 0, sizeof(ppp_ccb->ipv6cp_local_iid));
     memset(ppp_ccb->ipv6cp_peer_iid, 0, sizeof(ppp_ccb->ipv6cp_peer_iid));
     ppp_ccb->ipv6cp_up = FALSE;
+    dhcp6_pd_stop(ppp_ccb);
 
     /* All elements below were preallocated by pppd_construct_ccb_elements()
      * at init; a (re)configuration only resets their logical content. No
@@ -596,8 +601,10 @@ void exit_ppp(ppp_ccb_t *ppp_ccb)
     rte_atomic16_cmpset((U16 *)&(ppp_ccb->ppp_bool.cnt), 1, 0);
     rte_timer_stop(&(ppp_ccb->ppp));
     rte_timer_stop(&(ppp_ccb->ppp_ipv6cp));
+    rte_timer_stop(&(ppp_ccb->dhcp6_timer));
     rte_timer_stop(&(ppp_ccb->pppoe));
     rte_timer_stop(&(ppp_ccb->ppp_alive));
+    dhcp6_pd_stop(ppp_ccb);
     ppp_ccb->phase = END_PHASE;
     ppp_ccb->control_protocol[PPP_CP_LCP].state = S_INIT;
     ppp_ccb->control_protocol[PPP_CP_IPCP].state = S_INIT;
@@ -657,6 +664,24 @@ STATUS ppp_process(FastRG_t *fastrg_ccb, U8 *pkt_data, U16 len)
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG, 
             "Invalid CCB ID %u in PPP processing", ccb_id);
         return ERROR;
+    }
+
+    U16 vlan_offset = sizeof(struct rte_ether_hdr);
+    U16 ppp_offset = vlan_offset + sizeof(vlan_header_t) +
+        sizeof(pppoe_header_t);
+    if (len >= ppp_offset + sizeof(ppp_payload_t)) {
+        vlan_header_t *vlan_hdr = (vlan_header_t *)(pkt_data + vlan_offset);
+        ppp_payload_t *ppp_payload = (ppp_payload_t *)(pkt_data + ppp_offset);
+
+        if (vlan_hdr->next_proto == rte_cpu_to_be_16(ETH_P_PPP_SES) &&
+                ppp_payload->ppp_protocol ==
+                    rte_cpu_to_be_16(PPP_IPV6_PROTOCOL)) {
+            U16 ipv6_offset = ppp_offset + sizeof(*ppp_payload);
+
+            dhcp6_wan_input(ppp_ccb, pkt_data + ipv6_offset,
+                len - ipv6_offset);
+            return SUCCESS;
+        }
     }
 
     ret = PPP_decode_frame(pkt_data, len, &event, ppp_ccb);
