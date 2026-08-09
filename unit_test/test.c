@@ -185,6 +185,10 @@ int main()
     test_northbound(fastrg_ccb, &total_tests, &total_pass);
     puts("ok!");
 
+    puts("====================test etcd_integration.c====================");
+    test_etcd_integration(fastrg_ccb, &total_tests, &total_pass);
+    puts("ok!");
+
     puts("====================test dnsd/dns_codec.c====================");
     test_dns_codec(fastrg_ccb, &total_tests, &total_pass);
     puts("ok!");
