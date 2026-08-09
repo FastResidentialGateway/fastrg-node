@@ -18,6 +18,11 @@
 #define IPCP_PHASE			0x4
 #define DATA_PHASE			0x5
 
+#define PPP_CP_LCP          0
+#define PPP_CP_IPCP         1
+#define PPP_CP_IPV6CP       2
+#define PPP_CP_COUNT        3
+
 #define END_OF_LIST 		0x0
 #define SERVICE_NAME 		0x0101
 #define AC_NAME 			0x0102
@@ -84,6 +89,9 @@
 #define PRIMARY_DNS			0x81
 #define SECONDARY_DNS		0x83
 
+/* define for IPV6CP options */
+#define IPV6CP_OPT_INTERFACE_ID 0x1
+
 #define MAX_RECV_UNIT		ETH_MTU - sizeof(pppoe_header_t) - sizeof(ppp_payload_t) - sizeof(vlan_header_t)
 #define MAX_RETRAN			10
 /* LCP keepalive: declare the peer dead after this many consecutive
@@ -139,7 +147,9 @@ typedef struct pppoe_phase {
     BOOL               active;
 }__rte_cache_aligned pppoe_phase_t;
 
-typedef struct ppp_phase {
+/* Per-control-protocol negotiation automaton. The PPPoE connection stage is
+ * tracked separately in ppp_ccb_t.phase. */
+typedef struct control_protocol {
     U16           state;
     U16           event;
     ppp_payload_t ppp_payload;
@@ -147,6 +157,6 @@ typedef struct ppp_phase {
     ppp_options_t *ppp_options;
     U8            max_retransmit;
     U8            timer_counter;
-}__rte_cache_aligned ppp_phase_t;
+}__rte_cache_aligned control_protocol_t;
 
 #endif

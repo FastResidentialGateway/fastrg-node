@@ -44,8 +44,8 @@ check_nak_rej_result_t check_ipcp_nak_rej(U8 flag, ppp_ccb_t *s_ppp_ccb, U16 ppp
 {
     FastRG_t *fastrg_ccb = s_ppp_ccb->fastrg_ccb;
     pppoe_header_t *pppoe_header = &(s_ppp_ccb->pppoe_header);
-    ppp_header_t *ppp_hdr = &(s_ppp_ccb->ppp_phase[1].ppp_hdr);
-    ppp_options_t *ppp_options = s_ppp_ccb->ppp_phase[1].ppp_options;
+    ppp_header_t *ppp_hdr = &(s_ppp_ccb->control_protocol[PPP_CP_IPCP].ppp_hdr);
+    ppp_options_t *ppp_options = s_ppp_ccb->control_protocol[PPP_CP_IPCP].ppp_options;
     ppp_options_t *tmp_buf = fastrg_malloc(ppp_options_t, PPP_MSG_BUF_LEN*sizeof(char), 0);
     ppp_options_t *tmp_cur = tmp_buf;
     int bool_flag = 0;
@@ -103,6 +103,84 @@ check_nak_rej_result_t check_ipcp_nak_rej(U8 flag, ppp_ccb_t *s_ppp_ccb, U16 ppp
     return CHECK_NAK_REJ_NO_ACTION;
 }
 
+static BOOL ipv6cp_iid_is_zero(const U8 iid[8])
+{
+    static const U8 zero_iid[8] = {0};
+
+    return memcmp(iid, zero_iid, sizeof(zero_iid)) == 0;
+}
+
+static check_nak_rej_result_t check_ipv6cp_nak_rej(U8 flag,
+    ppp_ccb_t *s_ppp_ccb, U16 ppp_hdr_len)
+{
+    FastRG_t *fastrg_ccb = s_ppp_ccb->fastrg_ccb;
+    pppoe_header_t *pppoe_header = &s_ppp_ccb->pppoe_header;
+    ppp_header_t *ppp_hdr = &s_ppp_ccb->control_protocol[PPP_CP_IPV6CP].ppp_hdr;
+    ppp_options_t *ppp_options = s_ppp_ccb->control_protocol[PPP_CP_IPV6CP].ppp_options;
+    U8 tmp_buf[PPP_MSG_BUF_LEN] = {0};
+    U8 *tmp_cur = tmp_buf;
+    U16 opt_total = sizeof(ppp_header_t);
+    BOOL need_response = FALSE;
+
+    if (ppp_hdr_len < sizeof(ppp_header_t) ||
+            ppp_hdr_len - sizeof(ppp_header_t) > sizeof(tmp_buf))
+        return CHECK_NAK_REJ_ERROR;
+
+    ppp_hdr->length = sizeof(ppp_header_t);
+    for(ppp_options_t *cur=ppp_options; opt_total<ppp_hdr_len;
+            cur=(ppp_options_t *)((U8 *)cur + cur->length)) {
+        U16 remaining = ppp_hdr_len - opt_total;
+
+        if (remaining < sizeof(ppp_options_t) || cur->length < sizeof(ppp_options_t) ||
+                cur->length > remaining) {
+            FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+                "User %" PRIu16 " recv IPV6CP option with invalid length.",
+                s_ppp_ccb->user_num);
+            return CHECK_NAK_REJ_ERROR;
+        }
+        if (cur->type == IPV6CP_OPT_INTERFACE_ID &&
+                cur->length != sizeof(ppp_options_t) + sizeof(s_ppp_ccb->ipv6cp_peer_iid)) {
+            FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+                "User %" PRIu16 " recv IPV6CP Interface-Identifier with invalid length %u.",
+                s_ppp_ccb->user_num, cur->length);
+            return CHECK_NAK_REJ_ERROR;
+        }
+
+        if (flag == CONFIG_NAK && cur->type == IPV6CP_OPT_INTERFACE_ID &&
+                (ipv6cp_iid_is_zero(cur->val) ||
+                 memcmp(cur->val, s_ppp_ccb->ipv6cp_local_iid,
+                     sizeof(s_ppp_ccb->ipv6cp_local_iid)) == 0)) {
+            U8 suggested_iid[sizeof(s_ppp_ccb->ipv6cp_local_iid)];
+
+            rte_memcpy(suggested_iid, s_ppp_ccb->ipv6cp_local_iid,
+                sizeof(suggested_iid));
+            suggested_iid[sizeof(suggested_iid) - 1]++;
+            rte_memcpy(tmp_cur, cur, cur->length);
+            rte_memcpy(((ppp_options_t *)tmp_cur)->val, suggested_iid,
+                sizeof(suggested_iid));
+            tmp_cur += cur->length;
+            ppp_hdr->length += cur->length;
+            need_response = TRUE;
+        } else if (flag == CONFIG_REJECT &&
+                cur->type != IPV6CP_OPT_INTERFACE_ID) {
+            rte_memcpy(tmp_cur, cur, cur->length);
+            tmp_cur += cur->length;
+            ppp_hdr->length += cur->length;
+            need_response = TRUE;
+        }
+        opt_total += cur->length;
+    }
+
+    if (need_response == FALSE)
+        return CHECK_NAK_REJ_NO_ACTION;
+
+    rte_memcpy(ppp_options, tmp_buf, ppp_hdr->length - sizeof(ppp_header_t));
+    pppoe_header->length = rte_cpu_to_be_16(ppp_hdr->length + sizeof(ppp_payload_t));
+    ppp_hdr->length = rte_cpu_to_be_16(ppp_hdr->length);
+    ppp_hdr->code = flag;
+    return CHECK_NAK_REJ_SEND_RESPONSE;
+}
+
 /**
  * @fn check_lcp_nak_rej
  *
@@ -121,8 +199,8 @@ check_nak_rej_result_t check_lcp_nak_rej(U8 flag, ppp_ccb_t *s_ppp_ccb, U16 ppp_
 {
     FastRG_t       *fastrg_ccb = s_ppp_ccb->fastrg_ccb;
     pppoe_header_t *pppoe_header = &(s_ppp_ccb->pppoe_header);
-    ppp_header_t   *ppp_hdr = &(s_ppp_ccb->ppp_phase[0].ppp_hdr);
-    ppp_options_t  *ppp_options = s_ppp_ccb->ppp_phase[0].ppp_options;
+    ppp_header_t   *ppp_hdr = &(s_ppp_ccb->control_protocol[PPP_CP_LCP].ppp_hdr);
+    ppp_options_t  *ppp_options = s_ppp_ccb->control_protocol[PPP_CP_LCP].ppp_options;
     ppp_options_t  *tmp_buf = fastrg_malloc(ppp_options_t, PPP_MSG_BUF_LEN, 0);
     ppp_options_t  *tmp_cur = tmp_buf;
     BOOL           need_res_nak_reject = FALSE;
@@ -211,8 +289,8 @@ check_nak_rej_result_t check_lcp_nak_rej(U8 flag, ppp_ccb_t *s_ppp_ccb, U16 ppp_
 STATUS decode_lcp(U16 ppp_hdr_len, U16 *event, struct rte_timer *tim, ppp_ccb_t *s_ppp_ccb)
 {
     FastRG_t      *fastrg_ccb = s_ppp_ccb->fastrg_ccb;
-    ppp_header_t  *ppp_hdr = &(s_ppp_ccb->ppp_phase[0].ppp_hdr);
-    ppp_options_t *ppp_options = s_ppp_ccb->ppp_phase[0].ppp_options;
+    ppp_header_t  *ppp_hdr = &(s_ppp_ccb->control_protocol[PPP_CP_LCP].ppp_hdr);
+    ppp_options_t *ppp_options = s_ppp_ccb->control_protocol[PPP_CP_LCP].ppp_options;
 
     /* Any LCP frame from the peer proves it is alive — reset the keepalive miss
      * counter so the periodic Echo-Request probe does not tear the session down. */
@@ -383,6 +461,20 @@ STATUS decode_lcp(U16 ppp_hdr_len, U16 *event, struct rte_timer *tim, ppp_ccb_t 
             *event = E_RECV_GOOD_CODE_PROTOCOL_REJECT;
             return SUCCESS;
         case PROTO_REJECT:
+            if (ppp_hdr_len >= sizeof(ppp_header_t) + sizeof(U16)) {
+                U16 rejected_protocol;
+
+                rte_memcpy(&rejected_protocol, ppp_options, sizeof(rejected_protocol));
+                if (rte_be_to_cpu_16(rejected_protocol) == IPV6CP_PROTOCOL) {
+                    ipv6cp_stop(s_ppp_ccb);
+                    *event = E_RECV_GOOD_CODE_PROTOCOL_REJECT;
+                    FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+                        "User %" PRIu16
+                        " peer does not support IPV6CP; continuing IPv4-only.",
+                        s_ppp_ccb->user_num);
+                    return SUCCESS;
+                }
+            }
             *event = E_RECV_BAD_CODE_PROTOCOL_REJECT;
             return SUCCESS;
         case ECHO_REQUEST:
@@ -408,8 +500,8 @@ STATUS decode_lcp(U16 ppp_hdr_len, U16 *event, struct rte_timer *tim, ppp_ccb_t 
 STATUS decode_ipcp(U16 ppp_hdr_len, U16 *event, struct rte_timer *tim, ppp_ccb_t *s_ppp_ccb)
 {
     FastRG_t      *fastrg_ccb = s_ppp_ccb->fastrg_ccb;
-    ppp_header_t  *ppp_hdr = &(s_ppp_ccb->ppp_phase[1].ppp_hdr);
-    ppp_options_t *ppp_options = s_ppp_ccb->ppp_phase[1].ppp_options;
+    ppp_header_t  *ppp_hdr = &(s_ppp_ccb->control_protocol[PPP_CP_IPCP].ppp_hdr);
+    ppp_options_t *ppp_options = s_ppp_ccb->control_protocol[PPP_CP_IPCP].ppp_options;
 
     /* Any IPCP frame from the peer also proves liveness — reset the keepalive
      * miss counter. */
@@ -603,6 +695,159 @@ STATUS decode_ipcp(U16 ppp_hdr_len, U16 *event, struct rte_timer *tim, ppp_ccb_t
     return SUCCESS;
 }
 
+STATUS decode_ipv6cp(U16 ppp_hdr_len, U16 *event, struct rte_timer *tim,
+    ppp_ccb_t *s_ppp_ccb)
+{
+    FastRG_t *fastrg_ccb = s_ppp_ccb->fastrg_ccb;
+    ppp_header_t *ppp_hdr = &s_ppp_ccb->control_protocol[PPP_CP_IPV6CP].ppp_hdr;
+    ppp_options_t *ppp_options = s_ppp_ccb->control_protocol[PPP_CP_IPV6CP].ppp_options;
+    U16 opt_total;
+
+    s_ppp_ccb->echo_miss_count = 0;
+
+    switch (ppp_hdr->code) {
+        case CONFIG_REQUEST:
+            switch (check_ipv6cp_nak_rej(CONFIG_NAK, s_ppp_ccb, ppp_hdr_len)) {
+                case CHECK_NAK_REJ_ERROR:
+                    return ERROR;
+                case CHECK_NAK_REJ_SEND_RESPONSE:
+                    *event = E_RECV_BAD_CONFIG_REQUEST;
+                    return SUCCESS;
+                default:
+                    ;
+            }
+            switch (check_ipv6cp_nak_rej(CONFIG_REJECT, s_ppp_ccb, ppp_hdr_len)) {
+                case CHECK_NAK_REJ_ERROR:
+                    return ERROR;
+                case CHECK_NAK_REJ_SEND_RESPONSE:
+                    *event = E_RECV_BAD_CONFIG_REQUEST;
+                    return SUCCESS;
+                default:
+                    ;
+            }
+
+            opt_total = sizeof(ppp_header_t);
+            for(ppp_options_t *cur=ppp_options; opt_total<ppp_hdr_len;
+                    cur=(ppp_options_t *)((U8 *)cur + cur->length)) {
+                if (cur->type == IPV6CP_OPT_INTERFACE_ID)
+                    rte_memcpy(s_ppp_ccb->ipv6cp_peer_iid, cur->val,
+                        sizeof(s_ppp_ccb->ipv6cp_peer_iid));
+                opt_total += cur->length;
+            }
+            *event = E_RECV_GOOD_CONFIG_REQUEST;
+            ppp_hdr->length = rte_cpu_to_be_16(ppp_hdr_len);
+            return SUCCESS;
+
+        case CONFIG_ACK:
+            if (s_ppp_ccb->config_request_pending[PPP_CP_IPV6CP] == FALSE ||
+                    ppp_hdr->identifier != s_ppp_ccb->identifier[PPP_CP_IPV6CP]) {
+                FastRG_LOG(DBG, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+                    "User %" PRIu16
+                    " dropped unmatched IPV6CP Configure-Ack id %u (pending %u, expected %u).",
+                    s_ppp_ccb->user_num, ppp_hdr->identifier,
+                    s_ppp_ccb->config_request_pending[PPP_CP_IPV6CP], s_ppp_ccb->identifier[PPP_CP_IPV6CP]);
+                return ERROR;
+            }
+            opt_total = sizeof(ppp_header_t);
+            for(ppp_options_t *cur=ppp_options; opt_total<ppp_hdr_len;
+                    cur=(ppp_options_t *)((U8 *)cur + cur->length)) {
+                U16 remaining = ppp_hdr_len - opt_total;
+                if (remaining < sizeof(ppp_options_t) || cur->length < sizeof(ppp_options_t) ||
+                        cur->length > remaining ||
+                        (cur->type == IPV6CP_OPT_INTERFACE_ID &&
+                         cur->length != sizeof(ppp_options_t) +
+                             sizeof(s_ppp_ccb->ipv6cp_local_iid)))
+                    return ERROR;
+                opt_total += cur->length;
+            }
+            s_ppp_ccb->config_request_pending[PPP_CP_IPV6CP] = FALSE;
+            rte_timer_stop(tim);
+            *event = E_RECV_CONFIG_ACK;
+            return SUCCESS;
+
+        case CONFIG_NAK:
+            if (s_ppp_ccb->config_request_pending[PPP_CP_IPV6CP] == FALSE ||
+                    ppp_hdr->identifier != s_ppp_ccb->identifier[PPP_CP_IPV6CP]) {
+                FastRG_LOG(DBG, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+                    "User %" PRIu16
+                    " dropped unmatched IPV6CP Configure-Nak id %u (pending %u, expected %u).",
+                    s_ppp_ccb->user_num, ppp_hdr->identifier,
+                    s_ppp_ccb->config_request_pending[PPP_CP_IPV6CP], s_ppp_ccb->identifier[PPP_CP_IPV6CP]);
+                return ERROR;
+            }
+            opt_total = sizeof(ppp_header_t);
+            for(ppp_options_t *cur=ppp_options; opt_total<ppp_hdr_len;
+                    cur=(ppp_options_t *)((U8 *)cur + cur->length)) {
+                U16 remaining = ppp_hdr_len - opt_total;
+                if (remaining < sizeof(ppp_options_t) || cur->length < sizeof(ppp_options_t) ||
+                        cur->length > remaining ||
+                        (cur->type == IPV6CP_OPT_INTERFACE_ID &&
+                         cur->length != sizeof(ppp_options_t) +
+                             sizeof(s_ppp_ccb->ipv6cp_local_iid)))
+                    return ERROR;
+                if (cur->type == IPV6CP_OPT_INTERFACE_ID)
+                    rte_memcpy(s_ppp_ccb->ipv6cp_local_iid, cur->val,
+                        sizeof(s_ppp_ccb->ipv6cp_local_iid));
+                opt_total += cur->length;
+            }
+            s_ppp_ccb->config_request_pending[PPP_CP_IPV6CP] = FALSE;
+            *event = E_RECV_CONFIG_NAK_REJ;
+            return SUCCESS;
+
+        case CONFIG_REJECT:
+            if (s_ppp_ccb->config_request_pending[PPP_CP_IPV6CP] == FALSE ||
+                    ppp_hdr->identifier != s_ppp_ccb->identifier[PPP_CP_IPV6CP]) {
+                FastRG_LOG(DBG, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+                    "User %" PRIu16
+                    " dropped unmatched IPV6CP Configure-Reject id %u (pending %u, expected %u).",
+                    s_ppp_ccb->user_num, ppp_hdr->identifier,
+                    s_ppp_ccb->config_request_pending[PPP_CP_IPV6CP], s_ppp_ccb->identifier[PPP_CP_IPV6CP]);
+                return ERROR;
+            }
+            opt_total = sizeof(ppp_header_t);
+            while (opt_total < ppp_hdr_len) {
+                ppp_options_t *cur = (ppp_options_t *)((U8 *)ppp_options +
+                    opt_total - sizeof(ppp_header_t));
+                U16 remaining = ppp_hdr_len - opt_total;
+
+                if (remaining < sizeof(ppp_options_t) || cur->length < sizeof(ppp_options_t) ||
+                        cur->length > remaining ||
+                        (cur->type == IPV6CP_OPT_INTERFACE_ID &&
+                         cur->length != sizeof(ppp_options_t) +
+                             sizeof(s_ppp_ccb->ipv6cp_local_iid)))
+                    return ERROR;
+                if (cur->type == IPV6CP_OPT_INTERFACE_ID) {
+                    s_ppp_ccb->config_request_pending[PPP_CP_IPV6CP] = FALSE;
+                    FastRG_LOG(WARN, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+                        "User %" PRIu16
+                        " peer rejected IPV6CP Interface-Identifier; continuing IPv4-only.",
+                        s_ppp_ccb->user_num);
+                    s_ppp_ccb->cp_id = PPP_CP_IPV6CP;
+                    PPP_FSM(tim, s_ppp_ccb, E_CLOSE);
+                    return ERROR;
+                }
+                opt_total += cur->length;
+            }
+            s_ppp_ccb->config_request_pending[PPP_CP_IPV6CP] = FALSE;
+            *event = E_RECV_CONFIG_NAK_REJ;
+            return SUCCESS;
+
+        case TERMIN_REQUEST:
+            *event = E_RECV_TERMINATE_REQUEST;
+            return SUCCESS;
+        case TERMIN_ACK:
+            rte_timer_stop(tim);
+            *event = E_RECV_TERMINATE_ACK;
+            return SUCCESS;
+        case CODE_REJECT:
+            *event = E_RECV_GOOD_CODE_PROTOCOL_REJECT;
+            return SUCCESS;
+        default:
+            *event = E_RECV_UNKNOWN_CODE;
+            return SUCCESS;
+    }
+}
+
 STATUS build_padi(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb)
 {
     FastRG_t             *fastrg_ccb = s_ppp_ccb->fastrg_ccb;
@@ -726,6 +971,23 @@ void build_padt(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb)
     *mulen = sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) + sizeof(pppoe_header_t);
 }
 
+void ppp_ipv6cp_iid_init(ppp_ccb_t *s_ppp_ccb)
+{
+    const U8 *mac = s_ppp_ccb->fastrg_ccb->nic_info.hsi_wan_src_mac.addr_bytes;
+
+    if (ipv6cp_iid_is_zero(s_ppp_ccb->ipv6cp_local_iid) == FALSE)
+        return;
+
+    s_ppp_ccb->ipv6cp_local_iid[0] = mac[0] ^ 0x02;
+    s_ppp_ccb->ipv6cp_local_iid[1] = mac[1];
+    s_ppp_ccb->ipv6cp_local_iid[2] = mac[2];
+    s_ppp_ccb->ipv6cp_local_iid[3] = 0xff;
+    s_ppp_ccb->ipv6cp_local_iid[4] = 0xfe;
+    s_ppp_ccb->ipv6cp_local_iid[5] = mac[3];
+    s_ppp_ccb->ipv6cp_local_iid[6] = mac[4];
+    s_ppp_ccb->ipv6cp_local_iid[7] = mac[5];
+}
+
 void build_config_request(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb)
 {
     FastRG_t             *fastrg_ccb = s_ppp_ccb->fastrg_ccb;
@@ -753,14 +1015,14 @@ void build_config_request(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb)
     pppoe_header->session_id = s_ppp_ccb->session_id; 
 
     ppp_hdr->code = CONFIG_REQUEST;
-    s_ppp_ccb->identifier[s_ppp_ccb->cp] = (s_ppp_ccb->identifier[s_ppp_ccb->cp] % UINT8_MAX) + 1;
-    ppp_hdr->identifier = s_ppp_ccb->identifier[s_ppp_ccb->cp];
-    s_ppp_ccb->config_request_pending[s_ppp_ccb->cp] = TRUE;
+    s_ppp_ccb->identifier[s_ppp_ccb->cp_id] = (s_ppp_ccb->identifier[s_ppp_ccb->cp_id] % UINT8_MAX) + 1;
+    ppp_hdr->identifier = s_ppp_ccb->identifier[s_ppp_ccb->cp_id];
+    s_ppp_ccb->config_request_pending[s_ppp_ccb->cp_id] = TRUE;
 
     pppoe_header->length = sizeof(ppp_header_t) + sizeof(ppp_payload->ppp_protocol);
     ppp_hdr->length = sizeof(ppp_header_t);
 
-    if (s_ppp_ccb->cp == 1) {
+    if (s_ppp_ccb->cp_id == PPP_CP_IPCP) {
         ppp_payload->ppp_protocol = rte_cpu_to_be_16(IPCP_PROTOCOL);
         ppp_options->type = IP_ADDRESS;
         U8 total_opt_len = 0;
@@ -784,7 +1046,15 @@ void build_config_request(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb)
 
         pppoe_header->length += total_opt_len;
         ppp_hdr->length += total_opt_len;
-    } else if (s_ppp_ccb->cp == 0) {
+    } else if (s_ppp_ccb->cp_id == PPP_CP_IPV6CP) {
+        ppp_payload->ppp_protocol = rte_cpu_to_be_16(IPV6CP_PROTOCOL);
+        ppp_options->type = IPV6CP_OPT_INTERFACE_ID;
+        ppp_options->length = sizeof(ppp_options_t) + sizeof(s_ppp_ccb->ipv6cp_local_iid);
+        rte_memcpy(ppp_options->val, s_ppp_ccb->ipv6cp_local_iid,
+            sizeof(s_ppp_ccb->ipv6cp_local_iid));
+        pppoe_header->length += ppp_options->length;
+        ppp_hdr->length += ppp_options->length;
+    } else if (s_ppp_ccb->cp_id == PPP_CP_LCP) {
         ppp_payload->ppp_protocol = rte_cpu_to_be_16(LCP_PROTOCOL);
         ppp_options_t *cur = ppp_options;
         /* option, auth — ask the peer to authenticate itself; dropped for the
@@ -851,7 +1121,7 @@ void build_config_ack(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb)
     ppp_payload_t        *ppp_payload = (ppp_payload_t *)(pppoe_header + 1);
     ppp_header_t         *ppp_hdr = (ppp_header_t *)(ppp_payload + 1);
     ppp_options_t        *ppp_options = (ppp_options_t *)(ppp_hdr + 1);
-    U16                  ppp_hdr_total = rte_be_to_cpu_16(s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].ppp_hdr.length);
+    U16                  ppp_hdr_total = rte_be_to_cpu_16(s_ppp_ccb->control_protocol[s_ppp_ccb->cp_id].ppp_hdr.length);
     U16                  frame_len = rte_be_to_cpu_16(s_ppp_ccb->pppoe_header.length) +
                                      sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) + sizeof(pppoe_header_t);
     U16                  ppp_opt_len;
@@ -873,11 +1143,11 @@ void build_config_ack(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb)
 
     *vlan_header = s_ppp_ccb->vlan_header;
     *pppoe_header = s_ppp_ccb->pppoe_header;
-    *ppp_payload = s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].ppp_payload;
-    *ppp_hdr = s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].ppp_hdr;
+    *ppp_payload = s_ppp_ccb->control_protocol[s_ppp_ccb->cp_id].ppp_payload;
+    *ppp_hdr = s_ppp_ccb->control_protocol[s_ppp_ccb->cp_id].ppp_hdr;
     ppp_hdr->code = CONFIG_ACK;
 
-    rte_memcpy(ppp_options, s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].ppp_options, ppp_opt_len);
+    rte_memcpy(ppp_options, s_ppp_ccb->control_protocol[s_ppp_ccb->cp_id].ppp_options, ppp_opt_len);
 
     *mulen = frame_len;
 
@@ -891,7 +1161,7 @@ void build_config_nak_rej(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb)
     vlan_header_t        *vlan_header = (vlan_header_t *)(eth_hdr + 1);
     pppoe_header_t       *pppoe_header = (pppoe_header_t *)(vlan_header + 1);
     ppp_payload_t        *ppp_payload = (ppp_payload_t *)(pppoe_header + 1);
-    U16                  ppp_hdr_total = rte_be_to_cpu_16(s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].ppp_hdr.length);
+    U16                  ppp_hdr_total = rte_be_to_cpu_16(s_ppp_ccb->control_protocol[s_ppp_ccb->cp_id].ppp_hdr.length);
     U16                  frame_len = rte_be_to_cpu_16(s_ppp_ccb->pppoe_header.length) +
                                      sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) + sizeof(pppoe_header_t);
     U16                  ppp_opt_len;
@@ -915,10 +1185,10 @@ void build_config_nak_rej(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb)
 
     *vlan_header = s_ppp_ccb->vlan_header;
     *pppoe_header = s_ppp_ccb->pppoe_header;
-    *ppp_payload = s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].ppp_payload;
-    *ppp_hdr = s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].ppp_hdr;
+    *ppp_payload = s_ppp_ccb->control_protocol[s_ppp_ccb->cp_id].ppp_payload;
+    *ppp_hdr = s_ppp_ccb->control_protocol[s_ppp_ccb->cp_id].ppp_hdr;
 
-    rte_memcpy(ppp_options, s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].ppp_options, ppp_opt_len);
+    rte_memcpy(ppp_options, s_ppp_ccb->control_protocol[s_ppp_ccb->cp_id].ppp_options, ppp_opt_len);
 
     *mulen = frame_len;
 
@@ -934,7 +1204,7 @@ void build_echo_reply(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb)
     ppp_payload_t        *ppp_payload = (ppp_payload_t *)(pppoe_header + 1);
     ppp_header_t         *ppp_hdr = (ppp_header_t *)(ppp_payload + 1);
     U8 *magic_num = (U8 *)(ppp_hdr + 1);
-    U8 ppp_opt_len = rte_be_to_cpu_16(s_ppp_ccb->ppp_phase[0].ppp_hdr.length) - sizeof(ppp_header_t);
+    U8 ppp_opt_len = rte_be_to_cpu_16(s_ppp_ccb->control_protocol[PPP_CP_LCP].ppp_hdr.length) - sizeof(ppp_header_t);
 
     rte_ether_addr_copy(&fastrg_ccb->nic_info.hsi_wan_src_mac, &eth_hdr->src_addr);
     rte_ether_addr_copy(&s_ppp_ccb->PPP_dst_mac, &eth_hdr->dst_addr);
@@ -942,8 +1212,8 @@ void build_echo_reply(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb)
 
     *vlan_header = s_ppp_ccb->vlan_header;
     *pppoe_header = s_ppp_ccb->pppoe_header;
-    *ppp_payload = s_ppp_ccb->ppp_phase[0].ppp_payload;
-    *ppp_hdr = s_ppp_ccb->ppp_phase[0].ppp_hdr;
+    *ppp_payload = s_ppp_ccb->control_protocol[PPP_CP_LCP].ppp_payload;
+    *ppp_hdr = s_ppp_ccb->control_protocol[PPP_CP_LCP].ppp_hdr;
 
     ppp_hdr->code = ECHO_REPLY;
     ppp_hdr->length = sizeof(ppp_header_t);
@@ -957,7 +1227,7 @@ void build_echo_reply(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb)
     ppp_opt_len -= sizeof(s_ppp_ccb->magic_num);
     if (ppp_opt_len == sizeof(U32)/* echo requester's nmagic number */) {
         magic_num += sizeof(s_ppp_ccb->magic_num);
-        *(U32 *)magic_num = *(U32 *)s_ppp_ccb->ppp_phase[0].ppp_options;
+        *(U32 *)magic_num = *(U32 *)s_ppp_ccb->control_protocol[PPP_CP_LCP].ppp_options;
         ppp_hdr->length += ppp_opt_len;
         pppoe_header->length += ppp_opt_len;
     }
@@ -1023,8 +1293,8 @@ void build_terminate_ack(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb)
 
     *vlan_header = s_ppp_ccb->vlan_header;
     *pppoe_header = s_ppp_ccb->pppoe_header;
-    *ppp_payload = s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].ppp_payload;
-    *ppp_hdr = s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].ppp_hdr;
+    *ppp_payload = s_ppp_ccb->control_protocol[s_ppp_ccb->cp_id].ppp_payload;
+    *ppp_hdr = s_ppp_ccb->control_protocol[s_ppp_ccb->cp_id].ppp_hdr;
 
     ppp_hdr->code = TERMIN_ACK;
     ppp_hdr->length = rte_cpu_to_be_16(sizeof(ppp_header_t));
@@ -1061,10 +1331,12 @@ void build_terminate_request(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb)
     /* We don't convert seesion id to little endian at first */
     pppoe_header->session_id = s_ppp_ccb->session_id;
 
-    if (s_ppp_ccb->cp == 0) 
+    if (s_ppp_ccb->cp_id == PPP_CP_LCP)
         ppp_payload->ppp_protocol = rte_cpu_to_be_16(LCP_PROTOCOL);
-    else if (s_ppp_ccb->cp == 1)
+    else if (s_ppp_ccb->cp_id == PPP_CP_IPCP)
         ppp_payload->ppp_protocol = rte_cpu_to_be_16(IPCP_PROTOCOL);
+    else if (s_ppp_ccb->cp_id == PPP_CP_IPV6CP)
+        ppp_payload->ppp_protocol = rte_cpu_to_be_16(IPV6CP_PROTOCOL);
 
     ppp_hdr->code = TERMIN_REQUEST;
     ppp_hdr->identifier = ((rand() % 254) + 1);
@@ -1087,8 +1359,8 @@ STATUS build_code_reject(unsigned char *buffer, ppp_ccb_t *s_ppp_ccb, U16 *mulen
     ppp_payload_t        *ppp_payload  = (ppp_payload_t *)(pppoe_header + 1);
     ppp_header_t         *ppp_hdr      = (ppp_header_t *)(ppp_payload + 1);
     U8                   *rej_pkt      = (U8 *)(ppp_hdr + 1);
-    ppp_header_t         *rejected_hdr = &s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].ppp_hdr;
-    ppp_options_t        *rejected_opt = s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].ppp_options;
+    ppp_header_t         *rejected_hdr = &s_ppp_ccb->control_protocol[s_ppp_ccb->cp_id].ppp_hdr;
+    ppp_options_t        *rejected_opt = s_ppp_ccb->control_protocol[s_ppp_ccb->cp_id].ppp_options;
     U16                   rejected_len = rte_be_to_cpu_16(rejected_hdr->length);
 
     if (rejected_len < sizeof(ppp_header_t)) {
@@ -1114,7 +1386,8 @@ STATUS build_code_reject(unsigned char *buffer, ppp_ccb_t *s_ppp_ccb, U16 *mulen
     pppoe_header->session_id = s_ppp_ccb->session_id;
 
     /* Code-Reject rides on the protocol whose Code field was unknown. */
-    ppp_payload->ppp_protocol = rte_cpu_to_be_16(s_ppp_ccb->cp == 1 ? IPCP_PROTOCOL : LCP_PROTOCOL);
+    ppp_payload->ppp_protocol = rte_cpu_to_be_16(s_ppp_ccb->cp_id == PPP_CP_IPV6CP ? IPV6CP_PROTOCOL :
+        (s_ppp_ccb->cp_id == PPP_CP_IPCP ? IPCP_PROTOCOL : LCP_PROTOCOL));
     ppp_hdr->code             = CODE_REJECT;
     ppp_hdr->identifier       = ((rand() % 254) + 1);
 
@@ -1335,7 +1608,7 @@ void build_auth_response_chap(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb, ppp_
     ppp_len = (U16)(sizeof(ppp_header_t) + sizeof(U8) + sizeof(chap_hash) + name_len);
 
     MD5Init(&context);
-    MD5Update(&context, &s_ppp_ccb->ppp_phase[0].ppp_hdr.identifier, 1);
+    MD5Update(&context, &s_ppp_ccb->control_protocol[PPP_CP_LCP].ppp_hdr.identifier, 1);
     MD5Update(&context, s_ppp_ccb->ppp_passwd, strlen((const char *)s_ppp_ccb->ppp_passwd));
     MD5Update(&context, ppp_chap_data->val, ppp_chap_data->val_size);
     MD5Final(chap_hash, &context);
@@ -1347,9 +1620,9 @@ void build_auth_response_chap(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb, ppp_
     *eth_hdr = s_ppp_ccb->eth_hdr;
     *vlan_header = s_ppp_ccb->vlan_header;
     *pppoe_header = s_ppp_ccb->pppoe_header;
-    *ppp_payload = s_ppp_ccb->ppp_phase[0].ppp_payload;
+    *ppp_payload = s_ppp_ccb->control_protocol[PPP_CP_LCP].ppp_payload;
     ppp_payload->ppp_protocol = rte_cpu_to_be_16(CHAP_PROTOCOL);
-    *ppp_hdr = s_ppp_ccb->ppp_phase[0].ppp_hdr;
+    *ppp_hdr = s_ppp_ccb->control_protocol[PPP_CP_LCP].ppp_hdr;
     ppp_hdr->code = CHAP_RESPONSE;
     ppp_hdr->length = rte_cpu_to_be_16(ppp_len);
     pppoe_header->length = rte_cpu_to_be_16(sizeof(ppp_payload_t) + ppp_len);
@@ -1439,8 +1712,8 @@ int check_auth_result(ppp_ccb_t *s_ppp_ccb)
     if (s_ppp_ccb->phase != AUTH_PHASE)
         return 0;
 
-    U16 ppp_protocol = s_ppp_ccb->ppp_phase[0].ppp_payload.ppp_protocol;
-    U8 ppp_hdr_code = s_ppp_ccb->ppp_phase[0].ppp_hdr.code;
+    U16 ppp_protocol = s_ppp_ccb->control_protocol[PPP_CP_LCP].ppp_payload.ppp_protocol;
+    U8 ppp_hdr_code = s_ppp_ccb->control_protocol[PPP_CP_LCP].ppp_hdr.code;
     if (ppp_protocol == rte_cpu_to_be_16(PAP_PROTOCOL) || ppp_protocol == rte_cpu_to_be_16(CHAP_PROTOCOL)) {
         BOOL auth_failed = (ppp_protocol == rte_cpu_to_be_16(PAP_PROTOCOL) && ppp_hdr_code == PAP_NAK) ||
             (ppp_protocol == rte_cpu_to_be_16(CHAP_PROTOCOL) && ppp_hdr_code == CHAP_FAILURE);
@@ -1450,13 +1723,18 @@ int check_auth_result(ppp_ccb_t *s_ppp_ccb)
         if (auth_failed == TRUE) {
             FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 
                 "received auth info error and start closing connection.", s_ppp_ccb->user_num);
-            s_ppp_ccb->cp = 0;
+            s_ppp_ccb->cp_id = PPP_CP_LCP;
             PPP_FSM(&s_ppp_ccb->ppp, s_ppp_ccb, E_CLOSE);
             return 1;
         } else if (auth_succeeded == TRUE) {
-            s_ppp_ccb->cp = 1;
+            s_ppp_ccb->cp_id = PPP_CP_IPCP;
             s_ppp_ccb->phase = IPCP_PHASE;
             PPP_FSM(&s_ppp_ccb->ppp, s_ppp_ccb, E_OPEN);
+            if (s_ppp_ccb->ipv6_enabled == TRUE) {
+                ppp_ipv6cp_iid_init(s_ppp_ccb);
+                s_ppp_ccb->cp_id = PPP_CP_IPV6CP;
+                PPP_FSM(&s_ppp_ccb->ppp_ipv6cp, s_ppp_ccb, E_OPEN);
+            }
             return 1;
         }
     }
@@ -1494,7 +1772,7 @@ STATUS decode_pppoe(pppoe_header_tag_t *pppoe_header_tag, ppp_ccb_t *s_ppp_ccb)
     case PADS:
         rte_timer_stop(&(s_ppp_ccb->pppoe));
         s_ppp_ccb->session_id = s_ppp_ccb->pppoe_header.session_id;
-        s_ppp_ccb->cp = 0;
+        s_ppp_ccb->cp_id = PPP_CP_LCP;
         PPP_FSM(&(s_ppp_ccb->ppp), s_ppp_ccb, E_OPEN);
         return SUCCESS;
     case PADT:
@@ -1506,8 +1784,9 @@ STATUS decode_pppoe(pppoe_header_tag_t *pppoe_header_tag, ppp_ccb_t *s_ppp_ccb)
         FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "Session 0x%x connection disconnected.", rte_be_to_cpu_16(s_ppp_ccb->session_id));
         s_ppp_ccb->phase = END_PHASE;
         s_ppp_ccb->pppoe_phase.active = FALSE;
-        s_ppp_ccb->ppp_phase[0].state = S_INIT;
-        s_ppp_ccb->ppp_phase[1].state = S_INIT;
+        s_ppp_ccb->control_protocol[PPP_CP_LCP].state = S_INIT;
+        s_ppp_ccb->control_protocol[PPP_CP_IPCP].state = S_INIT;
+        s_ppp_ccb->control_protocol[PPP_CP_IPV6CP].state = S_INIT;
         PPP_bye(s_ppp_ccb);
         return SUCCESS;		
     case PADM:
@@ -1542,43 +1821,66 @@ STATUS decode_ppp(ppp_payload_t *ppp_payload, U16 payload_avail, U16 *event, ppp
 
     /* check the ppp is in LCP, AUTH or NCP phase */
     if (ppp_payload->ppp_protocol == rte_cpu_to_be_16(IPCP_PROTOCOL)) {
-        s_ppp_ccb->ppp_phase[1].ppp_payload = *ppp_payload;
-        s_ppp_ccb->ppp_phase[1].ppp_hdr = *ppp_hdr;
-        if (s_ppp_ccb->ppp_phase[1].ppp_options != NULL) {
-            fastrg_mfree(s_ppp_ccb->ppp_phase[1].ppp_options);
-            s_ppp_ccb->ppp_phase[1].ppp_options = NULL;
+        s_ppp_ccb->control_protocol[PPP_CP_IPCP].ppp_payload = *ppp_payload;
+        s_ppp_ccb->control_protocol[PPP_CP_IPCP].ppp_hdr = *ppp_hdr;
+        if (s_ppp_ccb->control_protocol[PPP_CP_IPCP].ppp_options != NULL) {
+            fastrg_mfree(s_ppp_ccb->control_protocol[PPP_CP_IPCP].ppp_options);
+            s_ppp_ccb->control_protocol[PPP_CP_IPCP].ppp_options = NULL;
         }
-        s_ppp_ccb->ppp_phase[1].ppp_options = fastrg_malloc(ppp_options_t, ppp_hdr_len-sizeof(ppp_header_t), 0);
-        if (s_ppp_ccb->ppp_phase[1].ppp_options == NULL && ppp_hdr_len != sizeof(ppp_header_t)) {
+        s_ppp_ccb->control_protocol[PPP_CP_IPCP].ppp_options = fastrg_malloc(ppp_options_t, ppp_hdr_len-sizeof(ppp_header_t), 0);
+        if (s_ppp_ccb->control_protocol[PPP_CP_IPCP].ppp_options == NULL && ppp_hdr_len != sizeof(ppp_header_t)) {
         	FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "fastrg_malloc error");
         	return ERROR;
         }
-        rte_memcpy(s_ppp_ccb->ppp_phase[1].ppp_options, ppp_hdr+1, ppp_hdr_len-sizeof(ppp_header_t));
+        rte_memcpy(s_ppp_ccb->control_protocol[PPP_CP_IPCP].ppp_options, ppp_hdr+1, ppp_hdr_len-sizeof(ppp_header_t));
         if (s_ppp_ccb->phase != IPCP_PHASE)
             return ERROR;
         if (decode_ipcp(ppp_hdr_len, event, tim, s_ppp_ccb) == ERROR)
             return ERROR;
-        s_ppp_ccb->cp = 1;
-    } else if (ppp_payload->ppp_protocol == rte_cpu_to_be_16(LCP_PROTOCOL)) {
-        s_ppp_ccb->ppp_phase[0].ppp_payload = *ppp_payload;
-        s_ppp_ccb->ppp_phase[0].ppp_hdr = *ppp_hdr;
-        if (s_ppp_ccb->ppp_phase[0].ppp_options != NULL) {
-            fastrg_mfree(s_ppp_ccb->ppp_phase[0].ppp_options);
-            s_ppp_ccb->ppp_phase[0].ppp_options = NULL;
+        s_ppp_ccb->cp_id = PPP_CP_IPCP;
+    } else if (ppp_payload->ppp_protocol == rte_cpu_to_be_16(IPV6CP_PROTOCOL) &&
+            s_ppp_ccb->ipv6_enabled == TRUE) {
+        tim = &s_ppp_ccb->ppp_ipv6cp;
+        s_ppp_ccb->control_protocol[PPP_CP_IPV6CP].ppp_payload = *ppp_payload;
+        s_ppp_ccb->control_protocol[PPP_CP_IPV6CP].ppp_hdr = *ppp_hdr;
+        if (s_ppp_ccb->control_protocol[PPP_CP_IPV6CP].ppp_options != NULL) {
+            fastrg_mfree(s_ppp_ccb->control_protocol[PPP_CP_IPV6CP].ppp_options);
+            s_ppp_ccb->control_protocol[PPP_CP_IPV6CP].ppp_options = NULL;
         }
-        s_ppp_ccb->ppp_phase[0].ppp_options = fastrg_malloc(ppp_options_t, ppp_hdr_len-sizeof(ppp_header_t), 0);
-        if (s_ppp_ccb->ppp_phase[0].ppp_options == NULL && ppp_hdr_len != sizeof(ppp_header_t)) {
+        s_ppp_ccb->control_protocol[PPP_CP_IPV6CP].ppp_options = fastrg_malloc(ppp_options_t,
+            ppp_hdr_len - sizeof(ppp_header_t), 0);
+        if (s_ppp_ccb->control_protocol[PPP_CP_IPV6CP].ppp_options == NULL &&
+                ppp_hdr_len != sizeof(ppp_header_t)) {
+            FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "fastrg_malloc error");
+            return ERROR;
+        }
+        rte_memcpy(s_ppp_ccb->control_protocol[PPP_CP_IPV6CP].ppp_options, ppp_hdr + 1,
+            ppp_hdr_len - sizeof(ppp_header_t));
+        if (s_ppp_ccb->phase != IPCP_PHASE && s_ppp_ccb->phase != DATA_PHASE)
+            return ERROR;
+        if (decode_ipv6cp(ppp_hdr_len, event, tim, s_ppp_ccb) == ERROR)
+            return ERROR;
+        s_ppp_ccb->cp_id = PPP_CP_IPV6CP;
+    } else if (ppp_payload->ppp_protocol == rte_cpu_to_be_16(LCP_PROTOCOL)) {
+        s_ppp_ccb->control_protocol[PPP_CP_LCP].ppp_payload = *ppp_payload;
+        s_ppp_ccb->control_protocol[PPP_CP_LCP].ppp_hdr = *ppp_hdr;
+        if (s_ppp_ccb->control_protocol[PPP_CP_LCP].ppp_options != NULL) {
+            fastrg_mfree(s_ppp_ccb->control_protocol[PPP_CP_LCP].ppp_options);
+            s_ppp_ccb->control_protocol[PPP_CP_LCP].ppp_options = NULL;
+        }
+        s_ppp_ccb->control_protocol[PPP_CP_LCP].ppp_options = fastrg_malloc(ppp_options_t, ppp_hdr_len-sizeof(ppp_header_t), 0);
+        if (s_ppp_ccb->control_protocol[PPP_CP_LCP].ppp_options == NULL && ppp_hdr_len != sizeof(ppp_header_t)) {
             FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "fastrg_malloc error.");
             return ERROR;
         }
-        rte_memcpy(s_ppp_ccb->ppp_phase[0].ppp_options, ppp_hdr+1, ppp_hdr_len-sizeof(ppp_header_t));
+        rte_memcpy(s_ppp_ccb->control_protocol[PPP_CP_LCP].ppp_options, ppp_hdr+1, ppp_hdr_len-sizeof(ppp_header_t));
         if (decode_lcp(ppp_hdr_len, event, tim, s_ppp_ccb) == ERROR)
             return ERROR;
         /* Ensure the LCP FSM table is used to handle this event. Without this,
          * LCP packets (e.g. ECHO_REQUEST) arriving during NCP negotiation would
          * be dispatched to the NCP FSM, which has no handler for them and would
          * silently discard the packet — leaving the peer waiting. */
-        s_ppp_ccb->cp = 0;
+        s_ppp_ccb->cp_id = PPP_CP_LCP;
     } else if (ppp_payload->ppp_protocol == rte_cpu_to_be_16(PAP_PROTOCOL)) {
         /* in AUTH phase, if the packet is not what we want, then send nak packet 
             and just close process */
@@ -1586,8 +1888,8 @@ STATUS decode_ppp(ppp_payload_t *ppp_payload, U16 payload_avail, U16 *event, ppp
             return ERROR;
         // we don't care what msg pap server send to us, just check it's ack or nak
         if (ppp_hdr->code == PAP_ACK) {
-            s_ppp_ccb->ppp_phase[0].ppp_payload = *ppp_payload;
-            s_ppp_ccb->ppp_phase[0].ppp_hdr = *ppp_hdr;
+            s_ppp_ccb->control_protocol[PPP_CP_LCP].ppp_payload = *ppp_payload;
+            s_ppp_ccb->control_protocol[PPP_CP_LCP].ppp_hdr = *ppp_hdr;
             FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " auth success.", s_ppp_ccb->user_num);
             return SUCCESS;
         } else if (ppp_hdr->code == PAP_NAK) {
@@ -1611,10 +1913,10 @@ STATUS decode_ppp(ppp_payload_t *ppp_payload, U16 payload_avail, U16 *event, ppp
             tmp_s_ppp_ccb->eth_hdr = s_ppp_ccb->eth_hdr;
             tmp_s_ppp_ccb->vlan_header = s_ppp_ccb->vlan_header;
             tmp_s_ppp_ccb->pppoe_header = s_ppp_ccb->pppoe_header;
-            tmp_s_ppp_ccb->ppp_phase[0].ppp_payload = *ppp_payload;
-            tmp_s_ppp_ccb->ppp_phase[0].ppp_hdr = *ppp_hdr;
-            tmp_s_ppp_ccb->ppp_phase[0].ppp_options = NULL;
-            tmp_s_ppp_ccb->cp = 0;
+            tmp_s_ppp_ccb->control_protocol[PPP_CP_LCP].ppp_payload = *ppp_payload;
+            tmp_s_ppp_ccb->control_protocol[PPP_CP_LCP].ppp_hdr = *ppp_hdr;
+            tmp_s_ppp_ccb->control_protocol[PPP_CP_LCP].ppp_options = NULL;
+            tmp_s_ppp_ccb->cp_id = PPP_CP_LCP;
             tmp_s_ppp_ccb->session_id = s_ppp_ccb->session_id;
 
             build_auth_ack_pap(buffer, &mulen, tmp_s_ppp_ccb);
@@ -1657,10 +1959,10 @@ STATUS decode_ppp(ppp_payload_t *ppp_payload, U16 payload_avail, U16 *event, ppp
             tmp_s_ppp_ccb->eth_hdr = s_ppp_ccb->eth_hdr;
             tmp_s_ppp_ccb->vlan_header = s_ppp_ccb->vlan_header;
             tmp_s_ppp_ccb->pppoe_header = s_ppp_ccb->pppoe_header;
-            tmp_s_ppp_ccb->ppp_phase[0].ppp_payload = *ppp_payload;
-            tmp_s_ppp_ccb->ppp_phase[0].ppp_hdr = *ppp_hdr;
-            tmp_s_ppp_ccb->ppp_phase[0].ppp_options = NULL;
-            tmp_s_ppp_ccb->cp = 0;
+            tmp_s_ppp_ccb->control_protocol[PPP_CP_LCP].ppp_payload = *ppp_payload;
+            tmp_s_ppp_ccb->control_protocol[PPP_CP_LCP].ppp_hdr = *ppp_hdr;
+            tmp_s_ppp_ccb->control_protocol[PPP_CP_LCP].ppp_options = NULL;
+            tmp_s_ppp_ccb->cp_id = PPP_CP_LCP;
             tmp_s_ppp_ccb->session_id = s_ppp_ccb->session_id;
 
             /* Credential read side: deep-copy the strings into the temp ccb
@@ -1697,24 +1999,24 @@ STATUS decode_ppp(ppp_payload_t *ppp_payload, U16 payload_avail, U16 *event, ppp
         } else if (ppp_hdr->code == CHAP_SUCCESS) {
             /* Keep the authentication result in the common PAP/CHAP slot;
              * check_auth_result owns the phase and NCP FSM transition. */
-            s_ppp_ccb->ppp_phase[0].ppp_payload = *ppp_payload;
-            s_ppp_ccb->ppp_phase[0].ppp_hdr = *ppp_hdr;
+            s_ppp_ccb->control_protocol[PPP_CP_LCP].ppp_payload = *ppp_payload;
+            s_ppp_ccb->control_protocol[PPP_CP_LCP].ppp_hdr = *ppp_hdr;
             FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " auth success.", s_ppp_ccb->user_num);
             return SUCCESS;
         } else if (ppp_hdr->code == CHAP_FAILURE) {
             /* Keep the authentication result in the common PAP/CHAP slot;
              * check_auth_result owns the phase and LCP FSM transition. */
-            s_ppp_ccb->ppp_phase[0].ppp_payload = *ppp_payload;
-            s_ppp_ccb->ppp_phase[0].ppp_hdr = *ppp_hdr;
+            s_ppp_ccb->control_protocol[PPP_CP_LCP].ppp_payload = *ppp_payload;
+            s_ppp_ccb->control_protocol[PPP_CP_LCP].ppp_hdr = *ppp_hdr;
             FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " auth fail.", s_ppp_ccb->user_num);
             return SUCCESS;
         }
     } else if (ppp_payload->ppp_protocol == rte_cpu_to_be_16(MPLSCP_PROTOCOL) ||
         ppp_payload->ppp_protocol == rte_cpu_to_be_16(IPV6CP_PROTOCOL)) {
-        /* We don't implement MPLSCP/IPV6CP. Reply with an LCP Protocol-Reject
-         * (RFC 1661 §5.7) so the peer stops retransmitting; otherwise it would
-         * keep retrying these CPs and block the session from making progress
-         * — including blocking DisconnectHsi from completing cleanly. */
+        /* Reject MPLSCP unconditionally and IPV6CP when it is disabled for the
+         * subscriber. The LCP Protocol-Reject (RFC 1661 §5.7) stops the peer
+         * from retransmitting an unavailable CP, which could otherwise block
+         * session progress and prevent DisconnectHsi from completing cleanly. */
         U8  reject_buf[ETH_MTU];
         U16 reject_len = 0;
         U16 rejected_proto = rte_be_to_cpu_16(ppp_payload->ppp_protocol);
@@ -1796,14 +2098,20 @@ void codec_cleanup_ppp_ccb(ppp_ccb_t *s_ppp_ccb)
         return;
 
     // Clean up LCP phase options
-    if (s_ppp_ccb->ppp_phase[0].ppp_options != NULL) {
-        fastrg_mfree(s_ppp_ccb->ppp_phase[0].ppp_options);
-        s_ppp_ccb->ppp_phase[0].ppp_options = NULL;
+    if (s_ppp_ccb->control_protocol[PPP_CP_LCP].ppp_options != NULL) {
+        fastrg_mfree(s_ppp_ccb->control_protocol[PPP_CP_LCP].ppp_options);
+        s_ppp_ccb->control_protocol[PPP_CP_LCP].ppp_options = NULL;
     }
 
     // Clean up IPCP phase options
-    if (s_ppp_ccb->ppp_phase[1].ppp_options != NULL) {
-        fastrg_mfree(s_ppp_ccb->ppp_phase[1].ppp_options);
-        s_ppp_ccb->ppp_phase[1].ppp_options = NULL;
+    if (s_ppp_ccb->control_protocol[PPP_CP_IPCP].ppp_options != NULL) {
+        fastrg_mfree(s_ppp_ccb->control_protocol[PPP_CP_IPCP].ppp_options);
+        s_ppp_ccb->control_protocol[PPP_CP_IPCP].ppp_options = NULL;
+    }
+
+    // Clean up IPV6CP phase options
+    if (s_ppp_ccb->control_protocol[PPP_CP_IPV6CP].ppp_options != NULL) {
+        fastrg_mfree(s_ppp_ccb->control_protocol[PPP_CP_IPV6CP].ppp_options);
+        s_ppp_ccb->control_protocol[PPP_CP_IPV6CP].ppp_options = NULL;
     }
 }
