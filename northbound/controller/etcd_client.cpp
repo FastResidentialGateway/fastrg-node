@@ -678,7 +678,11 @@ public:
                         continue;
                     hsi_total++;
 
-                    int ccb_id = parse_user_id(user_id.c_str(), 0);
+                    /* The watchdog may read incorrect(old) user_count(e.g. 
+                    control plane just adjusts user_count) but we don't need 
+                    to add lock here because next reconcile cycle(60 seconds 
+                    later) will rebuild the user_count. */
+                    int ccb_id = parse_user_id(user_id.c_str(), fastrg_ccb->user_count);
                     if (ccb_id >= 0)
                         present_ccb_ids.push_back(ccb_id);
 
