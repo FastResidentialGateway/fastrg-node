@@ -69,8 +69,11 @@ void PPP_keepalive_cb(__attribute__((unused)) struct rte_timer *tim,
 void PPP_bye(ppp_ccb_t *s_ppp_ccb)
 {
     rte_timer_stop(&(s_ppp_ccb->ppp));
+    rte_timer_stop(&(s_ppp_ccb->ppp_ipv6cp));
     rte_timer_stop(&(s_ppp_ccb->pppoe));
     rte_timer_stop(&(s_ppp_ccb->ppp_alive));
+    s_ppp_ccb->ipv6cp_up = FALSE;
+    s_ppp_ccb->config_request_pending[PPP_CP_IPV6CP] = FALSE;
     rte_atomic16_cmpset((volatile uint16_t *)&s_ppp_ccb->dp_start_bool.cnt, (S16)1, (S16)0);
     switch(s_ppp_ccb->phase) {
         case END_PHASE:
@@ -80,14 +83,16 @@ void PPP_bye(ppp_ccb_t *s_ppp_ccb)
             break;
         case PPPOE_PHASE:
             s_ppp_ccb->phase--;
-            s_ppp_ccb->ppp_phase[0].state = S_INIT;
-            s_ppp_ccb->ppp_phase[1].state = S_INIT;
+            s_ppp_ccb->control_protocol[PPP_CP_LCP].state = S_INIT;
+            s_ppp_ccb->control_protocol[PPP_CP_IPCP].state = S_INIT;
+            s_ppp_ccb->control_protocol[PPP_CP_IPV6CP].state = S_INIT;
             PPP_bye(s_ppp_ccb);
             break;
         case LCP_PHASE:
             s_ppp_ccb->ppp_processing = TRUE;
-            s_ppp_ccb->cp = 0;
-            s_ppp_ccb->ppp_phase[1].state = S_INIT;
+            s_ppp_ccb->cp_id = PPP_CP_LCP;
+            s_ppp_ccb->control_protocol[PPP_CP_IPCP].state = S_INIT;
+            s_ppp_ccb->control_protocol[PPP_CP_IPV6CP].state = S_INIT;
             PPP_FSM(&(s_ppp_ccb->ppp), s_ppp_ccb, E_CLOSE);
             break;
         case DATA_PHASE:
@@ -95,9 +100,10 @@ void PPP_bye(ppp_ccb_t *s_ppp_ccb)
             s_ppp_ccb->ppp_processing = TRUE;
             /* RFC 1661 §3.7: LCP close is sufficient — skip IPCP terminate. */
             rte_atomic16_set(&s_ppp_ccb->dp_start_bool, (S16)0);
-            s_ppp_ccb->ppp_phase[1].state = S_INIT;
+            s_ppp_ccb->control_protocol[PPP_CP_IPCP].state = S_INIT;
+            s_ppp_ccb->control_protocol[PPP_CP_IPV6CP].state = S_INIT;
             s_ppp_ccb->phase = LCP_PHASE;
-            s_ppp_ccb->cp = 0;
+            s_ppp_ccb->cp_id = PPP_CP_LCP;
             PPP_FSM(&(s_ppp_ccb->ppp), s_ppp_ccb, E_CLOSE);
             break;
         default:
@@ -268,8 +274,9 @@ STATUS ppp_init_config_by_user(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb, U16 ccb
     ppp_ccb->fastrg_ccb = fastrg_ccb;
     if (ppp_copy_credentials(ppp_ccb, user_name, password) == ERROR)
         return ERROR;
-    ppp_ccb->ppp_phase[0].state = S_INIT;
-    ppp_ccb->ppp_phase[1].state = S_INIT;
+    ppp_ccb->control_protocol[PPP_CP_LCP].state = S_INIT;
+    ppp_ccb->control_protocol[PPP_CP_IPCP].state = S_INIT;
+    ppp_ccb->control_protocol[PPP_CP_IPV6CP].state = S_INIT;
     ppp_ccb->pppoe_phase.active = FALSE;
 
     ppp_ccb->user_num = ccb_id + 1;
@@ -304,6 +311,7 @@ STATUS ppp_init_config_by_user(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb, U16 ccb
     memset(ppp_ccb->PPP_dst_mac.addr_bytes, 0, ETH_ALEN);
     rte_timer_init(&(ppp_ccb->pppoe));
     rte_timer_init(&(ppp_ccb->ppp));
+    rte_timer_init(&(ppp_ccb->ppp_ipv6cp));
     rte_timer_init(&(ppp_ccb->ppp_alive));
     rte_atomic16_init(&ppp_ccb->dp_start_bool);
     rte_atomic16_init(&ppp_ccb->ppp_bool);
@@ -314,6 +322,9 @@ STATUS ppp_init_config_by_user(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb, U16 ccb
     /* Default before any HSI config is applied; overridden per-subscriber
      * by apply_hsi_config() using ipv6_enable from etcd. */
     ppp_ccb->ipv6_enabled = FALSE;
+    memset(ppp_ccb->ipv6cp_local_iid, 0, sizeof(ppp_ccb->ipv6cp_local_iid));
+    memset(ppp_ccb->ipv6cp_peer_iid, 0, sizeof(ppp_ccb->ipv6cp_peer_iid));
+    ppp_ccb->ipv6cp_up = FALSE;
 
     /* All elements below were preallocated by pppd_construct_ccb_elements()
      * at init; a (re)configuration only resets their logical content. No
@@ -584,11 +595,17 @@ void exit_ppp(ppp_ccb_t *ppp_ccb)
 
     rte_atomic16_cmpset((U16 *)&(ppp_ccb->ppp_bool.cnt), 1, 0);
     rte_timer_stop(&(ppp_ccb->ppp));
+    rte_timer_stop(&(ppp_ccb->ppp_ipv6cp));
     rte_timer_stop(&(ppp_ccb->pppoe));
     rte_timer_stop(&(ppp_ccb->ppp_alive));
     ppp_ccb->phase = END_PHASE;
-    ppp_ccb->ppp_phase[0].state = S_INIT;
-    ppp_ccb->ppp_phase[1].state = S_INIT;
+    ppp_ccb->control_protocol[PPP_CP_LCP].state = S_INIT;
+    ppp_ccb->control_protocol[PPP_CP_IPCP].state = S_INIT;
+    ppp_ccb->control_protocol[PPP_CP_IPV6CP].state = S_INIT;
+    ppp_ccb->config_request_pending[PPP_CP_IPV6CP] = FALSE;
+    memset(ppp_ccb->ipv6cp_local_iid, 0, sizeof(ppp_ccb->ipv6cp_local_iid));
+    memset(ppp_ccb->ipv6cp_peer_iid, 0, sizeof(ppp_ccb->ipv6cp_peer_iid));
+    ppp_ccb->ipv6cp_up = FALSE;
     ppp_ccb->pppoe_phase.active = FALSE;
     ppp_ccb->hsi_ipv4 = 0x0;
     ppp_ccb->hsi_ipv4_gw = 0x0;
@@ -649,8 +666,8 @@ STATUS ppp_process(FastRG_t *fastrg_ccb, U8 *pkt_data, U16 len)
     if (check_auth_result(ppp_ccb) == 1)
         return ERROR;
 
-    ppp_ccb->ppp_phase[ppp_ccb->cp].event = event;
-    PPP_FSM(&(ppp_ccb->ppp), ppp_ccb, event);
+    ppp_ccb->control_protocol[ppp_ccb->cp_id].event = event;
+    PPP_FSM(ppp_cp_timer(ppp_ccb), ppp_ccb, event);
     codec_cleanup_ppp_ccb(ppp_ccb);
 
     return SUCCESS;
