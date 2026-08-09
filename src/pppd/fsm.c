@@ -24,6 +24,7 @@
 #include "kafka_producer.h"
 #include "nat.h"
 #include "fsm.h"
+#include "../dhcp6/dhcp6.h"
 #include "../dhcpd/dhcpd.h"
 #include "../dnsd/dnsd.h"
 #include "../etcd_integration.h"
@@ -874,13 +875,14 @@ STATUS ipv6cp_layer_up(ppp_ccb_t *s_ppp_ccb)
         s_ppp_ccb->ipv6cp_peer_iid[4], s_ppp_ccb->ipv6cp_peer_iid[5],
         s_ppp_ccb->ipv6cp_peer_iid[6], s_ppp_ccb->ipv6cp_peer_iid[7]);
 
-    /* DHCPv6-PD solicitation starts here once the DHCPv6 control plane is
-     * available. IPV6CP readiness is independent of the IPv4 data plane. */
+    /* Prefix delegation starts only after the IPv6 control protocol opens. */
+    dhcp6_pd_start(s_ppp_ccb);
     return SUCCESS;
 }
 
 void ipv6cp_stop(ppp_ccb_t *s_ppp_ccb)
 {
+    dhcp6_pd_stop(s_ppp_ccb);
     rte_timer_stop(&s_ppp_ccb->ppp_ipv6cp);
     s_ppp_ccb->config_request_pending[PPP_CP_IPV6CP] = FALSE;
     s_ppp_ccb->ipv6cp_up = FALSE;
@@ -914,6 +916,7 @@ STATUS A_this_layer_down(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb)
 
     if (s_ppp_ccb->cp_id == PPP_CP_IPV6CP) {
         FastRG_LOG(DBG, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "IPV6CP layer is down");
+        dhcp6_pd_stop(s_ppp_ccb);
         s_ppp_ccb->ipv6cp_up = FALSE;
         PPP_FSM(ppp_timer, s_ppp_ccb, E_CLOSE);
     } else if (s_ppp_ccb->cp_id == PPP_CP_IPCP) {
@@ -925,6 +928,7 @@ STATUS A_this_layer_down(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb)
         s_ppp_ccb->control_protocol[PPP_CP_IPCP].state = S_INIT;
         s_ppp_ccb->control_protocol[PPP_CP_IPV6CP].state = S_INIT;
         s_ppp_ccb->config_request_pending[PPP_CP_IPV6CP] = FALSE;
+        dhcp6_pd_stop(s_ppp_ccb);
         s_ppp_ccb->ipv6cp_up = FALSE;
         rte_timer_stop(&s_ppp_ccb->ppp_ipv6cp);
         PPP_FSM(ppp_timer, s_ppp_ccb, E_CLOSE);

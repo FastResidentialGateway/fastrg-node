@@ -200,6 +200,20 @@ typedef struct {
     /* IPv6 readiness is written by the control plane. The volatile access is
      * reserved for the data-plane reader introduced with IPv6 forwarding. */
     volatile BOOL         ipv6cp_up;
+    /* DHCPv6-PD client state is owned by the control plane. Future RA and
+     * IPv6 data-plane readers consume the published prefix after ready is set. */
+    U8                    dhcp6_state;
+    U8                    dhcp6_xid[3];
+    U8                    dhcp6_server_duid[130];
+    U16                   dhcp6_server_duid_len;
+    U32                   dhcp6_t1;
+    U8                    dhcp6_retry;
+    struct rte_timer      dhcp6_timer;
+    U8                    hsi_ipv6_pd_prefix[16];
+    U8                    hsi_ipv6_pd_plen;
+    U8                    hsi_ipv6_lan_prefix[16];
+    U8                    hsi_ipv6_dns[2][16];
+    volatile BOOL         dhcp6_pd_ready;
 }__rte_cache_aligned ppp_ccb_t;
 
 static inline struct rte_timer *ppp_cp_timer(ppp_ccb_t *ppp_ccb)

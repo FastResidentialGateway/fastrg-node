@@ -28,7 +28,7 @@ LDFLAGS = $(shell pkg-config --static --libs libdpdk) -lutils -lconfig -luuid -W
 
 TARGET = fastrg
 VERSION_H = src/version.h
-SRC = $(wildcard src/*.c) $(wildcard src/pppd/*.c) $(wildcard src/dhcpd/*.c) $(wildcard src/dnsd/*.c)
+SRC = $(wildcard src/*.c) $(wildcard src/pppd/*.c) $(wildcard src/dhcpd/*.c) $(wildcard src/dhcp6/*.c) $(wildcard src/dnsd/*.c)
 OBJ = $(SRC:.c=.o)
 
 GRPCDIR = northbound/grpc
