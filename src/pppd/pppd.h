@@ -218,6 +218,7 @@ typedef struct {
     volatile BOOL         dhcp6_pd_ready;
     struct nd6_table      *nd6_table;       /* single-writer IPv6 neighbor cache */
     struct rte_timer      ra_timer;         /* periodic LAN router advertisement for IPv6 */
+    U64                   last_rs_ra_cycles; /* last RS-triggered RA, for rate limiting in IPv6 */
 }__rte_cache_aligned ppp_ccb_t;
 
 static inline struct rte_timer *ppp_cp_timer(ppp_ccb_t *ppp_ccb)

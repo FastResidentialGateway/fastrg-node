@@ -22,9 +22,8 @@
 #define ND6_PREFIX_PREFERRED_SEC    43200
 #define ND6_RA_CUR_HOP_LIMIT        64
 
-#define ND6_NA_FLAG_ROUTER          UINT32_C(0x80000000)
-#define ND6_NA_FLAG_SOLICITED       UINT32_C(0x40000000)
-#define ND6_NA_FLAG_OVERRIDE        UINT32_C(0x20000000)
+/* RFC 4861 MIN_DELAY_BETWEEN_RAS, applied to RS-triggered advertisements. */
+#define ND6_RS_RA_MIN_DELAY_SEC     3
 
 typedef struct nd6_icmp_header {
     U8 type;
@@ -76,6 +75,22 @@ static BOOL nd6_gate_ready(const ppp_ccb_t *ppp_ccb)
 {
     return ppp_ccb != NULL && ppp_ccb->ipv6_enabled != FALSE &&
         ppp_ccb->ipv6cp_up != FALSE && ppp_ccb->dhcp6_pd_ready != FALSE;
+}
+
+/* Only link-local sources or addresses inside the advertised LAN /64 may
+ * populate the neighbor cache; multicast and off-link sources are discarded
+ * before they can consume an entry.
+ * ponytail: this bounds learners to the subscriber's own prefix, but a
+ * hostile LAN host can still churn addresses to fill the 1024 slots; add
+ * aging or stale-generation reclaim when IPv6 forwarding starts reading
+ * this cache. */
+static BOOL nd6_src_is_on_link(const ppp_ccb_t *ppp_ccb, const U8 src_ip[16])
+{
+    if (src_ip[0] == 0xff)
+        return FALSE;
+    if (src_ip[0] == 0xfe && (src_ip[1] & 0xc0) == 0x80)
+        return TRUE;
+    return memcmp(src_ip, ppp_ccb->hsi_ipv6_lan_prefix, 8) == 0;
 }
 
 static BOOL nd6_addr_is_zero(const U8 addr[16])
@@ -288,7 +303,8 @@ STATUS nd6_build_ra(ppp_ccb_t *ppp_ccb, U8 *buffer, U16 *packet_len)
 }
 
 STATUS nd6_build_na(ppp_ccb_t *ppp_ccb, const U8 dst_ip[16],
-    const struct rte_ether_addr *dst_mac, U8 *buffer, U16 *packet_len)
+    const struct rte_ether_addr *dst_mac, U32 na_flags, U8 *buffer,
+    U16 *packet_len)
 {
     struct rte_ipv6_hdr *ip6;
     nd6_neighbor_message_t *na;
@@ -303,8 +319,7 @@ STATUS nd6_build_na(ppp_ccb_t *ppp_ccb, const U8 dst_ip[16],
     ip6 = nd6_build_ip6(ppp_ccb, dst_ip, icmp_len, buffer);
     na = (nd6_neighbor_message_t *)(ip6 + 1);
     na->icmp.type = ND6_ICMP_NA;
-    na->icmp.data = rte_cpu_to_be_32(ND6_NA_FLAG_ROUTER |
-        ND6_NA_FLAG_SOLICITED | ND6_NA_FLAG_OVERRIDE);
+    na->icmp.data = rte_cpu_to_be_32(na_flags);
     nd6_gateway_link_local(&ppp_ccb->fastrg_ccb->nic_info.hsi_lan_mac,
         na->target);
     tlla = (nd6_ll_option_t *)(na + 1);
@@ -403,11 +418,20 @@ void nd6_lan_input(FastRG_t *fastrg_ccb, U16 ccb_id, U8 *pkt, U16 len)
     if (icmp->type == ND6_ICMP_RS) {
         struct rte_ether_addr ignored_mac;
         BOOL ignored_found;
+        U64 now;
 
         if (nd6_parse_ll_options((U8 *)(icmp + 1),
                 payload_len - sizeof(*icmp), ND6_OPT_SLLA, &ignored_mac,
                 &ignored_found) == ERROR)
             return;
+        /* A solicitation flood collapses into one advertisement per window;
+         * the periodic timer covers any host whose solicitation was
+         * absorbed. */
+        now = fastrg_get_cur_cycles();
+        if (now - ppp_ccb->last_rs_ra_cycles <
+                (U64)ND6_RS_RA_MIN_DELAY_SEC * fastrg_get_cycles_in_sec())
+            return;
+        ppp_ccb->last_rs_ra_cycles = now;
         nd6_send_ra(ppp_ccb);
         return;
     }
@@ -423,18 +447,38 @@ void nd6_lan_input(FastRG_t *fastrg_ccb, U16 ccb_id, U8 *pkt, U16 len)
                     payload_len - sizeof(*ns), ND6_OPT_SLLA, &learned_mac,
                     &has_slla) == ERROR)
             return;
-        /* An unspecified source is Duplicate Address Detection. It is not a
-         * usable neighbor and answering it would interfere with DAD. */
-        if (nd6_addr_is_zero(src_ip))
+        nd6_gateway_link_local(&fastrg_ccb->nic_info.hsi_lan_mac, gateway);
+        if (nd6_addr_is_zero(src_ip)) {
+            /* An unspecified source is Duplicate Address Detection. A probe
+             * for the gateway address is a claim attempt and is defended
+             * with an unsolicited all-nodes NA; every other target stays
+             * unanswered so host DAD can proceed. */
+            if (memcmp(ns->target, gateway, sizeof(gateway)) == 0) {
+                U8 response[ND6_PACKET_MAX_LEN];
+                U8 all_nodes[16];
+                struct rte_ether_addr all_nodes_mac;
+                U16 response_len;
+
+                nd6_all_nodes(all_nodes);
+                nd6_multicast_mac(all_nodes, &all_nodes_mac);
+                if (nd6_build_na(ppp_ccb, all_nodes, &all_nodes_mac,
+                        ND6_NA_FLAG_ROUTER | ND6_NA_FLAG_OVERRIDE,
+                        response, &response_len) == SUCCESS)
+                    nd6_send(fastrg_ccb, ccb_id, response, response_len);
+            }
+            return;
+        }
+        if (!nd6_src_is_on_link(ppp_ccb, src_ip))
             return;
         if (has_slla)
             nd6_table_learn(ppp_ccb->nd6_table, src_ip, &learned_mac);
-        nd6_gateway_link_local(&fastrg_ccb->nic_info.hsi_lan_mac, gateway);
         if (memcmp(ns->target, gateway, sizeof(gateway)) == 0) {
             U8 response[ND6_PACKET_MAX_LEN];
             U16 response_len;
 
-            if (nd6_build_na(ppp_ccb, src_ip, &eth->src_addr, response,
+            if (nd6_build_na(ppp_ccb, src_ip, &eth->src_addr,
+                    ND6_NA_FLAG_ROUTER | ND6_NA_FLAG_SOLICITED |
+                    ND6_NA_FLAG_OVERRIDE, response,
                     &response_len) == SUCCESS)
                 nd6_send(fastrg_ccb, ccb_id, response, response_len);
         }
@@ -449,7 +493,8 @@ void nd6_lan_input(FastRG_t *fastrg_ccb, U16 ccb_id, U8 *pkt, U16 len)
         if (payload_len < sizeof(*na) ||
                 nd6_parse_ll_options((U8 *)(na + 1),
                     payload_len - sizeof(*na), ND6_OPT_TLLA, &learned_mac,
-                    &has_tlla) == ERROR || nd6_addr_is_zero(src_ip))
+                    &has_tlla) == ERROR || nd6_addr_is_zero(src_ip) ||
+                !nd6_src_is_on_link(ppp_ccb, src_ip))
             return;
         if (has_tlla)
             nd6_table_learn(ppp_ccb->nd6_table, src_ip, &learned_mac);

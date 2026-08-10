@@ -420,6 +420,107 @@ static void test_timer_callback(void)
         "T9 periodic RA timer callback", NULL);
 }
 
+static void test_offlink_learn_gate(void)
+{
+    U8 packet[ND6_PACKET_MAX_LEN];
+    U8 gateway[16];
+    U8 offlink_ip[16] = {0x20, 0x01, 0x0d, 0xb8, 0x99, 0x99, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+    U8 multicast_ip[16] = {0xff, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x99};
+    U8 link_local_ip[16] = {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+    struct rte_ether_addr found;
+    U16 len;
+    U32 tx_count;
+
+    reset_fixture();
+    nd6_gateway_link_local(&g_fastrg_ccb->nic_info.hsi_lan_mac, gateway);
+    len = build_nd_packet(packet, ND6_ICMP_NS, offlink_ip, gateway,
+        ND6_OPT_SLLA, 1);
+    nd6_lan_input(g_fastrg_ccb, 0, packet, len);
+    nd6_test_get_last_tx(NULL, &tx_count);
+    BOOL offlink_ignored = tx_count == 0 &&
+        nd6_table_lookup(test_ccb.nd6_table, offlink_ip, &found) == ERROR;
+
+    len = build_nd_packet(packet, ND6_ICMP_NA, multicast_ip, multicast_ip,
+        ND6_OPT_TLLA, 1);
+    nd6_lan_input(g_fastrg_ccb, 0, packet, len);
+    BOOL multicast_ignored = nd6_table_lookup(test_ccb.nd6_table,
+        multicast_ip, &found) == ERROR;
+
+    nd6_test_tx_reset();
+    len = build_nd_packet(packet, ND6_ICMP_NS, link_local_ip, gateway,
+        ND6_OPT_SLLA, 1);
+    nd6_lan_input(g_fastrg_ccb, 0, packet, len);
+    nd6_test_get_last_tx(NULL, &tx_count);
+    TEST_ASSERT(offlink_ignored && multicast_ignored && tx_count == 1 &&
+            nd6_table_lookup(test_ccb.nd6_table, link_local_ip,
+                &found) == SUCCESS &&
+            rte_is_same_ether_addr(&found, &host_mac),
+        "T10 off-link and multicast sources are never learned", NULL);
+}
+
+static void test_rs_ra_rate_limit(void)
+{
+    U8 packet[ND6_PACKET_MAX_LEN];
+    U8 zero[16] = {0};
+    U16 len;
+    U32 tx_count;
+
+    reset_fixture();
+    test_ccb.last_rs_ra_cycles = 0;
+    len = build_nd_packet(packet, ND6_ICMP_RS, host_ip, zero,
+        ND6_OPT_SLLA, 1);
+    nd6_lan_input(g_fastrg_ccb, 0, packet, len);
+    nd6_test_get_last_tx(NULL, &tx_count);
+    BOOL first_replied = tx_count == 1;
+
+    nd6_test_tx_reset();
+    nd6_lan_input(g_fastrg_ccb, 0, packet, len);
+    nd6_test_get_last_tx(NULL, &tx_count);
+    BOOL second_suppressed = tx_count == 0;
+
+    test_ccb.last_rs_ra_cycles = 0;
+    nd6_lan_input(g_fastrg_ccb, 0, packet, len);
+    nd6_test_get_last_tx(NULL, &tx_count);
+    TEST_ASSERT(first_replied && second_suppressed && tx_count == 1,
+        "T11 RS flood collapses to one RA per window", NULL);
+}
+
+static void test_dad_defense(void)
+{
+    U8 packet[ND6_PACKET_MAX_LEN];
+    U8 gateway[16];
+    U8 zero[16] = {0};
+    struct rte_ether_addr found;
+    U16 len, tx_len;
+    U32 tx_count;
+
+    reset_fixture();
+    nd6_gateway_link_local(&g_fastrg_ccb->nic_info.hsi_lan_mac, gateway);
+    len = build_nd_packet(packet, ND6_ICMP_NS, zero, gateway, 0, 0);
+    nd6_lan_input(g_fastrg_ccb, 0, packet, len);
+    const U8 *tx = nd6_test_get_last_tx(&tx_len, &tx_count);
+    struct rte_ether_hdr *eth = (struct rte_ether_hdr *)tx;
+    vlan_header_t *vlan = (vlan_header_t *)(eth + 1);
+    struct rte_ipv6_hdr *ip6 = (struct rte_ipv6_hdr *)(vlan + 1);
+    test_neighbor_t *na = (test_neighbor_t *)(ip6 + 1);
+    U8 *dst_ip = (U8 *)&ip6->dst_addr;
+    BOOL defended = tx_count == 1 && tx_len > 0 &&
+        eth->dst_addr.addr_bytes[0] == 0x33 &&
+        eth->dst_addr.addr_bytes[1] == 0x33 &&
+        eth->dst_addr.addr_bytes[5] == 0x01 &&
+        dst_ip[0] == 0xff && dst_ip[1] == 0x02 && dst_ip[15] == 0x01 &&
+        na->icmp.type == ND6_ICMP_NA &&
+        rte_be_to_cpu_32(na->icmp.data) == UINT32_C(0xa0000000) &&
+        memcmp(na->target, gateway, 16) == 0 &&
+        rte_ipv6_udptcp_cksum_verify(ip6, na) == 0;
+    TEST_ASSERT(defended &&
+            nd6_table_lookup(test_ccb.nd6_table, zero, &found) == ERROR,
+        "T12 gateway DAD probe answered with unsolicited NA", NULL);
+}
+
 void test_nd6(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 {
     ppp_ccb_t *original_ccb = fastrg_ccb->ppp_ccb[0];
@@ -447,6 +548,9 @@ void test_nd6(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_rdnss_boundaries();
     test_malformed_packets();
     test_timer_callback();
+    test_offlink_learn_gate();
+    test_rs_ra_rate_limit();
+    test_dad_defense();
 
     rte_timer_stop_sync(&test_ccb.ra_timer);
     nd6_table_free(test_ccb.nd6_table);

@@ -24,6 +24,10 @@
 #define ND6_OPT_PREFIX_INFO     3
 #define ND6_OPT_RDNSS           25
 
+#define ND6_NA_FLAG_ROUTER      UINT32_C(0x80000000)
+#define ND6_NA_FLAG_SOLICITED   UINT32_C(0x40000000)
+#define ND6_NA_FLAG_OVERRIDE    UINT32_C(0x20000000)
+
 typedef struct nd6_table {
     struct rte_hash *hash;        /* key = 16-byte IPv6 address */
     U16 generation;               /* RELAXED atomic generation bump */
@@ -67,7 +71,8 @@ void nd6_ra_timer_cb(struct rte_timer *tim, void *arg);
 void nd6_gateway_link_local(const struct rte_ether_addr *mac, U8 addr[16]);
 STATUS nd6_build_ra(ppp_ccb_t *ppp_ccb, U8 *buffer, U16 *packet_len);
 STATUS nd6_build_na(ppp_ccb_t *ppp_ccb, const U8 dst_ip[16],
-    const struct rte_ether_addr *dst_mac, U8 *buffer, U16 *packet_len);
+    const struct rte_ether_addr *dst_mac, U32 na_flags, U8 *buffer,
+    U16 *packet_len);
 
 #ifdef UNIT_TEST
 void nd6_test_tx_reset(void);
