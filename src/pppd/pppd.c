@@ -29,6 +29,7 @@
 #include "../dp_flow.h"
 #include "../dhcpd/dhcpd.h"
 #include "../dhcp6/dhcp6.h"
+#include "../nd6/nd6.h"
 #include "../fastrg.h"
 #include "../utils.h"
 #include "../etcd_integration.h"
@@ -72,6 +73,7 @@ void PPP_bye(ppp_ccb_t *s_ppp_ccb)
     rte_timer_stop(&(s_ppp_ccb->ppp));
     rte_timer_stop(&(s_ppp_ccb->ppp_ipv6cp));
     rte_timer_stop(&(s_ppp_ccb->dhcp6_timer));
+    rte_timer_stop(&(s_ppp_ccb->ra_timer));
     rte_timer_stop(&(s_ppp_ccb->pppoe));
     rte_timer_stop(&(s_ppp_ccb->ppp_alive));
     dhcp6_pd_stop(s_ppp_ccb);
@@ -193,6 +195,8 @@ STATUS ppp_update_config_by_user(ppp_ccb_t *ppp_ccb, U16 vlan_id, const char *us
  */
 static void pppd_destroy_ccb_elements(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb)
 {
+    nd6_table_free(ppp_ccb->nd6_table);
+    ppp_ccb->nd6_table = NULL;
     mac_table_free(ppp_ccb->mac_table);
     ppp_ccb->mac_table = NULL;
     arp_pending_cleanup_queue(&ppp_ccb->arp_pq, fastrg_ccb->arp_pending_mp);
@@ -215,9 +219,9 @@ static void pppd_destroy_ccb_elements(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb)
  * @fn pppd_construct_ccb_elements
  *
  * @brief Construction of a subscriber slot's runtime-immutable
- *        elements: MAC table hash, ARP pending ring, NAT hashes + free
- *        ring, and the PPPoE header-tag buffer. Called only from
- *        pppd_allocate_ccbs() at init — after this, runtime configuration
+ *        elements: MAC and IPv6-neighbor table hashes, ARP pending ring,
+ *        NAT hashes + free ring, and the PPPoE header-tag buffer. Called only
+ *        from pppd_allocate_ccbs() at init — after this, runtime configuration
  *        changes reuse/reset these objects and never allocate or free.
  *
  * @param fastrg_ccb
@@ -235,6 +239,13 @@ static STATUS pppd_construct_ccb_elements(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_c
     if (ppp_ccb->mac_table == NULL) {
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG,
             "mac_table allocation failed for ccb %u", ccb_id);
+        goto err;
+    }
+
+    ppp_ccb->nd6_table = nd6_table_alloc(ccb_id);
+    if (ppp_ccb->nd6_table == NULL) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG,
+            "nd6_table allocation failed for ccb %u", ccb_id);
         goto err;
     }
 
@@ -316,6 +327,7 @@ STATUS ppp_init_config_by_user(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb, U16 ccb
     rte_timer_init(&(ppp_ccb->ppp));
     rte_timer_init(&(ppp_ccb->ppp_ipv6cp));
     rte_timer_init(&(ppp_ccb->dhcp6_timer));
+    rte_timer_init(&(ppp_ccb->ra_timer));
     rte_timer_init(&(ppp_ccb->ppp_alive));
     rte_atomic16_init(&ppp_ccb->dp_start_bool);
     rte_atomic16_init(&ppp_ccb->ppp_bool);
@@ -339,6 +351,7 @@ STATUS ppp_init_config_by_user(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb, U16 ccb
     /* MAC table: O(1) generation bump invalidates every learned entry
      * without touching the hash structure (safe vs concurrent learns). */
     mac_table_reset(ppp_ccb->mac_table);
+    nd6_table_reset(ppp_ccb->nd6_table);
 
     /* ARP pending ring: drop queued packets from the previous config. */
     arp_pending_flush(fastrg_ccb->arp_pending_mp, &ppp_ccb->arp_pq);
@@ -602,9 +615,11 @@ void exit_ppp(ppp_ccb_t *ppp_ccb)
     rte_timer_stop(&(ppp_ccb->ppp));
     rte_timer_stop(&(ppp_ccb->ppp_ipv6cp));
     rte_timer_stop(&(ppp_ccb->dhcp6_timer));
+    rte_timer_stop(&(ppp_ccb->ra_timer));
     rte_timer_stop(&(ppp_ccb->pppoe));
     rte_timer_stop(&(ppp_ccb->ppp_alive));
     dhcp6_pd_stop(ppp_ccb);
+    nd6_table_reset(ppp_ccb->nd6_table);
     ppp_ccb->phase = END_PHASE;
     ppp_ccb->control_protocol[PPP_CP_LCP].state = S_INIT;
     ppp_ccb->control_protocol[PPP_CP_IPCP].state = S_INIT;

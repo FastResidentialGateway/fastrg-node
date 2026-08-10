@@ -23,6 +23,8 @@
 #include "../fastrg.h"
 #include "../mac_table.h"
 
+struct nd6_table;
+
 #define PPP_MSG_BUF_LEN	        128
 
 #define MULTICAST_TAG           4001
@@ -214,6 +216,8 @@ typedef struct {
     U8                    hsi_ipv6_lan_prefix[16];
     U8                    hsi_ipv6_dns[2][16];
     volatile BOOL         dhcp6_pd_ready;
+    struct nd6_table      *nd6_table;       /* single-writer IPv6 neighbor cache */
+    struct rte_timer      ra_timer;         /* periodic LAN router advertisement for IPv6 */
 }__rte_cache_aligned ppp_ccb_t;
 
 static inline struct rte_timer *ppp_cp_timer(ppp_ccb_t *ppp_ccb)

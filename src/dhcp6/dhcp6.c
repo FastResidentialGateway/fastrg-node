@@ -12,6 +12,7 @@
 #include "dhcp6.h"
 #include "../dbg.h"
 #include "../dp.h"
+#include "../nd6/nd6.h"
 #include "../protocol.h"
 #include "../utils.h"
 #include "../pppd/codec.h"
@@ -444,6 +445,7 @@ STATUS dhcp6_process_message(ppp_ccb_t *ppp_ccb, const U8 *dhcp, U16 len)
     ppp_ccb->dhcp6_retry = 0;
     /* All delegated data is complete before it becomes visible to readers. */
     ppp_ccb->dhcp6_pd_ready = TRUE;
+    nd6_ra_start(ppp_ccb);
     dhcp6_arm(ppp_ccb, ppp_ccb->dhcp6_t1, SINGLE);
     FastRG_LOG(INFO, ppp_ccb->fastrg_ccb->fp, ppp_ccb, PPPLOGMSG,
         "User %" PRIu16 " DHCPv6-PD lease is ready (/%u, T1=%u seconds).",
@@ -549,6 +551,7 @@ void dhcp6_pd_stop(ppp_ccb_t *ppp_ccb)
     if (ppp_ccb == NULL)
         return;
 
+    nd6_ra_stop(ppp_ccb);
     rte_timer_stop(&ppp_ccb->dhcp6_timer);
     dhcp6_clear_lease(ppp_ccb);
     ppp_ccb->dhcp6_state = DHCP6_S_IDLE;
