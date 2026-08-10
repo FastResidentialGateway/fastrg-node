@@ -30,6 +30,7 @@
 #include "dp_flow.h"
 #include "dhcpd/dhcpd.h"
 #include "dnsd/dnsd.h"
+#include "nd6/nd6.h"
 #include "mac_table.h"
 #include "dbg.h"
 #include "dp.h"
@@ -554,6 +555,7 @@ int wan_data_rx(void *arg)
  * Handles non-TCP/UDP traffic that arrives on the LAN default queue 0
  * (everything not matching the RSS flow rules eth/vlan/ipv4/tcp|udp):
  *   - ARP to gateway IP → reply directly, others → TX to WAN
+ *   - IPv6 RS/NS/NA → control plane when IPv6 is enabled
  *   - PPPoE pass-through → forward to WAN
  *   - IP ICMP to gateway → echo reply on LAN
  *   - IP ICMP to WAN → NAT + PPPoE encap + TX to WAN
@@ -656,6 +658,37 @@ int lan_ctrl_rx(void *arg)
                     if (rte_eth_tx_burst(WAN_PORT, wan_tx_q, &single_pkt, 1) == 0)
                         drop_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
                 }
+                continue;
+            }
+
+            /* ---- IPv6 neighbor discovery ---- */
+            if (unlikely(vlan_header->next_proto == rte_cpu_to_be_16(FRAME_TYPE_IPV6))) {
+                ppp_ccb_t *ppp_ccb_ipv6 = PPPD_GET_CCB(fastrg_ccb, ccb_id);
+
+                /* Keep disabled subscribers on the old drop path before
+                 * parsing any IPv6 header. */
+                if (ppp_ccb_ipv6->ipv6_enabled == FALSE) {
+                    drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
+                    continue;
+                }
+
+                U16 ipv6_offset = sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t);
+                U32 packet_len = rte_pktmbuf_pkt_len(single_pkt);
+                if (packet_len >= ipv6_offset + sizeof(struct rte_ipv6_hdr) + 8) {
+                    struct rte_ipv6_hdr *ip6 = (struct rte_ipv6_hdr *)(
+                        rte_pktmbuf_mtod(single_pkt, U8 *) + ipv6_offset);
+                    U16 payload_len = rte_be_to_cpu_16(ip6->payload_len);
+                    if (ip6->proto == IPPROTO_ICMPV6 && payload_len >= 8 &&
+                            packet_len == ipv6_offset + sizeof(*ip6) + payload_len) {
+                        U8 icmp6_type = *((U8 *)(ip6 + 1));
+                        if (icmp6_type == ND6_ICMP_RS || icmp6_type == ND6_ICMP_NS ||
+                                icmp6_type == ND6_ICMP_NA) {
+                            send2cp(fastrg_ccb, single_pkt, EV_DP_ICMP6, LAN_PORT);
+                            continue;
+                        }
+                    }
+                }
+                drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                 continue;
             }
 

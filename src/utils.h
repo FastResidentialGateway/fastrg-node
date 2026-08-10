@@ -25,6 +25,7 @@ typedef enum {
     EV_DP_DNS,
     EV_DP_DHCP,
     EV_LINK,
+    EV_DP_ICMP6,
 } fastrg_event_type_t;
 
 typedef struct {
