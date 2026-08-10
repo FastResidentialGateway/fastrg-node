@@ -17,3 +17,6 @@ src/version.h
 northbound/controller/proto
 .github/*.md
 CLAUDE.md
+AGENTS.md
+.claude
+.codex

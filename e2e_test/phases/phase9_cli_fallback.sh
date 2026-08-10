@@ -136,7 +136,7 @@ phase9_cli_fallback() {
     # (SDN guard) — proves the node only accepts CLI writes when etcd is down.
     # ------------------------------------------------------------------
     info "Step 38: node gRPC ApplyConfig should be rejected in SDN mode..."
-    _p10_rej=$(ssh_node "ETCDCTL_API=3 true; grpcurl -plaintext -import-path /root/fastrg-node/northbound/grpc -proto fastrg_node.proto -d '{\"user_id\":${_U1},\"vlan_id\":360,\"pppoe_account\":\"x\",\"pppoe_password\":\"x\",\"dhcp_pool_start\":\"1.1.1.2\",\"dhcp_pool_end\":\"1.1.1.9\",\"dhcp_subnet_mask\":\"255.255.255.0\",\"dhcp_gateway\":\"1.1.1.1\"}' 127.0.0.1:${FASTRG_GRPC_PORT} fastrgnodeservice.FastrgService/ApplyConfig 2>&1" 2>/dev/null || true)
+    _p10_rej=$(ssh_node "ETCDCTL_API=3 true; grpcurl -plaintext -import-path /root/fastrg/fastrg-node/northbound/grpc -proto fastrg_node.proto -d '{\"user_id\":${_U1},\"vlan_id\":360,\"pppoe_account\":\"x\",\"pppoe_password\":\"x\",\"dhcp_pool_start\":\"1.1.1.2\",\"dhcp_pool_end\":\"1.1.1.9\",\"dhcp_subnet_mask\":\"255.255.255.0\",\"dhcp_gateway\":\"1.1.1.1\"}' 127.0.0.1:${FASTRG_GRPC_PORT} fastrgnodeservice.FastrgService/ApplyConfig 2>&1" 2>/dev/null || true)
     # The SDN guard covers every node-side config write; probe the field-level
     # RPCs (SNAT / toggles / DNS records) the same way. Any probe not rejected
     # flips the whole step to fail.
@@ -144,7 +144,7 @@ phase9_cli_fallback() {
     _p10_guard_detail=""
     _p10_probe_rpc() {
         local _rpc="$1" _payload="$2" _out
-        _out=$(ssh_node "grpcurl -plaintext -import-path /root/fastrg-node/northbound/grpc -proto fastrg_node.proto -d '${_payload}' 127.0.0.1:${FASTRG_GRPC_PORT} fastrgnodeservice.FastrgService/${_rpc} 2>&1" 2>/dev/null || true)
+        _out=$(ssh_node "grpcurl -plaintext -import-path /root/fastrg/fastrg-node/northbound/grpc -proto fastrg_node.proto -d '${_payload}' 127.0.0.1:${FASTRG_GRPC_PORT} fastrgnodeservice.FastrgService/${_rpc} 2>&1" 2>/dev/null || true)
         if ! printf '%s' "$_out" | grep -qiE "FailedPrecondition|etcd reachable"; then
             _p10_guard_ok=0
             _p10_guard_detail="${_p10_guard_detail:+${_p10_guard_detail}; }${_rpc}: $(printf '%s' "$_out" | tr '\n' '|' | tail -c 120)"
