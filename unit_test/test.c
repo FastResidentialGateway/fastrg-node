@@ -161,6 +161,10 @@ int main()
     test_dhcp6(fastrg_ccb, &total_tests, &total_pass);
     puts("ok!");
 
+    puts("====================test nd6/nd6.c====================");
+    test_nd6(fastrg_ccb, &total_tests, &total_pass);
+    puts("ok!");
+
     puts("====================test utils.c====================");
     test_utils(fastrg_ccb, &total_tests, &total_pass);
     puts("ok!");
