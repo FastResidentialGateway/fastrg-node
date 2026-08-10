@@ -11,6 +11,7 @@
 #define ETH_P_PPP_DIS   0x8863
 #define ETH_P_PPP_SES   0x8864
 #define VLAN            0x8100
+#define FRAME_TYPE_IPV6 0x86DD
 
 #define ICMP_UNREACH_DATA_PAYLOAD_LEN  8
 

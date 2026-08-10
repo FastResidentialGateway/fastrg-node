@@ -132,7 +132,7 @@ BOOL fastrg_help_requested(int argc, char **argv)
     if (argv == NULL)
         return FALSE;
 
-    for (int i = 1; i < argc; i++) {
+    for(int i=1; i<argc; i++) {
         if (argv[i] == NULL)
             continue;
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0)

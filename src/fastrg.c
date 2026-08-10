@@ -27,6 +27,7 @@
 #include "dp_flow.h"
 #include "dhcpd/dhcpd.h"
 #include "dnsd/dnsd.h"
+#include "nd6/nd6.h"
 #include <ip_codec.h>
 #include "config.h"
 #include "controller.h"
@@ -366,6 +367,15 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
                 rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
                 break;
             }
+            case EV_DP_ICMP6: {
+                U16 ccb_id = mail[i]->ccb_id;
+                U8 *pkt_data = rte_pktmbuf_mtod(mail[i]->mbuf, U8 *);
+
+                nd6_lan_input(fastrg_ccb, ccb_id, pkt_data, mail[i]->len);
+                rte_pktmbuf_free(mail[i]->mbuf);
+                rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
+                break;
+            }
             default:
                 /* Return unknown type slot to free_mail_ring */
                 rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
@@ -589,6 +599,7 @@ void fastrg_stop()
             case EV_DP_PPPoE:
             case EV_DP_DNS:
             case EV_DP_DHCP:
+            case EV_DP_ICMP6:
                 if (left_mail->mbuf)
                     rte_pktmbuf_free(left_mail->mbuf);
                 rte_ring_enqueue(fastrg_ccb.free_mail_ring, left_mail);
