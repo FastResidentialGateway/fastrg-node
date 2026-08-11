@@ -28,6 +28,7 @@
 #include "init.h"
 #include "dp_codec.h"
 #include "dp_flow.h"
+#include "dp_ipv6.h"
 #include "dhcpd/dhcpd.h"
 #include "dnsd/dnsd.h"
 #include "nd6/nd6.h"
@@ -355,7 +356,6 @@ int wan_ctrl_rx(void *arg)
                     ppp_payload->ppp_protocol == rte_cpu_to_be_16(CHAP_PROTOCOL) ||
                     ppp_payload->ppp_protocol == rte_cpu_to_be_16(IPCP_PROTOCOL) ||
                     ppp_payload->ppp_protocol == rte_cpu_to_be_16(MPLSCP_PROTOCOL) ||
-                    ppp_payload->ppp_protocol == rte_cpu_to_be_16(PPP_IPV6_PROTOCOL) ||
                     ppp_payload->ppp_protocol == rte_cpu_to_be_16(IPV6CP_PROTOCOL)))) {
                 /* Check whether ppp_bool is enabled */
                 if (unlikely(rte_atomic16_read(&ppp_ccb->ppp_bool) == 0)) {
@@ -363,6 +363,38 @@ int wan_ctrl_rx(void *arg)
                     continue;
                 }
                 send2cp(fastrg_ccb, single_pkt, EV_DP_PPPoE, WAN_PORT);
+                continue;
+            }
+
+            /* ---- IPv6 session data ---- */
+            if (unlikely(ppp_payload->ppp_protocol == rte_cpu_to_be_16(PPP_IPV6_PROTOCOL))) {
+                struct rte_ipv6_hdr *ip6 = (struct rte_ipv6_hdr *)
+                    ((char *)eth_hdr + IPV6_L2_LEN + IPV6_PPPOE_HDR_LEN);
+                ipv6_wan_verdict_t verdict = pppd_ipv6_dp_gate_open(ppp_ccb) ?
+                    ipv6_wan_classify(ppp_ccb, ip6, rte_pktmbuf_pkt_len(single_pkt)) :
+                    IPV6_WAN_TO_CP;
+
+                if (verdict == IPV6_WAN_TO_CP) {
+                    /* DHCPv6 and BRAS-side ICMPv6 belong to the control plane,
+                     * and with the gate closed every IPv6 session frame goes
+                     * there untouched. */
+                    if (unlikely(rte_atomic16_read(&ppp_ccb->ppp_bool) == 0)) {
+                        drop_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
+                        continue;
+                    }
+                    send2cp(fastrg_ccb, single_pkt, EV_DP_PPPoE, WAN_PORT);
+                } else if (verdict == IPV6_WAN_FORWARD) {
+                    ipv6_forward_result_t fwd = ipv6_wan_to_lan_forward(fastrg_ccb,
+                        ppp_ccb, single_pkt, ccb_id);
+                    if (likely(fwd == IPV6_FWD_OK))
+                        pkt[total_tx++] = single_pkt;
+                    else if (fwd == IPV6_FWD_NEIGHBOR_MISS)
+                        ipv6_neighbor_miss(fastrg_ccb, ppp_ccb, single_pkt, ccb_id);
+                    else
+                        drop_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
+                } else {
+                    drop_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
+                }
                 continue;
             }
 
@@ -470,6 +502,40 @@ int wan_data_rx(void *arg)
             ccb_id = mbuf_priv->ccb_id;
 
             ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
+            ppp_payload_t *ppp_payload = (ppp_payload_t *)((char *)eth_hdr +
+                IPV6_L2_LEN + sizeof(pppoe_header_t));
+
+            /* ---- IPv6 session data ----
+             * Classified before the IPv4 gate: IPv6 has its own gate, so a
+             * session whose IPCP failed still forwards IPv6. */
+            if (unlikely(ppp_payload->ppp_protocol == rte_cpu_to_be_16(PPP_IPV6_PROTOCOL))) {
+                struct rte_ipv6_hdr *ip6 = (struct rte_ipv6_hdr *)
+                    ((char *)eth_hdr + IPV6_L2_LEN + IPV6_PPPOE_HDR_LEN);
+                ipv6_wan_verdict_t verdict = pppd_ipv6_dp_gate_open(ppp_ccb) ?
+                    ipv6_wan_classify(ppp_ccb, ip6, rte_pktmbuf_pkt_len(single_pkt)) :
+                    IPV6_WAN_TO_CP;
+
+                if (verdict == IPV6_WAN_FORWARD) {
+                    ipv6_forward_result_t fwd = ipv6_wan_to_lan_forward(fastrg_ccb,
+                        ppp_ccb, single_pkt, ccb_id);
+                    if (likely(fwd == IPV6_FWD_OK))
+                        pkt[total_tx++] = single_pkt;
+                    else if (fwd == IPV6_FWD_NEIGHBOR_MISS)
+                        ipv6_neighbor_miss(fastrg_ccb, ppp_ccb, single_pkt, ccb_id);
+                    else
+                        drop_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
+                } else if (verdict == IPV6_WAN_TO_CP) {
+                    if (unlikely(rte_atomic16_read(&ppp_ccb->ppp_bool) == 0)) {
+                        drop_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
+                        continue;
+                    }
+                    send2cp(fastrg_ccb, single_pkt, EV_DP_PPPoE, WAN_PORT);
+                } else {
+                    drop_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
+                }
+                continue;
+            }
+
             if (unlikely(!pppd_dp_gate_open(ppp_ccb))) {
                 drop_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
                 continue;
@@ -555,7 +621,8 @@ int wan_data_rx(void *arg)
  * Handles non-TCP/UDP traffic that arrives on the LAN default queue 0
  * (everything not matching the RSS flow rules eth/vlan/ipv4/tcp|udp):
  *   - ARP to gateway IP → reply directly, others → TX to WAN
- *   - IPv6 RS/NS/NA → control plane when IPv6 is enabled
+ *   - IPv6 RS/NS/NA → control plane when IPv6 is enabled; other IPv6 →
+ *     PPPoE encapsulation → TX to WAN once the IPv6 gate is open
  *   - PPPoE pass-through → forward to WAN
  *   - IP ICMP to gateway → echo reply on LAN
  *   - IP ICMP to WAN → NAT + PPPoE encap + TX to WAN
@@ -661,7 +728,7 @@ int lan_ctrl_rx(void *arg)
                 continue;
             }
 
-            /* ---- IPv6 neighbor discovery ---- */
+            /* ---- IPv6 ---- */
             if (unlikely(vlan_header->next_proto == rte_cpu_to_be_16(FRAME_TYPE_IPV6))) {
                 ppp_ccb_t *ppp_ccb_ipv6 = PPPD_GET_CCB(fastrg_ccb, ccb_id);
 
@@ -672,23 +739,30 @@ int lan_ctrl_rx(void *arg)
                     continue;
                 }
 
-                U16 ipv6_offset = sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t);
-                U32 packet_len = rte_pktmbuf_pkt_len(single_pkt);
-                if (packet_len >= ipv6_offset + sizeof(struct rte_ipv6_hdr) + 8) {
-                    struct rte_ipv6_hdr *ip6 = (struct rte_ipv6_hdr *)(
-                        rte_pktmbuf_mtod(single_pkt, U8 *) + ipv6_offset);
-                    U16 payload_len = rte_be_to_cpu_16(ip6->payload_len);
-                    if (ip6->proto == IPPROTO_ICMPV6 && payload_len >= 8 &&
-                            packet_len == ipv6_offset + sizeof(*ip6) + payload_len) {
-                        U8 icmp6_type = *((U8 *)(ip6 + 1));
-                        if (icmp6_type == ND6_ICMP_RS || icmp6_type == ND6_ICMP_NS ||
-                                icmp6_type == ND6_ICMP_NA) {
-                            send2cp(fastrg_ccb, single_pkt, EV_DP_ICMP6, LAN_PORT);
-                            continue;
-                        }
-                    }
+                struct rte_ipv6_hdr *ip6 = (struct rte_ipv6_hdr *)
+                    ((char *)eth_hdr + IPV6_L2_LEN);
+                switch (ipv6_lan_classify(fastrg_ccb, ppp_ccb_ipv6, eth_hdr, ip6,
+                        rte_pktmbuf_pkt_len(single_pkt))) {
+                case IPV6_LAN_TO_CP:
+                    send2cp(fastrg_ccb, single_pkt, EV_DP_ICMP6, LAN_PORT);
+                    break;
+                case IPV6_LAN_PASSTHROUGH:
+                    count_rx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
+                    count_tx_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
+                    wan_pkt[total_wan_tx++] = single_pkt;
+                    break;
+                case IPV6_LAN_TOO_BIG:
+                    ipv6_send_packet_too_big(fastrg_ccb, ppp_ccb_ipv6, single_pkt,
+                        ccb_id, eth_hdr, vlan_header, ip6, lan_tx_q);
+                    break;
+                case IPV6_LAN_FORWARD:
+                    ipv6_lan_to_wan_encap(fastrg_ccb, ppp_ccb_ipv6, single_pkt, ccb_id);
+                    wan_pkt[total_wan_tx++] = single_pkt;
+                    break;
+                default:
+                    drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
+                    break;
                 }
-                drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                 continue;
             }
 
@@ -815,9 +889,10 @@ int lan_ctrl_rx(void *arg)
 /**
  * lan_data_rx - LAN port queues 1..N handler (one thread per RSS queue).
  *
- * Handles IPv4 TCP/UDP traffic distributed by RSS flow rules:
- *   - TCP: NAT + PPPoE encapsulation → TX to WAN
- *   - UDP: DHCP → handle locally; others → NAT + PPPoE encap → TX to WAN
+ * Handles TCP/UDP traffic distributed by RSS flow rules:
+ *   - IPv4 TCP: NAT + PPPoE encapsulation → TX to WAN
+ *   - IPv4 UDP: DHCP → handle locally; others → NAT + PPPoE encap → TX to WAN
+ *   - IPv6: routed PPPoE encapsulation → TX to WAN (no NAT)
  */
 int lan_data_rx(void *arg)
 {
@@ -866,7 +941,42 @@ int lan_data_rx(void *arg)
             U32 dhcp_server_ip = mbuf_priv->dhcp_server_ip;
             U32 subnet_mask = mbuf_priv->dhcp_subnet_mask;
 
-            /* Only IPv4 TCP/UDP expected from RSS flow rules */
+            /* ---- IPv6 (steered here by the LAN IPv6 TCP/UDP RSS rules) ---- */
+            if (unlikely(vlan_header->next_proto == rte_cpu_to_be_16(FRAME_TYPE_IPV6))) {
+                ppp_ccb_t *ppp_ccb_ipv6 = PPPD_GET_CCB(fastrg_ccb, ccb_id);
+
+                if (ppp_ccb_ipv6->ipv6_enabled == FALSE) {
+                    drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
+                    continue;
+                }
+                struct rte_ipv6_hdr *ip6 = (struct rte_ipv6_hdr *)
+                    ((char *)eth_hdr + IPV6_L2_LEN);
+                switch (ipv6_lan_classify(fastrg_ccb, ppp_ccb_ipv6, eth_hdr, ip6,
+                        rte_pktmbuf_pkt_len(single_pkt))) {
+                case IPV6_LAN_TO_CP:
+                    send2cp(fastrg_ccb, single_pkt, EV_DP_ICMP6, LAN_PORT);
+                    break;
+                case IPV6_LAN_PASSTHROUGH:
+                    count_rx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
+                    count_tx_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
+                    wan_pkt[total_wan_tx++] = single_pkt;
+                    break;
+                case IPV6_LAN_TOO_BIG:
+                    ipv6_send_packet_too_big(fastrg_ccb, ppp_ccb_ipv6, single_pkt,
+                        ccb_id, eth_hdr, vlan_header, ip6, tx_q);
+                    break;
+                case IPV6_LAN_FORWARD:
+                    ipv6_lan_to_wan_encap(fastrg_ccb, ppp_ccb_ipv6, single_pkt, ccb_id);
+                    wan_pkt[total_wan_tx++] = single_pkt;
+                    break;
+                default:
+                    drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
+                    break;
+                }
+                continue;
+            }
+
+            /* Only IPv4 TCP/UDP expected from the remaining RSS flow rules */
             if (unlikely(vlan_header->next_proto != rte_cpu_to_be_16(FRAME_TYPE_IP))) {
                 FastRG_LOG(DBG, fastrg_ccb->fp, NULL, NULL, "unexpected ether type %x on LAN data queue %u", rte_be_to_cpu_16(vlan_header->next_proto), rx_q);
                 drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
@@ -1016,8 +1126,9 @@ int lan_data_rx(void *arg)
  *
  * Same classification as the former wan_combined_rx: PPPoE discovery/control
  * → control plane, IPTV → LAN, ICMP session → inline NAT reverse. The heavy
- * per-flow work (TCP/UDP NAT reverse) is offloaded: each session packet gets a
- * flow tag from its inner 5-tuple and is handed to wan_dist for a worker lcore.
+ * per-flow work (TCP/UDP NAT reverse for IPv4, neighbor resolution and
+ * decapsulation for IPv6) is offloaded: each session packet gets a flow tag
+ * from its inner 5-tuple and is handed to wan_dist for a worker lcore.
  */
 int wan_dist_rx(void *arg)
 {
@@ -1091,13 +1202,49 @@ int wan_dist_rx(void *arg)
                     ppp_payload->ppp_protocol == rte_cpu_to_be_16(CHAP_PROTOCOL) ||
                     ppp_payload->ppp_protocol == rte_cpu_to_be_16(IPCP_PROTOCOL) ||
                     ppp_payload->ppp_protocol == rte_cpu_to_be_16(MPLSCP_PROTOCOL) ||
-                    ppp_payload->ppp_protocol == rte_cpu_to_be_16(PPP_IPV6_PROTOCOL) ||
                     ppp_payload->ppp_protocol == rte_cpu_to_be_16(IPV6CP_PROTOCOL)))) {
                 if (unlikely(rte_atomic16_read(&ppp_ccb->ppp_bool) == 0)) {
                     drop_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
                     continue;
                 }
                 send2cp(fastrg_ccb, single_pkt, EV_DP_PPPoE, WAN_PORT);
+                continue;
+            }
+
+            /* ---- IPv6 session data ----
+             * TCP/UDP is fanned out to a worker still carrying its PPPoE
+             * header, which is exactly how the worker tells IPv6 from the
+             * already-stripped IPv4 packets. Everything else is cheap enough
+             * to finish inline. */
+            if (unlikely(ppp_payload->ppp_protocol == rte_cpu_to_be_16(PPP_IPV6_PROTOCOL))) {
+                struct rte_ipv6_hdr *ip6 = (struct rte_ipv6_hdr *)
+                    ((char *)eth_hdr + IPV6_L2_LEN + IPV6_PPPOE_HDR_LEN);
+                ipv6_wan_verdict_t verdict = pppd_ipv6_dp_gate_open(ppp_ccb) ?
+                    ipv6_wan_classify(ppp_ccb, ip6, rte_pktmbuf_pkt_len(single_pkt)) :
+                    IPV6_WAN_TO_CP;
+                U32 flow_tag;
+
+                if (verdict == IPV6_WAN_TO_CP) {
+                    if (unlikely(rte_atomic16_read(&ppp_ccb->ppp_bool) == 0)) {
+                        drop_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
+                        continue;
+                    }
+                    send2cp(fastrg_ccb, single_pkt, EV_DP_PPPoE, WAN_PORT);
+                } else if (verdict != IPV6_WAN_FORWARD) {
+                    drop_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
+                } else if (ipv6_flow_tag(ip6, &flow_tag) == TRUE) {
+                    single_pkt->hash.usr = flow_tag;
+                    dist_pkt[dist_n++] = single_pkt;
+                } else {
+                    ipv6_forward_result_t fwd = ipv6_wan_to_lan_forward(fastrg_ccb,
+                        ppp_ccb, single_pkt, ccb_id);
+                    if (likely(fwd == IPV6_FWD_OK))
+                        pkt[total_tx++] = single_pkt;
+                    else if (fwd == IPV6_FWD_NEIGHBOR_MISS)
+                        ipv6_neighbor_miss(fastrg_ccb, ppp_ccb, single_pkt, ccb_id);
+                    else
+                        drop_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
+                }
                 continue;
             }
 
@@ -1242,6 +1389,21 @@ int wan_dist_worker(void *arg)
             eth_hdr = mbuf_priv->eth_hdr;
             vlan_header = mbuf_priv->vlan_hdr;
             ccb_id = mbuf_priv->ccb_id;
+            /* IPv6 arrives here still encapsulated; IPv4 was stripped by the
+             * RX lcore, so the VLAN next protocol identifies the family. */
+            if (unlikely(vlan_header->next_proto == rte_cpu_to_be_16(ETH_P_PPP_SES))) {
+                ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
+                ipv6_forward_result_t fwd = ipv6_wan_to_lan_forward(fastrg_ccb,
+                    ppp_ccb, single_pkt, ccb_id);
+
+                if (likely(fwd == IPV6_FWD_OK))
+                    tx_pkt[total_tx++] = single_pkt;
+                else if (fwd == IPV6_FWD_NEIGHBOR_MISS)
+                    ipv6_neighbor_miss(fastrg_ccb, ppp_ccb, single_pkt, ccb_id);
+                else
+                    drop_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
+                continue;
+            }
             ip_hdr = (struct rte_ipv4_hdr *)((char *)eth_hdr +
                 sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t));
             ip_hdr->hdr_checksum = 0;
@@ -1289,7 +1451,8 @@ int wan_dist_worker(void *arg)
  * Same handling as the former lan_combined_rx for ARP, PPPoE pass-through,
  * gateway-subnet ICMP/DHCP/DNS, WAN-bound ICMP and IGMP (all inline). WAN-bound
  * TCP/UDP destined to our LAN MAC is tagged by its LAN 5-tuple and fanned out
- * to lan_dist workers for NAT + PPPoE encap.
+ * to lan_dist workers: IPv4 for NAT + PPPoE encap, IPv6 for routed PPPoE
+ * encap.
  */
 int lan_dist_rx(void *arg)
 {
@@ -1408,6 +1571,51 @@ int lan_dist_rx(void *arg)
                 count_tx_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
                 wan_pkt[total_wan_tx++] = single_pkt;
                 #endif
+                continue;
+            }
+
+            /* ---- IPv6 ---- */
+            if (unlikely(vlan_header->next_proto == rte_cpu_to_be_16(FRAME_TYPE_IPV6))) {
+                ppp_ccb_t *ppp_ccb_ipv6 = PPPD_GET_CCB(fastrg_ccb, ccb_id);
+
+                if (ppp_ccb_ipv6->ipv6_enabled == FALSE) {
+                    drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
+                    continue;
+                }
+                struct rte_ipv6_hdr *ip6 = (struct rte_ipv6_hdr *)
+                    ((char *)eth_hdr + IPV6_L2_LEN);
+                U32 flow_tag;
+
+                switch (ipv6_lan_classify(fastrg_ccb, ppp_ccb_ipv6, eth_hdr, ip6,
+                        rte_pktmbuf_pkt_len(single_pkt))) {
+                case IPV6_LAN_TO_CP:
+                    send2cp(fastrg_ccb, single_pkt, EV_DP_ICMP6, LAN_PORT);
+                    break;
+                case IPV6_LAN_PASSTHROUGH:
+                    count_rx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
+                    count_tx_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
+                    wan_pkt[total_wan_tx++] = single_pkt;
+                    break;
+                case IPV6_LAN_TOO_BIG:
+                    ipv6_send_packet_too_big(fastrg_ccb, ppp_ccb_ipv6, single_pkt,
+                        ccb_id, eth_hdr, vlan_header, ip6, lan_tx_q);
+                    break;
+                case IPV6_LAN_FORWARD:
+                    /* TCP/UDP is fanned out to a worker, which recognizes IPv6
+                     * by the still-untouched VLAN next protocol. */
+                    if (ipv6_flow_tag(ip6, &flow_tag) == TRUE) {
+                        single_pkt->hash.usr = flow_tag;
+                        dist_pkt[dist_n++] = single_pkt;
+                    } else {
+                        ipv6_lan_to_wan_encap(fastrg_ccb, ppp_ccb_ipv6, single_pkt,
+                            ccb_id);
+                        wan_pkt[total_wan_tx++] = single_pkt;
+                    }
+                    break;
+                default:
+                    drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
+                    break;
+                }
                 continue;
             }
 
@@ -1710,6 +1918,14 @@ int lan_dist_worker(void *arg)
             eth_hdr = mbuf_priv->eth_hdr;
             vlan_header = mbuf_priv->vlan_hdr;
             ccb_id = mbuf_priv->ccb_id;
+            /* IPv6 keeps its L2 headers in place: encapsulation moves them
+             * back over the PPPoE header instead of prepending fresh ones. */
+            if (unlikely(vlan_header->next_proto == rte_cpu_to_be_16(FRAME_TYPE_IPV6))) {
+                ipv6_lan_to_wan_encap(fastrg_ccb, PPPD_GET_CCB(fastrg_ccb, ccb_id),
+                    single_pkt, ccb_id);
+                wan_pkt[total_wan_tx++] = single_pkt;
+                continue;
+            }
             ip_hdr = (struct rte_ipv4_hdr *)rte_pktmbuf_adj(single_pkt,
                 (U16)(sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t)));
             if (ip_hdr->next_proto_id == PROTO_TYPE_TCP) {

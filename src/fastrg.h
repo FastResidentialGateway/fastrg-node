@@ -149,6 +149,7 @@ typedef struct FastRG {
     struct pppoes_lcore_stats *pppoes_stats[RTE_MAX_LCORE];
     struct rte_timer        link;           /* for physical link checking timer */
     struct rte_timer        heartbeat_timer;/* for controller heartbeat timer */
+    struct rte_timer        nd6_age_timer;  /* periodic IPv6 neighbor cache aging sweep */
     datapath_mode_t         datapath_mode;    /* RSS multi-queue vs software distributor */
     U16                     dp_ctrl_txq_self; /* data core self-port control packet TX queue (N+1) */
     U16                     dp_ctrl_txq_opposite;/* data core opposite-port control packet TX queue (N+2) */

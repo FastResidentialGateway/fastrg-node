@@ -79,11 +79,10 @@ static BOOL nd6_gate_ready(const ppp_ccb_t *ppp_ccb)
 
 /* Only link-local sources or addresses inside the advertised LAN /64 may
  * populate the neighbor cache; multicast and off-link sources are discarded
- * before they can consume an entry.
- * ponytail: this bounds learners to the subscriber's own prefix, but a
- * hostile LAN host can still churn addresses to fill the 1024 slots; add
- * aging or stale-generation reclaim when IPv6 forwarding starts reading
- * this cache. */
+ * before they can consume an entry. Capacity is bounded by the aging sweep
+ * (nd6_age_scan_table), which reclaims idle and stale-generation entries, so
+ * a host churning addresses can at worst fill its own subscriber's table
+ * until the next sweep. */
 static BOOL nd6_src_is_on_link(const ppp_ccb_t *ppp_ccb, const U8 src_ip[16])
 {
     if (src_ip[0] == 0xff)
@@ -118,6 +117,18 @@ static void nd6_multicast_mac(const U8 addr[16],
     rte_memcpy(&mac->addr_bytes[2], &addr[12], 4);
 }
 
+void nd6_solicited_node_addr(const U8 target[16], U8 addr[16])
+{
+    memset(addr, 0, 16);
+    addr[0] = 0xff;
+    addr[1] = 0x02;
+    addr[11] = 0x01;
+    addr[12] = 0xff;
+    addr[13] = target[13];
+    addr[14] = target[14];
+    addr[15] = target[15];
+}
+
 void nd6_gateway_link_local(const struct rte_ether_addr *mac, U8 addr[16])
 {
     memset(addr, 0, 16);
@@ -133,11 +144,12 @@ void nd6_gateway_link_local(const struct rte_ether_addr *mac, U8 addr[16])
     addr[15] = mac->addr_bytes[5];
 }
 
-nd6_table_t *nd6_table_alloc(U16 ccb_id)
+nd6_table_t *nd6_table_alloc(U16 ccb_id, struct rte_rcu_qsbr *rcu)
 {
     nd6_table_t *table = fastrg_calloc(nd6_table_t, 1,
         sizeof(nd6_table_t), 0);
     char name[RTE_HASH_NAMESIZE];
+    int32_t max_key_id;
 
     if (table == NULL)
         return NULL;
@@ -153,11 +165,42 @@ nd6_table_t *nd6_table_alloc(U16 ccb_id)
         .extra_flag = RTE_HASH_EXTRA_FLAGS_RW_CONCURRENCY_LF,
     };
     table->hash = rte_hash_create(&params);
-    if (table->hash == NULL) {
-        fastrg_mfree(table);
-        return NULL;
+    if (table->hash == NULL)
+        goto err;
+
+    if (rcu != NULL) {
+        /* Deferred reclaim, same arrangement as the NAT hashes: a deleted key
+         * stops being visible to readers immediately, while its key slot is
+         * handed back only after every registered data lcore reports a
+         * quiescent state. The data word is a packed value rather than a
+         * pointer, so no free callback is needed. */
+        struct rte_hash_rcu_config rcu_cfg = {
+            .v = rcu,
+            .mode = RTE_HASH_QSBR_MODE_DQ,
+            /* One sweep can delete every entry, so let one reclaim pass hand
+             * all of them back instead of the 16-per-call default that would
+             * spread a full table over dozens of sweeps. */
+            .max_reclaim_size = ND6_TABLE_ENTRIES,
+            .free_key_data_func = NULL,
+        };
+        if (rte_hash_rcu_qsbr_add(table->hash, &rcu_cfg) != 0)
+            goto err;
+        table->rcu = rcu;
     }
+
+    max_key_id = rte_hash_max_key_id(table->hash);
+    if (max_key_id < 0)
+        goto err;
+    table->slot_count = (U32)max_key_id + 1;
+    table->last_seen = fastrg_calloc(U64, table->slot_count, sizeof(U64), 0);
+    table->probed = fastrg_calloc(U8, table->slot_count, sizeof(U8), 0);
+    if (table->last_seen == NULL || table->probed == NULL)
+        goto err;
     return table;
+
+err:
+    nd6_table_free(table);
+    return NULL;
 }
 
 void nd6_table_free(nd6_table_t *table)
@@ -166,6 +209,10 @@ void nd6_table_free(nd6_table_t *table)
         return;
     if (table->hash != NULL)
         rte_hash_free(table->hash);
+    if (table->last_seen != NULL)
+        fastrg_mfree(table->last_seen);
+    if (table->probed != NULL)
+        fastrg_mfree(table->probed);
     fastrg_mfree(table);
 }
 
@@ -174,9 +221,32 @@ void nd6_table_reset(nd6_table_t *table)
     if (table == NULL)
         return;
     /* A generation bump invalidates every value without restructuring the
-     * hash while future data-plane readers may be active. */
+     * hash while data-plane readers may be active. The now-stale keys still
+     * occupy their slots; the aging sweep deletes them and lets the deferred
+     * reclaim hand the slots back. */
     __atomic_fetch_add(&table->generation, 1, __ATOMIC_RELAXED);
     __atomic_store_n(&table->learn_fail, 0, __ATOMIC_RELAXED);
+}
+
+/* Run one deferred-reclaim pass so key slots freed by earlier deletes become
+ * allocatable again. No-op when the table was created without an RCU. */
+static void nd6_table_reclaim(nd6_table_t *table)
+{
+    U32 freed, pending, avail;
+
+    if (table->rcu == NULL)
+        return;
+    rte_hash_rcu_qsbr_dq_reclaim(table->hash, &freed, &pending, &avail);
+}
+
+/* Refresh a position's aging state after a learn. ctrl_thread-only, so plain
+ * loads and stores are enough. */
+static void nd6_table_touch(nd6_table_t *table, int32_t position)
+{
+    if (position < 0 || (U32)position >= table->slot_count)
+        return;
+    table->last_seen[position] = fastrg_get_cur_cycles();
+    table->probed[position] = 0;
 }
 
 void nd6_table_learn(nd6_table_t *table, const U8 ipv6[16],
@@ -185,16 +255,28 @@ void nd6_table_learn(nd6_table_t *table, const U8 ipv6[16],
     void *data;
     U16 generation;
     uintptr_t packed;
+    int32_t position;
 
     if (table == NULL || ipv6 == NULL || mac == NULL)
         return;
     generation = __atomic_load_n(&table->generation, __ATOMIC_RELAXED);
     packed = mac_table_pack(mac, generation);
-    if (rte_hash_lookup_data(table->hash, ipv6, &data) >= 0 &&
-            (uintptr_t)data == packed)
+    position = rte_hash_lookup_data(table->hash, ipv6, &data);
+    if (position >= 0 && (uintptr_t)data == packed) {
+        /* Already current: only the idle timer needs refreshing. */
+        nd6_table_touch(table, position);
         return;
-    if (rte_hash_add_key_data(table->hash, ipv6, (void *)packed) < 0)
-        __atomic_fetch_add(&table->learn_fail, 1, __ATOMIC_RELAXED);
+    }
+    if (rte_hash_add_key_data(table->hash, ipv6, (void *)packed) < 0) {
+        /* The table may only look full because deleted slots are still
+         * waiting on the defer queue; drain what is due and retry once. */
+        nd6_table_reclaim(table);
+        if (rte_hash_add_key_data(table->hash, ipv6, (void *)packed) < 0) {
+            __atomic_fetch_add(&table->learn_fail, 1, __ATOMIC_RELAXED);
+            return;
+        }
+    }
+    nd6_table_touch(table, rte_hash_lookup(table->hash, ipv6));
 }
 
 static void nd6_build_l2(ppp_ccb_t *ppp_ccb,
@@ -335,6 +417,37 @@ STATUS nd6_build_na(ppp_ccb_t *ppp_ccb, const U8 dst_ip[16],
     return SUCCESS;
 }
 
+STATUS nd6_build_ns(ppp_ccb_t *ppp_ccb, const U8 target[16],
+    const U8 dst_ip[16], const struct rte_ether_addr *dst_mac, U8 *buffer,
+    U16 *packet_len)
+{
+    struct rte_ipv6_hdr *ip6;
+    nd6_neighbor_message_t *ns;
+    nd6_ll_option_t *slla;
+    U16 icmp_len = sizeof(*ns) + sizeof(*slla);
+
+    if (!nd6_gate_ready(ppp_ccb) || target == NULL || dst_ip == NULL ||
+            dst_mac == NULL || buffer == NULL || packet_len == NULL)
+        return ERROR;
+    memset(buffer, 0, ND6_PACKET_MAX_LEN);
+    nd6_build_l2(ppp_ccb, dst_mac, buffer);
+    ip6 = nd6_build_ip6(ppp_ccb, dst_ip, icmp_len, buffer);
+    ns = (nd6_neighbor_message_t *)(ip6 + 1);
+    ns->icmp.type = ND6_ICMP_NS;
+    rte_memcpy(ns->target, target, 16);
+    slla = (nd6_ll_option_t *)(ns + 1);
+    slla->type = ND6_OPT_SLLA;
+    slla->length = 1;
+    rte_memcpy(slla->mac,
+        ppp_ccb->fastrg_ccb->nic_info.hsi_lan_mac.addr_bytes,
+        RTE_ETHER_ADDR_LEN);
+    ns->icmp.checksum = 0;
+    ns->icmp.checksum = rte_ipv6_udptcp_cksum(ip6, ns);
+    *packet_len = sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) +
+        sizeof(struct rte_ipv6_hdr) + icmp_len;
+    return SUCCESS;
+}
+
 static void nd6_send(FastRG_t *fastrg_ccb, U16 ccb_id, const U8 *packet,
     U16 packet_len)
 {
@@ -353,6 +466,18 @@ static void nd6_send_ra(ppp_ccb_t *ppp_ccb)
     U16 packet_len;
 
     if (nd6_build_ra(ppp_ccb, packet, &packet_len) == SUCCESS)
+        nd6_send(ppp_ccb->fastrg_ccb, ppp_ccb->user_num - 1, packet,
+            packet_len);
+}
+
+static void nd6_send_ns(ppp_ccb_t *ppp_ccb, const U8 target[16],
+    const U8 dst_ip[16], const struct rte_ether_addr *dst_mac)
+{
+    U8 packet[ND6_PACKET_MAX_LEN];
+    U16 packet_len;
+
+    if (nd6_build_ns(ppp_ccb, target, dst_ip, dst_mac, packet,
+            &packet_len) == SUCCESS)
         nd6_send(ppp_ccb->fastrg_ccb, ppp_ccb->user_num - 1, packet,
             packet_len);
 }
@@ -530,6 +655,104 @@ void nd6_ra_timer_cb(__attribute__((unused)) struct rte_timer *tim, void *arg)
         return;
     }
     nd6_send_ra(ppp_ccb);
+}
+
+void nd6_age_scan_table(ppp_ccb_t *ppp_ccb, U64 now)
+{
+    nd6_table_t *table;
+    const void *key;
+    void *data;
+    U32 next = 0;
+    int32_t position;
+    U16 generation;
+    U64 ttl_cycles;
+
+    if (ppp_ccb == NULL || ppp_ccb->nd6_table == NULL)
+        return;
+    table = ppp_ccb->nd6_table;
+    generation = __atomic_load_n(&table->generation, __ATOMIC_RELAXED);
+    ttl_cycles = (U64)ND6_NEIGHBOR_TTL_SEC * fastrg_get_cycles_in_sec();
+    /* Deleting the entry the iterator just returned is safe: the cursor has
+     * already moved past its bucket slot and no other entry is relocated. */
+    while ((position = rte_hash_iterate(table->hash, &key, &data,
+            &next)) >= 0) {
+        struct rte_ether_addr mac;
+        U8 entry_ip[16];
+
+        rte_memcpy(entry_ip, key, 16);
+        if (mac_table_unpack((uintptr_t)data, &mac) != generation) {
+            /* Left over from a table reset or a prefix change: lookups
+             * already reject it, so the slot is pure waste. */
+            rte_hash_del_key(table->hash, entry_ip);
+            continue;
+        }
+        if ((U32)position >= table->slot_count ||
+                table->last_seen[position] + ttl_cycles >= now)
+            continue;
+        if (table->probed[position] != 0) {
+            /* The probe from the previous sweep went unanswered. */
+            rte_hash_del_key(table->hash, entry_ip);
+            continue;
+        }
+        /* One unicast reachability probe; an answering host re-learns through
+         * nd6_lan_input, which refreshes last_seen and clears probed. */
+        table->probed[position] = 1;
+        nd6_send_ns(ppp_ccb, entry_ip, entry_ip, &mac);
+    }
+    /* Hand back the key slots freed by this sweep and by any earlier one
+     * whose grace period has since completed. */
+    nd6_table_reclaim(table);
+}
+
+void nd6_age_timer_cb(__attribute__((unused)) struct rte_timer *tim, void *arg)
+{
+    FastRG_t *fastrg_ccb = (FastRG_t *)arg;
+    U64 now;
+
+    if (fastrg_ccb == NULL)
+        return;
+    now = fastrg_get_cur_cycles();
+    for(U16 i=0; i<fastrg_ccb->user_count; i++)
+        nd6_age_scan_table(PPPD_GET_CCB(fastrg_ccb, i), now);
+}
+
+void nd6_wan_miss_input(FastRG_t *fastrg_ccb, U16 ccb_id, U8 *pkt, U16 len)
+{
+    ppp_ccb_t *ppp_ccb;
+    vlan_header_t *vlan;
+    ppp_payload_t *ppp_payload;
+    struct rte_ipv6_hdr *ip6;
+    struct rte_ether_addr resolved_mac, solicited_mac;
+    U8 solicited[16];
+    U8 *dst_ip;
+    U16 l2_len = sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t);
+    U16 ip6_offset = l2_len + sizeof(pppoe_header_t) + sizeof(ppp_payload_t);
+
+    if (fastrg_ccb == NULL || pkt == NULL || ccb_id >= fastrg_ccb->user_count)
+        return;
+    ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
+    if (!nd6_gate_ready(ppp_ccb) || len < ip6_offset + sizeof(*ip6))
+        return;
+
+    vlan = (vlan_header_t *)(pkt + sizeof(struct rte_ether_hdr));
+    ppp_payload = (ppp_payload_t *)(pkt + l2_len + sizeof(pppoe_header_t));
+    if (vlan->next_proto != rte_cpu_to_be_16(ETH_P_PPP_SES) ||
+            ppp_payload->ppp_protocol !=
+                rte_cpu_to_be_16(PPP_IPV6_PROTOCOL))
+        return;
+
+    ip6 = (struct rte_ipv6_hdr *)(pkt + ip6_offset);
+    dst_ip = (U8 *)&ip6->dst_addr;
+    if (rte_ipv6_check_version(ip6) != 0 ||
+            memcmp(dst_ip, ppp_ccb->hsi_ipv6_lan_prefix, 8) != 0)
+        return;
+    /* The address may have been learned between the data plane's lookup and
+     * this handler; only a still-unresolved one needs soliciting. */
+    if (nd6_table_lookup(ppp_ccb->nd6_table, dst_ip, &resolved_mac) == SUCCESS)
+        return;
+    nd6_solicited_node_addr(dst_ip, solicited);
+    nd6_multicast_mac(solicited, &solicited_mac);
+    nd6_send_ns(ppp_ccb, dst_ip, solicited, &solicited_mac);
 }
 
 #ifdef UNIT_TEST

@@ -200,6 +200,7 @@ STATUS apply_hsi_config(FastRG_t *fastrg_ccb, int ccb_id, const hsi_config_t *co
 
     /* Per-subscriber IPv6 enable is sourced from etcd HSI config */
     ppp_ccb->ipv6_enabled = config->ipv6_enable;
+    pppd_ipv6_dp_gate_update(ppp_ccb);
 
     FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
         "Applied HSI config for user %d: DHCP enabled with pool %s, dns_proxy_enable=%s, "

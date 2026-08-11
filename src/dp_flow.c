@@ -545,6 +545,34 @@ int setup_port_flows(FastRG_t *fastrg_ccb, uint16_t port_id, uint16_t total_queu
             "Port %u: VLAN IPv4/UDP -> RSS 1..%u [OK]\n",
             port_id, total_queues - 1);
 
+        /* IPv6 steering is best effort: a PMD that cannot match VLAN/IPv6/L4
+         * still forwards IPv6 correctly, its traffic just stays on queue 0
+         * where the same classification runs. Refusing to boot over it would
+         * cost IPv4 service too. */
+        flow = create_vlan_ip_rss_flow(fastrg_ccb, port_id,
+            RTE_FLOW_ITEM_TYPE_IPV6, RTE_FLOW_ITEM_TYPE_TCP,
+            RTE_ETH_RSS_NONFRAG_IPV6_TCP, error);
+        if (flow)
+            FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                "Port %u: VLAN IPv6/TCP -> RSS 1..%u [OK]\n",
+                port_id, total_queues - 1);
+        else
+            FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
+                "Port %u: VLAN IPv6/TCP RSS unsupported; IPv6 TCP stays on queue 0\n",
+                port_id);
+
+        flow = create_vlan_ip_rss_flow(fastrg_ccb, port_id,
+            RTE_FLOW_ITEM_TYPE_IPV6, RTE_FLOW_ITEM_TYPE_UDP,
+            RTE_ETH_RSS_NONFRAG_IPV6_UDP, error);
+        if (flow)
+            FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                "Port %u: VLAN IPv6/UDP -> RSS 1..%u [OK]\n",
+                port_id, total_queues - 1);
+        else
+            FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
+                "Port %u: VLAN IPv6/UDP RSS unsupported; IPv6 UDP stays on queue 0\n",
+                port_id);
+
     } else {
         /* ---- Port 1+: WAN-side PPPoE --------------------------------- */
 
