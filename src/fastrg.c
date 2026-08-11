@@ -376,6 +376,15 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
                 rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
                 break;
             }
+            case EV_DP_ND6_MISS: {
+                U16 ccb_id = mail[i]->ccb_id;
+                U8 *pkt_data = rte_pktmbuf_mtod(mail[i]->mbuf, U8 *);
+
+                nd6_wan_miss_input(fastrg_ccb, ccb_id, pkt_data, mail[i]->len);
+                rte_pktmbuf_free(mail[i]->mbuf);
+                rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
+                break;
+            }
             default:
                 /* Return unknown type slot to free_mail_ring */
                 rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
@@ -535,6 +544,9 @@ void fastrg_stop()
 {
     FastRG_LOG(INFO, fastrg_ccb.fp, NULL, NULL, "FastRG system stopping...");
     rte_eal_mp_wait_lcore();
+    /* Safe here and not earlier: the lcore that services this timer has left
+     * its loop, so the callback cannot be running. */
+    rte_timer_stop(&fastrg_ccb.nd6_age_timer);
     fastrg_stop_northbound_threads(&fastrg_ccb);
     // Cleanup Kafka producer (flush pending telemetry)
     kafka_producer_cleanup();
@@ -600,6 +612,7 @@ void fastrg_stop()
             case EV_DP_DNS:
             case EV_DP_DHCP:
             case EV_DP_ICMP6:
+            case EV_DP_ND6_MISS:
                 if (left_mail->mbuf)
                     rte_pktmbuf_free(left_mail->mbuf);
                 rte_ring_enqueue(fastrg_ccb.free_mail_ring, left_mail);
@@ -885,6 +898,12 @@ int fastrg_start(int argc, char **argv)
         FastRG_LOG(ERR, fastrg_ccb.fp, NULL, NULL, "Northbound initialization failed");
         goto err;
     }
+
+    /* Periodic IPv6 neighbor cache sweep on the control-plane lcore: it is the
+     * table's only writer, so aging must run where learning runs. */
+    rte_timer_reset(&fastrg_ccb.nd6_age_timer,
+        (U64)ND6_AGE_SCAN_SEC * fastrg_get_cycles_in_sec(), PERIODICAL,
+        fastrg_ccb.lcore.ctrl_thread, nd6_age_timer_cb, &fastrg_ccb);
 
     rte_atomic16_set(&start_flag, 1);
 

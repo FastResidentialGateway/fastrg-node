@@ -119,8 +119,10 @@ void dhcp6_derive_lan_prefix(const U8 pd_prefix[16], U8 pd_plen,
 
 static void dhcp6_clear_lease(ppp_ccb_t *ppp_ccb)
 {
-    /* Publish not-ready before clearing fields that future readers consume. */
+    /* Publish not-ready before clearing fields that data-plane readers
+     * consume. */
     ppp_ccb->dhcp6_pd_ready = FALSE;
+    pppd_ipv6_dp_gate_update(ppp_ccb);
     ppp_ccb->dhcp6_t1 = 0;
     ppp_ccb->hsi_ipv6_pd_plen = 0;
     memset(ppp_ccb->hsi_ipv6_pd_prefix, 0,
@@ -433,6 +435,7 @@ STATUS dhcp6_process_message(ppp_ccb_t *ppp_ccb, const U8 *dhcp, U16 len)
     }
 
     ppp_ccb->dhcp6_pd_ready = FALSE;
+    pppd_ipv6_dp_gate_update(ppp_ccb);
     rte_memcpy(ppp_ccb->hsi_ipv6_pd_prefix, response.prefix,
         sizeof(response.prefix));
     ppp_ccb->hsi_ipv6_pd_plen = response.prefix_plen;
@@ -445,6 +448,7 @@ STATUS dhcp6_process_message(ppp_ccb_t *ppp_ccb, const U8 *dhcp, U16 len)
     ppp_ccb->dhcp6_retry = 0;
     /* All delegated data is complete before it becomes visible to readers. */
     ppp_ccb->dhcp6_pd_ready = TRUE;
+    pppd_ipv6_dp_gate_update(ppp_ccb);
     nd6_ra_start(ppp_ccb);
     dhcp6_arm(ppp_ccb, ppp_ccb->dhcp6_t1, SINGLE);
     FastRG_LOG(INFO, ppp_ccb->fastrg_ccb->fp, ppp_ccb, PPPLOGMSG,

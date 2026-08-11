@@ -229,6 +229,10 @@ int main()
     test_dp(fastrg_ccb, &total_tests, &total_pass);
     puts("ok!");
 
+    puts("====================test dp_ipv6.h====================");
+    test_dp_ipv6(fastrg_ccb, &total_tests, &total_pass);
+    puts("ok!");
+
     puts("====================test northbound/cmdline/ip_pool_range.c====================");
     test_cmdline(fastrg_ccb, &total_tests, &total_pass);
     puts("ok!");
