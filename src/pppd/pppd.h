@@ -44,21 +44,13 @@
  * Maps WAN PPPoE IP:eport → LAN dip:iport.
  * Packed to 16 bytes so total table = 65536 * 16 = 1 MB per ppp_ccb.
  *
- * Entries are published only by control-plane writers: standalone gRPC
- * handlers write directly, while SDN updates run on ctrl_thread through the
- * etcd event/reconcile path. Data-plane lcores only read the table.
- * port_fwd_add() writes dip/iport and resets hit_count, issues a release
- * fence, then sets is_active to 1. A reader that observes is_active == 1 and
- * consumes dip/iport must use port_fwd_lookup_by_eport(), which provides the
- * matching acquire fence, or issue an acquire fence between its own flag check
- * and field reads. Checks that consume only is_active (the SNAT reserved-port
- * check, active counting, reconcile pass 1, and add/remove guards) need no
- * acquire pairing.
- *
- * port_fwd_remove() sets is_active to 0 before a release fence prevents field
- * clearing from becoming visible first. A reader already past its flag check
- * can still overlap the clearing stores; this inherent check-then-use race is
- * architecture-independent and affects only packets in flight during removal.
+ * Publish protocol: control-plane writers (gRPC handler in standalone,
+ * ctrl_thread in SDN) write dip/iport, issue a release fence, then set
+ * is_active. Reading dip/iport after seeing is_active == 1 requires the
+ * matching acquire — go through port_fwd_lookup_by_eport() or fence
+ * yourself; is_active-only checks need no pairing. port_fwd_remove()
+ * clears is_active first; packets already past their flag check may
+ * still see the teardown (inherent check-then-use window).
  *
  * Do not make this struct cache line aligned. Each entry is parallel accessed 
  * in different lcores, even we align it to cache line, it still has false sharing
