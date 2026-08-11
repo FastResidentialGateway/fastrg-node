@@ -430,7 +430,12 @@ STATUS reconcile_port_mapping(FastRG_t *fastrg_ccb, int ccb_id,
             continue;
         }
         port_fwd_entry_t *entry = &ppp_ccb->port_fwd_table[mappings[i].eport];
-        if (rte_atomic16_read(&entry->is_active) == 0) {
+        U16 is_active = rte_atomic16_read(&entry->is_active);
+        if (is_active != 0) {
+            /* Pairs with port_fwd_add() before comparing the published fields. */
+            rte_atomic_thread_fence(rte_memory_order_acquire);
+        }
+        if (is_active == 0) {
             /* Entry missing locally — add it */
             port_fwd_add(ppp_ccb->port_fwd_table, mappings[i].eport, dip_be, mappings[i].dport);
             FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,

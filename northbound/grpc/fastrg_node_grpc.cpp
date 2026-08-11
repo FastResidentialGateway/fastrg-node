@@ -701,6 +701,8 @@ grpc::Status FastRGNodeServiceImpl::GetPortFwdInfo(::grpc::ServerContext* contex
 
     for(int eport=0; eport<PORT_FWD_TABLE_SIZE; eport++) {
         if (rte_atomic16_read(&ppp_ccb->port_fwd_table[eport].is_active) == 1) {
+            /* Pairs with port_fwd_add() before reading the published fields. */
+            rte_atomic_thread_fence(rte_memory_order_acquire);
             PortFwdEntry *entry = response->add_entries();
             entry->set_eport(eport);
 

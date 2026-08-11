@@ -256,6 +256,8 @@ BOOL hsi_config_matches_local(const char *user_id,
                 "Sync match[%s]: port_fwd[%u] inactive in local", user_id, pm->eport);
             return FALSE;
         }
+        /* Pairs with port_fwd_add() before comparing the published fields. */
+        rte_atomic_thread_fence(rte_memory_order_acquire);
         if (e->iport != pm->dport) {
             FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
                 "Sync match[%s]: port_fwd[%u] iport mismatch local=%u etcd=%u",
