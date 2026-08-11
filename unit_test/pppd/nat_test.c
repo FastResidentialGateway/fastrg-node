@@ -722,6 +722,60 @@ static void test_forward_hash_full_enospc(void)
     small_env_destroy();
 }
 
+static void test_port_fwd_lookup_contract(void)
+{
+    printf("\nTesting port-forward lookup contract:\n");
+    printf("========================================\n\n");
+
+    memset(test_ccb.port_fwd_table, 0, sizeof(test_ccb.port_fwd_table));
+    const U16 eport = 18080;
+    const U32 dip = rte_cpu_to_be_32(0xC0A8010A);
+    const U16 iport = 8080;
+    U32 out_dip = 0;
+    U16 out_iport = 0;
+
+    TEST_ASSERT(port_fwd_lookup_by_eport(test_ccb.port_fwd_table, eport) == NULL,
+        "inactive port-forward lookup returns NULL", NULL);
+    TEST_ASSERT(nat_port_fwd_reverse_lookup(test_ccb.port_fwd_table,
+        rte_cpu_to_be_16(eport), &out_dip, &out_iport) == ERROR,
+        "inactive port-forward reverse lookup returns ERROR", NULL);
+
+    port_fwd_add(test_ccb.port_fwd_table, eport, dip, iport);
+    port_fwd_entry_t *entry = port_fwd_lookup_by_eport(test_ccb.port_fwd_table, eport);
+    TEST_ASSERT(entry != NULL && entry->dip == dip && entry->iport == iport,
+        "active port-forward lookup returns published fields", NULL);
+    TEST_ASSERT(nat_port_fwd_reverse_lookup(test_ccb.port_fwd_table,
+        rte_cpu_to_be_16(eport), &out_dip, &out_iport) == SUCCESS &&
+        out_dip == dip && out_iport == rte_cpu_to_be_16(iport),
+        "active reverse lookup returns published fields in packet byte order", NULL);
+    TEST_ASSERT(entry != NULL && rte_atomic64_read(&entry->hit_count) == 0,
+        "new port-forward entry starts with zero hit count", NULL);
+
+    const U32 ignored_dip = rte_cpu_to_be_32(0xC0A8010B);
+    port_fwd_add(test_ccb.port_fwd_table, eport, ignored_dip, 9090);
+    TEST_ASSERT(entry->dip == dip && entry->iport == iport,
+        "adding an active eport does not overwrite its fields", NULL);
+
+    TEST_ASSERT(port_fwd_remove(test_ccb.port_fwd_table, eport) == SUCCESS,
+        "active port-forward entry can be removed", NULL);
+    TEST_ASSERT(port_fwd_remove(test_ccb.port_fwd_table, eport) == ERROR,
+        "removing an inactive port-forward entry returns ERROR", NULL);
+    TEST_ASSERT(nat_port_fwd_reverse_lookup(test_ccb.port_fwd_table,
+        rte_cpu_to_be_16(eport), &out_dip, &out_iport) == ERROR,
+        "removed port-forward entry is no longer found", NULL);
+
+    const U32 replacement_dip = rte_cpu_to_be_32(0xC0A8010C);
+    const U16 replacement_iport = 10080;
+    port_fwd_add(test_ccb.port_fwd_table, eport, replacement_dip, replacement_iport);
+    entry = port_fwd_lookup_by_eport(test_ccb.port_fwd_table, eport);
+    TEST_ASSERT(nat_port_fwd_reverse_lookup(test_ccb.port_fwd_table,
+        rte_cpu_to_be_16(eport), &out_dip, &out_iport) == SUCCESS &&
+        out_dip == replacement_dip && out_iport == rte_cpu_to_be_16(replacement_iport),
+        "re-added port-forward entry publishes replacement fields", NULL);
+    TEST_ASSERT(entry != NULL && rte_atomic64_read(&entry->hit_count) == 0,
+        "re-added port-forward entry resets hit count", NULL);
+}
+
 void test_nat(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 {
     (void)fastrg_ccb;
@@ -753,6 +807,7 @@ void test_nat(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_pool_dry_enospc();
     test_reverse_hash_full_enospc();
     test_forward_hash_full_enospc();
+    test_port_fwd_lookup_contract();
 
     printf("\n");
     printf("╔════════════════════════════════════════════════════════════╗\n");

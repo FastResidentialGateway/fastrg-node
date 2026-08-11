@@ -546,7 +546,9 @@ static inline U16 nat_learning_port_reuse(ppp_ccb_t *ppp_ccb, struct rte_ether_h
         U32 nat_port_host = rte_be_to_cpu_16(nat_port);
         void *data;
 
-        /* Skip ports reserved by static port forwarding rules */
+        /* This check consumes only is_active, not dip/iport, so it needs no
+         * acquire pairing. Ordering cannot remove the add/remove race: a stale
+         * view only skips a port or reaches existing reverse-hash conflict handling. */
         if (rte_atomic16_read(&ppp_ccb->port_fwd_table[nat_port_host].is_active) == 1)
             goto next_nat_port;
 
@@ -803,7 +805,8 @@ static inline U16 nat_tcp_learning(ppp_ccb_t *ppp_ccb, struct rte_ether_hdr *eth
 /**
  * @fn port_fwd_lookup_by_eport
  *
- * @brief O(1) lookup: index directly by eport value.
+ * @brief O(1) lookup: index directly by eport value. A non-NULL return
+ *        carries acquire semantics, so callers may read dip/iport directly.
  *
  * @param table
  *      port_fwd_table[PORT_FWD_TABLE_SIZE] inside ppp_ccb
@@ -817,8 +820,12 @@ static inline port_fwd_entry_t *port_fwd_lookup_by_eport(
     port_fwd_entry_t table[], U16 eport)
 {
     port_fwd_entry_t *entry = &table[eport];
-    if (rte_atomic16_read(&entry->is_active) == 1)
+    if (rte_atomic16_read(&entry->is_active) == 1) {
+        /* Pairs with the release fence in port_fwd_add(): observing an active
+         * entry also makes the dip/iport published before the flag visible. */
+        rte_atomic_thread_fence(rte_memory_order_acquire);
         return entry;
+    }
     return NULL;
 }
 
@@ -827,6 +834,8 @@ static inline port_fwd_entry_t *port_fwd_lookup_by_eport(
  *
  * @brief Add / update a static port forwarding entry.
  *        O(1): write directly to table[eport].
+ *        The release fence pairs with the acquire in
+ *        port_fwd_lookup_by_eport() when publishing dip/iport.
  *
  * @param table
  *      Port forwarding table
@@ -855,6 +864,8 @@ static inline void port_fwd_add(port_fwd_entry_t table[],
  *
  * @brief Remove a port forwarding entry.
  *        O(1): clear table[eport] directly.
+ *        The release fence keeps the is_active=0 publication ordered before
+ *        field clearing; it does not close the in-flight check-then-use race.
  *
  * @param table
  *      Port forwarding table
