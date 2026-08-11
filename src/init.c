@@ -452,6 +452,7 @@ STATUS sys_init(FastRG_t *fastrg_ccb, struct fastrg_config *fastrg_cfg)
 
     rte_timer_init(&fastrg_ccb->link);
     rte_timer_init(&fastrg_ccb->heartbeat_timer);
+    rte_timer_init(&fastrg_ccb->nd6_age_timer);
 
     size_t rcu_size = rte_rcu_qsbr_get_memsize(RTE_MAX_LCORE);
 

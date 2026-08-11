@@ -225,6 +225,17 @@ typedef struct {
     U8                    hsi_ipv6_lan_prefix[16];
     U8                    hsi_ipv6_dns[2][16];
     volatile BOOL         dhcp6_pd_ready;
+    /* Data-plane IPv6 forwarding gate: the AND of ipv6_enabled, ipv6cp_up and
+     * dhcp6_pd_ready, recomputed by the control plane (its only writer) via
+     * pppd_ipv6_dp_gate_update(). Kept independent of dp_start_bool so that an
+     * IPCP failure never stops IPv6 forwarding and an IPV6CP or prefix
+     * delegation failure never stops IPv4 forwarding. */
+    rte_atomic16_t        ipv6_dp_bool;
+    /* Cycle stamp of the last WAN->LAN neighbor-cache miss handed to the
+     * control plane. Data lcores claim a new stamp with a relaxed
+     * compare-exchange before escalating, so traffic to an unresolved LAN
+     * address cannot flood the control-plane ring. */
+    U64                   nd6_miss_last_cycles;
     struct nd6_table      *nd6_table;       /* single-writer IPv6 neighbor cache */
     struct rte_timer      ra_timer;         /* periodic LAN router advertisement for IPv6 */
     U64                   last_rs_ra_cycles; /* last RS-triggered RA, for rate limiting in IPv6 */
@@ -256,6 +267,47 @@ static __always_inline BOOL pppd_dp_gate_open(const ppp_ccb_t *ppp_ccb)
 static inline struct rte_timer *ppp_cp_timer(ppp_ccb_t *ppp_ccb)
 {
     return ppp_ccb->cp_id == PPP_CP_IPV6CP ? &ppp_ccb->ppp_ipv6cp : &ppp_ccb->ppp;
+}
+
+/**
+ * @fn pppd_ipv6_dp_gate_update
+ *
+ * @brief Recompute a subscriber's IPv6 data-plane gate from ipv6_enabled,
+ *        ipv6cp_up and dhcp6_pd_ready. Call it from the control plane after
+ *        every write to any of those three flags.
+ *
+ *        Opening the gate publishes a write barrier first, so a data lcore
+ *        that observes the gate open also observes the LAN prefix, session id,
+ *        peer MAC and VLAN written before the call. Closing needs no barrier:
+ *        a packet already in flight reads consistent-but-stale fields, and the
+ *        control block itself is preallocated and never freed.
+ *
+ * @param ppp_ccb
+ *      Subscriber control block (NULL tolerated)
+ * @return
+ *      void
+ */
+void pppd_ipv6_dp_gate_update(ppp_ccb_t *ppp_ccb);
+
+/**
+ * @fn pppd_ipv6_dp_gate_open
+ *
+ * @brief Data-plane side of the IPv6 gate: report whether IPv6 forwarding is
+ *        open for this subscriber and, when it is, order the read against the
+ *        subscriber fields the control plane published before opening it.
+ *
+ * @param ppp_ccb
+ *      Subscriber control block
+ * @return
+ *      TRUE when IPv6 forwarding fields may be read, FALSE otherwise
+ */
+static __always_inline BOOL pppd_ipv6_dp_gate_open(const ppp_ccb_t *ppp_ccb)
+{
+    if (rte_atomic16_read(&ppp_ccb->ipv6_dp_bool) == (S16)0)
+        return FALSE;
+    /* Pairs with the rte_smp_wmb() in pppd_ipv6_dp_gate_update(). */
+    rte_smp_rmb();
+    return TRUE;
 }
 
 void   exit_ppp(ppp_ccb_t *ppp_ccb);

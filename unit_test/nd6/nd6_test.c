@@ -6,6 +6,7 @@
 #include <rte_byteorder.h>
 #include <rte_ether.h>
 #include <rte_ip6.h>
+#include <rte_rcu_qsbr.h>
 #include <rte_timer.h>
 
 #include "../../src/nd6/nd6.h"
@@ -16,6 +17,10 @@ static int test_count = 0;
 static int pass_count = 0;
 static FastRG_t *g_fastrg_ccb;
 static ppp_ccb_t test_ccb;
+/* QSBR the neighbor cache defers its key-slot reclaim on. This single-threaded
+ * fixture is both the writer and the only registered reader, so it reports its
+ * own quiescent states around the aging tests. */
+static struct rte_rcu_qsbr *test_rcu;
 
 static const struct rte_ether_addr host_mac = {
     .addr_bytes = {0x02, 0x10, 0x20, 0x30, 0x40, 0x50},
@@ -521,6 +526,157 @@ static void test_dad_defense(void)
         "T12 gateway DAD probe answered with unsolicited NA", NULL);
 }
 
+static void test_neighbor_aging(void)
+{
+    U8 packet[ND6_PACKET_MAX_LEN];
+    struct rte_ether_addr found;
+    const U8 *tx;
+    U16 len, tx_len;
+    U32 tx_count;
+    U64 fresh, aged;
+
+    reset_fixture();
+    nd6_table_learn(test_ccb.nd6_table, host_ip, &host_mac);
+    fresh = fastrg_get_cur_cycles();
+    aged = fresh + (U64)(ND6_NEIGHBOR_TTL_SEC + 1) * fastrg_get_cycles_in_sec();
+
+    /* A sweep at learn time neither probes nor deletes. */
+    nd6_age_scan_table(&test_ccb, fresh);
+    nd6_test_get_last_tx(NULL, &tx_count);
+    BOOL fresh_kept = tx_count == 0 &&
+        nd6_table_lookup(test_ccb.nd6_table, host_ip, &found) == SUCCESS;
+
+    /* Idle past the TTL: one unicast NS probe, entry still present. */
+    nd6_age_scan_table(&test_ccb, aged);
+    tx = nd6_test_get_last_tx(&tx_len, &tx_count);
+    struct rte_ether_hdr *eth = (struct rte_ether_hdr *)tx;
+    vlan_header_t *vlan = (vlan_header_t *)(eth + 1);
+    struct rte_ipv6_hdr *ip6 = (struct rte_ipv6_hdr *)(vlan + 1);
+    test_neighbor_t *ns = (test_neighbor_t *)(ip6 + 1);
+    U8 gateway[16];
+
+    nd6_gateway_link_local(&g_fastrg_ccb->nic_info.hsi_lan_mac, gateway);
+    BOOL probed = tx_count == 1 && tx_len > 0 &&
+        rte_is_same_ether_addr(&eth->dst_addr, &host_mac) &&
+        ns->icmp.type == ND6_ICMP_NS && ns->icmp.code == 0 &&
+        memcmp(ns->target, host_ip, 16) == 0 &&
+        memcmp((U8 *)&ip6->dst_addr, host_ip, 16) == 0 &&
+        memcmp((U8 *)&ip6->src_addr, gateway, 16) == 0 &&
+        ip6->hop_limits == 255 &&
+        ((U8 *)(ns + 1))[0] == ND6_OPT_SLLA &&
+        ((U8 *)(ns + 1))[1] == 1 &&
+        memcmp((U8 *)(ns + 1) + 2,
+            g_fastrg_ccb->nic_info.hsi_lan_mac.addr_bytes, 6) == 0 &&
+        rte_ipv6_udptcp_cksum_verify(ip6, ns) == 0 &&
+        nd6_table_lookup(test_ccb.nd6_table, host_ip, &found) == SUCCESS;
+
+    /* An answering NA refreshes the entry and clears the outstanding probe,
+     * so the next sweep probes again instead of deleting. */
+    nd6_test_tx_reset();
+    len = build_nd_packet(packet, ND6_ICMP_NA, host_ip, host_ip,
+        ND6_OPT_TLLA, 1);
+    nd6_lan_input(g_fastrg_ccb, 0, packet, len);
+    nd6_age_scan_table(&test_ccb, aged);
+    nd6_test_get_last_tx(NULL, &tx_count);
+    BOOL refreshed = tx_count == 1 &&
+        nd6_table_lookup(test_ccb.nd6_table, host_ip, &found) == SUCCESS;
+
+    /* That probe goes unanswered: the entry is deleted. */
+    nd6_age_scan_table(&test_ccb, aged);
+    TEST_ASSERT(fresh_kept && probed && refreshed &&
+            nd6_table_lookup(test_ccb.nd6_table, host_ip, &found) == ERROR,
+        "T13 idle neighbors are probed once then reclaimed", NULL);
+}
+
+static void test_stale_generation_reclaim(void)
+{
+    U8 addr[16];
+    struct rte_ether_addr found;
+    U64 now;
+    BOOL filled = TRUE;
+
+    reset_fixture();
+    now = fastrg_get_cur_cycles();
+    /* Hand back key slots deferred by earlier sweeps so the fill below starts
+     * from a genuinely empty table. */
+    for(U8 i=0; i<3; i++) {
+        rte_rcu_qsbr_quiescent(test_rcu, 0);
+        nd6_age_scan_table(&test_ccb, now);
+    }
+
+    memcpy(addr, lan_prefix, 16);
+    for(U32 i=0; i<ND6_TABLE_ENTRIES; i++) {
+        addr[14] = (U8)(i >> 8);
+        addr[15] = (U8)i;
+        nd6_table_learn(test_ccb.nd6_table, addr, &host_mac);
+    }
+    for(U32 i=0; i<ND6_TABLE_ENTRIES; i++) {
+        addr[14] = (U8)(i >> 8);
+        addr[15] = (U8)i;
+        filled = filled &&
+            nd6_table_lookup(test_ccb.nd6_table, addr, &found) == SUCCESS;
+    }
+
+    /* One more address has nowhere to go while the table is full. */
+    addr[13] = 0x01;
+    nd6_table_learn(test_ccb.nd6_table, addr, &host_mac);
+    BOOL rejected = nd6_table_lookup(test_ccb.nd6_table, addr, &found) == ERROR;
+
+    /* A reset leaves every key behind at the previous generation; the sweep
+     * deletes them and the deferred reclaim makes the slots allocatable
+     * again once the reader has crossed a grace period. */
+    nd6_table_reset(test_ccb.nd6_table);
+    rte_rcu_qsbr_quiescent(test_rcu, 0);
+    nd6_age_scan_table(&test_ccb, now);
+    rte_rcu_qsbr_quiescent(test_rcu, 0);
+    nd6_table_learn(test_ccb.nd6_table, addr, &host_mac);
+    TEST_ASSERT(filled && rejected &&
+            nd6_table_lookup(test_ccb.nd6_table, addr, &found) == SUCCESS &&
+            rte_is_same_ether_addr(&found, &host_mac),
+        "T14 stale generation entries are swept and their slots reused", NULL);
+}
+
+static void test_ns_builder(void)
+{
+    U8 packet[ND6_PACKET_MAX_LEN];
+    U8 solicited[16];
+    U8 gateway[16];
+    struct rte_ether_addr solicited_mac;
+    U16 packet_len = 0;
+    STATUS status;
+
+    reset_fixture();
+    nd6_solicited_node_addr(host_ip, solicited);
+    solicited_mac.addr_bytes[0] = 0x33;
+    solicited_mac.addr_bytes[1] = 0x33;
+    memcpy(&solicited_mac.addr_bytes[2], &solicited[12], 4);
+    nd6_gateway_link_local(&g_fastrg_ccb->nic_info.hsi_lan_mac, gateway);
+    status = nd6_build_ns(&test_ccb, host_ip, solicited, &solicited_mac,
+        packet, &packet_len);
+
+    struct rte_ether_hdr *eth = (struct rte_ether_hdr *)packet;
+    vlan_header_t *vlan = (vlan_header_t *)(eth + 1);
+    struct rte_ipv6_hdr *ip6 = (struct rte_ipv6_hdr *)(vlan + 1);
+    test_neighbor_t *ns = (test_neighbor_t *)(ip6 + 1);
+    U8 *dst_ip = (U8 *)&ip6->dst_addr;
+
+    TEST_ASSERT(status == SUCCESS &&
+            packet_len == sizeof(*eth) + sizeof(*vlan) + sizeof(*ip6) + 32 &&
+            solicited[0] == 0xff && solicited[1] == 0x02 &&
+            solicited[11] == 0x01 && solicited[12] == 0xff &&
+            memcmp(&solicited[13], &host_ip[13], 3) == 0 &&
+            eth->dst_addr.addr_bytes[0] == 0x33 &&
+            eth->dst_addr.addr_bytes[1] == 0x33 &&
+            memcmp(&eth->dst_addr.addr_bytes[2], &solicited[12], 4) == 0 &&
+            vlan->next_proto == rte_cpu_to_be_16(FRAME_TYPE_IPV6) &&
+            memcmp(dst_ip, solicited, 16) == 0 &&
+            memcmp((U8 *)&ip6->src_addr, gateway, 16) == 0 &&
+            ns->icmp.type == ND6_ICMP_NS &&
+            memcmp(ns->target, host_ip, 16) == 0 &&
+            rte_ipv6_udptcp_cksum_verify(ip6, ns) == 0,
+        "T15 solicited-node NS frame format", NULL);
+}
+
 void test_nd6(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 {
     ppp_ccb_t *original_ccb = fastrg_ccb->ppp_ccb[0];
@@ -532,7 +688,15 @@ void test_nd6(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     rte_atomic16_init(&test_ccb.vlan_id);
     rte_atomic16_set(&test_ccb.vlan_id, 321);
     rte_timer_init(&test_ccb.ra_timer);
-    test_ccb.nd6_table = nd6_table_alloc(60000);
+    if (test_rcu == NULL) {
+        size_t rcu_size = rte_rcu_qsbr_get_memsize(1);
+
+        test_rcu = calloc(1, rcu_size);
+        assert(test_rcu != NULL && rte_rcu_qsbr_init(test_rcu, 1) == 0);
+        rte_rcu_qsbr_thread_register(test_rcu, 0);
+        rte_rcu_qsbr_thread_online(test_rcu, 0);
+    }
+    test_ccb.nd6_table = nd6_table_alloc(60000, test_rcu);
     if (test_ccb.nd6_table == NULL) {
         fprintf(stderr, "ND6 fixture allocation failed\n");
         assert(test_ccb.nd6_table != NULL);
@@ -551,6 +715,9 @@ void test_nd6(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_offlink_learn_gate();
     test_rs_ra_rate_limit();
     test_dad_defense();
+    test_neighbor_aging();
+    test_stale_generation_reclaim();
+    test_ns_builder();
 
     rte_timer_stop_sync(&test_ccb.ra_timer);
     nd6_table_free(test_ccb.nd6_table);

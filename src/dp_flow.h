@@ -12,6 +12,8 @@
  *   Port 0 (LAN):
  *     P0: VLAN / IPv4 TCP                        -> RSS queues 1..N
  *     P0: VLAN / IPv4 UDP                        -> RSS queues 1..N
+ *     P0: VLAN / IPv6 TCP                        -> RSS queues 1..N (optional)
+ *     P0: VLAN / IPv6 UDP                        -> RSS queues 1..N (optional)
  *   Port 1 (WAN, PPPoE):
  *     P0: PPPoE Discovery (ETH 0x8863)           -> queue 0
  *     ICE/E810 only (rte_flow pattern path):

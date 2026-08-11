@@ -36,6 +36,23 @@
 #include "../northbound.h"
 #include "kafka_producer.h"
 
+void pppd_ipv6_dp_gate_update(ppp_ccb_t *ppp_ccb)
+{
+    if (ppp_ccb == NULL)
+        return;
+    if (ppp_ccb->ipv6_enabled != FALSE && ppp_ccb->ipv6cp_up != FALSE &&
+            ppp_ccb->dhcp6_pd_ready != FALSE) {
+        /* Publish every subscriber field the forwarding path reads (LAN
+         * prefix, session id, peer MAC, VLAN) before the gate that authorizes
+         * reading them. Pairs with the rte_smp_rmb() in
+         * pppd_ipv6_dp_gate_open(). */
+        rte_smp_wmb();
+        rte_atomic16_set(&ppp_ccb->ipv6_dp_bool, (S16)1);
+    } else {
+        rte_atomic16_set(&ppp_ccb->ipv6_dp_bool, (S16)0);
+    }
+}
+
 void PPP_bye_timer_cb(__attribute__((unused)) struct rte_timer *tim,
     ppp_ccb_t *ppp_ccb)
 {
@@ -78,6 +95,7 @@ void PPP_bye(ppp_ccb_t *s_ppp_ccb)
     rte_timer_stop(&(s_ppp_ccb->ppp_alive));
     dhcp6_pd_stop(s_ppp_ccb);
     s_ppp_ccb->ipv6cp_up = FALSE;
+    pppd_ipv6_dp_gate_update(s_ppp_ccb);
     s_ppp_ccb->config_request_pending[PPP_CP_IPV6CP] = FALSE;
     rte_atomic16_cmpset((volatile uint16_t *)&s_ppp_ccb->dp_start_bool.cnt, (S16)1, (S16)0);
     switch(s_ppp_ccb->phase) {
@@ -242,7 +260,7 @@ static STATUS pppd_construct_ccb_elements(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_c
         goto err;
     }
 
-    ppp_ccb->nd6_table = nd6_table_alloc(ccb_id);
+    ppp_ccb->nd6_table = nd6_table_alloc(ccb_id, fastrg_ccb->ppp_ccb_rcu);
     if (ppp_ccb->nd6_table == NULL) {
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG,
             "nd6_table allocation failed for ccb %u", ccb_id);
@@ -331,6 +349,7 @@ STATUS ppp_init_config_by_user(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb, U16 ccb
     rte_timer_init(&(ppp_ccb->ppp_alive));
     rte_atomic16_init(&ppp_ccb->dp_start_bool);
     rte_atomic16_init(&ppp_ccb->ppp_bool);
+    rte_atomic16_init(&ppp_ccb->ipv6_dp_bool);
     rte_atomic16_init(&ppp_ccb->redial_pending);
     /* Default before any HSI config is applied; overridden per-subscriber
      * by apply_hsi_config() using tcp_conntrack_enable from etcd. */
@@ -338,9 +357,11 @@ STATUS ppp_init_config_by_user(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb, U16 ccb
     /* Default before any HSI config is applied; overridden per-subscriber
      * by apply_hsi_config() using ipv6_enable from etcd. */
     ppp_ccb->ipv6_enabled = FALSE;
+    pppd_ipv6_dp_gate_update(ppp_ccb);
     memset(ppp_ccb->ipv6cp_local_iid, 0, sizeof(ppp_ccb->ipv6cp_local_iid));
     memset(ppp_ccb->ipv6cp_peer_iid, 0, sizeof(ppp_ccb->ipv6cp_peer_iid));
     ppp_ccb->ipv6cp_up = FALSE;
+    pppd_ipv6_dp_gate_update(ppp_ccb);
     dhcp6_pd_stop(ppp_ccb);
 
     /* All elements below were preallocated by pppd_construct_ccb_elements()
@@ -628,6 +649,7 @@ void exit_ppp(ppp_ccb_t *ppp_ccb)
     memset(ppp_ccb->ipv6cp_local_iid, 0, sizeof(ppp_ccb->ipv6cp_local_iid));
     memset(ppp_ccb->ipv6cp_peer_iid, 0, sizeof(ppp_ccb->ipv6cp_peer_iid));
     ppp_ccb->ipv6cp_up = FALSE;
+    pppd_ipv6_dp_gate_update(ppp_ccb);
     ppp_ccb->pppoe_phase.active = FALSE;
     ppp_ccb->hsi_ipv4 = 0x0;
     ppp_ccb->hsi_ipv4_gw = 0x0;
