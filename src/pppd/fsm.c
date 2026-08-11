@@ -861,6 +861,7 @@ STATUS ipv6cp_layer_up(ppp_ccb_t *s_ppp_ccb)
     FastRG_t *fastrg_ccb = s_ppp_ccb->fastrg_ccb;
 
     s_ppp_ccb->ipv6cp_up = TRUE;
+    pppd_ipv6_dp_gate_update(s_ppp_ccb);
     FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
         "User %" PRIu16 " IPV6CP connection established (local IID "
         "%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x, peer IID "
@@ -886,6 +887,7 @@ void ipv6cp_stop(ppp_ccb_t *s_ppp_ccb)
     rte_timer_stop(&s_ppp_ccb->ppp_ipv6cp);
     s_ppp_ccb->config_request_pending[PPP_CP_IPV6CP] = FALSE;
     s_ppp_ccb->ipv6cp_up = FALSE;
+    pppd_ipv6_dp_gate_update(s_ppp_ccb);
     s_ppp_ccb->control_protocol[PPP_CP_IPV6CP].state = S_STOPPED;
 }
 
@@ -918,6 +920,7 @@ STATUS A_this_layer_down(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb)
         FastRG_LOG(DBG, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "IPV6CP layer is down");
         dhcp6_pd_stop(s_ppp_ccb);
         s_ppp_ccb->ipv6cp_up = FALSE;
+        pppd_ipv6_dp_gate_update(s_ppp_ccb);
         PPP_FSM(ppp_timer, s_ppp_ccb, E_CLOSE);
     } else if (s_ppp_ccb->cp_id == PPP_CP_IPCP) {
         FastRG_LOG(DBG, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "IPCP layer is down");
@@ -930,6 +933,7 @@ STATUS A_this_layer_down(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb)
         s_ppp_ccb->config_request_pending[PPP_CP_IPV6CP] = FALSE;
         dhcp6_pd_stop(s_ppp_ccb);
         s_ppp_ccb->ipv6cp_up = FALSE;
+        pppd_ipv6_dp_gate_update(s_ppp_ccb);
         rte_timer_stop(&s_ppp_ccb->ppp_ipv6cp);
         PPP_FSM(ppp_timer, s_ppp_ccb, E_CLOSE);
         FastRG_LOG(DBG, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "LCP layer is down");
