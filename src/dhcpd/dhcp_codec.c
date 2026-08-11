@@ -331,6 +331,9 @@ STATUS build_dhcp_offer(dhcp_ccb_per_lan_user_t *per_lan_user, struct rte_ether_
     U16 ccb_id = dhcp_ccb->ccb_id;
     ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(dhcp_ccb->fastrg_ccb, ccb_id);
     U32 dns_1, dns_2;
+    /* Plain read, no barrier: this runs on the control thread, which is also
+     * where the gate is opened and where hsi_primary_dns / hsi_secondary_dns
+     * are written, so program order already orders them. */
     dhcp_select_dns_servers(dhcp_ccb->dns_state.dns_proxy_enabled,
         dhcp_ccb->dhcp_server_ip, rte_atomic16_read(&ppp_ccb->dp_start_bool) != 0,
         ppp_ccb->hsi_primary_dns, ppp_ccb->hsi_secondary_dns, &dns_1, &dns_2);
@@ -437,6 +440,9 @@ STATUS build_dhcp_ack(dhcp_ccb_per_lan_user_t *per_lan_user, struct rte_ether_ad
     U16 ccb_id = dhcp_ccb->ccb_id;
     ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(dhcp_ccb->fastrg_ccb, ccb_id);
     U32 dns_1, dns_2;
+    /* Plain read, no barrier: this runs on the control thread, which is also
+     * where the gate is opened and where hsi_primary_dns / hsi_secondary_dns
+     * are written, so program order already orders them. */
     dhcp_select_dns_servers(dhcp_ccb->dns_state.dns_proxy_enabled,
         dhcp_ccb->dhcp_server_ip, rte_atomic16_read(&ppp_ccb->dp_start_bool) != 0,
         ppp_ccb->hsi_primary_dns, ppp_ccb->hsi_secondary_dns, &dns_1, &dns_2);

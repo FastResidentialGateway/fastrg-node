@@ -162,7 +162,16 @@ typedef struct {
     U32	                  ppp_interval;      /* LCP keepalive echo interval, seconds */
     U32                   echo_miss_count;   /* consecutive unanswered LCP echo-requests; reset on any frame from peer */
     rte_atomic16_t        ppp_bool;          /* boolean flag for accept ppp packets at data plane */
-    rte_atomic16_t        dp_start_bool;     /* hsi data plane starting boolean flag */
+    /* HSI data-plane gate. Single writer: the control plane. Storing 1 is a
+     * publish — it hands the data plane the session fields written before it
+     * (session_id, PPP_dst_mac, hsi_ipv4), so every store of 1 is preceded by
+     * rte_smp_wmb() and every data-plane read goes through
+     * pppd_dp_gate_open(), which supplies the paired read barrier.
+     * Storing 0 deliberately carries no barrier: ccbs are preallocated and
+     * never freed, so a reader that races the close only encapsulates a
+     * handful of packets from stale (or already cleared) fields, which the
+     * upstream drops. That race window exists regardless of ordering. */
+    rte_atomic16_t        dp_start_bool;
     rte_atomic16_t        redial_pending;    /* desire=connect arrived mid-teardown; redial once down */
     BOOL                  ppp_processing;    /* boolean flag for checking ppp is disconnecting */
     addr_table_t          addr_table[MAX_NAT_ENTRIES]; /* hsi nat entry pool (slots referenced by both nat hashes) */
@@ -190,6 +199,29 @@ typedef struct {
      * volatile blocks the compiler from hoisting/caching the load. */
     volatile BOOL         tcp_conntrack_enabled;
 }__rte_cache_aligned ppp_ccb_t;
+
+/**
+ * @fn pppd_dp_gate_open
+ *
+ * @brief Data-plane read side of the dp_start_bool gate: report whether the
+ *        subscriber's data path is open, and when it is, order this read
+ *        ahead of the session fields the gate publishes.
+ *
+ * @param ppp_ccb subscriber control block
+ *
+ * @return TRUE when the gate is open and the published session fields are
+ *         safe to read, FALSE when the packet must be dropped
+ */
+static __always_inline BOOL pppd_dp_gate_open(const ppp_ccb_t *ppp_ccb)
+{
+    if (rte_atomic16_read(&ppp_ccb->dp_start_bool) == (S16)0)
+        return FALSE;
+    /* Pairs with the rte_smp_wmb() that precedes every store of 1 to
+     * dp_start_bool: seeing the gate open must also mean seeing the
+     * session_id, PPP_dst_mac and hsi_ipv4 written before it was opened. */
+    rte_smp_rmb();
+    return TRUE;
+}
 
 void   exit_ppp(ppp_ccb_t *ppp_ccb);
 

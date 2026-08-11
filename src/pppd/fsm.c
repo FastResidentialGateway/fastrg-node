@@ -789,6 +789,11 @@ STATUS ipcp_layer_up(ppp_ccb_t *s_ppp_ccb)
 {
     FastRG_t *fastrg_ccb = s_ppp_ccb->fastrg_ccb;
 
+    /* session_id, PPP_dst_mac and hsi_ipv4 were written on this thread during
+     * discovery and IPCP negotiation. Make them visible before the gate that
+     * lets data lcores read them. Pairs with the read barrier in
+     * pppd_dp_gate_open(). */
+    rte_smp_wmb();
     rte_atomic16_set(&s_ppp_ccb->dp_start_bool, (S16)1);
     s_ppp_ccb->phase = DATA_PHASE;
     FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " IPCP connection establish successfully.", s_ppp_ccb->user_num);
@@ -800,6 +805,9 @@ STATUS ipcp_layer_up(ppp_ccb_t *s_ppp_ccb)
         *(((U8 *)&(s_ppp_ccb->hsi_ipv4))+2), *(((U8 *)&(s_ppp_ccb->hsi_ipv4))+3), 
         *(((U8 *)&(s_ppp_ccb->hsi_ipv4_gw))), *(((U8 *)&(s_ppp_ccb->hsi_ipv4_gw))+1), 
         *(((U8 *)&(s_ppp_ccb->hsi_ipv4_gw))+2), *(((U8 *)&(s_ppp_ccb->hsi_ipv4_gw))+3));
+    /* These two fall back after the gate opened, and that is fine: they are not
+     * part of what the gate publishes. Their only readers (the DHCP and DNS
+     * paths) run on this same control thread, so program order suffices. */
     if (s_ppp_ccb->hsi_primary_dns == 0xffffffff || s_ppp_ccb->hsi_primary_dns == 0x0)
         s_ppp_ccb->hsi_primary_dns = rte_cpu_to_be_32(0x08080808); /* 8.8.8.8 */
     if (s_ppp_ccb->hsi_secondary_dns == 0xffffffff || s_ppp_ccb->hsi_secondary_dns == 0x0)

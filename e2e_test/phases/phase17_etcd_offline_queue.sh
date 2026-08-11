@@ -79,7 +79,7 @@ _cleanup_phase17_etcd_offline_queue() {
 # non-SDN-guard ApplyConfig can actually succeed).
 _p17_apply_config_direct() {
     local uid="$1" vlan="$2"
-    ssh_node "grpcurl -plaintext -import-path /root/fastrg-node/northbound/grpc -proto fastrg_node.proto \
+    ssh_node "grpcurl -plaintext -import-path /root/fastrg/fastrg-node/northbound/grpc -proto fastrg_node.proto \
         -d '{\"user_id\":${uid},\"vlan_id\":${vlan},\"pppoe_account\":\"p18test\",\"pppoe_password\":\"p18pw\",\"dhcp_pool_start\":\"10.188.0.2\",\"dhcp_pool_end\":\"10.188.0.9\",\"dhcp_subnet_mask\":\"255.255.255.0\",\"dhcp_gateway\":\"10.188.0.1\"}' \
         127.0.0.1:${FASTRG_GRPC_PORT} fastrgnodeservice.FastrgService/ApplyConfig 2>&1"
 }
@@ -310,7 +310,7 @@ phase17_etcd_offline_queue() {
     local _p17b_removed=0 _p17b_out=""
     for _i in $(seq 1 45); do
         sleep 2
-        _p17b_out=$(ssh_node "grpcurl -plaintext -import-path /root/fastrg-node/northbound/grpc -proto fastrg_node.proto \
+        _p17b_out=$(ssh_node "grpcurl -plaintext -import-path /root/fastrg/fastrg-node/northbound/grpc -proto fastrg_node.proto \
             -d '{\"user_id\":${_P17_UID}}' 127.0.0.1:${FASTRG_GRPC_PORT} fastrgnodeservice.FastrgService/RemoveConfig 2>&1" || true)
         if ! printf '%s' "$_p17b_out" | grep -qi "FailedPrecondition"; then
             _p17b_removed=1
