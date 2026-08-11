@@ -44,14 +44,6 @@
  * Maps WAN PPPoE IP:eport → LAN dip:iport.
  * Packed to 16 bytes so total table = 65536 * 16 = 1 MB per ppp_ccb.
  *
- * Publish protocol: control-plane writers (gRPC handler in standalone,
- * ctrl_thread in SDN) write dip/iport, issue a release fence, then set
- * is_active. Reading dip/iport after seeing is_active == 1 requires the
- * matching acquire — go through port_fwd_lookup_by_eport() or fence
- * yourself; is_active-only checks need no pairing. port_fwd_remove()
- * clears is_active first; packets already past their flag check may
- * still see the teardown (inherent check-then-use window).
- *
  * Do not make this struct cache line aligned. Each entry is parallel accessed 
  * in different lcores, even we align it to cache line, it still has false sharing
  * issue. Therefore, we keep it unaligned to save memory usage. 
