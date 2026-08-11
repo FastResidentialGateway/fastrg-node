@@ -58,7 +58,7 @@ _cleanup_phase12_rollback() {
             jq -r '.config.vlan_id // empty' 2>/dev/null || true)
         if [[ "$_cur_vlan" != "${_P12_ORIG_VLAN}" ]]; then
             info "Cleanup(phase12): hsi/${USER_ID} vlan=${_cur_vlan} (expected ${_P12_ORIG_VLAN}); restoring canonical fixture..."
-            ssh_node "bash /root/fastrg-node/e2e_test/restore_etcd_config.sh --force" >/dev/null 2>&1 || true
+            ssh_node "bash /root/fastrg/fastrg-node/e2e_test/restore_etcd_config.sh --force" >/dev/null 2>&1 || true
         fi
     fi
 }

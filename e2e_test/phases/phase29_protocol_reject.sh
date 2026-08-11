@@ -136,7 +136,7 @@ _p29_wait_for_reject_logs() {
             fi
         done
         if ! printf '%s\n' "$_bras_log" | \
-                grep -qF "Protocol-Reject received for 0x8057 — stopping IPV6CP" ||
+                grep -qiF "Protocol-Reject received for 0x8057 — stopping IPV6CP" ||
            ! printf '%s\n' "$_bras_log" | \
                 grep -qF "Protocol-Reject received for 0x8281 — stopping MPLSCP"; then
             _all_seen=0
@@ -210,7 +210,7 @@ phase29_protocol_reject() {
         fi
     done
     if ! printf '%s\n' "$_new_bras_log" | \
-            grep -qF "Protocol-Reject received for 0x8057 — stopping IPV6CP"; then
+            grep -qiF "Protocol-Reject received for 0x8057 — stopping IPV6CP"; then
         _step116_ok=0
         _issue116="${_issue116:+${_issue116}; }BRAS did not stop IPV6CP injection"
     fi

@@ -208,6 +208,15 @@ STATUS apply_hsi_config(FastRG_t *fastrg_ccb, int ccb_id, const hsi_config_t *co
     goto out;
 
 out:
+    /* Any of the three flags may go from 0 back to 1 here, which re-publishes
+     * everything this function wrote while the gates were closed (VLAN map,
+     * PPPoE credentials and VLAN, DHCP pool, per-subscriber toggles). One write
+     * barrier ahead of the first restore covers all three. On the dp_start_bool
+     * path it pairs with the read barrier in pppd_dp_gate_open(); on the
+     * dhcp_bool and ppp_bool paths the data plane only hands packets to the
+     * control plane through rings, whose enqueue/dequeue supply the read-side
+     * ordering for the thread that actually reads these fields. */
+    rte_smp_wmb();
     rte_atomic16_set(&ppp_ccb->ppp_bool, ori_ppp_status);
     rte_atomic16_set(&ppp_ccb->dp_start_bool, ori_dp_status);
     rte_atomic16_set(&dhcp_ccb->dhcp_bool, ori_dhcp_status);

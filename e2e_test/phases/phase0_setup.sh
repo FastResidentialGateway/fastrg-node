@@ -3,7 +3,7 @@
 # ---------------------------------------------------------------------------
 # Phase 0 — Prerequisites
 # ---------------------------------------------------------------------------
-_FASTRG_DAEMON="/root/fastrg-node/fastrg"
+_FASTRG_DAEMON="/root/fastrg/fastrg-node/fastrg"
 _FASTRG_START_CMD="${_FASTRG_DAEMON} -l 1-8 -n 4 --socket-mem 17408 -a 0000:07:00.0 -a 0000:08:00.0"
 
 phase0_setup() {
@@ -128,7 +128,7 @@ phase0_setup() {
         else
             warn "etcd HSI config for USER_ID=${USER_ID} is corrupt/stale (vlan=${_seed_vlan:-empty}) — reseeding..."
         fi
-        ssh_node "bash /root/fastrg-node/e2e_test/restore_etcd_config.sh --force" 2>&1 | sed 's/^/    /'
+        ssh_node "bash /root/fastrg/fastrg-node/e2e_test/restore_etcd_config.sh --force" 2>&1 | sed 's/^/    /'
         _seed_hsi=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/${USER_ID}" 2>/dev/null || true)
         if [[ -z "$_seed_hsi" ]]; then
             error "Failed to seed etcd HSI fixture for USER_ID=${USER_ID}."

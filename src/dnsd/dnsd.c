@@ -313,6 +313,9 @@ int dnsd_cp_process_lan_udp_query(FastRG_t *fastrg_ccb, U8 *pkt_data, U16 pkt_le
 
     /* Priority 3: forward to upstream DNS server */
     ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
+    /* Plain read, no barrier: this runs on the control thread, the same thread
+     * that opens the gate in ipcp_layer_up() and writes the session_id and
+     * PPP_dst_mac used below, so program order already orders them. */
     if (rte_atomic16_read(&ppp_ccb->dp_start_bool) != (S16)0 && state->active_dns != 0) {
         /* Only consider failover when an earlier query is still waiting. This
          * avoids switching on the first query after an idle period. */

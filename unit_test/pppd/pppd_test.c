@@ -513,6 +513,28 @@ static void test_port_fwd_entry_packing(void)
         sizeof(port_fwd_entry_t));
 }
 
+/* ---- dp_start_bool gate ---- */
+
+static void test_dp_gate_open_tracks_flag(void)
+{
+    printf("\nTesting pppd_dp_gate_open:\n");
+    printf("=========================================\n\n");
+
+    pppd_ccb_reset();
+
+    /* The read barrier inside the helper cannot be observed from a
+     * single-threaded test. What this pins down is the interface every
+     * data-plane read point depends on: the helper answers exactly the
+     * dp_start_bool state, so a closed gate still means "drop the packet". */
+    rte_atomic16_set(&test_ppp_ccb.dp_start_bool, 0);
+    TEST_ASSERT(pppd_dp_gate_open(&test_ppp_ccb) == FALSE,
+        "closed gate reports FALSE", "");
+
+    rte_atomic16_set(&test_ppp_ccb.dp_start_bool, 1);
+    TEST_ASSERT(pppd_dp_gate_open(&test_ppp_ccb) == TRUE,
+        "open gate reports TRUE", "");
+}
+
 void test_pppd(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 {
     printf("\n");
@@ -554,6 +576,8 @@ void test_pppd(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_credentials_overwrite();
 
     test_port_fwd_entry_packing();
+
+    test_dp_gate_open_tracks_flag();
 
     /* Leave no armed timer behind, and restore the shared ccb slot other
      * suites expect to find untouched. */
