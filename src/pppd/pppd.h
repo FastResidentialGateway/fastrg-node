@@ -10,6 +10,7 @@
 #define _PPPD_H_
 
 #include <stdatomic.h>
+#include <netinet/in.h>
 
 #include <common.h>
 
@@ -38,6 +39,11 @@ struct nd6_table;
 #define PPPoE_CMD_DISABLE       0
 #define PPPoE_CMD_FORCE_DISABLE 1
 #define PPPoE_CMD_ENABLE        2
+
+/* Buffer sizes for pppd_ipv6_report_strings(). */
+#define PPPD_IPV6_ADDR_STRLEN   INET6_ADDRSTRLEN            /* "fe80::1"          */
+#define PPPD_IPV6_PREFIX_STRLEN (INET6_ADDRSTRLEN + 4)      /* address + "/128"   */
+#define PPPD_IPV6_DNS_STRLEN    (2 * INET6_ADDRSTRLEN + 2)  /* two servers + ','  */
 
 /**
  * @brief SNAT port forwarding entry (direct-indexed by eport)
@@ -288,6 +294,41 @@ static inline struct rte_timer *ppp_cp_timer(ppp_ccb_t *ppp_ccb)
  *      void
  */
 void pppd_ipv6_dp_gate_update(ppp_ccb_t *ppp_ccb);
+
+/**
+ * @fn pppd_ipv6_report_strings
+ *
+ * @brief Format a subscriber's IPv6 session state for northbound reporting
+ *        (Kafka events, gRPC, CLI). Every output buffer is written, and one
+ *        that has nothing to report is left as an empty string.
+ *
+ *        Formatting only — the caller decides whether the fields are ready to
+ *        be read (control plane: the three IPv6 flags in program order; other
+ *        threads: pppd_ipv6_dp_gate_open()).
+ *
+ * @param ppp_ccb
+ *      Subscriber control block (NULL tolerated)
+ * @param addr_str
+ *      Receives the WAN link-local address built from the IPV6CP interface
+ *      identifier, e.g. "fe80::1"
+ * @param addr_len
+ *      Size of addr_str, at least PPPD_IPV6_ADDR_STRLEN
+ * @param prefix_str
+ *      Receives the whole delegated prefix in CIDR form, e.g.
+ *      "2001:db8:ab00::/56"
+ * @param prefix_len
+ *      Size of prefix_str, at least PPPD_IPV6_PREFIX_STRLEN
+ * @param dns_str
+ *      Receives the DNS servers separated by ',' without spaces; unused
+ *      server slots are skipped
+ * @param dns_len
+ *      Size of dns_str, at least PPPD_IPV6_DNS_STRLEN
+ * @return
+ *      void
+ */
+void pppd_ipv6_report_strings(const ppp_ccb_t *ppp_ccb, char *addr_str,
+    U32 addr_len, char *prefix_str, U32 prefix_len, char *dns_str,
+    U32 dns_len);
 
 /**
  * @fn pppd_ipv6_dp_gate_open

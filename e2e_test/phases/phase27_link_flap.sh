@@ -521,11 +521,13 @@ phase27_link_flap() {
             fi
         fi
 
-        # The peer's NIC (and vlan3 on top of it) follows the PF link; the
-        # vlan device and its lease survive the flap, so this normally
-        # succeeds on the first probe once the peer link is re-established.
+        # The peer holds a VF, which relinks a few seconds after the PF. Its
+        # vlan device keeps the address the whole time, so wait for carrier
+        # too — otherwise the next step measures during the relink.
         for _i in $(seq 1 30); do
-            if ssh_lan "ip -o link show '${_P27_LAN_VLAN}' 2>/dev/null | \
+            if ssh_lan "ip -o link show '${LAN_PEER_NIC}' 2>/dev/null | \
+                    grep -q 'LOWER_UP' && \
+                    ip -o link show '${_P27_LAN_VLAN}' 2>/dev/null | \
                     grep -q '${_P27_LAN_VLAN}@${LAN_PEER_NIC}' && \
                     ip -4 -o addr show dev '${_P27_LAN_VLAN}' scope global | grep -q ' inet '" \
                     >/dev/null 2>&1; then
@@ -536,7 +538,7 @@ phase27_link_flap() {
         done
         if [[ $_lan_vlan_ready -ne 1 ]]; then
             _step111_ok=0
-            _issue111="${_issue111:+${_issue111}; }${_P27_LAN_VLAN}@${LAN_PEER_NIC} did not recover an IPv4 address within 30s"
+            _issue111="${_issue111:+${_issue111}; }${LAN_PEER_NIC} carrier or ${_P27_LAN_VLAN} IPv4 did not recover within 30s"
         fi
     fi
     _p27_restore_lan
@@ -554,7 +556,7 @@ phase27_link_flap() {
 
     if [[ $_step111_ok -eq 1 ]]; then
         pass "Step 112: LAN flap and per-port isolation" \
-            "port 0 link 1→0 in ${_lan_down_elapsed}s →1 in ${_lan_up_elapsed}s, speed 0→${_P27_OBS_SPEED} Mbps, flap ${_lan_flap_base}→${_lan_flap_after} (+2); ${_P27_LAN_VLAN}@${LAN_PEER_NIC} has IPv4; port 1 remained ${_wan_after_lan}"
+            "port 0 link 1→0 in ${_lan_down_elapsed}s →1 in ${_lan_up_elapsed}s, speed 0→${_P27_OBS_SPEED} Mbps, flap ${_lan_flap_base}→${_lan_flap_after} (+2); ${LAN_PEER_NIC} carries and ${_P27_LAN_VLAN} has IPv4; port 1 remained ${_wan_after_lan}"
     else
         fail "Step 112: LAN flap and per-port isolation" "$_issue111"
     fi
