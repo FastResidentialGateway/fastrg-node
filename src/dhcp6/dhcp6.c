@@ -16,6 +16,7 @@
 #include "../protocol.h"
 #include "../utils.h"
 #include "../pppd/codec.h"
+#include "../pppd/fsm.h"
 #include "../pppd/header.h"
 
 #define DHCP6_HEADER_LEN          4
@@ -434,6 +435,15 @@ STATUS dhcp6_process_message(ppp_ccb_t *ppp_ccb, const U8 *dhcp, U16 len)
         return SUCCESS;
     }
 
+    /* Snapshot the lease this reply replaces, for the northbound re-report at
+     * the end of this function. */
+    BOOL was_ready = ppp_ccb->dhcp6_pd_ready;
+    BOOL lease_changed = memcmp(ppp_ccb->hsi_ipv6_pd_prefix, response.prefix,
+                sizeof(response.prefix)) != 0 ||
+            ppp_ccb->hsi_ipv6_pd_plen != response.prefix_plen ||
+            memcmp(ppp_ccb->hsi_ipv6_dns, response.dns,
+                sizeof(response.dns)) != 0 ? TRUE : FALSE;
+
     ppp_ccb->dhcp6_pd_ready = FALSE;
     pppd_ipv6_dp_gate_update(ppp_ccb);
     rte_memcpy(ppp_ccb->hsi_ipv6_pd_prefix, response.prefix,
@@ -454,6 +464,20 @@ STATUS dhcp6_process_message(ppp_ccb_t *ppp_ccb, const U8 *dhcp, U16 len)
     FastRG_LOG(INFO, ppp_ccb->fastrg_ccb->fp, ppp_ccb, PPPLOGMSG,
         "User %" PRIu16 " DHCPv6-PD lease is ready (/%u, T1=%u seconds).",
         ppp_ccb->user_num, ppp_ccb->hsi_ipv6_pd_plen, ppp_ccb->dhcp6_t1);
+
+    /* Delegation finishes after IPCP opens, so the connected event sent back
+     * then carried no IPv6 — re-send it now that the lease exists. A renew
+     * that returns the same prefix and DNS servers sends nothing, keeping one
+     * event per T1 out of the pipeline. Before IPCP opens there is nothing to
+     * re-send: ipcp_layer_up() will pick this lease up itself.
+     *
+     * Losing IPv6 mid-session (IPV6CP down, or a renew with no prefix) closes
+     * the forwarding gate but sends no event: a connected event racing a
+     * teardown is worse than a stale IPv6 row on the controller, which the
+     * next disconnect or successful lease corrects anyway. */
+    if ((was_ready == FALSE || lease_changed == TRUE) &&
+            ppp_ccb->phase == DATA_PHASE)
+        ppp_report_connected(ppp_ccb);
     return SUCCESS;
 }
 

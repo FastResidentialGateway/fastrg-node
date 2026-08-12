@@ -535,6 +535,102 @@ static void test_dp_gate_open_tracks_flag(void)
         "open gate reports TRUE", "");
 }
 
+/* ---- IPv6 northbound string formatting ---- */
+
+/* 2001:db8:ab00:: */
+static const U8 test_pd_prefix[16] = { 0x20, 0x01, 0x0d, 0xb8, 0xab, 0x00 };
+/* 2001:4860:4860::8888 */
+static const U8 test_dns1[16] = { 0x20, 0x01, 0x48, 0x60, 0x48, 0x60, 0, 0,
+                                  0, 0, 0, 0, 0, 0, 0x88, 0x88 };
+/* 2606:4700:4700::1111 */
+static const U8 test_dns2[16] = { 0x26, 0x06, 0x47, 0x00, 0x47, 0x00, 0, 0,
+                                  0, 0, 0, 0, 0, 0, 0x11, 0x11 };
+static const U8 test_local_iid[8] = { 0x00, 0x11, 0x22, 0xff,
+                                      0xfe, 0x33, 0x44, 0x55 };
+
+static void test_ipv6_report_strings_full_lease(void)
+{
+    char addr[PPPD_IPV6_ADDR_STRLEN];
+    char prefix[PPPD_IPV6_PREFIX_STRLEN];
+    char dns[PPPD_IPV6_DNS_STRLEN];
+
+    printf("\nTesting pppd_ipv6_report_strings with a full lease:\n");
+    printf("=========================================\n\n");
+
+    pppd_ccb_reset();
+    memcpy(test_ppp_ccb.ipv6cp_local_iid, test_local_iid,
+        sizeof(test_local_iid));
+    memcpy(test_ppp_ccb.hsi_ipv6_pd_prefix, test_pd_prefix,
+        sizeof(test_pd_prefix));
+    test_ppp_ccb.hsi_ipv6_pd_plen = 56;
+    memcpy(test_ppp_ccb.hsi_ipv6_dns[0], test_dns1, sizeof(test_dns1));
+    memcpy(test_ppp_ccb.hsi_ipv6_dns[1], test_dns2, sizeof(test_dns2));
+
+    pppd_ipv6_report_strings(&test_ppp_ccb, addr, sizeof(addr), prefix,
+        sizeof(prefix), dns, sizeof(dns));
+
+    TEST_ASSERT(strcmp(addr, "fe80::11:22ff:fe33:4455") == 0,
+        "WAN address is the IPV6CP interface identifier under fe80::",
+        "got %s", addr);
+    TEST_ASSERT(strcmp(prefix, "2001:db8:ab00::/56") == 0,
+        "delegated prefix is reported in CIDR form", "got %s", prefix);
+    TEST_ASSERT(strcmp(dns, "2001:4860:4860::8888,2606:4700:4700::1111") == 0,
+        "two DNS servers are comma-separated without spaces", "got %s", dns);
+}
+
+static void test_ipv6_report_strings_single_dns(void)
+{
+    char addr[PPPD_IPV6_ADDR_STRLEN];
+    char prefix[PPPD_IPV6_PREFIX_STRLEN];
+    char dns[PPPD_IPV6_DNS_STRLEN];
+
+    printf("\nTesting pppd_ipv6_report_strings with one DNS server:\n");
+    printf("=========================================\n\n");
+
+    pppd_ccb_reset();
+    memcpy(test_ppp_ccb.ipv6cp_local_iid, test_local_iid,
+        sizeof(test_local_iid));
+    memcpy(test_ppp_ccb.hsi_ipv6_pd_prefix, test_pd_prefix,
+        sizeof(test_pd_prefix));
+    test_ppp_ccb.hsi_ipv6_pd_plen = 60;
+    memcpy(test_ppp_ccb.hsi_ipv6_dns[0], test_dns1, sizeof(test_dns1));
+    /* hsi_ipv6_dns[1] is left all zero -- an unused server slot. */
+
+    pppd_ipv6_report_strings(&test_ppp_ccb, addr, sizeof(addr), prefix,
+        sizeof(prefix), dns, sizeof(dns));
+
+    TEST_ASSERT(strcmp(prefix, "2001:db8:ab00::/60") == 0,
+        "prefix length is reported as delegated, not assumed to be 56",
+        "got %s", prefix);
+    TEST_ASSERT(strcmp(dns, "2001:4860:4860::8888") == 0,
+        "an unused DNS slot adds no separator", "got %s", dns);
+}
+
+static void test_ipv6_report_strings_no_dns(void)
+{
+    char addr[PPPD_IPV6_ADDR_STRLEN];
+    char prefix[PPPD_IPV6_PREFIX_STRLEN];
+    char dns[PPPD_IPV6_DNS_STRLEN];
+
+    printf("\nTesting pppd_ipv6_report_strings with no DNS server:\n");
+    printf("=========================================\n\n");
+
+    pppd_ccb_reset();
+    memcpy(test_ppp_ccb.ipv6cp_local_iid, test_local_iid,
+        sizeof(test_local_iid));
+    memcpy(test_ppp_ccb.hsi_ipv6_pd_prefix, test_pd_prefix,
+        sizeof(test_pd_prefix));
+    test_ppp_ccb.hsi_ipv6_pd_plen = 56;
+
+    pppd_ipv6_report_strings(&test_ppp_ccb, addr, sizeof(addr), prefix,
+        sizeof(prefix), dns, sizeof(dns));
+
+    TEST_ASSERT(dns[0] == '\0',
+        "a lease without DNS servers reports an empty string", "got %s", dns);
+    TEST_ASSERT(strcmp(addr, "fe80::11:22ff:fe33:4455") == 0,
+        "address is still reported when DNS is absent", "got %s", addr);
+}
+
 void test_pppd(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 {
     printf("\n");
@@ -578,6 +674,10 @@ void test_pppd(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_port_fwd_entry_packing();
 
     test_dp_gate_open_tracks_flag();
+
+    test_ipv6_report_strings_full_lease();
+    test_ipv6_report_strings_single_dns();
+    test_ipv6_report_strings_no_dns();
 
     /* Leave no armed timer behind, and restore the shared ccb slot other
      * suites expect to find untouched. */

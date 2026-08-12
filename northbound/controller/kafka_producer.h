@@ -77,11 +77,19 @@ int kafka_producer_is_ready(void);
  *      gateway IPv4 on "connected" transitions (may be NULL)
  * @param err_msg
  *      error description on abnormal transitions (may be NULL)
+ * @param hsi_ipv6
+ *      WAN IPv6 address on "connected" transitions (may be NULL)
+ * @param hsi_ipv6_pd_prefix
+ *      delegated prefix in CIDR form, e.g. "2001:db8:ab00::/56" (may be NULL)
+ * @param hsi_ipv6_dns
+ *      IPv6 DNS servers, comma-separated without spaces (may be NULL)
  * @return
  *      void
  */
 void kafka_report_pppoe_state(const char *user_id, kafka_pppoe_phase_t phase,
-    const char *hsi_ipv4, const char *hsi_ipv4_gw, const char *err_msg);
+    const char *hsi_ipv4, const char *hsi_ipv4_gw, const char *err_msg,
+    const char *hsi_ipv6, const char *hsi_ipv6_pd_prefix,
+    const char *hsi_ipv6_dns);
 
 /**
  * @fn kafka_report_config_apply

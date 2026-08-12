@@ -88,6 +88,27 @@ STATUS ipv6cp_layer_up(ppp_ccb_t *s_ppp_ccb);
 void ipv6cp_stop(ppp_ccb_t *s_ppp_ccb);
 
 /**
+ * @fn ppp_report_connected
+ *
+ * @brief report the subscriber's "connected" state to the controller over
+ *      Kafka, always carrying the assigned IPv4 address and gateway, plus the
+ *      IPv6 address, delegated prefix and DNS servers once IPv6 is up. The
+ *      controller overwrites its whole row per event, so callers must not
+ *      report a partial state. Does nothing in standalone mode (no Kafka).
+ *
+ *      Call it from the control plane whenever the reportable state becomes
+ *      complete: when IPCP opens, and again when prefix delegation lands
+ *      afterwards.
+ *
+ * @param s_ppp_ccb
+ *      PPP control block pointer
+ *
+ * @return
+ *      void
+ */
+void ppp_report_connected(ppp_ccb_t *s_ppp_ccb);
+
+/**
  * @fn ppp_phase_rollback
  *
  * @brief roll the PPPoE connection phase back two phases toward the lower

@@ -487,6 +487,15 @@ void fastrg_grpc_get_hsi_info() {
                     std::cout << ", ";
             }
             std::cout << std::endl;
+            std::cout << "    IPv6 address: " << hsi_info.ipv6_addr() << std::endl;
+            std::cout << "    IPv6 PD prefix: " << hsi_info.ipv6_pd_prefix() << std::endl;
+            std::cout << "    IPv6 DNS servers: ";
+            for(int j=0; j<hsi_info.ipv6_dnss_size(); j++) {
+                std::cout << hsi_info.ipv6_dnss(j);
+                if (j < hsi_info.ipv6_dnss_size() - 1)
+                    std::cout << ", ";
+            }
+            std::cout << std::endl;
         }
     } else {
         std::cout << "grpc client get hsi info failed: " << std::endl;

@@ -1075,6 +1075,29 @@ grpc::Status FastRGNodeServiceImpl::GetFastrgHsiInfo(::grpc::ServerContext* cont
                                    std::to_string(*(((U8 *)&(ppp_ccb->hsi_secondary_dns))+1)) + "." +
                                    std::to_string(*(((U8 *)&(ppp_ccb->hsi_secondary_dns))+2)) + "." +
                                    std::to_string(*(((U8 *)&(ppp_ccb->hsi_secondary_dns))+3)));
+                /* The gate is what makes the IPv6 fields safe to read from this
+                 * worker thread. Closed (IPv6 off, IPV6CP down, or a lease
+                 * being renewed) leaves them empty, which every consumer reads
+                 * as "not reported". */
+                if (pppd_ipv6_dp_gate_open(ppp_ccb)) {
+                    char v6_addr[PPPD_IPV6_ADDR_STRLEN] = { 0 };
+                    char v6_prefix[PPPD_IPV6_PREFIX_STRLEN] = { 0 };
+                    char v6_dns[PPPD_IPV6_DNS_STRLEN] = { 0 };
+                    pppd_ipv6_report_strings(ppp_ccb, v6_addr, sizeof(v6_addr),
+                        v6_prefix, sizeof(v6_prefix), v6_dns, sizeof(v6_dns));
+                    hsi_info->set_ipv6_addr(v6_addr);
+                    hsi_info->set_ipv6_pd_prefix(v6_prefix);
+                    /* One formatter for every northbound path: split its
+                     * comma-separated list back out into repeated entries. */
+                    std::string dns_list(v6_dns);
+                    for (size_t start = 0; start < dns_list.size(); ) {
+                        size_t sep = dns_list.find(',', start);
+                        if (sep == std::string::npos)
+                            sep = dns_list.size();
+                        hsi_info->add_ipv6_dnss(dns_list.substr(start, sep - start));
+                        start = sep + 1;
+                    }
+                }
                 break;
             case NOT_CONFIGURED:
                 hsi_info->set_status("not configured");

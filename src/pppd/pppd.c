@@ -6,6 +6,8 @@
   Designed by THE on Jan 14, 2019
 /\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\*/
 
+#include <arpa/inet.h>
+
 #include <common.h>
 
 #include <rte_eal.h>
@@ -50,6 +52,59 @@ void pppd_ipv6_dp_gate_update(ppp_ccb_t *ppp_ccb)
         rte_atomic16_set(&ppp_ccb->ipv6_dp_bool, (S16)1);
     } else {
         rte_atomic16_set(&ppp_ccb->ipv6_dp_bool, (S16)0);
+    }
+}
+
+void pppd_ipv6_report_strings(const ppp_ccb_t *ppp_ccb, char *addr_str,
+    U32 addr_len, char *prefix_str, U32 prefix_len, char *dns_str,
+    U32 dns_len)
+{
+    if (ppp_ccb == NULL)
+        return;
+
+    if (addr_str != NULL && addr_len > 0) {
+        /* RFC 5072: the WAN address is the negotiated interface identifier
+         * under the link-local prefix. The node runs IA_PD only, so this is
+         * the session's sole WAN IPv6 address. */
+        U8 link_local[16] = { 0xfe, 0x80 };
+
+        addr_str[0] = '\0';
+        rte_memcpy(&link_local[8], ppp_ccb->ipv6cp_local_iid,
+            sizeof(ppp_ccb->ipv6cp_local_iid));
+        inet_ntop(AF_INET6, link_local, addr_str, addr_len);
+    }
+
+    if (prefix_str != NULL && prefix_len > 0) {
+        char prefix[INET6_ADDRSTRLEN];
+
+        prefix_str[0] = '\0';
+        /* The whole delegated prefix, not the /64 carved out for the LAN. */
+        if (inet_ntop(AF_INET6, ppp_ccb->hsi_ipv6_pd_prefix, prefix,
+                sizeof(prefix)) != NULL)
+            snprintf(prefix_str, prefix_len, "%s/%u", prefix,
+                ppp_ccb->hsi_ipv6_pd_plen);
+    }
+
+    if (dns_str != NULL && dns_len > 0) {
+        U32 used = 0;
+
+        dns_str[0] = '\0';
+        for(U32 i=0; i<RTE_DIM(ppp_ccb->hsi_ipv6_dns); i++) {
+            char server[INET6_ADDRSTRLEN];
+            int written;
+
+            /* An all-zero entry is an unused server slot. */
+            if (ipv6_addr_is_unset(ppp_ccb->hsi_ipv6_dns[i]) == TRUE)
+                continue;
+            if (inet_ntop(AF_INET6, ppp_ccb->hsi_ipv6_dns[i], server,
+                    sizeof(server)) == NULL)
+                continue;
+            written = snprintf(dns_str + used, dns_len - used, "%s%s",
+                used > 0 ? "," : "", server);
+            if (written < 0 || (U32)written >= dns_len - used)
+                break;
+            used += (U32)written;
+        }
     }
 }
 
@@ -670,7 +725,7 @@ void exit_ppp(ppp_ccb_t *ppp_ccb)
      * writes connection status back to etcd. */
     char uid[8];
     snprintf(uid, sizeof(uid), "%u", ppp_ccb->user_num);
-    kafka_report_pppoe_state(uid, KAFKA_PPPOE_DISCONNECTED, NULL, NULL, NULL);
+    kafka_report_pppoe_state(uid, KAFKA_PPPOE_DISCONNECTED, NULL, NULL, NULL, NULL, NULL, NULL);
 
     /* Honour a deferred connect: a desire_status=connect that arrived while this
      * session was tearing down was parked (redial_pending) instead of being

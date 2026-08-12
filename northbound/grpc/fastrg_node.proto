@@ -208,6 +208,9 @@ message HsiInfo {
   uint64 pppoes_tx_packets = 11;
   uint64 pppoes_rx_bytes = 12;
   uint64 pppoes_tx_bytes = 13;
+  string ipv6_addr = 14;          // WAN link-local negotiated by IPV6CP; empty until IPv6 is up
+  string ipv6_pd_prefix = 15;     // full delegated prefix in CIDR form, e.g. "2001:db8:ab00::/56"
+  repeated string ipv6_dnss = 16; // IPv6 DNS servers learned from DHCPv6-PD
 }
 
 message FastrgHsiInfo {
