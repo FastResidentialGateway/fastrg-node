@@ -222,7 +222,7 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
                         /* PPPoE "disconnecting" transition → controller via Kafka. */
                         char uid[8];
                         snprintf(uid, sizeof(uid), "%u", pppoe_msg->ccb_id + 1);
-                        kafka_report_pppoe_state(uid, KAFKA_PPPOE_DISCONNECTING, NULL, NULL, NULL);
+                        kafka_report_pppoe_state(uid, KAFKA_PPPOE_DISCONNECTING, NULL, NULL, NULL, NULL, NULL, NULL);
                     }
                 } else if (pppoe_msg->cmd == PPPoE_CMD_ENABLE) {
                     FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "User %d pppoe is spawning\n", pppoe_msg->ccb_id + 1);
@@ -230,7 +230,7 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
                         /* PPPoE "connecting" transition → controller via Kafka. */
                         char uid[8];
                         snprintf(uid, sizeof(uid), "%u", pppoe_msg->ccb_id + 1);
-                        kafka_report_pppoe_state(uid, KAFKA_PPPOE_CONNECTING, NULL, NULL, NULL);
+                        kafka_report_pppoe_state(uid, KAFKA_PPPOE_CONNECTING, NULL, NULL, NULL, NULL, NULL, NULL);
                     }
                 } else if (pppoe_msg->cmd == PPPoE_CMD_FORCE_DISABLE) {
                     FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "User %d pppoe is force terminating\n", pppoe_msg->ccb_id + 1);

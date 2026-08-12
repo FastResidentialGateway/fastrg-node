@@ -437,10 +437,6 @@ STATUS reconcile_port_mapping(FastRG_t *fastrg_ccb, int ccb_id,
         }
         port_fwd_entry_t *entry = &ppp_ccb->port_fwd_table[mappings[i].eport];
         U16 is_active = rte_atomic16_read(&entry->is_active);
-        if (is_active != 0) {
-            /* Pairs with port_fwd_add() before comparing the published fields. */
-            rte_atomic_thread_fence(rte_memory_order_acquire);
-        }
         if (is_active == 0) {
             /* Entry missing locally — add it */
             port_fwd_add(ppp_ccb->port_fwd_table, mappings[i].eport, dip_be, mappings[i].dport);
@@ -448,16 +444,20 @@ STATUS reconcile_port_mapping(FastRG_t *fastrg_ccb, int ccb_id,
                 "User %u: port-mapping reconcile: added mapping for eport=%u -> %s:%u",
                 ccb_id + 1, mappings[i].eport, mappings[i].dip, mappings[i].dport);
             added++;
-        } else if (entry->dip != dip_be || entry->iport != mappings[i].dport) {
-            /* Same eport exists but dip/dport has changed — update it */
-            port_fwd_remove(ppp_ccb->port_fwd_table, mappings[i].eport);
-            port_fwd_add(ppp_ccb->port_fwd_table, mappings[i].eport, dip_be, mappings[i].dport);
-            FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
-                "User %u: port-mapping reconcile: updated mapping for eport=%u -> %s:%u",
-                ccb_id + 1, mappings[i].eport, mappings[i].dip, mappings[i].dport);
-            updated++;
+        } else {
+            /* Pairs with port_fwd_add() before comparing the published fields. */
+            rte_atomic_thread_fence(rte_memory_order_acquire);
+            if (entry->dip != dip_be || entry->iport != mappings[i].dport) {
+                /* Same eport exists but dip/dport has changed — update it */
+                port_fwd_remove(ppp_ccb->port_fwd_table, mappings[i].eport);
+                port_fwd_add(ppp_ccb->port_fwd_table, mappings[i].eport, dip_be, mappings[i].dport);
+                FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                    "User %u: port-mapping reconcile: updated mapping for eport=%u -> %s:%u",
+                    ccb_id + 1, mappings[i].eport, mappings[i].dip, mappings[i].dport);
+                updated++;
+            }
+            /* else: exact match, no-op */
         }
-        /* else: exact match, no-op */
     }
 
     FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,

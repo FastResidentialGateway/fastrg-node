@@ -799,6 +799,42 @@ STATUS lcp_layer_up(ppp_ccb_t *s_ppp_ccb)
     return SUCCESS;
 }
 
+void ppp_report_connected(ppp_ccb_t *s_ppp_ccb)
+{
+    if (s_ppp_ccb->fastrg_ccb->is_standalone == TRUE)
+        return;
+
+    char user_id_str[6];
+    snprintf(user_id_str, sizeof(user_id_str), "%u", s_ppp_ccb->user_num);
+
+    struct in_addr ip = { .s_addr = s_ppp_ccb->hsi_ipv4 };
+    struct in_addr gw = { .s_addr = s_ppp_ccb->hsi_ipv4_gw };
+    char ip_str[INET_ADDRSTRLEN] = { 0 }, gw_str[INET_ADDRSTRLEN] = { 0 };
+    inet_ntop(AF_INET, &ip, ip_str, sizeof(ip_str));
+    inet_ntop(AF_INET, &gw, gw_str, sizeof(gw_str));
+
+    /* Same three flags as the data-plane gate, read without a barrier: this
+     * runs on the control thread, which is also their only writer, so program
+     * order suffices. */
+    BOOL ipv6_ready = s_ppp_ccb->ipv6_enabled != FALSE &&
+        s_ppp_ccb->ipv6cp_up != FALSE &&
+        s_ppp_ccb->dhcp6_pd_ready != FALSE ? TRUE : FALSE;
+    char v6_addr[PPPD_IPV6_ADDR_STRLEN] = { 0 };
+    char v6_prefix[PPPD_IPV6_PREFIX_STRLEN] = { 0 };
+    char v6_dns[PPPD_IPV6_DNS_STRLEN] = { 0 };
+
+    if (ipv6_ready == TRUE)
+        pppd_ipv6_report_strings(s_ppp_ccb, v6_addr, sizeof(v6_addr),
+            v6_prefix, sizeof(v6_prefix), v6_dns, sizeof(v6_dns));
+
+    /* IPv6 not up yet: leave those three fields unreported rather than
+     * sending empty strings the controller would store as NULL. */
+    kafka_report_pppoe_state(user_id_str, KAFKA_PPPOE_CONNECTED, ip_str,
+        gw_str, NULL, ipv6_ready == TRUE ? v6_addr : NULL,
+        ipv6_ready == TRUE ? v6_prefix : NULL,
+        ipv6_ready == TRUE ? v6_dns : NULL);
+}
+
 /**
  * @fn ipcp_layer_up
  * @brief IPCP this-layer-up transition: open the data plane for the
@@ -843,18 +879,13 @@ STATUS ipcp_layer_up(ppp_ccb_t *s_ppp_ccb)
         return ERROR;
     }
     FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " HSI module is spawned.\n", s_ppp_ccb->user_num);
+    /* PPPoE "connected" transition → controller via Kafka. Status is no longer
+     * written to etcd. Prefix delegation normally finishes after this point,
+     * and re-reports from dhcp6_process_message() when it does. */
+    ppp_report_connected(s_ppp_ccb);
     if (fastrg_ccb->is_standalone == FALSE) {
         char user_id_str[6];
         snprintf(user_id_str, sizeof(user_id_str), "%u", s_ppp_ccb->user_num);
-        /* PPPoE "connected" transition → controller via Kafka (with assigned
-         * IP/gateway). Status is no longer written to etcd. */
-        struct in_addr ip = { .s_addr = s_ppp_ccb->hsi_ipv4 };
-        struct in_addr gw = { .s_addr = s_ppp_ccb->hsi_ipv4_gw };
-        char ip_str[INET_ADDRSTRLEN] = { 0 }, gw_str[INET_ADDRSTRLEN] = { 0 };
-        inet_ntop(AF_INET, &ip, ip_str, sizeof(ip_str));
-        inet_ntop(AF_INET, &gw, gw_str, sizeof(gw_str));
-        kafka_report_pppoe_state(user_id_str, KAFKA_PPPOE_CONNECTED, ip_str, gw_str, NULL);
-
         /* Static DNS records are still loaded from etcd (read-only) now that
          * the session is up. */
         etcd_client_load_dns_records(fastrg_ccb->node_uuid, user_id_str,
