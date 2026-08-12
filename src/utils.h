@@ -393,4 +393,16 @@ STATUS fastrg_parse_pci_ids(const char *path, U16 vendor_id, U16 device_id,
  */
 STATUS fastrg_get_nic_model(U16 port_id, char *model, size_t model_len);
 
+/**
+ * @fn ipv6_addr_is_unset
+ * 
+ * @brief Check if an IPv6 address is unset (all zeros)
+ * 
+ * @param addr
+ *      Pointer to the IPv6 address (16 bytes)
+ * @return
+ *      TRUE if the address is unset (all zeros), FALSE otherwise
+ */
+BOOL ipv6_addr_is_unset(const U8 *addr);
+
 #endif

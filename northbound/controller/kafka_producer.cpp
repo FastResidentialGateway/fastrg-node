@@ -331,7 +331,9 @@ int kafka_producer_is_ready(void) {
 }
 
 void kafka_report_pppoe_state(const char *user_id, kafka_pppoe_phase_t phase,
-    const char *hsi_ipv4, const char *hsi_ipv4_gw, const char *err_msg) {
+    const char *hsi_ipv4, const char *hsi_ipv4_gw, const char *err_msg,
+    const char *hsi_ipv6, const char *hsi_ipv6_pd_prefix,
+    const char *hsi_ipv6_dns) {
     if (!g_ready.load())
         return;
 
@@ -357,6 +359,11 @@ void kafka_report_pppoe_state(const char *user_id, kafka_pppoe_phase_t phase,
     if (hsi_ipv4)    p->set_hsi_ipv4(hsi_ipv4);
     if (hsi_ipv4_gw) p->set_hsi_ipv4_gw(hsi_ipv4_gw);
     if (err_msg)     p->set_error_message(err_msg);
+    /* An unset field arrives as an empty string, which the controller reads as
+     * "not reported" and stores as NULL. */
+    if (hsi_ipv6)           p->set_hsi_ipv6(hsi_ipv6);
+    if (hsi_ipv6_pd_prefix) p->set_hsi_ipv6_pd_prefix(hsi_ipv6_pd_prefix);
+    if (hsi_ipv6_dns)       p->set_hsi_ipv6_dns(hsi_ipv6_dns);
     produce_event(evt);
 }
 
