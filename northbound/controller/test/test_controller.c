@@ -76,6 +76,19 @@ int main() {
             printf("Unknown status: %d\n", status);
     }
 
+    // Test shutdown reporting (will also fail without server)
+    status = controller_report_shutdown(node_uuid);
+    switch (status) {
+        case CONTROLLER_SUCCESS:
+            printf("Shutdown report successful\n");
+            break;
+        case CONTROLLER_ERROR:
+            printf("Shutdown report error (connection issue - expected without server)\n");
+            break;
+        default:
+            printf("Unknown status: %d\n", status);
+    }
+
     // Cleanup
     controller_client_cleanup();
     printf("Controller client cleaned up\n");

@@ -12,6 +12,7 @@ using controller::NodeManagement;
 using controller::NodeRegisterRequest;
 using controller::NodeRegisterReply;
 using controller::NodeHeartbeat;
+using controller::NodeShutdownRequest;
 using google::protobuf::Empty;
 
 class NodeManagementServiceImpl final : public NodeManagement::Service {
@@ -35,6 +36,13 @@ public:
                   << " at " << request->ip() 
                   << " (uptime: " << request->uptime_timestamp() << ")" << std::endl;
         
+        return Status::OK;
+    }
+
+    Status ReportShutdown(ServerContext* context, const NodeShutdownRequest* request,
+                          Empty* reply) override {
+        std::cout << "Shutdown reported by node " << request->node_uuid() << std::endl;
+
         return Status::OK;
     }
 };

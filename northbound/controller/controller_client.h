@@ -23,7 +23,8 @@ controller_status_t controller_register_node(const char* node_uuid, const char* 
 /* Send heartbeat to the controller */
 controller_status_t controller_send_heartbeat(const char* node_uuid, long uptime_timestamp, const char* ip);
 
-controller_status_t controller_unregister_node(const char* node_uuid, const char* ip, const char* version);
+/* Report graceful shutdown to the controller (marks node inactive, keeps it visible) */
+controller_status_t controller_report_shutdown(const char* node_uuid);
 
 /* Cleanup the controller client */
 void controller_client_cleanup(void);

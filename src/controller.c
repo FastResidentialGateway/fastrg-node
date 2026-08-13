@@ -65,13 +65,16 @@ void controller_cleanup(FastRG_t *fastrg_ccb)
     // Stop heartbeat timer
     rte_timer_stop(&fastrg_ccb->heartbeat_timer);
 
-    U8 ip_addr[INET6_ADDRSTRLEN];
-    if (get_local_ip_for_server(fastrg_ccb->controller_address, ip_addr, sizeof(ip_addr)) != 0) {
-        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Failed to get local IP for controller connection");
-        return;
-    }
+    // Report shutdown instead of unregistering: unregistering deletes nodes/<uuid>
+    // so the node disappears from the controller UI, while reporting shutdown only
+    // marks it inactive and keeps it visible. Registering on next boot flips it
+    // back to active. A failure here must not hold up shutdown.
+    controller_status_t status = controller_report_shutdown(fastrg_ccb->node_uuid);
+    if (status == CONTROLLER_SUCCESS)
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "Reported shutdown to controller, node marked inactive");
+    else
+        FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL, "Failed to report shutdown to controller, status: %d", status);
 
-    controller_unregister_node(fastrg_ccb->node_uuid, (const char *)ip_addr, fastrg_ccb->version);
     // Cleanup controller client
     controller_client_cleanup();
 
