@@ -140,6 +140,22 @@ phase0_setup() {
     fi
 
     # ------------------------------------------------------------------
+    # The canonical fixture is IPv4-only. A controller config write that
+    # omits ipv6_enable keeps whatever is stored, so an interrupted IPv6 test
+    # can leave it on — and phase 29 would then watch IPV6CP get negotiated
+    # instead of rejected. Turn it back off before the node reads the config.
+    # ------------------------------------------------------------------
+    local _seed_uid _seed_ipv6
+    for _seed_uid in "${SUB_IDS[@]}"; do
+        _seed_ipv6=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/${_seed_uid}" \
+            2>/dev/null | jq -r '.config.ipv6_enable' 2>/dev/null || true)
+        if [[ "$_seed_ipv6" == "true" ]]; then
+            info "Preflight: user ${_seed_uid} carries ipv6_enable=true — restoring the IPv4-only fixture."
+            fastrg_grpc set_ipv6 "${_seed_uid}" false >/dev/null 2>&1 || true
+        fi
+    done
+
+    # ------------------------------------------------------------------
     # Preflight: remove HSI keys whose user_id is beyond the canonical
     # subscriber count. Interrupted synthetic-user tests can otherwise leave
     # a VLAN-conflicting key that poisons controller reconciliation.
