@@ -12,6 +12,7 @@
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
+#include <chrono>
 
 using grpc::Channel;
 using grpc::ClientContext;
@@ -20,6 +21,7 @@ using controller::NodeManagement;
 using controller::NodeRegisterRequest;
 using controller::NodeRegisterReply;
 using controller::NodeHeartbeat;
+using controller::NodeShutdownRequest;
 
 class ControllerClient {
 public:
@@ -112,21 +114,22 @@ public:
         }
     }
 
-    controller_status_t UnregisterNode(const std::string& node_uuid, const std::string& ip, const std::string& version) {
-        NodeRegisterRequest request;
+    controller_status_t ReportShutdown(const std::string& node_uuid) {
+        NodeShutdownRequest request;
         request.set_node_uuid(node_uuid);
-        request.set_ip(ip);
-        request.set_version(version);
 
         google::protobuf::Empty reply;
         ClientContext context;
+        // Shutdown must not hang on an unreachable controller: a call without a
+        // deadline blocks for the whole TCP connect timeout, which can be minutes.
+        context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
 
-        Status status = stub_->UnregisterNode(&context, request, &reply);
+        Status status = stub_->ReportShutdown(&context, request, &reply);
 
         if (status.ok()) {
             return CONTROLLER_SUCCESS;
         } else {
-            std::cerr << "Unregister RPC failed: " << status.error_code() << ": " << status.error_message() << std::endl;
+            std::cerr << "ReportShutdown RPC failed: " << status.error_code() << ": " << status.error_message() << std::endl;
             return CONTROLLER_ERROR;
         }
     }
@@ -162,11 +165,11 @@ controller_status_t controller_register_node(const char* node_uuid, const char* 
     return g_client->RegisterNode(std::string(node_uuid), std::string(ip), std::string(version), location ? std::string(location) : std::string());
 }
 
-controller_status_t controller_unregister_node(const char* node_uuid, const char* ip, const char* version) {
-    if (!g_client) {
+controller_status_t controller_report_shutdown(const char* node_uuid) {
+    if (!g_client || !node_uuid) {
         return CONTROLLER_ERROR;
     }
-    return g_client->UnregisterNode(std::string(node_uuid), std::string(ip), std::string(version));
+    return g_client->ReportShutdown(std::string(node_uuid));
 }
 
 controller_status_t controller_send_heartbeat(const char* node_uuid, long uptime_timestamp, const char* ip) {
