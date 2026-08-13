@@ -371,6 +371,11 @@ def set_tcp_conntrack(node_addr, user_id, enable):
     return {"status": "tcp_conntrack set"}
 
 
+def set_ipv6(node_addr, user_id, enable):
+    _update_hsi_field(user_id, lambda cfg: cfg.__setitem__("ipv6_enable", bool(enable)))
+    return {"status": "ipv6 set"}
+
+
 def ctrl_login(node_addr=None):
     """Verify controller login works; return a short token preview ({} on failure)."""
     tok = _ctrl_token(force=True)
@@ -386,6 +391,11 @@ def ctrl_desire(node_addr, user_id):
 def ctrl_pppoe(node_addr, user_id):
     """Observed PPPoE status for a user from the controller DB (fed by Kafka)."""
     return _ctrl("GET", f"/api/config/{NODE_UUID}/pppoe/{user_id}")
+
+
+def ctrl_pppoe_status(node_addr, user_id):
+    """Full PPPoE status row for a user, including the IPv6 columns."""
+    return _ctrl("GET", f"/api/pppoe/status/{NODE_UUID}/{user_id}")
 
 
 def get_user_drop_count(node_addr, user_id, port_idx=1):
@@ -544,6 +554,13 @@ def main():
                 sys.exit(1)
             enable = opts.args[1].lower() not in ("false", "0", "off")
             result = set_tcp_conntrack(opts.node, opts.args[0], enable)
+        elif opts.command == "set_ipv6":
+            if len(opts.args) < 2:
+                print(json.dumps({"error": "set_ipv6 requires <user_id> <true|false>"}),
+                      file=sys.stderr)
+                sys.exit(1)
+            enable = opts.args[1].lower() not in ("false", "0", "off")
+            result = set_ipv6(opts.node, opts.args[0], enable)
         elif opts.command == "ctrl_login":
             result = ctrl_login(opts.node)
         elif opts.command == "ctrl_desire":
@@ -556,6 +573,11 @@ def main():
                 print(json.dumps({"error": "ctrl_pppoe requires <user_id>"}), file=sys.stderr)
                 sys.exit(1)
             result = ctrl_pppoe(opts.node, int(opts.args[0]))
+        elif opts.command == "ctrl_pppoe_status":
+            if not opts.args:
+                print(json.dumps({"error": "ctrl_pppoe_status requires <user_id>"}), file=sys.stderr)
+                sys.exit(1)
+            result = ctrl_pppoe_status(opts.node, int(opts.args[0]))
         elif opts.command == "get_user_drop_count":
             if not opts.args:
                 print(json.dumps({"error": "get_user_drop_count requires <user_id> [port_idx]"}),

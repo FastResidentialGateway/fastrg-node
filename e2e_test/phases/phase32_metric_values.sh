@@ -14,10 +14,10 @@
 # restart, are asserted where that scenario already exists — phases 25, 27 and
 # 19 respectively — instead of being re-created here.
 #
-# The phase runs last before the summary because that is where the fixture is
-# back in its canonical steady state: phase 31 restores the subscriber count to
-# 2 and its Step 127 has just proven both subscribers are in Data phase, which
-# is exactly the precondition the tallies are checked against.
+# The phase runs right after phase 31 because that is where the fixture is back
+# in its canonical steady state: phase 31 restores the subscriber count to 2 and
+# its Step 127 has just proven both subscribers are in Data phase, which is
+# exactly the precondition the tallies are checked against.
 # ---------------------------------------------------------------------------
 
 # Number of leasable addresses in a "start-end" (or "start~end") pool range:
