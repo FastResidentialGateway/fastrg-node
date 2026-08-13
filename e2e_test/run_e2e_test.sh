@@ -553,7 +553,8 @@ source "${_E2E_PHASES_DIR}/phase31_subscriber_scale.sh"
 source "${_E2E_PHASES_DIR}/phase32_metric_values.sh"
 source "${_E2E_PHASES_DIR}/phase33_shutdown_inactive.sh"
 source "${_E2E_PHASES_DIR}/phase34_wan_long_outage.sh"
-source "${_E2E_PHASES_DIR}/phase35_summary.sh"
+source "${_E2E_PHASES_DIR}/phase35_ipv6.sh"
+source "${_E2E_PHASES_DIR}/phase36_summary.sh"
 
 # ---------------------------------------------------------------------------
 # Cleanup — kill fastrg only if the script started it
@@ -576,6 +577,7 @@ cleanup_fastrg() {
     _cleanup_phase31_subscriber_scale 2>/dev/null || true
     _cleanup_phase33_shutdown_inactive 2>/dev/null || true
     _cleanup_phase34_wan_long_outage 2>/dev/null || true
+    _cleanup_phase35_ipv6 2>/dev/null || true
 
     # Best-effort: remove new subscriber config if the test left it in etcd
     _cleanup_new_subscriber_config 2>/dev/null || true
@@ -684,7 +686,8 @@ main() {
     phase32_metric_values
     phase33_shutdown_inactive
     phase34_wan_long_outage
-    phase35_summary || true
+    phase35_ipv6
+    phase36_summary || true
 
     # Exit code mirrors the RESULT line: any failed step fails the run. Counted
     # here from the same results the summary printed, so a summary that breaks
