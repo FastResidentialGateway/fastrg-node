@@ -8,16 +8,32 @@ set -euo pipefail
 
 # LAN topology comes from the suite-level LAN_FLAP_HOST / LAN_FLAP_NIC /
 # LAN_PEER_NIC variables (see run_e2e_test.sh) so this phase carries no
-# bench-specific interface names. On the default bench the LAN link is fiber
-# into a PF on the WAN host with SR-IOV enabled, and the LAN peer VM consumes
-# one of its VFs. Flapping the PF on its host is the only action that drops
+# bench-specific interface names. On the default bench both links are 10G
+# fiber into a PF on the peer host with SR-IOV enabled, and the peer VMs
+# consume the VFs. Flapping the PF on its host is the only action that drops
 # the physical signal the node observes — in-guest admin down / unbind / PCI
 # reset all leave the SerDes lit.
-# Nominal link speed both ports negotiate on this bench (X710 10GbE SFP+ on the
-# WAN side, 10G fiber into the LAN PF). fastrg_nic_link_speed_mbps must report
-# exactly this while the link is up and 0 while it is down — the down side is
-# already required by _p27_wait_link_down.
+#
+# Both flaps rely on the peer's admin down actually removing the signal. An
+# optical module cuts its laser (TX_DISABLE) when the interface goes down, so
+# the node sees a real link down that lasts until the interface is brought
+# back. A passive direct-attach copper cable has no TX_DISABLE path: the wire
+# keeps carrying a valid idle stream, the node observes nothing, and the only
+# event it ever sees is the renegotiation transient when the peer comes back
+# up. _p27_wan_carrier_is_down exists so that medium change is reported as
+# such instead of quietly turning this step into a race against that
+# transient.
+#
+# Nominal link speed both ports negotiate on this bench (10G fiber into both
+# PFs). fastrg_nic_link_speed_mbps must report exactly this while the link is
+# up and 0 while it is down — the down side is already required by
+# _p27_wait_link_down.
 _P27_LINK_SPEED_MBPS=10000
+# Hold time of the second, deliberately short WAN flap in Step 111. Measured
+# on this bench: 0.1s of host-side down yields exactly one down/up pair on the
+# node (10/10 runs), well inside the 0.5s polling interval that the pair is
+# meant to slip past.
+_P27_FLASH_HOLD_SEC=0.1
 _P27_LAN_VLAN="vlan3"
 _P27_WAN_RETURN_ROUTE="192.168.200.128/25"
 _P27_WAN_RETURN_GATEWAY="192.168.201.1"
@@ -111,10 +127,44 @@ _p27_wait_link_up() {
     return 1
 }
 
-_p27_restore_wan() {
-    ssh_wan "ip link set '${WAN_NIC}' up; \
-        ip route replace '${_P27_WAN_RETURN_ROUTE}' via '${_P27_WAN_RETURN_GATEWAY}' dev '${WAN_NIC}'" \
-        >/dev/null 2>&1 || true
+# The exact host-side command that puts the WAN link back. The restore
+# primitive, the detached watchdog and the short flap all build on this one
+# definition so a change can never reach some restore paths and not others.
+# It quotes with double quotes because the watchdog embeds it inside a
+# single-quoted sh -c.
+_p27_wan_restore_cmd() {
+    printf 'ip link set "%s" up; ip route replace "%s" via "%s" dev "%s"' \
+        "$WAN_NIC" "$_P27_WAN_RETURN_ROUTE" "$_P27_WAN_RETURN_GATEWAY" "$WAN_NIC"
+}
+
+_p27_wan_link_kill() {
+    ssh_wan "ip link set '${WAN_NIC}' down" >/dev/null 2>&1
+}
+
+_p27_wan_link_restore() {
+    ssh_wan "$(_p27_wan_restore_cmd)" >/dev/null 2>&1 || true
+}
+
+# One toggle shorter than the polling interval. Down and up travel in a single
+# remote command so the hold is the sleep itself rather than two ssh round
+# trips.
+_p27_wan_link_flap() {
+    ssh_wan "ip link set '${WAN_NIC}' down; sleep ${_P27_FLASH_HOLD_SEC}; $(_p27_wan_restore_cmd)" \
+        >/dev/null 2>&1
+}
+
+# True once the peer host reports the WAN link has lost carrier. LOWER_UP is
+# the carrier bit: while it is still set the peer is up on the wire whatever
+# its administrative state says, and the node has nothing to detect.
+_p27_wan_carrier_is_down() {
+    local _i _state
+
+    for _i in $(seq 1 5); do
+        _state=$(ssh_wan "ip link show '${WAN_NIC}' 2>/dev/null" 2>/dev/null || true)
+        printf '%s\n' "$_state" | grep -q 'LOWER_UP' || return 0
+        sleep 0.3
+    done
+    return 1
 }
 
 _p27_restore_lan() {
@@ -335,9 +385,7 @@ _p27_arm_wan_watchdog() {
     # The watchdog is deliberately armed before link-down. Even if the runner
     # is interrupted, the WAN peer returns to up within eight seconds, before
     # the node's ten-second link_disconnect timer can fire.
-    ssh_wan "nohup sh -c 'sleep 8; ip link set \"${WAN_NIC}\" up; \
-        ip route replace \"${_P27_WAN_RETURN_ROUTE}\" via \
-        \"${_P27_WAN_RETURN_GATEWAY}\" dev \"${WAN_NIC}\"' \
+    ssh_wan "nohup sh -c 'sleep 8; $(_p27_wan_restore_cmd)' \
         >/dev/null 2>&1 </dev/null &" >/dev/null 2>&1
 }
 
@@ -353,7 +401,7 @@ _p27_arm_lan_watchdog() {
 _cleanup_phase27_link_flap() {
     local _i _ping=""
 
-    _p27_restore_wan
+    _p27_wan_link_restore
     _p27_restore_lan
 
     if [[ ${_p27_needs_path_recovery:-0} -eq 1 ]]; then
@@ -394,6 +442,9 @@ phase27_link_flap() {
     local _lan_flap_base="" _lan_flap_after="" _lan_delta=-1
     local _wan_after_lan="" _wan_up_base="" _lan_up_base=""
     local _wan_new_log="" _down_log=0 _up_log=0
+    local _wan_flap_sustained=""
+    local _flash_base="" _flash_after="" _flash_delta=-1
+    local _flash_log_baseline=0 _flash_new_log="" _flash_down_log=0 _flash_up_log=0
     local _lan_log_baseline=0 _lan_new_log="" _lan_down_log=0 _lan_up_log=0 _i
     local _lan_down_started=0 _lan_down_elapsed=-1
     local _lan_up_started=0 _lan_up_elapsed=-1 _lan_vlan_ready=0
@@ -418,46 +469,100 @@ phase27_link_flap() {
         _issue110="invalid baseline: metrics_port='${_P27_METRICS_PORT}' flap='${_wan_flap_base}' link_up='${_wan_up_base}'"
     elif ! _p27_arm_wan_watchdog; then
         _step110_ok=0
-        _issue110="failed to arm the WAN peer eight-second recovery watchdog"
-    elif ! ssh_wan "ip link set '${WAN_NIC}' down" >/dev/null 2>&1; then
+        _issue110="sustained: failed to arm the WAN peer eight-second recovery watchdog"
+    elif ! _p27_wan_link_kill; then
         _step110_ok=0
-        _issue110="failed to set WAN peer ${WAN_NIC} down"
+        _issue110="sustained: failed to set WAN peer ${WAN_NIC} down"
     else
         _p27_needs_session_recovery=1
         _p27_needs_path_recovery=1
+        if ! _p27_wan_carrier_is_down; then
+            _step110_ok=0
+            _issue110="sustained: WAN down ineffective on host side (${WAN_NIC} still reports carrier after admin down)"
+        fi
         if ! _p27_wait_link_down 1 14; then
             _step110_ok=0
-            _issue110="port 1 did not report link_up=0/speed=0 within 7s (up='${_P27_OBS_UP}' speed='${_P27_OBS_SPEED}')"
+            _issue110="${_issue110:+${_issue110}; }sustained: port 1 did not report link_up=0/speed=0 within 7s (up='${_P27_OBS_UP}' speed='${_P27_OBS_SPEED}')"
         fi
         # Restore immediately after observing down; the total down window remains below 10s.
-        _p27_restore_wan
+        _p27_wan_link_restore
         if ! _p27_wait_link_up 1 20; then
             _step110_ok=0
-            _issue110="${_issue110:+${_issue110}; }port 1 did not recover link_up=1/speed>0 within 10s (up='${_P27_OBS_UP}' speed='${_P27_OBS_SPEED}')"
+            _issue110="${_issue110:+${_issue110}; }sustained: port 1 did not recover link_up=1/speed>0 within 10s (up='${_P27_OBS_UP}' speed='${_P27_OBS_SPEED}')"
         elif [[ "$_P27_OBS_SPEED" != "$_P27_LINK_SPEED_MBPS" ]]; then
             _step110_ok=0
-            _issue110="${_issue110:+${_issue110}; }port 1 came back at ${_P27_OBS_SPEED} Mbps, expected ${_P27_LINK_SPEED_MBPS}"
+            _issue110="${_issue110:+${_issue110}; }sustained: port 1 came back at ${_P27_OBS_SPEED} Mbps, expected ${_P27_LINK_SPEED_MBPS}"
         fi
     fi
-    _p27_restore_wan
+    _p27_wan_link_restore
     sleep 2
 
     _wan_flap_after=$(_p27_read_metric fastrg_nic_link_flaps_total 1 || true)
     if [[ "$_wan_flap_base" =~ ^[0-9]+$ && "$_wan_flap_after" =~ ^[0-9]+$ ]]; then
         _wan_delta=$(( _wan_flap_after - _wan_flap_base ))
     fi
+    _wan_flap_sustained="$_wan_flap_after"
     _wan_new_log=$(_p27_new_log "$_P27_LOG_PATH" "$_wan_log_baseline" || true)
     printf '%s\n' "$_wan_new_log" | grep -qF "Port 1 Link Down" && _down_log=1 || true
     printf '%s\n' "$_wan_new_log" | grep -qF "Port 1 Link Up" && _up_log=1 || true
     if [[ $_wan_delta -lt 2 || $(( _wan_delta % 2 )) -ne 0 || \
           $_down_log -ne 1 || $_up_log -ne 1 ]]; then
         _step110_ok=0
-        _issue110="${_issue110:+${_issue110}; }flap=${_wan_flap_base}->${_wan_flap_after} delta=${_wan_delta}; down_log=${_down_log} up_log=${_up_log}; log='$(_p27_log_snippet "$_P27_LOG_PATH" "$_wan_log_baseline")'"
+        _issue110="${_issue110:+${_issue110}; }sustained: flap=${_wan_flap_base}->${_wan_flap_after} delta=${_wan_delta}; down_log=${_down_log} up_log=${_up_log}; log='$(_p27_log_snippet "$_P27_LOG_PATH" "$_wan_log_baseline")'"
+    fi
+
+    # Second part of Step 111 — a flap shorter than the polling interval.
+    #
+    # The node counts link transitions in the LSC callback, so a toggle the
+    # 0.5s polling can never sample must still show up afterwards: the counter
+    # advances by exactly one down/up pair and both lines reach the log. That
+    # is what is asserted here. The gauge is deliberately not part of it — it
+    # only reports the state at scrape time, so requiring it to have read 0
+    # would make this a sampling race. The sustained part above keeps its own
+    # gauge assertions unchanged.
+    if [[ $_step110_ok -eq 1 ]]; then
+        sleep 2
+        _flash_base=$(_p27_read_metric fastrg_nic_link_flaps_total 1 || true)
+        _flash_log_baseline=$(_p27_log_line_count "$_P27_LOG_PATH")
+        if [[ ! "$_flash_base" =~ ^[0-9]+$ ]]; then
+            _step110_ok=0
+            _issue110="fast-flap: invalid baseline flap='${_flash_base}'"
+        elif ! _p27_arm_wan_watchdog; then
+            _step110_ok=0
+            _issue110="fast-flap: failed to arm the WAN peer eight-second recovery watchdog"
+        elif ! _p27_wan_link_flap; then
+            _step110_ok=0
+            _issue110="fast-flap: failed to flap WAN peer ${WAN_NIC}"
+        else
+            if ! _p27_wait_link_up 1 20; then
+                _step110_ok=0
+                _issue110="fast-flap: port 1 did not recover link_up=1/speed>0 within 10s (up='${_P27_OBS_UP}' speed='${_P27_OBS_SPEED}')"
+            elif [[ "$_P27_OBS_SPEED" != "$_P27_LINK_SPEED_MBPS" ]]; then
+                _step110_ok=0
+                _issue110="fast-flap: port 1 came back at ${_P27_OBS_SPEED} Mbps, expected ${_P27_LINK_SPEED_MBPS}"
+            fi
+            _flash_after=$(_p27_read_metric fastrg_nic_link_flaps_total 1 || true)
+            if [[ "$_flash_base" =~ ^[0-9]+$ && "$_flash_after" =~ ^[0-9]+$ ]]; then
+                _flash_delta=$(( _flash_after - _flash_base ))
+            fi
+            # Step 112 checks port 1 stays put while port 0 flaps, using this
+            # as its baseline; carry the transitions from this part into it.
+            [[ "$_flash_after" =~ ^[0-9]+$ ]] && _wan_flap_after="$_flash_after" || true
+            _flash_new_log=$(_p27_new_log "$_P27_LOG_PATH" "$_flash_log_baseline" || true)
+            printf '%s\n' "$_flash_new_log" | grep -qF "Port 1 Link Down" && _flash_down_log=1 || true
+            printf '%s\n' "$_flash_new_log" | grep -qF "Port 1 Link Up" && _flash_up_log=1 || true
+            if [[ $_flash_delta -ne 2 || $_flash_down_log -ne 1 || $_flash_up_log -ne 1 ]]; then
+                _step110_ok=0
+                _issue110="${_issue110:+${_issue110}; }fast-flap: ${_P27_FLASH_HOLD_SEC}s toggle gave flap=${_flash_base}->${_flash_after} delta=${_flash_delta} (expected exactly 2); down_log=${_flash_down_log} up_log=${_flash_up_log}; log='$(_p27_log_snippet "$_P27_LOG_PATH" "$_flash_log_baseline")'"
+            fi
+        fi
+        _p27_wan_link_restore
+        sleep 2
     fi
 
     if [[ $_step110_ok -eq 1 ]]; then
         pass "Step 111: WAN LSC event and flap counter" \
-            "port 1 link 1→0→1, speed 0→${_P27_OBS_SPEED} Mbps, flap ${_wan_flap_base}→${_wan_flap_after} (+${_wan_delta}, even), current-run down/up logs present"
+            "sustained: port 1 link 1→0→1, speed 0→${_P27_LINK_SPEED_MBPS} Mbps, flap ${_wan_flap_base}→${_wan_flap_sustained} (+${_wan_delta}, even), current-run down/up logs present; fast-flap: ${_P27_FLASH_HOLD_SEC}s toggle counted ${_flash_base}→${_flash_after} (+${_flash_delta}) with down/up logs, link back at ${_P27_OBS_SPEED} Mbps"
     else
         fail "Step 111: WAN LSC event and flap counter" "$_issue110"
     fi
@@ -560,6 +665,12 @@ phase27_link_flap() {
     fi
 
     # Step 113 — the sub-10s WAN outage must not run link_disconnect or drop data.
+    #
+    # The flaps above clear the peer's ARP entry for the LAN side, so the first
+    # packet after them is consumed by address resolution rather than lost by
+    # the data plane. One unscored probe absorbs that, leaving the scored ping
+    # to measure the session itself.
+    ssh_lan "ping -c 1 -W 2 ${WAN_IP}" >/dev/null 2>&1 || true
     _ping_out=$(ssh_lan "ping -c 4 -W 3 ${WAN_IP}" 2>&1 || true)
     if ! printf '%s\n' "$_ping_out" | grep -qE '0% packet loss|0\.0% packet loss'; then
         _step112_ok=0
