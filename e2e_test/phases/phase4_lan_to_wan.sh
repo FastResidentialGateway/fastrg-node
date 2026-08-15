@@ -13,7 +13,8 @@ phase4_lan_to_wan() {
     # ------------------------------------------------------------------
     info "Step 10: Ping ${WAN_IP} from LAN host ${LAN_HOST}..."
     PING_OUT=$(ssh_lan "ping -c 4 -W 3 ${WAN_IP} 2>&1" || true)
-    if printf '%s' "$PING_OUT" | grep -qE "0% packet loss|0\.0% packet loss"; then
+    # Anchored: only a literal zero loss field counts — "50%"/"100% packet loss" must not substring-match as success.
+    if printf '%s' "$PING_OUT" | grep -qE "(^|[ ,])0(\.0+)?% packet loss"; then
         pass "Step 10: Ping LAN→WAN" "${WAN_IP} reachable, 0% packet loss"
     else
         LOSS=$(printf '%s' "$PING_OUT" | grep -oE '[0-9]+(\.[0-9]+)?% packet loss' | head -1 || echo "no response")

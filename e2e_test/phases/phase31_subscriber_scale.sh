@@ -232,7 +232,8 @@ phase31_subscriber_scale() {
         fi
     done
     _ping_out=$(ssh_lan "ping -c 4 -W 3 ${WAN_IP} 2>&1" || true)
-    if ! printf '%s' "$_ping_out" | grep -qE '0% packet loss|0\.0% packet loss'; then
+    # Anchored: only a literal zero loss field counts — "50%"/"100% packet loss" must not substring-match as success.
+    if ! printf '%s' "$_ping_out" | grep -qE '(^|[ ,])0(\.0+)?% packet loss'; then
         _loss=$(printf '%s' "$_ping_out" | \
             grep -oE '[0-9]+(\.[0-9]+)?% packet loss' | head -1 || true)
         _issue126="${_issue126:+${_issue126}; }LAN→WAN ping ${_loss:-no response}"

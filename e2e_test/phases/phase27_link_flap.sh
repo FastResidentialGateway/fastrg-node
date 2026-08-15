@@ -35,12 +35,41 @@ _P27_LINK_SPEED_MBPS=10000
 # meant to slip past.
 _P27_FLASH_HOLD_SEC=0.1
 _P27_LAN_VLAN="vlan3"
+# NetworkManager owns vlan3 on the LAN host, and after the LAN link returns it
+# does not simply carry on: it tears the connection down and rebuilds it, with
+# the address and the default route gone together while it does. Measured once
+# on this bench: teardown at link+4.3s, rebuild complete at link+8.7s. A ping
+# issued inside that gap prints "Network is unreachable" and never puts a
+# packet on the wire, so it says nothing about the data plane Step 113 tests.
+#
+# Where the three limits come from:
+#   window 25s — the gap can only be observed once Step 113 starts pinging,
+#     which lands somewhere between a few seconds and ~15s after the link
+#     returns depending on how long the checks in between take. 8.7s of gap
+#     plus that spread plus margin is 25s. An unreachable ping later than this
+#     runs on some other clock — an expired DHCP lease, a route someone
+#     removed — and is reported instead of waited out.
+#   budget 20s — how long a rebuild that started inside the window gets to
+#     finish, more than twice the 8.7s measured.
+#   interval 2s — long enough that attempts are not just ssh round trips,
+#     short enough to catch the path within about a second of its return.
+#
+# All three come from one measurement plus margin, not from a distribution.
+# If the attempt log starts showing the gap opening later than the window or
+# lasting longer than the budget, NetworkManager's behaviour on this bench has
+# changed: measure it again rather than widening the numbers here.
+_P27_NM_GAP_WINDOW_SEC=25
+_P27_NM_GAP_BUDGET_SEC=20
+_P27_NM_GAP_INTERVAL_SEC=2
 _P27_WAN_RETURN_ROUTE="192.168.200.128/25"
 _P27_WAN_RETURN_GATEWAY="192.168.201.1"
 _P27_LOG_PATH=""
 _P27_METRICS_PORT=""
 _P27_BRAS_SSH_PID=""
 _P27_PATH_RECOVERY_DETAIL=""
+_P27_PROBE_NOTE=""
+_P27_PROBE_OUT=""
+_P27_WAN_CMD_DETAIL=""
 _p27_needs_session_recovery=0
 _p27_needs_path_recovery=0
 
@@ -132,13 +161,38 @@ _p27_wait_link_up() {
 # definition so a change can never reach some restore paths and not others.
 # It quotes with double quotes because the watchdog embeds it inside a
 # single-quoted sh -c.
+#
+# Bringing the link up returns before the kernel has reinstalled the
+# interface's connected route, and until it is back the gateway resolves to
+# nothing: a route command issued in that window fails with "Nexthop has
+# invalid gateway" while the link change itself has already happened. Measured
+# on this bench, the window is 0.1-40ms wide (half the samples under 2ms), so
+# a loaded host hits it and an idle one usually does not.
+#
+# `onlink` states what is true here — the gateway sits on this interface's own
+# segment — so the kernel stops making the route conditional on that reinstall
+# finishing. Forwarding is unchanged; only the timing dependency is gone. Any
+# other failure (missing interface, bad syntax, no permission) still returns
+# non-zero as before.
 _p27_wan_restore_cmd() {
-    printf 'ip link set "%s" up; ip route replace "%s" via "%s" dev "%s"' \
+    printf 'ip link set "%s" up; ip route replace "%s" via "%s" dev "%s" onlink' \
         "$WAN_NIC" "$_P27_WAN_RETURN_ROUTE" "$_P27_WAN_RETURN_GATEWAY" "$WAN_NIC"
 }
 
+# Why the link commands report more than a status: when one of them fails, the
+# step used to say only "failed", leaving no way to tell an ssh-level problem
+# from the remote command refusing. The pass path and the conditions are the
+# same as before — only the failure messages gained the reason.
+_p27_wan_cmd_detail() {
+    printf "rc=%s, err='%s'" "$1" "$(printf '%s' "$2" | tr '\n' '|' | tail -c 200)"
+}
+
 _p27_wan_link_kill() {
-    ssh_wan "ip link set '${WAN_NIC}' down" >/dev/null 2>&1
+    local _out _rc=0
+
+    _out=$(ssh_wan "ip link set '${WAN_NIC}' down" 2>&1) || _rc=$?
+    _P27_WAN_CMD_DETAIL=$(_p27_wan_cmd_detail "$_rc" "$_out")
+    return "$_rc"
 }
 
 _p27_wan_link_restore() {
@@ -149,8 +203,12 @@ _p27_wan_link_restore() {
 # remote command so the hold is the sleep itself rather than two ssh round
 # trips.
 _p27_wan_link_flap() {
-    ssh_wan "ip link set '${WAN_NIC}' down; sleep ${_P27_FLASH_HOLD_SEC}; $(_p27_wan_restore_cmd)" \
-        >/dev/null 2>&1
+    local _out _rc=0
+
+    _out=$(ssh_wan "ip link set '${WAN_NIC}' down; sleep ${_P27_FLASH_HOLD_SEC}; $(_p27_wan_restore_cmd)" \
+        2>&1) || _rc=$?
+    _P27_WAN_CMD_DETAIL=$(_p27_wan_cmd_detail "$_rc" "$_out")
+    return "$_rc"
 }
 
 # True once the peer host reports the WAN link has lost carrier. LOWER_UP is
@@ -397,6 +455,144 @@ _p27_arm_lan_watchdog() {
         >/dev/null 2>&1 </dev/null &" >/dev/null 2>&1
 }
 
+# One word for what a ping run means, used for the attempt log and for the
+# decision to measure again:
+#   no-route — "Network is unreachable": nothing reached the wire, whether the
+#              route was already missing (connect:) or vanished mid-run
+#              (sendmsg:), so the run measured nothing
+#   ok       — every packet came back
+#   loss     — packets did reach the wire and did not all come back, which is
+#              a verdict about the data plane
+#   silent   — no ping output to judge at all (ssh trouble, say)
+#
+# The loss figure is matched with the percentage anchored, so that the "0%" of
+# "100% packet loss" cannot read as a clean run.
+_p27_classify_ping() {
+    local _out="$1"
+
+    if printf '%s\n' "$_out" | grep -q 'Network is unreachable'; then
+        printf 'no-route'
+    elif printf '%s\n' "$_out" | grep -qE '(^|[ ,])0(\.0+)?% packet loss'; then
+        printf 'ok'
+    elif printf '%s\n' "$_out" | grep -qE '[1-9][0-9]* packets transmitted'; then
+        printf 'loss'
+    else
+        printf 'silent'
+    fi
+}
+
+# Whether the LAN host holds an IPv4 address on its vlan and can resolve a
+# route to the ping target right now. NetworkManager takes both away together
+# while it rebuilds the connection, so one line per probe shows how far the
+# rebuild has got. Evidence for reading a failure afterwards, never a decision
+# input: an expired lease looks the same.
+_p27_lan_path_snapshot() {
+    local _state
+
+    _state=$(ssh_lan "ip -4 -o addr show dev '${_P27_LAN_VLAN}' scope global | grep -q ' inet ' \
+            && printf 'addr=yes ' || printf 'addr=no '; \
+        ip route get '${WAN_IP}' 2>/dev/null | grep -q ' dev ${_P27_LAN_VLAN}' \
+            && printf 'route=yes' || printf 'route=no'" 2>/dev/null || true)
+    printf '%s' "${_state:-addr=? route=?}"
+}
+
+# The session-teardown lines Step 113 asserts on, over the log this run has
+# produced so far. The probe loop repeats this check because a teardown
+# settles the outcome: once the node has dropped the session, nothing the LAN
+# host does to its own vlan will bring the path back.
+_p27_session_teardown_seen() {
+    local _baseline="$1" _hit
+
+    _hit=$(_p27_new_log "$_P27_LOG_PATH" "$_baseline" | \
+        grep -E 'pppoe is force terminating|pppoe is spawning|HSI module is (terminated|spawned)' || true)
+    [[ -n "$_hit" ]]
+}
+
+# "1 retry" / "4 retries", because a step's detail line is often all a reader
+# gets.
+_p27_retries_phrase() {
+    if [[ "$1" -eq 1 ]]; then
+        printf '1 retry'
+    else
+        printf '%s retries' "$1"
+    fi
+}
+
+# The Step 113 probe: one unscored ping to absorb the ARP the flaps cleared,
+# then the scored one. The pair is repeated only while the single thing in the
+# way is the LAN host rebuilding its vlan — see the _P27_NM_GAP_* notes above
+# for what that is and where the limits come from.
+#
+# _P27_PROBE_OUT comes back holding the scored output of the last attempt, so
+# what is asserted on is the same whether it took one attempt or seven. Both
+# results travel in variables rather than on stdout: a command substitution
+# would run this in a subshell, where the note below would be lost.
+#
+# Retrying cannot turn a broken node green. It is allowed only for a ping that
+# never left the LAN host, and the only way out of that state is the LAN host
+# completing a DHCP exchange with the node's own DHCP server — so a node that
+# is not serving DHCP fails here by running the budget out, with every attempt
+# on the record.
+#
+# _P27_PROBE_NOTE comes back as a phrase to append to the step detail: empty
+# when the first attempt settled it, otherwise how many attempts there were,
+# what each one saw, and why the loop stopped.
+#
+# $1: value of $SECONDS when the LAN link came back, or -1 if the LAN link
+#     never went down in this run
+# $2: node log line count from before the flaps
+_p27_probe_wan_path() {
+    local _anchor="$1" _log_baseline="$2"
+    local _out="" _kind="" _retries=0 _t=0 _onset=-1 _deadline=0 _attempts=""
+
+    _P27_PROBE_NOTE=""
+    while :; do
+        ssh_lan "ping -c 1 -W 2 ${WAN_IP}" >/dev/null 2>&1 || true
+        _out=$(ssh_lan "ping -c 4 -W 3 ${WAN_IP}" 2>&1 || true)
+        _kind=$(_p27_classify_ping "$_out")
+        _t=$(( SECONDS - _anchor ))
+
+        # Packets that reached the wire have already answered the question this
+        # step asks, whichever way they answered it. Only a ping that never got
+        # out is worth issuing again.
+        [[ "$_kind" == "no-route" ]] || break
+
+        if [[ $_anchor -lt 0 ]]; then
+            _P27_PROBE_NOTE="; not retried: no LAN link restore in this run to attribute the missing route to"
+            break
+        fi
+
+        _attempts="${_attempts}${_attempts:+; }t+${_t}s ${_kind} $(_p27_lan_path_snapshot)"
+
+        if [[ $_onset -lt 0 ]]; then
+            _onset=$_t
+            if [[ $_onset -gt $_P27_NM_GAP_WINDOW_SEC ]]; then
+                _P27_PROBE_NOTE="; not retried: first unreachable ping came t+${_onset}s after the LAN link returned, outside the ${_P27_NM_GAP_WINDOW_SEC}s reconvergence window (${_attempts})"
+                break
+            fi
+            _deadline=$(( SECONDS + _P27_NM_GAP_BUDGET_SEC ))
+        fi
+
+        if _p27_session_teardown_seen "$_log_baseline"; then
+            _P27_PROBE_NOTE="; stopped after $(_p27_retries_phrase "$_retries"): the node logged a session teardown (${_attempts})"
+            break
+        fi
+
+        if [[ $SECONDS -ge $_deadline ]]; then
+            _P27_PROBE_NOTE="; still unreachable after $(_p27_retries_phrase "$_retries") over $(( _t - _onset ))s (${_attempts})"
+            break
+        fi
+
+        sleep "$_P27_NM_GAP_INTERVAL_SEC"
+        _retries=$(( _retries + 1 ))
+    done
+
+    if [[ "$_kind" == "ok" && $_retries -gt 0 ]]; then
+        _P27_PROBE_NOTE="; recovered after $(_p27_retries_phrase "$_retries"), t+${_t}s after the LAN link returned"
+    fi
+    _P27_PROBE_OUT="$_out"
+}
+
 # Idempotent: called after phase27 and from the top-level EXIT trap.
 _cleanup_phase27_link_flap() {
     local _i _ping=""
@@ -417,7 +613,8 @@ _cleanup_phase27_link_flap() {
         info "Cleanup(phase27): waiting for PPPoE data-plane recovery..."
         for _i in $(seq 1 6); do
             _ping=$(ssh_lan "ping -c 2 -W 2 ${WAN_IP}" 2>&1 || true)
-            if printf '%s\n' "$_ping" | grep -qE '0% packet loss|0\.0% packet loss'; then
+            # Anchored: only a literal zero loss field counts — "50%"/"100% packet loss" must not substring-match as success.
+            if printf '%s\n' "$_ping" | grep -qE '(^|[ ,])0(\.0+)?% packet loss'; then
                 _p27_needs_session_recovery=0
                 return 0
             fi
@@ -445,9 +642,11 @@ phase27_link_flap() {
     local _wan_flap_sustained=""
     local _flash_base="" _flash_after="" _flash_delta=-1
     local _flash_log_baseline=0 _flash_new_log="" _flash_down_log=0 _flash_up_log=0
+    local _flash_final=""
     local _lan_log_baseline=0 _lan_new_log="" _lan_down_log=0 _lan_up_log=0 _i
     local _lan_down_started=0 _lan_down_elapsed=-1
     local _lan_up_started=0 _lan_up_elapsed=-1 _lan_vlan_ready=0
+    local _lan_restored_at=-1
     local _session_log="" _ping_out="" _ping_loss=""
 
     _mport_raw=$(ssh_node "grep 'MetricsListenPort' /etc/fastrg/config.cfg 2>/dev/null" | \
@@ -472,7 +671,7 @@ phase27_link_flap() {
         _issue110="sustained: failed to arm the WAN peer eight-second recovery watchdog"
     elif ! _p27_wan_link_kill; then
         _step110_ok=0
-        _issue110="sustained: failed to set WAN peer ${WAN_NIC} down"
+        _issue110="sustained: failed to set WAN peer ${WAN_NIC} down (${_P27_WAN_CMD_DETAIL})"
     else
         _p27_needs_session_recovery=1
         _p27_needs_path_recovery=1
@@ -532,7 +731,7 @@ phase27_link_flap() {
             _issue110="fast-flap: failed to arm the WAN peer eight-second recovery watchdog"
         elif ! _p27_wan_link_flap; then
             _step110_ok=0
-            _issue110="fast-flap: failed to flap WAN peer ${WAN_NIC}"
+            _issue110="fast-flap: failed to flap WAN peer ${WAN_NIC} (${_P27_WAN_CMD_DETAIL})"
         else
             if ! _p27_wait_link_up 1 20; then
                 _step110_ok=0
@@ -545,9 +744,6 @@ phase27_link_flap() {
             if [[ "$_flash_base" =~ ^[0-9]+$ && "$_flash_after" =~ ^[0-9]+$ ]]; then
                 _flash_delta=$(( _flash_after - _flash_base ))
             fi
-            # Step 112 checks port 1 stays put while port 0 flaps, using this
-            # as its baseline; carry the transitions from this part into it.
-            [[ "$_flash_after" =~ ^[0-9]+$ ]] && _wan_flap_after="$_flash_after" || true
             _flash_new_log=$(_p27_new_log "$_P27_LOG_PATH" "$_flash_log_baseline" || true)
             printf '%s\n' "$_flash_new_log" | grep -qF "Port 1 Link Down" && _flash_down_log=1 || true
             printf '%s\n' "$_flash_new_log" | grep -qF "Port 1 Link Up" && _flash_up_log=1 || true
@@ -556,6 +752,22 @@ phase27_link_flap() {
                 _issue110="${_issue110:+${_issue110}; }fast-flap: ${_P27_FLASH_HOLD_SEC}s toggle gave flap=${_flash_base}->${_flash_after} delta=${_flash_delta} (expected exactly 2); down_log=${_flash_down_log} up_log=${_flash_up_log}; log='$(_p27_log_snippet "$_P27_LOG_PATH" "$_flash_log_baseline")'"
             fi
         fi
+        # Step 112 checks that port 1 stays put while port 0 flaps, and uses
+        # this counter as its baseline. It is read here unconditionally
+        # because a flash command that reports failure can still have flapped
+        # the link: carrying the pre-flash number forward would then fail
+        # Step 112 for a transition Step 111 has already reported, turning one
+        # fault into two. Only a valid number overwrites, so a failed read
+        # leaves the previous baseline in place.
+        #
+        # The wait matters as much as the read. The paths that report a
+        # failure above skip the recovery wait, so without this the counter
+        # can be sampled between the down and the up — one short of where it
+        # settles, which lands Step 112 in the same false failure by a
+        # different route.
+        _p27_wait_link_up 1 20 || true
+        _flash_final=$(_p27_read_metric fastrg_nic_link_flaps_total 1 || true)
+        [[ "$_flash_final" =~ ^[0-9]+$ ]] && _wan_flap_after="$_flash_final" || true
         _p27_wan_link_restore
         sleep 2
     fi
@@ -606,6 +818,10 @@ phase27_link_flap() {
             _step111_ok=0
             _issue111="${_issue111:+${_issue111}; }failed to set LAN PF ${LAN_FLAP_NIC} up"
         fi
+        # Start of the clock the LAN host's vlan rebuild hangs off. Step 113
+        # measures against it to tell that rebuild apart from a path that is
+        # down for its own reasons.
+        _lan_restored_at=$SECONDS
 
         for _i in $(seq 1 30); do
             _lan_flap_after=$(_p27_read_metric fastrg_nic_link_flaps_total 0 || true)
@@ -669,14 +885,17 @@ phase27_link_flap() {
     # The flaps above clear the peer's ARP entry for the LAN side, so the first
     # packet after them is consumed by address resolution rather than lost by
     # the data plane. One unscored probe absorbs that, leaving the scored ping
-    # to measure the session itself.
-    ssh_lan "ping -c 1 -W 2 ${WAN_IP}" >/dev/null 2>&1 || true
-    _ping_out=$(ssh_lan "ping -c 4 -W 3 ${WAN_IP}" 2>&1 || true)
-    if ! printf '%s\n' "$_ping_out" | grep -qE '0% packet loss|0\.0% packet loss'; then
+    # to measure the session itself. _p27_probe_wan_path issues that pair, and
+    # repeats it while the LAN host still has no route of its own to send on —
+    # what moves is when the measurement starts, not what counts as a pass.
+    _p27_probe_wan_path "$_lan_restored_at" "$_wan_log_baseline"
+    _ping_out="$_P27_PROBE_OUT"
+    # Anchored: only a literal zero loss field counts — "50%"/"100% packet loss" must not substring-match as success.
+    if ! printf '%s\n' "$_ping_out" | grep -qE '(^|[ ,])0(\.0+)?% packet loss'; then
         _step112_ok=0
         _ping_loss=$(printf '%s\n' "$_ping_out" | \
             grep -oE '[0-9]+(\.[0-9]+)?% packet loss' | head -1 || true)
-        _issue112="${WAN_IP} was not reachable (${_ping_loss:-no response})"
+        _issue112="${WAN_IP} was not reachable (${_ping_loss:-no response})${_P27_PROBE_NOTE}"
     fi
 
     _wan_new_log=$(_p27_new_log "$_P27_LOG_PATH" "$_wan_log_baseline" || true)
@@ -697,7 +916,7 @@ phase27_link_flap() {
     if [[ $_step112_ok -eq 1 ]]; then
         _p27_needs_session_recovery=0
         pass "Step 113: preserve session across short WAN flap" \
-            "${WAN_IP} reachable with 0% packet loss; no automatic session teardown; ${_P27_PATH_RECOVERY_DETAIL}"
+            "${WAN_IP} reachable with 0% packet loss; no automatic session teardown; ${_P27_PATH_RECOVERY_DETAIL}${_P27_PROBE_NOTE}"
     else
         fail "Step 113: preserve session across short WAN flap" "$_issue112"
     fi

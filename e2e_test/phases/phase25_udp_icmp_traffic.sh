@@ -228,6 +228,13 @@ _p25_udp_result_ok() {
     awk -v lost="$_lost" -v bytes="$_bytes" 'BEGIN { exit !(lost < 1 && bytes > 0) }'
 }
 
+# True when the loss figure is zero however ping spelled it (0, 0.0, 0.00).
+# A string compare against "0" and "0.0" misses the rest, and a substring
+# match on "0% packet loss" would accept the "0%" inside "100%".
+_p25_loss_is_zero() {
+    [[ "$1" =~ ^0([.]0+)?$ ]]
+}
+
 _p25_ping_loss() {
     printf '%s\n' "$1" | sed -nE \
         's/.* ([0-9]+([.][0-9]+)?)% packet loss.*/\1/p' | tail -1 || true
@@ -242,6 +249,7 @@ phase25_udp_icmp_traffic() {
     local _entries_base="" _entries_after="" _alloc_base="" _alloc_after=""
     local _iperf_out="" _iperf_rc=0 _parsed="" _lost="" _bytes="" _client_stopped=0
     local _ping_out="" _ping_retry_out="" _ping_loss="" _entries_delta=""
+    local _entries_seq="" _entries_seq_file="" _entries_seq_pid=""
     local _traffic_before="" _traffic_after=""
 
     _P25_METRICS_PORT=$(ssh_node \
@@ -331,11 +339,41 @@ phase25_udp_icmp_traffic() {
             "server=${_server_ready}/${_server_stopped} rc=${_iperf_rc} stopped=${_client_stopped}; loss=${_lost:-NA}% bytes=${_bytes:-NA}; alloc_fail=${_alloc_base:-NA}->${_alloc_after:-NA}${_P25_TRAFFIC_ISSUE:+; traffic counters: ${_P25_TRAFFIC_ISSUE}}; output='$(_p25_snippet "$_iperf_out")'"
     fi
 
+    # What this step is for: the ICMP ident mapping must stay alive for longer
+    # than ten seconds. 150 packets spread over about fifteen seconds all
+    # returning is that property demonstrated directly — if the mapping were
+    # recycled or its translation broken part way through, the replies stop
+    # coming back and the loss figure says so.
+    #
+    # The subscriber's live NAT entry count is recorded alongside, not
+    # asserted. It answers to anything that puts a flow through this
+    # subscriber, and the LAN host raises its own (DNS to the node's proxy,
+    # DHCP renewal, NTP, periodic distribution traffic), so its value here
+    # tracks the environment as much as the mapping. The per-second sequence
+    # is kept because a future surprise is much easier to read with the shape
+    # of the count than with two endpoints.
     info "Step 106: running approximately 15s of ICMP echo traffic..."
     _entries_base=$(_p25_fetch_metric "fastrg_node_per_user_nat_entries_used")
+    _entries_seq_file=$(mktemp) || _entries_seq_file=""
+    if [[ -n "$_entries_seq_file" ]]; then
+        ( for _p25_i in $(seq 1 18); do
+              printf '%s ' "$(_p25_fetch_metric "fastrg_node_per_user_nat_entries_used")" \
+                  >> "$_entries_seq_file" 2>/dev/null
+              sleep 1
+          done ) >/dev/null 2>&1 &
+        _entries_seq_pid=$!
+    fi
     _ping_out=$(ssh_lan "ping -c 150 -i 0.1 -W 2 ${WAN_IP}" 2>&1 || true)
+    if [[ -n "${_entries_seq_pid}" ]]; then
+        kill "$_entries_seq_pid" 2>/dev/null || true
+        wait "$_entries_seq_pid" 2>/dev/null || true
+    fi
+    if [[ -n "$_entries_seq_file" ]]; then
+        _entries_seq=$(tr -s ' ' < "$_entries_seq_file" 2>/dev/null || true)
+        rm -f "$_entries_seq_file"
+    fi
     _ping_loss=$(_p25_ping_loss "$_ping_out")
-    if [[ "$_ping_loss" != "0" && "$_ping_loss" != "0.0" ]]; then
+    if ! _p25_loss_is_zero "$_ping_loss"; then
         info "Step 106: first ping reported ${_ping_loss:-unparseable}% loss; retrying once..."
         _ping_retry_out=$(ssh_lan "ping -c 150 -i 0.1 -W 2 ${WAN_IP}" 2>&1 || true)
         _ping_loss=$(_p25_ping_loss "$_ping_retry_out")
@@ -344,13 +382,12 @@ phase25_udp_icmp_traffic() {
     if _p25_is_uint "$_entries_base" && _p25_is_uint "$_entries_after"; then
         _entries_delta=$(( _entries_after - _entries_base ))
     fi
-    if [[ "$_ping_loss" == "0" || "$_ping_loss" == "0.0" ]] && \
-       [[ "$_entries_delta" =~ ^-?[0-9]+$ ]] && (( _entries_delta <= 1 )); then
+    if _p25_loss_is_zero "$_ping_loss"; then
         pass "Step 106: sustained ICMP echo" \
-            "loss=${_ping_loss}%, entries delta=${_entries_delta}; ident mapping survived beyond 10s"
+            "loss=${_ping_loss}% over 150 packets in ~15s; ident mapping survived beyond 10s; recorded only: nat entries ${_entries_base:-NA}->${_entries_after:-NA} (delta ${_entries_delta:-NA}), during the ping: ${_entries_seq:-unavailable}"
     else
         fail "Step 106: sustained ICMP echo" \
-            "loss=${_ping_loss:-NA}%; entries=${_entries_base:-NA}->${_entries_after:-NA}; first='$(_p25_snippet "$_ping_out")' retry='$(_p25_snippet "$_ping_retry_out")'"
+            "loss=${_ping_loss:-NA}%; recorded only: nat entries ${_entries_base:-NA}->${_entries_after:-NA} (delta ${_entries_delta:-NA}), during the ping: ${_entries_seq:-unavailable}; first='$(_p25_snippet "$_ping_out")' retry='$(_p25_snippet "$_ping_retry_out")'"
     fi
 
     # ------------------------------------------------------------------

@@ -166,7 +166,8 @@ phase28_chap_auth() {
     ssh_lan "ping -c 1 -W 3 ${WAN_IP}" >/dev/null 2>&1 || true
 
     _ping_out=$(ssh_lan "ping -c 4 -W 3 ${WAN_IP}" 2>&1 || true)
-    if ! printf '%s\n' "$_ping_out" | grep -qE '0% packet loss|0\.0% packet loss'; then
+    # Anchored: only a literal zero loss field counts — "50%"/"100% packet loss" must not substring-match as success.
+    if ! printf '%s\n' "$_ping_out" | grep -qE '(^|[ ,])0(\.0+)?% packet loss'; then
         _step114_ok=0
         _ping_loss=$(printf '%s\n' "$_ping_out" | \
             grep -oE '[0-9]+(\.[0-9]+)?% packet loss' | head -1 || true)
