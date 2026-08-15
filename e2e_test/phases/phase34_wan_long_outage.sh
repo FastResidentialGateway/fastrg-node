@@ -36,8 +36,21 @@ _p34_needs_recovery=0
 # The exact host-side command that puts the WAN link back, defined once so the
 # watchdog and every restore path stay in step. Double quotes because the
 # watchdog embeds it inside a single-quoted sh -c.
+#
+# Bringing the link up returns before the kernel has reinstalled the
+# interface's connected route, and until it is back the gateway resolves to
+# nothing: a route command issued in that window fails with "Nexthop has
+# invalid gateway" while the link change itself has already happened. Measured
+# on this bench, the window is 0.1-40ms wide (half the samples under 2ms), so
+# a loaded host hits it and an idle one usually does not.
+#
+# `onlink` states what is true here — the gateway sits on this interface's own
+# segment — so the kernel stops making the route conditional on that reinstall
+# finishing. Forwarding is unchanged; only the timing dependency is gone. Any
+# other failure (missing interface, bad syntax, no permission) still returns
+# non-zero as before.
 _p34_wan_restore_cmd() {
-    printf 'ip link set "%s" up; ip route replace "%s" via "%s" dev "%s"' \
+    printf 'ip link set "%s" up; ip route replace "%s" via "%s" dev "%s" onlink' \
         "$WAN_NIC" "$_P34_WAN_RETURN_ROUTE" "$_P34_WAN_RETURN_GATEWAY" "$WAN_NIC"
 }
 
@@ -303,7 +316,8 @@ phase34_wan_long_outage() {
         # spent on address resolution rather than lost by the data plane.
         ssh_lan "ping -c 1 -W 2 ${WAN_IP}" >/dev/null 2>&1 || true
         _ping_out=$(ssh_lan "ping -c 4 -W 3 ${WAN_IP}" 2>&1 || true)
-        if ! printf '%s\n' "$_ping_out" | grep -qE '0% packet loss|0\.0% packet loss'; then
+        # Anchored: only a literal zero loss field counts — "50%"/"100% packet loss" must not substring-match as success.
+        if ! printf '%s\n' "$_ping_out" | grep -qE '(^|[ ,])0(\.0+)?% packet loss'; then
             _step139_ok=0
             _ping_loss=$(printf '%s\n' "$_ping_out" | \
                 grep -oE '[0-9]+(\.[0-9]+)?% packet loss' | head -1 || true)

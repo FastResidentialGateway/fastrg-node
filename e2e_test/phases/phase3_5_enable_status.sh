@@ -75,7 +75,8 @@ phase3_5_enable_status() {
         _35_warm_ok=0
         for _35_w in $(seq 1 8); do
             _35_ping=$(ssh_lan "ping -c 2 -W 2 ${WAN_IP} 2>&1" || true)
-            if printf '%s' "$_35_ping" | grep -qE "0% packet loss|0\.0% packet loss|bytes from"; then
+            # Anchored: only a literal zero loss field counts — "50%"/"100% packet loss" must not substring-match as success.
+            if printf '%s' "$_35_ping" | grep -qE "(^|[ ,])0(\.0+)?% packet loss|bytes from"; then
                 _35_warm_ok=1
                 info "  Dataplane warm (ICMP reply received, ${_35_w}x3s after Data phase)"
                 break
