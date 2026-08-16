@@ -23,6 +23,7 @@
 
 #include "pppd.h"
 #include "nat.h"
+#include "ipv6_firewall.h"
 #include "fsm.h"
 #include "codec.h"
 #include "../dp.h"
@@ -274,6 +275,7 @@ static void pppd_destroy_ccb_elements(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb)
     ppp_ccb->mac_table = NULL;
     arp_pending_cleanup_queue(&ppp_ccb->arp_pq, fastrg_ccb->arp_pending_mp);
     nat_table_destroy(ppp_ccb);
+    ipv6_firewall_table_destroy(ppp_ccb);
     if (ppp_ccb->pppoe_phase.pppoe_header_tag != NULL) {
         fastrg_mfree(ppp_ccb->pppoe_phase.pppoe_header_tag);
         ppp_ccb->pppoe_phase.pppoe_header_tag = NULL;
@@ -293,9 +295,10 @@ static void pppd_destroy_ccb_elements(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb)
  *
  * @brief Construction of a subscriber slot's runtime-immutable
  *        elements: MAC and IPv6-neighbor table hashes, ARP pending ring,
- *        NAT hashes + free ring, and the PPPoE header-tag buffer. Called only
- *        from pppd_allocate_ccbs() at init — after this, runtime configuration
- *        changes reuse/reset these objects and never allocate or free.
+ *        NAT hashes + free ring, IPv6 firewall hash + free ring, and the
+ *        PPPoE header-tag buffer. Called only from pppd_allocate_ccbs() at
+ *        init — after this, runtime configuration changes reuse/reset these
+ *        objects and never allocate or free.
  *
  * @param fastrg_ccb
  *      FastRG control block pointer
@@ -331,6 +334,12 @@ static STATUS pppd_construct_ccb_elements(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_c
     if (nat_table_init(ppp_ccb, ccb_id, fastrg_ccb->ppp_ccb_rcu) != SUCCESS) {
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG,
             "NAT rev hash/ring creation failed for ccb %u", ccb_id);
+        goto err;
+    }
+
+    if (ipv6_firewall_table_init(ppp_ccb, ccb_id, fastrg_ccb->ppp_ccb_rcu) != SUCCESS) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG,
+            "IPv6 firewall hash/ring creation failed for ccb %u", ccb_id);
         goto err;
     }
 
@@ -391,10 +400,12 @@ STATUS ppp_init_config_by_user(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb, U16 ccb
      * got initialized (benign only because ccbs come zeroed from the mempool).
      * expire deadlines live in the SoA array; nat_table_reset() zeroes them
      * and binds each entry's expire_slot. */
-    for(int j=0; j<MAX_NAT_ENTRIES; j++) {
-        rte_atomic16_init(&ppp_ccb->addr_table[j].is_fill);
-    }
+    for(int i=0; i<MAX_NAT_ENTRIES; i++)
+        rte_atomic16_init(&ppp_ccb->addr_table[i].is_fill);
     rte_spinlock_init(&ppp_ccb->nat_insert_lock);
+    for(int i=0; i<IPV6_FIREWALL_MAX_ENTRIES; i++)
+        rte_atomic16_init(&ppp_ccb->ipv6_firewall_table[i].is_fill);
+    rte_spinlock_init(&ppp_ccb->ipv6_firewall_insert_lock);
     memset(ppp_ccb->PPP_dst_mac.addr_bytes, 0, ETH_ALEN);
     rte_timer_init(&(ppp_ccb->pppoe));
     rte_timer_init(&(ppp_ccb->ppp));
@@ -434,6 +445,11 @@ STATUS ppp_init_config_by_user(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb, U16 ccb
 
     /* NAT hashes + free-list: flush all learned flows. */
     nat_table_reset(ppp_ccb);
+
+    /* IPv6 firewall hash + free-list: flush all learned sessions. Both resets
+     * run after pppd_ipv6_dp_gate_update() closed the IPv6 gate above, which
+     * is what keeps new packets away from a table being rebuilt. */
+    ipv6_firewall_table_reset(ppp_ccb);
 
     return SUCCESS;
 }
