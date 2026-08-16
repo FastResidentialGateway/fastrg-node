@@ -36,6 +36,7 @@
 #include "nd6/nd6.h"
 #include "pppd/pppd.h"
 #include "pppd/header.h"
+#include "pppd/ipv6_firewall.h"
 
 /** Ethernet + VLAN bytes in front of the L3 header on both ports. */
 #define IPV6_L2_LEN         (U16)(sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t))
@@ -52,9 +53,6 @@
 
 /** Hop limit of the ICMPv6 errors this node originates. */
 #define IPV6_ERROR_HOP_LIMIT 64
-
-#define ICMP6_PACKET_TOO_BIG 2
-#define ICMP6_PTB_HDR_LEN    8
 
 /** Upper bound on an ICMPv6 Packet Too Big frame: L2 plus a 1280-byte packet. */
 #define IPV6_PTB_MAX_LEN    (U16)(IPV6_L2_LEN + IPV6_MIN_MTU)
@@ -92,6 +90,7 @@ typedef enum {
     IPV6_FWD_OK = 0,
     IPV6_FWD_HOP_LIMIT,     /**< hop limit exhausted */
     IPV6_FWD_NEIGHBOR_MISS, /**< destination not in the neighbor cache */
+    IPV6_FWD_FIREWALL_DROP, /**< unsolicited: no firewall session accepts it */
 } ipv6_forward_result_t;
 
 static __always_inline BOOL ipv6_addr_is_multicast(const U8 addr[16])
@@ -574,6 +573,70 @@ static __always_inline void ipv6_neighbor_miss(FastRG_t *fastrg_ccb,
         return;
     }
     send2cp(fastrg_ccb, pkt, EV_DP_ND6_MISS, WAN_PORT);
+}
+
+/**
+ * @fn ipv6_firewall_lan_to_wan_encap
+ *
+ * @brief Encapsulate an outbound IPv6 packet, first opening the firewall
+ *        session that will let its reply back in.
+ *
+ * @param fastrg_ccb
+ *      FastRG control block
+ * @param ppp_ccb
+ *      Subscriber control block
+ * @param pkt
+ *      Packet to encapsulate
+ * @param ccb_id
+ *      Subscriber index
+ * @return
+ *      void
+ */
+static __always_inline void ipv6_firewall_lan_to_wan_encap(FastRG_t *fastrg_ccb,
+    ppp_ccb_t *ppp_ccb, struct rte_mbuf *pkt, U16 ccb_id)
+{
+    mbuf_priv_t *mbuf_priv = rte_mbuf_to_priv(pkt);
+    struct rte_ipv6_hdr *ip6 = (struct rte_ipv6_hdr *)
+        ((char *)mbuf_priv->eth_hdr + IPV6_L2_LEN);
+
+    ipv6_firewall_learn(ppp_ccb, ip6);
+    ipv6_lan_to_wan_encap(fastrg_ccb, ppp_ccb, pkt, ccb_id);
+}
+
+/**
+ * @fn ipv6_firewall_wan_to_lan_forward
+ *
+ * @brief Put an inbound IPv6 packet through the firewall and, if it belongs to
+ *        an open session, decapsulate it for the LAN.
+ *
+ *        A rejected packet is reported as IPV6_FWD_FIREWALL_DROP with the
+ *        frame exactly as it arrived, and the caller frees it. Rejecting it
+ *        here also means an unsolicited scan of the LAN prefix never reaches
+ *        neighbor resolution, so it cannot make this node solicit addresses
+ *        nobody asked about.
+ *
+ * @param fastrg_ccb
+ *      FastRG control block
+ * @param ppp_ccb
+ *      Subscriber control block
+ * @param pkt
+ *      Packet to decapsulate
+ * @param ccb_id
+ *      Subscriber index
+ * @return
+ *      IPV6_FWD_OK when the packet is ready for LAN TX, otherwise the reason
+ *      it cannot be forwarded
+ */
+static __always_inline ipv6_forward_result_t ipv6_firewall_wan_to_lan_forward(
+    FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb, struct rte_mbuf *pkt, U16 ccb_id)
+{
+    mbuf_priv_t *mbuf_priv = rte_mbuf_to_priv(pkt);
+    struct rte_ipv6_hdr *ip6 = (struct rte_ipv6_hdr *)
+        ((char *)mbuf_priv->eth_hdr + IPV6_L2_LEN + IPV6_PPPOE_HDR_LEN);
+
+    if (unlikely(ipv6_firewall_inbound_pass(ppp_ccb, ip6) == FALSE))
+        return IPV6_FWD_FIREWALL_DROP;
+    return ipv6_wan_to_lan_forward(fastrg_ccb, ppp_ccb, pkt, ccb_id);
 }
 
 #endif /* _DP_IPV6_H_ */

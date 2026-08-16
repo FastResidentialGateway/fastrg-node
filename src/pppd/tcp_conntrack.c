@@ -19,32 +19,32 @@
 
 /*//////////////////////////////////////////////////////////////////////////////////
     ACTION HANDLERS
-    Each handler performs one side-effect on the NAT entry during a state transition.
-    All handlers are static — the state table (below) is the only caller.
-    The is_reply parameter lets a handler take direction-dependent action; most
-    handlers ignore it.
+    Each handler performs one side-effect on the tracked connection during a
+    state transition.  All handlers are static — the state table (below) is the
+    only caller.  The is_reply parameter lets a handler take direction-dependent
+    action; most handlers ignore it.
 ///////////////////////////////////////////////////////////////////////////////////*/
 
-static STATUS tcp_act_timeout_syn_sent(struct addr_table *entry, BOOL is_reply)
+static STATUS tcp_act_timeout_syn_sent(const tcp_conntrack_view_t *v, BOOL is_reply)
 {
     (void)is_reply;
-    nat_expire_set(((addr_table_t *)entry)->expire_slot,
+    nat_expire_set(v->expire_slot,
         fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_SYN_SENT * fastrg_get_cycles_in_sec());
     return SUCCESS;
 }
 
-static STATUS tcp_act_timeout_syn_recv(struct addr_table *entry, BOOL is_reply)
+static STATUS tcp_act_timeout_syn_recv(const tcp_conntrack_view_t *v, BOOL is_reply)
 {
     (void)is_reply;
-    nat_expire_set(((addr_table_t *)entry)->expire_slot,
+    nat_expire_set(v->expire_slot,
         fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_SYN_RECV * fastrg_get_cycles_in_sec());
     return SUCCESS;
 }
 
-static STATUS tcp_act_timeout_established(struct addr_table *entry, BOOL is_reply)
+static STATUS tcp_act_timeout_established(const tcp_conntrack_view_t *v, BOOL is_reply)
 {
     (void)is_reply;
-    nat_expire_set(((addr_table_t *)entry)->expire_slot,
+    nat_expire_set(v->expire_slot,
         fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_ESTABLISHED * fastrg_get_cycles_in_sec());
     return SUCCESS;
 }
@@ -53,58 +53,58 @@ static STATUS tcp_act_timeout_established(struct addr_table *entry, BOOL is_repl
  * (ESTABLISHED, ACK) row fires on EVERY data packet of an established flow,
  * so an unconditional store would dirty the shared expire cache line per
  * packet.  Transitions INTO established keep the unconditional setter. */
-static STATUS tcp_act_refresh_established(struct addr_table *entry, BOOL is_reply)
+static STATUS tcp_act_refresh_established(const tcp_conntrack_view_t *v, BOOL is_reply)
 {
     (void)is_reply;
-    nat_expire_refresh(((addr_table_t *)entry)->expire_slot,
+    nat_expire_refresh(v->expire_slot,
         fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_ESTABLISHED * fastrg_get_cycles_in_sec());
     return SUCCESS;
 }
 
-static STATUS tcp_act_timeout_fin_wait(struct addr_table *entry, BOOL is_reply)
+static STATUS tcp_act_timeout_fin_wait(const tcp_conntrack_view_t *v, BOOL is_reply)
 {
     (void)is_reply;
-    nat_expire_set(((addr_table_t *)entry)->expire_slot,
+    nat_expire_set(v->expire_slot,
         fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_FIN_WAIT * fastrg_get_cycles_in_sec());
     return SUCCESS;
 }
 
-static STATUS tcp_act_timeout_close_wait(struct addr_table *entry, BOOL is_reply)
+static STATUS tcp_act_timeout_close_wait(const tcp_conntrack_view_t *v, BOOL is_reply)
 {
     (void)is_reply;
-    nat_expire_set(((addr_table_t *)entry)->expire_slot,
+    nat_expire_set(v->expire_slot,
         fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_CLOSE_WAIT * fastrg_get_cycles_in_sec());
     return SUCCESS;
 }
 
-static STATUS tcp_act_timeout_last_ack(struct addr_table *entry, BOOL is_reply)
+static STATUS tcp_act_timeout_last_ack(const tcp_conntrack_view_t *v, BOOL is_reply)
 {
     (void)is_reply;
-    nat_expire_set(((addr_table_t *)entry)->expire_slot,
+    nat_expire_set(v->expire_slot,
         fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_LAST_ACK * fastrg_get_cycles_in_sec());
     return SUCCESS;
 }
 
-static STATUS tcp_act_timeout_time_wait(struct addr_table *entry, BOOL is_reply)
+static STATUS tcp_act_timeout_time_wait(const tcp_conntrack_view_t *v, BOOL is_reply)
 {
     (void)is_reply;
-    nat_expire_set(((addr_table_t *)entry)->expire_slot,
+    nat_expire_set(v->expire_slot,
         fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_TIME_WAIT * fastrg_get_cycles_in_sec());
     return SUCCESS;
 }
 
-static STATUS tcp_act_timeout_close(struct addr_table *entry, BOOL is_reply)
+static STATUS tcp_act_timeout_close(const tcp_conntrack_view_t *v, BOOL is_reply)
 {
     (void)is_reply;
-    nat_expire_set(((addr_table_t *)entry)->expire_slot,
+    nat_expire_set(v->expire_slot,
         fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_CLOSE * fastrg_get_cycles_in_sec());
     return SUCCESS;
 }
 
-static STATUS tcp_act_timeout_mid_stream(struct addr_table *entry, BOOL is_reply)
+static STATUS tcp_act_timeout_mid_stream(const tcp_conntrack_view_t *v, BOOL is_reply)
 {
     (void)is_reply;
-    nat_expire_set(((addr_table_t *)entry)->expire_slot,
+    nat_expire_set(v->expire_slot,
         fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_MID_STREAM * fastrg_get_cycles_in_sec());
     return SUCCESS;
 }
@@ -112,39 +112,37 @@ static STATUS tcp_act_timeout_mid_stream(struct addr_table *entry, BOOL is_reply
 /* MID_STREAM + ACK: only promote to ESTABLISHED when the ACK comes from the
  * WAN side — that's the bidirectional confirmation we were waiting for.
  * On a LAN-side ACK we just refresh the MID_STREAM timeout. */
-static STATUS tcp_act_mid_stream_ack(struct addr_table *entry, BOOL is_reply)
+static STATUS tcp_act_mid_stream_ack(const tcp_conntrack_view_t *v, BOOL is_reply)
 {
-    addr_table_t *e = (addr_table_t *)entry;
-
     if (is_reply) {
-        e->tcp_state = TCP_CONNTRACK_ESTABLISHED;
-        nat_expire_set(e->expire_slot,
+        *v->tcp_state = TCP_CONNTRACK_ESTABLISHED;
+        nat_expire_set(v->expire_slot,
             fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_ESTABLISHED * fastrg_get_cycles_in_sec());
     } else {
-        nat_expire_refresh(e->expire_slot,
+        nat_expire_refresh(v->expire_slot,
             fastrg_get_cur_cycles() + (U64)TCP_TIMEOUT_MID_STREAM * fastrg_get_cycles_in_sec());
     }
     return SUCCESS;
 }
 
-static STATUS tcp_act_set_fin_lan(struct addr_table *entry, BOOL is_reply)
+static STATUS tcp_act_set_fin_lan(const tcp_conntrack_view_t *v, BOOL is_reply)
 {
     (void)is_reply;
-    ((addr_table_t *)entry)->tcp_fin_flags |= TCP_FIN_FLAG_LAN;
+    *v->tcp_fin_flags |= TCP_FIN_FLAG_LAN;
     return SUCCESS;
 }
 
-static STATUS tcp_act_set_fin_wan(struct addr_table *entry, BOOL is_reply)
+static STATUS tcp_act_set_fin_wan(const tcp_conntrack_view_t *v, BOOL is_reply)
 {
     (void)is_reply;
-    ((addr_table_t *)entry)->tcp_fin_flags |= TCP_FIN_FLAG_WAN;
+    *v->tcp_fin_flags |= TCP_FIN_FLAG_WAN;
     return SUCCESS;
 }
 
-static STATUS tcp_act_reset_fin_flags(struct addr_table *entry, BOOL is_reply)
+static STATUS tcp_act_reset_fin_flags(const tcp_conntrack_view_t *v, BOOL is_reply)
 {
     (void)is_reply;
-    ((addr_table_t *)entry)->tcp_fin_flags = 0;
+    *v->tcp_fin_flags = 0;
     return SUCCESS;
 }
 
@@ -269,36 +267,35 @@ static void __attribute__((constructor)) tcp_conntrack_build_index(void)
     }
 }
 
-STATUS tcp_conntrack_fsm(struct addr_table *entry, U8 tcp_flags, BOOL is_reply)
+STATUS tcp_conntrack_fsm_view(const tcp_conntrack_view_t *v, U8 tcp_flags, BOOL is_reply)
 {
-    addr_table_t *e = (addr_table_t *)entry;
     tcp_conntrack_event_t event = tcp_flags_to_event(tcp_flags, is_reply);
 
     if (event == TCP_EV_INVLD)
         return SUCCESS;
 
     /* Out-of-range (corrupted) state */
-    if (e->tcp_state >= TCP_NSTATE)
+    if (*v->tcp_state >= TCP_NSTATE)
         return ERROR;
 
-    int8_t idx = tcp_fsm_idx[e->tcp_state][event];
+    int8_t idx = tcp_fsm_idx[*v->tcp_state][event];
 
     /* No transition defined for (state, event): ignore if the state has any
      * table row at all; a state with no rows keeps the former "state not
      * found in table" ERROR contract. */
     if (idx < 0)
-        return tcp_state_has_rows[e->tcp_state] ? SUCCESS : ERROR;
+        return tcp_state_has_rows[*v->tcp_state] ? SUCCESS : ERROR;
 
     const tcp_conntrack_state_tbl_t *t = &tcp_conntrack_tbl[idx];
 
     /* State transition */
-    e->tcp_state = t->next_state;
+    *v->tcp_state = t->next_state;
 
     /* Execute NULL-terminated handler chain.  A handler may further mutate
      * tcp_state (e.g. tcp_act_mid_stream_ack promotes MID_STREAM→ESTABLISHED on
      * WAN-side ACK). */
     for(int j=0; j<4 && t->hdl[j]; j++) {
-        if ((*t->hdl[j])(entry, is_reply) == ERROR)
+        if ((*t->hdl[j])(v, is_reply) == ERROR)
             return ERROR;
     }
 

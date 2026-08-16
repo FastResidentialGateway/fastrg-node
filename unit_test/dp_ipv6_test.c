@@ -8,6 +8,7 @@
 #include <rte_ip6.h>
 #include <rte_lcore.h>
 #include <rte_mbuf.h>
+#include <rte_rcu_qsbr.h>
 #include <rte_tcp.h>
 #include <rte_udp.h>
 
@@ -524,6 +525,109 @@ static void test_flow_tag(void)
         "T6 non-TCP/UDP packets carry no flow tag", NULL);
 }
 
+/* Overwrite the L4 ports of a frame built by build_lan_frame/build_wan_frame,
+ * so the firewall sees a real UDP tuple instead of the byte pattern. */
+static void set_udp_ports(struct rte_ipv6_hdr *ip6, U16 sport, U16 dport)
+{
+    struct rte_udp_hdr *udp = (struct rte_udp_hdr *)(ip6 + 1);
+
+    udp->src_port = rte_cpu_to_be_16(sport);
+    udp->dst_port = rte_cpu_to_be_16(dport);
+    udp->dgram_len = ip6->payload_len;
+}
+
+/* Turn a WAN frame into an ICMPv6 error of `type` quoting a UDP packet from
+ * `quoted_src` to `quoted_dst`. The frame must have been built with a payload
+ * long enough for the error header, the quoted IPv6 header and its UDP header. */
+static void build_wan_icmp6_error(struct rte_ipv6_hdr *ip6, U8 type,
+    const U8 *quoted_src, const U8 *quoted_dst, U16 quoted_sport,
+    U16 quoted_dport)
+{
+    U8 *icmp6 = (U8 *)(ip6 + 1);
+    struct rte_ipv6_hdr *quoted = (struct rte_ipv6_hdr *)(icmp6 + ICMP6_PTB_HDR_LEN);
+    struct rte_udp_hdr *quoted_udp = (struct rte_udp_hdr *)(quoted + 1);
+
+    memset(icmp6, 0, ICMP6_PTB_HDR_LEN);
+    icmp6[0] = type;
+    memset(quoted, 0, sizeof(*quoted) + sizeof(*quoted_udp));
+    quoted->vtc_flow = rte_cpu_to_be_32(UINT32_C(6) << 28);
+    quoted->payload_len = rte_cpu_to_be_16(sizeof(*quoted_udp));
+    quoted->proto = IPPROTO_UDP;
+    quoted->hop_limits = 64;
+    memcpy(&quoted->src_addr, quoted_src, 16);
+    memcpy(&quoted->dst_addr, quoted_dst, 16);
+    quoted_udp->src_port = rte_cpu_to_be_16(quoted_sport);
+    quoted_udp->dst_port = rte_cpu_to_be_16(quoted_dport);
+    quoted_udp->dgram_len = rte_cpu_to_be_16(sizeof(*quoted_udp));
+}
+
+static void test_firewall_wrappers(void)
+{
+    mock_packet_t pkt;
+    struct rte_ipv6_hdr *ip6;
+    ipv6_forward_result_t result;
+    U32 orig_len;
+    U64 passed_before, dropped_before;
+
+    printf("\nTesting IPv6 firewall wrappers:\n");
+
+    set_gate(TRUE, TRUE, TRUE);
+    nd6_table_reset(test_ccb.nd6_table);
+    nd6_table_learn(test_ccb.nd6_table, lan_host, &host_mac);
+    ipv6_firewall_table_reset(&test_ccb);
+
+    /* Nothing was requested from the LAN, so the reply path must reject the
+     * frame and hand it back exactly as it arrived. */
+    ip6 = build_wan_frame(&pkt, remote_host, lan_host, IPPROTO_UDP, 64, 32);
+    set_udp_ports(ip6, 53, 40000);
+    orig_len = pkt.mbuf.pkt_len;
+    result = ipv6_firewall_wan_to_lan_forward(g_fastrg_ccb, &test_ccb, &pkt.mbuf, 0);
+    TEST_ASSERT(result == IPV6_FWD_FIREWALL_DROP &&
+            pkt.mbuf.pkt_len == orig_len &&
+            pkt.mbuf.data_off == MOCK_HEADROOM,
+        "T7 an unsolicited inbound packet is rejected and left untouched", NULL);
+
+    /* The LAN opens the flow; the same reply is then welcome. */
+    ip6 = build_lan_frame(&pkt, &g_fastrg_ccb->nic_info.hsi_lan_mac, lan_host,
+        remote_host, IPPROTO_UDP, 64, 32);
+    set_udp_ports(ip6, 40000, 53);
+    ipv6_firewall_lan_to_wan_encap(g_fastrg_ccb, &test_ccb, &pkt.mbuf, 0);
+    TEST_ASSERT(rte_hash_count(test_ccb.ipv6_firewall_hash) == 1,
+        "T7 the outbound packet opens one firewall session", NULL);
+
+    ip6 = build_wan_frame(&pkt, remote_host, lan_host, IPPROTO_UDP, 64, 32);
+    set_udp_ports(ip6, 53, 40000);
+    orig_len = pkt.mbuf.pkt_len;
+    result = ipv6_firewall_wan_to_lan_forward(g_fastrg_ccb, &test_ccb, &pkt.mbuf, 0);
+    TEST_ASSERT(result == IPV6_FWD_OK &&
+            pkt.mbuf.pkt_len == orig_len - IPV6_PPPOE_HDR_LEN,
+        "T7 the reply of that flow is forwarded and decapsulated", NULL);
+
+    /* An ICMPv6 error quoting the live session reaches the LAN host. */
+    passed_before = test_ccb.ipv6_firewall_icmp6_err_passed;
+    ip6 = build_wan_frame(&pkt, remote_host, lan_host, IPPROTO_ICMPV6, 64,
+        (U16)(ICMP6_PTB_HDR_LEN + sizeof(struct rte_ipv6_hdr) +
+              sizeof(struct rte_udp_hdr)));
+    build_wan_icmp6_error(ip6, ICMP6_PACKET_TOO_BIG, lan_host, remote_host,
+        40000, 53);
+    result = ipv6_firewall_wan_to_lan_forward(g_fastrg_ccb, &test_ccb, &pkt.mbuf, 0);
+    TEST_ASSERT(result == IPV6_FWD_OK &&
+            test_ccb.ipv6_firewall_icmp6_err_passed == passed_before + 1,
+        "T7 Packet Too Big quoting a live session is forwarded", NULL);
+
+    /* The same message quoting a tuple nobody opened is forged. */
+    dropped_before = test_ccb.ipv6_firewall_icmp6_err_dropped;
+    ip6 = build_wan_frame(&pkt, remote_host, lan_host, IPPROTO_ICMPV6, 64,
+        (U16)(ICMP6_PTB_HDR_LEN + sizeof(struct rte_ipv6_hdr) +
+              sizeof(struct rte_udp_hdr)));
+    build_wan_icmp6_error(ip6, ICMP6_PACKET_TOO_BIG, lan_host, remote_host,
+        40001, 53);
+    result = ipv6_firewall_wan_to_lan_forward(g_fastrg_ccb, &test_ccb, &pkt.mbuf, 0);
+    TEST_ASSERT(result == IPV6_FWD_FIREWALL_DROP &&
+            test_ccb.ipv6_firewall_icmp6_err_dropped == dropped_before + 1,
+        "T7 Packet Too Big quoting an unknown tuple is rejected", NULL);
+}
+
 void test_dp_ipv6(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 {
     ppp_ccb_t *original_ccb = fastrg_ccb->ppp_ccb[0];
@@ -547,6 +651,19 @@ void test_dp_ipv6(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
         fprintf(stderr, "IPv6 data-plane fixture allocation failed\n");
         assert(test_ccb.nd6_table != NULL);
     }
+    /* The firewall wrappers need a session table, and its hash needs a QSBR
+     * variable with this thread registered as the only reader. */
+    size_t rcu_sz = rte_rcu_qsbr_get_memsize(1);
+    struct rte_rcu_qsbr *fw_rcu = calloc(1, rcu_sz);
+    assert(fw_rcu != NULL && rte_rcu_qsbr_init(fw_rcu, 1) == 0);
+    rte_rcu_qsbr_thread_register(fw_rcu, 0);
+    rte_rcu_qsbr_thread_online(fw_rcu, 0);
+    test_ccb.tcp_conntrack_enabled = TRUE;
+    rte_spinlock_init(&test_ccb.ipv6_firewall_insert_lock);
+    if (ipv6_firewall_table_init(&test_ccb, 60002, fw_rcu) != SUCCESS) {
+        fprintf(stderr, "IPv6 firewall fixture allocation failed\n");
+        assert(test_ccb.ipv6_firewall_hash != NULL);
+    }
     fastrg_ccb->ppp_ccb[0] = &test_ccb;
     /* The transforms bump per-lcore counters; this mock has no rows, so the
      * getters must return NULL instead of an uninitialized pointer. */
@@ -560,11 +677,14 @@ void test_dp_ipv6(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_wan_classification();
     test_wan_to_lan_transform();
     test_flow_tag();
+    test_firewall_wrappers();
 
     fastrg_ccb->per_subscriber_stats[lcore_id][LAN_PORT] = saved_lan;
     fastrg_ccb->per_subscriber_stats[lcore_id][WAN_PORT] = saved_wan;
     fastrg_ccb->pppoes_stats[lcore_id] = saved_pppoes;
     nd6_table_free(test_ccb.nd6_table);
+    ipv6_firewall_table_destroy(&test_ccb);
+    free(fw_rcu);
     fastrg_ccb->ppp_ccb[0] = original_ccb;
     *total_tests += test_count;
     *total_pass += pass_count;

@@ -14,6 +14,7 @@ void test_ppp_fsm(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass);
 void test_pppd(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass);
 void test_utils(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass);
 void test_nat(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass);
+void test_ipv6_firewall(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass);
 void test_dp_codec(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass);
 void test_dp(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass);
 void test_dp_ipv6(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass);

@@ -111,9 +111,11 @@ int main()
 
     signal(SIGCHLD, SIG_IGN);
 
-    /* Minimal EAL so DPDK objects (rte_hash / rte_ring, used by the NAT
-     * suite) can be created without hugepages. */
-    char *eal_argv[] = {"unit-tester", "--no-huge", "--iova-mode=va", "-m", "256",
+    /* Minimal EAL so DPDK objects (rte_hash / rte_ring, used by the NAT and
+     * IPv6 firewall suites) can be created without hugepages. The heap has to
+     * hold every subscriber fixture the suites build at once, and each
+     * subscriber owns two NAT hashes plus a firewall hash and their rings. */
+    char *eal_argv[] = {"unit-tester", "--no-huge", "--iova-mode=va", "-m", "768",
         "-l", "0", "--log-level=lib.eal:error"};
     if (rte_eal_init(8, eal_argv) < 0) {
         puts("rte_eal_init failed");
@@ -175,6 +177,10 @@ int main()
 
     puts("====================test pppd/nat.h====================");
     test_nat(fastrg_ccb, &total_tests, &total_pass);
+    puts("ok!");
+
+    puts("====================test pppd/ipv6_firewall.h====================");
+    test_ipv6_firewall(fastrg_ccb, &total_tests, &total_pass);
     puts("ok!");
 
     puts("====================test dp_codec.h====================");
