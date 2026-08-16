@@ -1,5 +1,7 @@
 #include <sys/signalfd.h>
 #include <signal.h>
+#include <errno.h>
+#include <pthread.h>
 #include <linux/ethtool.h>
 #include <time.h>
 #include <inttypes.h>
@@ -398,15 +400,66 @@ static void init_node_runtime_state(FastRG_t *fastrg_ccb)
     }
 }
 
+/* Startup latch for the metrics listener. The bind happens on the metrics
+ * thread, so its verdict has to travel back to the startup path that decides
+ * whether the node may run. Same three-state contract as the gRPC server
+ * latch: pending until the thread reports, then ok or failed exactly once. */
+typedef enum {
+    METRICS_STARTUP_PENDING,
+    METRICS_STARTUP_OK,
+    METRICS_STARTUP_FAILED,
+} metrics_startup_state_t;
+
+static pthread_mutex_t metrics_startup_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t metrics_startup_cv = PTHREAD_COND_INITIALIZER;
+static metrics_startup_state_t metrics_startup_result = METRICS_STARTUP_PENDING;
+
+/**
+ * @fn metrics_startup_publish
+ *
+ * @brief Hand the metrics listener's verdict to whoever is waiting on it. Both
+ *        outcomes must be published, or a failed bind would leave the startup
+ *        path blocked forever.
+ *
+ * @param result
+ *      METRICS_STARTUP_OK or METRICS_STARTUP_FAILED
+ */
+static void metrics_startup_publish(metrics_startup_state_t result)
+{
+    pthread_mutex_lock(&metrics_startup_lock);
+    metrics_startup_result = result;
+    pthread_mutex_unlock(&metrics_startup_lock);
+    pthread_cond_broadcast(&metrics_startup_cv);
+}
+
+int metrics_server_wait_ready(void)
+{
+    metrics_startup_state_t result;
+
+    pthread_mutex_lock(&metrics_startup_lock);
+    while (metrics_startup_result == METRICS_STARTUP_PENDING)
+        pthread_cond_wait(&metrics_startup_cv, &metrics_startup_lock);
+    /* Consume the verdict and re-arm the latch: every metrics thread launch
+     * pairs with exactly one wait. */
+    result = metrics_startup_result;
+    metrics_startup_result = METRICS_STARTUP_PENDING;
+    pthread_mutex_unlock(&metrics_startup_lock);
+
+    return result == METRICS_STARTUP_OK ? 0 : -1;
+}
+
 void *metrics_server_run(void *arg)
 {
     FastRG_t *fastrg_ccb = (FastRG_t *)arg;
     lighthttp_server_t *srv = &fastrg_ccb->metrics_server;
 
     if (lighthttp_init(srv, fastrg_ccb->metrics_ip_port) != 0) {
-        FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
-            "metrics: failed to start /metrics server on %s; Prometheus scrape disabled",
-            fastrg_ccb->metrics_ip_port);
+        int saved = errno;
+
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+            "metrics: failed to start /metrics server on %s: %s (errno %d)",
+            fastrg_ccb->metrics_ip_port, strerror(saved), saved);
+        metrics_startup_publish(METRICS_STARTUP_FAILED);
         return NULL;
     }
     lighthttp_add_route(srv, "GET", "/metrics", metrics_build, fastrg_ccb);
@@ -414,6 +467,7 @@ void *metrics_server_run(void *arg)
 
     FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
         "metrics: Prometheus /metrics listening on %s:%d", srv->host, srv->port);
+    metrics_startup_publish(METRICS_STARTUP_OK);
 
     /* Publish lighthttp_init()'s listen_fd store before loading the stop request.
      * This full barrier prevents a StoreLoad reorder where the stop path sees -1
