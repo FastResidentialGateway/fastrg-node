@@ -39,6 +39,8 @@ struct ppp_row {
     uint32_t user_id;
     uint64_t rxp, rxb, txp, txb;
     uint64_t nat_used, nat_enospc, nat_gc_reclaimed;
+    uint64_t fw6_used, fw6_enospc, fw6_gc_reclaimed, fw6_evicted;
+    uint64_t fw6_icmp6_err_passed, fw6_icmp6_err_dropped;
 };
 struct dhcp_row {
     uint32_t user_id;
@@ -219,6 +221,16 @@ int metrics_build(lighthttp_buf_t *out, const char **content_type, void *arg)
                     ppp[i].nat_used = MAX_NAT_ENTRIES - rte_ring_count(c->nat_free_ring);
                 ppp[i].nat_enospc = __atomic_load_n(&c->nat_enospc, __ATOMIC_RELAXED);
                 ppp[i].nat_gc_reclaimed = __atomic_load_n(&c->nat_gc_reclaimed, __ATOMIC_RELAXED);
+                /* IPv6 firewall pool health, sampled the same way. */
+                if (c->ipv6_firewall_free_ring != NULL)
+                    ppp[i].fw6_used = IPV6_FIREWALL_MAX_ENTRIES - rte_ring_count(c->ipv6_firewall_free_ring);
+                ppp[i].fw6_enospc = __atomic_load_n(&c->ipv6_firewall_enospc, __ATOMIC_RELAXED);
+                ppp[i].fw6_gc_reclaimed = __atomic_load_n(&c->ipv6_firewall_gc_reclaimed, __ATOMIC_RELAXED);
+                ppp[i].fw6_evicted = __atomic_load_n(&c->ipv6_firewall_evicted, __ATOMIC_RELAXED);
+                ppp[i].fw6_icmp6_err_passed =
+                    __atomic_load_n(&c->ipv6_firewall_icmp6_err_passed, __ATOMIC_RELAXED);
+                ppp[i].fw6_icmp6_err_dropped =
+                    __atomic_load_n(&c->ipv6_firewall_icmp6_err_dropped, __ATOMIC_RELAXED);
             }
         }
     }
@@ -456,6 +468,26 @@ int metrics_build(lighthttp_buf_t *out, const char **content_type, void *arg)
             uint64_t v = *(uint64_t *)((char *)&ppp[i] + nat_metrics[m].off);
             lighthttp_buf_appendf(out, "%s{node_uuid=\"%s\",user_id=\"%u\"} %" PRIu64 "\n",
                 nat_metrics[m].name, uuid, (unsigned)ppp[i].user_id, v);
+        }
+    }
+
+    /* ---- per-user IPv6 firewall pool health ---- */
+    static const struct row_metric fw6_metrics[] = {
+        {"fastrg_node_per_user_ipv6_firewall_entries_used", "Live IPv6 firewall sessions held by this subscriber (pool fill).", offsetof(struct ppp_row, fw6_used)},
+        {"fastrg_node_per_user_ipv6_firewall_alloc_fail_total", "IPv6 firewall sessions not opened: pool dry or hash full.", offsetof(struct ppp_row, fw6_enospc)},
+        {"fastrg_node_per_user_ipv6_firewall_gc_reclaimed_total", "Expired IPv6 firewall sessions reclaimed by the amortized GC.", offsetof(struct ppp_row, fw6_gc_reclaimed)},
+        {"fastrg_node_per_user_ipv6_firewall_evicted_total", "Live IPv6 firewall sessions evicted to make room for a new one.", offsetof(struct ppp_row, fw6_evicted)},
+        {"fastrg_node_per_user_ipv6_firewall_icmp6_err_passed_total", "Inbound ICMPv6 error messages matching a live session.", offsetof(struct ppp_row, fw6_icmp6_err_passed)},
+        {"fastrg_node_per_user_ipv6_firewall_icmp6_err_dropped_total", "Inbound ICMPv6 error messages matching no live session.", offsetof(struct ppp_row, fw6_icmp6_err_dropped)},
+    };
+    for(size_t m=0; m<sizeof(fw6_metrics)/sizeof(fw6_metrics[0]); m++) {
+        emit_header(out, fw6_metrics[m].name, "gauge", fw6_metrics[m].help);
+        if (ppp == NULL)
+            continue;
+        for(U16 i=0; i<user_count; i++) {
+            uint64_t v = *(uint64_t *)((char *)&ppp[i] + fw6_metrics[m].off);
+            lighthttp_buf_appendf(out, "%s{node_uuid=\"%s\",user_id=\"%u\"} %" PRIu64 "\n",
+                fw6_metrics[m].name, uuid, (unsigned)ppp[i].user_id, v);
         }
     }
 

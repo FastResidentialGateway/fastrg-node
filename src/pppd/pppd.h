@@ -9,6 +9,7 @@
 #ifndef _PPPD_H_
 #define _PPPD_H_
 
+#include <assert.h>
 #include <stdatomic.h>
 #include <netinet/in.h>
 
@@ -35,6 +36,9 @@ struct nd6_table;
  * was a multiple of 4 and hashing quality suffered 4x clustering. */
 #define MAX_NAT_ENTRIES         (TOTAL_SOCK_PORT << 2)
 #define PORT_FWD_TABLE_SIZE     TOTAL_SOCK_PORT  /* direct-indexed by eport (0..65535) */
+/* IPv6 firewall sessions kept per subscriber.  Fully preallocated like every
+ * other subscriber resource, so the data plane never allocates. */
+#define IPV6_FIREWALL_MAX_ENTRIES     TOTAL_SOCK_PORT
 
 #define PPPoE_CMD_DISABLE       0
 #define PPPoE_CMD_FORCE_DISABLE 1
@@ -88,6 +92,51 @@ typedef struct addr_table {
     U16                   max_win_lan;     // last advertised window from LAN (no scaling)
     U16                   max_win_wan;     // same from WAN
 }__rte_cache_aligned addr_table_t;
+
+/**
+ * @brief IPv6 firewall session key, always written LAN side first so that the
+ *        outbound packet (LAN = source) and its reply (LAN = destination)
+ *        produce the very same 40 bytes and share one hash entry.
+ *
+ *        rte_hash compares raw key bytes, padding included: every builder must
+ *        zero the whole struct before filling it, or the two directions hash
+ *        differently and replies never match.
+ */
+typedef struct ipv6_firewall_key {
+    U8  lan_addr[16];    /* subscriber-side address */
+    U8  remote_addr[16]; /* internet-side address */
+    U16 lan_port;        /* TCP/UDP: LAN port; ICMPv6 echo: identifier */
+    U16 remote_port;     /* TCP/UDP: remote port; ICMPv6 echo: 0 */
+    U8  proto;           /* IPPROTO_TCP / IPPROTO_UDP / IPPROTO_ICMPV6 */
+    U8  pad[3];          /* explicitly zeroed, part of the compared bytes */
+} ipv6_firewall_key_t;
+
+/**
+ * @brief One IPv6 firewall session.  Exactly one cache line, so a lookup that
+ *        hits touches a single line.
+ *
+ *        The expiry deadline and the LRU recency stamp live in the ppp_ccb
+ *        structure-of-arrays instead of here: the GC and the eviction scan walk
+ *        those arrays alone and never pull entry lines into cache.
+ */
+typedef struct ipv6_firewall_entry {
+    ipv6_firewall_key_t  key;             /* also the delete key on GC / eviction */
+    rte_atomic16_t is_fill;         /* IPV6_FIREWALL_ENTRY_FREE / _READY */
+    U8             tcp_state;       /* tcp_conntrack_state_t; NONE for non-TCP */
+    U8             tcp_fin_flags;   /* TCP_FIN_FLAG_LAN / _WAN bitmask */
+    /* TCP seq/ack window tracking (host order), same meaning as the equally
+     * named addr_table_t fields: the baseline tcp_conntrack_seq_valid checks
+     * inbound packets against. */
+    U32            max_seq_end_lan; /* highest (seq + payload + SYN/FIN) from LAN */
+    U32            max_seq_end_wan; /* same from WAN */
+    U32            max_ack_lan;     /* highest ack from LAN */
+    U32            max_ack_wan;     /* same from WAN */
+    U16            max_win_lan;     /* last advertised window from LAN (no scaling) */
+    U16            max_win_wan;     /* same from WAN */
+}__rte_cache_aligned ipv6_firewall_entry_t;
+
+static_assert(sizeof(ipv6_firewall_entry_t) == RTE_CACHE_LINE_SIZE,
+    "ipv6_firewall_entry_t must stay one cache line");
 
 /* Coalescing threshold for expire refreshes.  NAT/conntrack timeouts are
  * seconds-granular, so a refresh that would move the deadline by less than
@@ -211,6 +260,23 @@ typedef struct {
      * the PPP control plane when IPV6CP negotiation is implemented. The
      * 1-byte aligned store/load follows the same atomicity rule as conntrack. */
     volatile BOOL         ipv6_enabled;
+    /* ---- IPv6 stateful firewall (per subscriber, mirrors the NAT block) ---- */
+    ipv6_firewall_entry_t       ipv6_firewall_table[IPV6_FIREWALL_MAX_ENTRIES]; /* session pool (slots referenced by the hash) */
+    U64                   ipv6_firewall_expire_at[IPV6_FIREWALL_MAX_ENTRIES];  /* SoA expiry deadline, parallel to the pool; 0 = slot free */
+    U64                   ipv6_firewall_last_used[IPV6_FIREWALL_MAX_ENTRIES];  /* SoA last-hit stamp for LRU eviction; 0 = slot free.
+                                                                    * Separate from the deadline because per-state TCP timeouts
+                                                                    * make "expires first" and "idle longest" different sessions */
+    U64                   ipv6_firewall_enospc;          /* sessions not created: pool dry or hash full (RELAXED add) */
+    U64                   ipv6_firewall_gc_reclaimed;    /* sessions reclaimed by GC scans (RELAXED add) */
+    U64                   ipv6_firewall_evicted;         /* sessions dropped by LRU to make room (RELAXED add) */
+    U64                   ipv6_firewall_icmp6_err_passed;  /* inbound ICMPv6 errors matching a live session (RELAXED add) */
+    U64                   ipv6_firewall_icmp6_err_dropped; /* inbound ICMPv6 errors matching nothing (RELAXED add) */
+    struct rte_hash       *ipv6_firewall_hash;      /* ipv6_firewall_key_t -> pool slot idx, both directions;
+                                               * owns slot reclaim via its RCU dq callback */
+    struct rte_ring       *ipv6_firewall_free_ring; /* free-list of pool slot indices (MPMC) */
+    U32                   ipv6_firewall_gc_counter; /* amortized expired-slot scan position (approximate, racy by design) */
+    rte_spinlock_t        ipv6_firewall_insert_lock; /* serializes miss-path inserts and LRU eviction for this subscriber;
+                                                * kept separate from nat_insert_lock so IPv4 and IPv6 never block each other */
     struct rte_timer      ppp_ipv6cp;         /* IPV6CP retransmit timer */
     U8                    ipv6cp_local_iid[8]; /* negotiated local interface identifier */
     U8                    ipv6cp_peer_iid[8];  /* negotiated peer interface identifier */

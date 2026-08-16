@@ -31,8 +31,9 @@
 #define NAT_ENTRY_TIMEOUT_SEC 10
 
 /* Slots examined per amortized/emergency GC scan call. Bounded so the
- * inline hot-path cost stays small; the nat_gc_ccb_counter persists 
- * across calls, so successive calls cover the whole pool. */
+ * inline hot-path cost stays small; each subscriber's nat_gc_counter
+ * cursor persists across calls, so successive calls cover the whole
+ * pool. */
 #define NAT_GC_SCAN_CHUNK 512
 
 /* Forced-minimum GC: after this many consecutive full-burst polls with no

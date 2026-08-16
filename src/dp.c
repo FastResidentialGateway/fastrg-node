@@ -253,37 +253,42 @@ static inline U16 rx_prefetch_prologue(struct rte_mbuf **pkt, U16 nb_rx)
     return k;
 }
 
-/* Round-robin subscriber cursor shared by all data lcores doing idle NAT GC;
- * relaxed atomics -- approximate fairness is all that is needed. */
-static U32 nat_gc_ccb_counter;
+/* Round-robin subscriber cursor shared by all data lcores doing idle
+ * forwarding-flow GC; relaxed atomics -- approximate fairness is all that is
+ * needed. */
+static U32 fw_flow_gc_ccb_counter;
 
 /**
- * @fn nat_gc_idle_tick_by_ccb
+ * @fn fw_flow_gc_idle_tick_by_ccb
  *
- * @brief Amortized NAT garbage collection: called by data-plane RX loops
- *        after a burst with idle headroom (nb_rx < BURST_SIZE), or forced
- *        every NAT_GC_FORCE_PERIOD consecutive full bursts so sustained
- *        line rate cannot starve reclaim.  Picks the next subscriber
- *        round-robin and scans one bounded chunk of its NAT pool for
- *        expired entries.  Zombie flows (never looked up again) are
- *        otherwise unreachable now that slot allocation is free-list based
- *        -- this restores the self-cleaning the old probe-walk eviction
+ * @brief Amortized garbage collection of a subscriber's forwarding flow
+ *        tables -- its NAT mappings and its IPv6 firewall sessions. Called 
+ *        by data-plane RX loops after a burst with idle headroom 
+ *        (nb_rx < BURST_SIZE), or forced every NAT_GC_FORCE_PERIOD consecutive 
+ *        full bursts so sustained line rate cannot starve reclaim. Picks 
+ *        the next subscriber round-robin and scans one bounded chunk of each 
+ *        of its two pools for expired entries. Zombie flows (never looked up 
+ *        again) are otherwise unreachable now that slot allocation is free-list 
+ *        based -- this restores the self-cleaning the old probe-walk eviction 
  *        provided, at near-zero cost to saturated bursts.
  *
  * @param fastrg_ccb
  *        FastRG control block
  */
-static inline void nat_gc_idle_tick_by_ccb(FastRG_t *fastrg_ccb)
+static inline void fw_flow_gc_idle_tick_by_ccb(FastRG_t *fastrg_ccb)
 {
     U16 user_count = fastrg_ccb->user_count;
 
     if (unlikely(user_count == 0))
         return;
-    U16 ccb_id = (U16)(__atomic_fetch_add(&nat_gc_ccb_counter, 1, __ATOMIC_RELAXED) % user_count);
+    U16 ccb_id = (U16)(__atomic_fetch_add(&fw_flow_gc_ccb_counter, 1, __ATOMIC_RELAXED) % user_count);
     ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
-    if (ppp_ccb == NULL || ppp_ccb->nat_reverse_hash == NULL)
+    if (ppp_ccb == NULL)
         return;
-    nat_gc_scan_by_ccb(ppp_ccb, NAT_GC_SCAN_CHUNK);
+    if (likely(ppp_ccb->nat_reverse_hash != NULL))
+        nat_gc_scan_by_ccb(ppp_ccb, NAT_GC_SCAN_CHUNK);
+    if (likely(ppp_ccb->ipv6_firewall_hash != NULL))
+        ipv6_firewall_gc_scan_by_ccb(ppp_ccb, IPV6_FIREWALL_GC_SCAN_CHUNK);
 }
 
 /**
@@ -384,7 +389,7 @@ int wan_ctrl_rx(void *arg)
                     }
                     send2cp(fastrg_ccb, single_pkt, EV_DP_PPPoE, WAN_PORT);
                 } else if (verdict == IPV6_WAN_FORWARD) {
-                    ipv6_forward_result_t fwd = ipv6_wan_to_lan_forward(fastrg_ccb,
+                    ipv6_forward_result_t fwd = ipv6_firewall_wan_to_lan_forward(fastrg_ccb,
                         ppp_ccb, single_pkt, ccb_id);
                     if (likely(fwd == IPV6_FWD_OK))
                         pkt[total_tx++] = single_pkt;
@@ -516,7 +521,7 @@ int wan_data_rx(void *arg)
                     IPV6_WAN_TO_CP;
 
                 if (verdict == IPV6_WAN_FORWARD) {
-                    ipv6_forward_result_t fwd = ipv6_wan_to_lan_forward(fastrg_ccb,
+                    ipv6_forward_result_t fwd = ipv6_firewall_wan_to_lan_forward(fastrg_ccb,
                         ppp_ccb, single_pkt, ccb_id);
                     if (likely(fwd == IPV6_FWD_OK))
                         pkt[total_tx++] = single_pkt;
@@ -604,7 +609,7 @@ int wan_data_rx(void *arg)
          * so sustained line rate cannot starve reclaim. */
         if (nb_rx < BURST_SIZE || ++nat_gc_backpressure >= NAT_GC_FORCE_PERIOD) {
             nat_gc_backpressure = 0;
-            nat_gc_idle_tick_by_ccb(fastrg_ccb);
+            fw_flow_gc_idle_tick_by_ccb(fastrg_ccb);
         }
         uint64_t _elapsed = rte_rdtsc() - _t0;
         fastrg_ccb->lcore_usage[rte_lcore_id()].total_cycles += _elapsed;
@@ -756,7 +761,7 @@ int lan_ctrl_rx(void *arg)
                         ccb_id, eth_hdr, vlan_header, ip6, lan_tx_q);
                     break;
                 case IPV6_LAN_FORWARD:
-                    ipv6_lan_to_wan_encap(fastrg_ccb, ppp_ccb_ipv6, single_pkt, ccb_id);
+                    ipv6_firewall_lan_to_wan_encap(fastrg_ccb, ppp_ccb_ipv6, single_pkt, ccb_id);
                     wan_pkt[total_wan_tx++] = single_pkt;
                     break;
                 default:
@@ -966,7 +971,7 @@ int lan_data_rx(void *arg)
                         ccb_id, eth_hdr, vlan_header, ip6, tx_q);
                     break;
                 case IPV6_LAN_FORWARD:
-                    ipv6_lan_to_wan_encap(fastrg_ccb, ppp_ccb_ipv6, single_pkt, ccb_id);
+                    ipv6_firewall_lan_to_wan_encap(fastrg_ccb, ppp_ccb_ipv6, single_pkt, ccb_id);
                     wan_pkt[total_wan_tx++] = single_pkt;
                     break;
                 default:
@@ -1110,7 +1115,7 @@ int lan_data_rx(void *arg)
         /* GC after the burst is fully processed — see wan_data_rx */
         if (nb_rx < BURST_SIZE || ++nat_gc_backpressure >= NAT_GC_FORCE_PERIOD) {
             nat_gc_backpressure = 0;
-            nat_gc_idle_tick_by_ccb(fastrg_ccb);
+            fw_flow_gc_idle_tick_by_ccb(fastrg_ccb);
         }
         uint64_t _elapsed = rte_rdtsc() - _t0;
         fastrg_ccb->lcore_usage[rte_lcore_id()].total_cycles += _elapsed;
@@ -1236,7 +1241,7 @@ int wan_dist_rx(void *arg)
                     single_pkt->hash.usr = flow_tag;
                     dist_pkt[dist_n++] = single_pkt;
                 } else {
-                    ipv6_forward_result_t fwd = ipv6_wan_to_lan_forward(fastrg_ccb,
+                    ipv6_forward_result_t fwd = ipv6_firewall_wan_to_lan_forward(fastrg_ccb,
                         ppp_ccb, single_pkt, ccb_id);
                     if (likely(fwd == IPV6_FWD_OK))
                         pkt[total_tx++] = single_pkt;
@@ -1324,7 +1329,7 @@ int wan_dist_rx(void *arg)
         /* GC after the burst is fully processed — see wan_data_rx */
         if (nb_rx < BURST_SIZE || ++nat_gc_backpressure >= NAT_GC_FORCE_PERIOD) {
             nat_gc_backpressure = 0;
-            nat_gc_idle_tick_by_ccb(fastrg_ccb);
+            fw_flow_gc_idle_tick_by_ccb(fastrg_ccb);
         }
         uint64_t _elapsed = rte_rdtsc() - _t0;
         fastrg_ccb->lcore_usage[rte_lcore_id()].total_cycles += _elapsed;
@@ -1393,7 +1398,7 @@ int wan_dist_worker(void *arg)
              * RX lcore, so the VLAN next protocol identifies the family. */
             if (unlikely(vlan_header->next_proto == rte_cpu_to_be_16(ETH_P_PPP_SES))) {
                 ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
-                ipv6_forward_result_t fwd = ipv6_wan_to_lan_forward(fastrg_ccb,
+                ipv6_forward_result_t fwd = ipv6_firewall_wan_to_lan_forward(fastrg_ccb,
                     ppp_ccb, single_pkt, ccb_id);
 
                 if (likely(fwd == IPV6_FWD_OK))
@@ -1607,7 +1612,7 @@ int lan_dist_rx(void *arg)
                         single_pkt->hash.usr = flow_tag;
                         dist_pkt[dist_n++] = single_pkt;
                     } else {
-                        ipv6_lan_to_wan_encap(fastrg_ccb, ppp_ccb_ipv6, single_pkt,
+                        ipv6_firewall_lan_to_wan_encap(fastrg_ccb, ppp_ccb_ipv6, single_pkt,
                             ccb_id);
                         wan_pkt[total_wan_tx++] = single_pkt;
                     }
@@ -1856,7 +1861,7 @@ int lan_dist_rx(void *arg)
         /* GC after the burst is fully processed — see wan_data_rx */
         if (nb_rx < BURST_SIZE || ++nat_gc_backpressure >= NAT_GC_FORCE_PERIOD) {
             nat_gc_backpressure = 0;
-            nat_gc_idle_tick_by_ccb(fastrg_ccb);
+            fw_flow_gc_idle_tick_by_ccb(fastrg_ccb);
         }
         uint64_t _elapsed = rte_rdtsc() - _t0;
         fastrg_ccb->lcore_usage[rte_lcore_id()].total_cycles += _elapsed;
@@ -1921,7 +1926,7 @@ int lan_dist_worker(void *arg)
             /* IPv6 keeps its L2 headers in place: encapsulation moves them
              * back over the PPPoE header instead of prepending fresh ones. */
             if (unlikely(vlan_header->next_proto == rte_cpu_to_be_16(FRAME_TYPE_IPV6))) {
-                ipv6_lan_to_wan_encap(fastrg_ccb, PPPD_GET_CCB(fastrg_ccb, ccb_id),
+                ipv6_firewall_lan_to_wan_encap(fastrg_ccb, PPPD_GET_CCB(fastrg_ccb, ccb_id),
                     single_pkt, ccb_id);
                 wan_pkt[total_wan_tx++] = single_pkt;
                 continue;

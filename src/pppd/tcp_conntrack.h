@@ -59,6 +59,50 @@ typedef enum {
 #define TCP_FIN_FLAG_LAN  0x01  /* FIN seen from LAN (LAN→WAN) */
 #define TCP_FIN_FLAG_WAN  0x02  /* FIN seen from WAN (WAN→LAN) */
 
+/*--------- TRACKED FIELDS ----------*/
+/**
+ * @brief The nine fields connection tracking owns, gathered by pointer so the
+ *        state machine and the sequence checks work on any table that keeps
+ *        them — the IPv4 NAT entry and the IPv6 firewall session both do,
+ *        in their own layouts.
+ */
+typedef struct tcp_conntrack_view {
+    U8  *tcp_state;
+    U8  *tcp_fin_flags;
+    U64 *expire_slot;
+    U32 *max_seq_end_lan, *max_seq_end_wan;
+    U32 *max_ack_lan,     *max_ack_wan;
+    U16 *max_win_lan,     *max_win_wan;
+} tcp_conntrack_view_t;
+
+/**
+ * @fn tcp_conntrack_nat_view
+ *
+ * @brief Point a conntrack view at an IPv4 NAT entry.
+ *
+ * @param e
+ *        NAT address table entry
+ *
+ * @return View of that entry's conntrack fields
+ */
+static inline tcp_conntrack_view_t tcp_conntrack_nat_view(struct addr_table *e)
+{
+    addr_table_t *entry = (addr_table_t *)e;
+    tcp_conntrack_view_t view = {
+        .tcp_state       = &entry->tcp_state,
+        .tcp_fin_flags   = &entry->tcp_fin_flags,
+        .expire_slot     = entry->expire_slot,
+        .max_seq_end_lan = &entry->max_seq_end_lan,
+        .max_seq_end_wan = &entry->max_seq_end_wan,
+        .max_ack_lan     = &entry->max_ack_lan,
+        .max_ack_wan     = &entry->max_ack_wan,
+        .max_win_lan     = &entry->max_win_lan,
+        .max_win_wan     = &entry->max_win_wan,
+    };
+
+    return view;
+}
+
 /*--------- STATE TABLE STRUCTURE ----------*/
 typedef struct {
     U8     state;        /* current TCP conntrack state */
@@ -67,7 +111,7 @@ typedef struct {
     /* NULL-terminated action handler chain.  is_reply lets a handler take
      * direction-dependent action (e.g. MID_STREAM promotes to ESTABLISHED only
      * when the ACK comes from the WAN side). */
-    STATUS (*hdl[4])(struct addr_table *, BOOL is_reply);
+    STATUS (*hdl[4])(const tcp_conntrack_view_t *, BOOL is_reply);
 } tcp_conntrack_state_tbl_t;
 
 /**
@@ -182,14 +226,14 @@ static inline BOOL tcp_conntrack_inbound_valid(U8 state, U8 tcp_flags)
  *        SYN packets and zero-baseline (uninitialised) entries always pass —
  *        seeding happens on the first accepted packet via seq_update().
  *
- * @param e           NAT entry (already located via reverse lookup)
+ * @param v           Conntrack view of the tracked connection
  * @param tcp_hdr     TCP header
  * @param is_reply    TRUE for WAN→LAN
  *
  * @return TRUE if seq/ack are within tolerated window, FALSE to drop.
  */
-static inline BOOL tcp_conntrack_seq_valid(addr_table_t *e, struct rte_tcp_hdr *tcp_hdr,
-    BOOL is_reply)
+static inline BOOL tcp_conntrack_seq_valid_view(const tcp_conntrack_view_t *v,
+    struct rte_tcp_hdr *tcp_hdr, BOOL is_reply)
 {
     U32 seq = rte_be_to_cpu_32(tcp_hdr->sent_seq);
     U32 ack = rte_be_to_cpu_32(tcp_hdr->recv_ack);
@@ -200,8 +244,8 @@ static inline BOOL tcp_conntrack_seq_valid(addr_table_t *e, struct rte_tcp_hdr *
         return TRUE;
 
     /* Pick the opposite-direction state to compare against. */
-    U32 peer_max_ack    = is_reply ? e->max_ack_lan    : e->max_ack_wan;
-    U32 peer_max_seqend = is_reply ? e->max_seq_end_lan: e->max_seq_end_wan;
+    U32 peer_max_ack    = is_reply ? *v->max_ack_lan    : *v->max_ack_wan;
+    U32 peer_max_seqend = is_reply ? *v->max_seq_end_lan: *v->max_seq_end_wan;
 
     /* Zero baseline: first packet seeds state, accept it. */
     if (peer_max_seqend == 0 && peer_max_ack == 0)
@@ -235,13 +279,13 @@ static inline BOOL tcp_conntrack_seq_valid(addr_table_t *e, struct rte_tcp_hdr *
  *        on a NAT entry after an accepted TCP packet.  Must be called on both
  *        directions to keep the baseline current.
  *
- * @param e           NAT entry
+ * @param v           Conntrack view of the tracked connection
  * @param tcp_hdr     TCP header
  * @param payload_len TCP payload length in bytes (excludes TCP header)
  * @param is_reply    TRUE for WAN→LAN, FALSE for LAN→WAN
  */
-static inline void tcp_conntrack_seq_update(addr_table_t *e, struct rte_tcp_hdr *tcp_hdr,
-                                             U16 payload_len, BOOL is_reply)
+static inline void tcp_conntrack_seq_update_view(const tcp_conntrack_view_t *v,
+    struct rte_tcp_hdr *tcp_hdr, U16 payload_len, BOOL is_reply)
 {
     U32 seq = rte_be_to_cpu_32(tcp_hdr->sent_seq);
     U32 ack = rte_be_to_cpu_32(tcp_hdr->recv_ack);
@@ -254,28 +298,81 @@ static inline void tcp_conntrack_seq_update(addr_table_t *e, struct rte_tcp_hdr 
      * when the field is still zero — otherwise an ISN ≥ 2^31 looks "older
      * than zero" under signed math and the baseline never advances. */
     if (is_reply) {
-        if (e->max_seq_end_wan == 0 ||
-            (int32_t)(seq_end - e->max_seq_end_wan) > 0) e->max_seq_end_wan = seq_end;
-        if (e->max_ack_wan == 0 ||
-            (int32_t)(ack - e->max_ack_wan) > 0)         e->max_ack_wan     = ack;
-        e->max_win_wan = win;
+        if (*v->max_seq_end_wan == 0 ||
+            (int32_t)(seq_end - *v->max_seq_end_wan) > 0) *v->max_seq_end_wan = seq_end;
+        if (*v->max_ack_wan == 0 ||
+            (int32_t)(ack - *v->max_ack_wan) > 0)         *v->max_ack_wan     = ack;
+        *v->max_win_wan = win;
     } else {
-        if (e->max_seq_end_lan == 0 ||
-            (int32_t)(seq_end - e->max_seq_end_lan) > 0) e->max_seq_end_lan = seq_end;
-        if (e->max_ack_lan == 0 ||
-            (int32_t)(ack - e->max_ack_lan) > 0)         e->max_ack_lan     = ack;
-        e->max_win_lan = win;
+        if (*v->max_seq_end_lan == 0 ||
+            (int32_t)(seq_end - *v->max_seq_end_lan) > 0) *v->max_seq_end_lan = seq_end;
+        if (*v->max_ack_lan == 0 ||
+            (int32_t)(ack - *v->max_ack_lan) > 0)         *v->max_ack_lan     = ack;
+        *v->max_win_lan = win;
     }
 }
 
 /**
- * @fn tcp_conntrack_fsm
+ * @fn tcp_conntrack_seq_valid
+ *
+ * @brief tcp_conntrack_seq_valid_view() for an IPv4 NAT entry.
+ *
+ * @param e           NAT entry (already located via reverse lookup)
+ * @param tcp_hdr     TCP header
+ * @param is_reply    TRUE for WAN→LAN
+ *
+ * @return TRUE if seq/ack are within tolerated window, FALSE to drop.
+ */
+static inline BOOL tcp_conntrack_seq_valid(addr_table_t *e, struct rte_tcp_hdr *tcp_hdr,
+    BOOL is_reply)
+{
+    tcp_conntrack_view_t view = tcp_conntrack_nat_view(e);
+
+    return tcp_conntrack_seq_valid_view(&view, tcp_hdr, is_reply);
+}
+
+/**
+ * @fn tcp_conntrack_seq_update
+ *
+ * @brief tcp_conntrack_seq_update_view() for an IPv4 NAT entry.
+ *
+ * @param e           NAT entry
+ * @param tcp_hdr     TCP header
+ * @param payload_len TCP payload length in bytes (excludes TCP header)
+ * @param is_reply    TRUE for WAN→LAN, FALSE for LAN→WAN
+ */
+static inline void tcp_conntrack_seq_update(addr_table_t *e, struct rte_tcp_hdr *tcp_hdr,
+    U16 payload_len, BOOL is_reply)
+{
+    tcp_conntrack_view_t view = tcp_conntrack_nat_view(e);
+
+    tcp_conntrack_seq_update_view(&view, tcp_hdr, payload_len, is_reply);
+}
+
+/**
+ * @fn tcp_conntrack_fsm_view
  *
  * @brief TCP connection tracking finite state machine.
  *        Table-driven, O(1) dispatch:
  *        1. Look up (state, event) in the constructor-built row index
  *        2. Transition to next_state
  *        3. Execute action handler chain
+ *
+ * @param v
+ *        Conntrack view of the tracked connection
+ * @param tcp_flags
+ *        TCP flags byte from rte_tcp_hdr
+ * @param is_reply
+ *        TRUE if packet is in WAN direction (WAN→LAN), FALSE for LAN (LAN→WAN)
+ *
+ * @return SUCCESS, or ERROR if a handler fails
+ */
+STATUS tcp_conntrack_fsm_view(const tcp_conntrack_view_t *v, U8 tcp_flags, BOOL is_reply);
+
+/**
+ * @fn tcp_conntrack_fsm
+ *
+ * @brief tcp_conntrack_fsm_view() for an IPv4 NAT entry.
  *
  * @param entry
  *        Pointer to NAT address table entry
@@ -286,7 +383,12 @@ static inline void tcp_conntrack_seq_update(addr_table_t *e, struct rte_tcp_hdr 
  *
  * @return SUCCESS, or ERROR if a handler fails
  */
-STATUS tcp_conntrack_fsm(struct addr_table *entry, U8 tcp_flags, BOOL is_reply);
+static inline STATUS tcp_conntrack_fsm(struct addr_table *entry, U8 tcp_flags, BOOL is_reply)
+{
+    tcp_conntrack_view_t view = tcp_conntrack_nat_view(entry);
+
+    return tcp_conntrack_fsm_view(&view, tcp_flags, is_reply);
+}
 
 /**
  * @fn tcp_conntrack_state2str
