@@ -26,5 +26,7 @@ void test_lighthttp(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass);
 void test_metrics(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass);
 void test_mac_table(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass);
 void test_cmdline(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass);
+void test_etcd_integration(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass);
+void test_grpc_server(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass);
 
 #endif // TEST_H

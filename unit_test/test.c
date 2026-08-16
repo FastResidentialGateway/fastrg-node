@@ -185,6 +185,10 @@ int main()
     test_northbound(fastrg_ccb, &total_tests, &total_pass);
     puts("ok!");
 
+    puts("====================test etcd_integration.c====================");
+    test_etcd_integration(fastrg_ccb, &total_tests, &total_pass);
+    puts("ok!");
+
     puts("====================test dnsd/dns_codec.c====================");
     test_dns_codec(fastrg_ccb, &total_tests, &total_pass);
     puts("ok!");
@@ -219,6 +223,10 @@ int main()
 
     puts("====================test northbound/cmdline/ip_pool_range.c====================");
     test_cmdline(fastrg_ccb, &total_tests, &total_pass);
+    puts("ok!");
+
+    puts("====================test northbound/grpc/fastrg_grpc_server.cpp====================");
+    test_grpc_server(fastrg_ccb, &total_tests, &total_pass);
     puts("ok!");
 
     printf("\n====================Unit Test Summary====================\n\n");

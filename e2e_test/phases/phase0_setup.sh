@@ -309,6 +309,24 @@ phase0_setup() {
         done
         if [[ $_ready -eq 0 ]]; then
             error "fastrg gRPC did not become ready within 120 seconds."
+            # The wait loop above throws the client's stderr away; probe once
+            # more keeping it, so the real dial error is on the record.
+            _probe_err=$(python3 "${GRPC_CLIENT_DIR}/fastrg_grpc_client.py" \
+                --node "${FASTRG_NODE}:${FASTRG_GRPC_PORT}" \
+                get_hsi_info 2>&1 >/dev/null || true)
+            if [[ -n "$_probe_err" ]]; then
+                error "Probe error: ${_probe_err}"
+            fi
+            # Best-effort forensics: every step tolerates its own failure so a
+            # broken collector can never mask the timeout error above.
+            info "fastrg process state on node:"
+            ssh_node "pgrep -ax fastrg || echo '(fastrg is not running)'" 2>&1 || true
+            info "Listeners on port ${FASTRG_GRPC_PORT} (ss -ltnp):"
+            ssh_node "ss -ltnp 'sport = :${FASTRG_GRPC_PORT}' || true" 2>&1 || true
+            # Keyword match anywhere in the line, not a line-prefix filter:
+            # concurrent writes splice gRPC errors into FastRG log lines.
+            info "gRPC-related daemon output:"
+            ssh_node "grep -aiE 'grpc|chttp2|bind' /var/log/fastrg.log 2>/dev/null | tail -10" 2>&1 || true
             info "Last log output:"
             ssh_node "tail -20 /var/log/fastrg.log 2>/dev/null || true"
             exit 1
