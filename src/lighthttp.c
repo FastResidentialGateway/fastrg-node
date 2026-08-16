@@ -223,12 +223,16 @@ int lighthttp_init(lighthttp_server_t *s, const char *addr)
 
     if (lighthttp_parse_addr(addr, s->host, sizeof(s->host), &s->port) != 0) {
         fprintf(stderr, "lighthttp: invalid listen addr '%s'\n", addr ? addr : "(null)");
+        errno = EINVAL;
         return -1;
     }
 
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
-        fprintf(stderr, "lighthttp: socket() failed: %s\n", strerror(errno));
+        int saved = errno;
+
+        fprintf(stderr, "lighthttp: socket() failed: %s\n", strerror(saved));
+        errno = saved;
         return -1;
     }
     int one = 1;
@@ -243,17 +247,24 @@ int lighthttp_init(lighthttp_server_t *s, const char *addr)
     } else if (inet_pton(AF_INET, s->host, &sa.sin_addr) != 1) {
         fprintf(stderr, "lighthttp: bad listen host '%s'\n", s->host);
         close(fd);
+        errno = EINVAL;
         return -1;
     }
 
     if (bind(fd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
-        fprintf(stderr, "lighthttp: bind(%s:%d) failed: %s\n", s->host, s->port, strerror(errno));
+        int saved = errno;
+
+        fprintf(stderr, "lighthttp: bind(%s:%d) failed: %s\n", s->host, s->port, strerror(saved));
         close(fd);
+        errno = saved;
         return -1;
     }
     if (listen(fd, LIGHTHTTP_BACKLOG) < 0) {
-        fprintf(stderr, "lighthttp: listen() failed: %s\n", strerror(errno));
+        int saved = errno;
+
+        fprintf(stderr, "lighthttp: listen() failed: %s\n", strerror(saved));
         close(fd);
+        errno = saved;
         return -1;
     }
 

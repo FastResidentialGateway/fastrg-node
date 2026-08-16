@@ -513,14 +513,26 @@ STATUS northbound(FastRG_t *fastrg_ccb)
     fastrg_ccb->metrics_server.listen_fd = -1;
     rte_atomic16_set(&fastrg_ccb->metrics_stop_requested, 0);
 
-    /* Start the Prometheus /metrics HTTP server so Prometheus can scrape this node
-     * directly. Non-fatal on failure — metrics are observability, not core function. */
+    /* Start the Prometheus /metrics HTTP server so Prometheus can scrape this
+     * node directly. A listener that never came up leaves the node running with
+     * nothing able to see it, which is how a dead endpoint stays unnoticed, so
+     * the startup path waits for the verdict and gives up on failure. Only the
+     * listener coming up is gated here; a scrape that fails later still just
+     * fails that scrape. */
     if (fastrg_create_pthread("fastrg_metrics",
         metrics_server_run, fastrg_ccb, rte_lcore_id(), &fastrg_ccb->metrics_thread) != SUCCESS) {
-        FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
-            "Metrics HTTP server thread failed to start; Prometheus scrape disabled");
-    } else {
-        fastrg_ccb->metrics_thread_started = TRUE;
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+            "Metrics HTTP server thread failed to start; shutting down");
+        return ERROR;
+    }
+    fastrg_ccb->metrics_thread_started = TRUE;
+
+    if (metrics_server_wait_ready() != 0) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+            "Metrics HTTP server failed to start on %s; shutting down",
+            fastrg_ccb->metrics_ip_port);
+        fastrg_stop_northbound_threads(fastrg_ccb);
+        return ERROR;
     }
 
     if (fastrg_create_pthread("fastrg_grpc",

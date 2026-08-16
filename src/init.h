@@ -38,13 +38,28 @@ void fastrg_set_hugepage_free_bytes_for_test(uint64_t free_bytes);
  * @fn metrics_server_run
  * @brief pthread entry point for the Prometheus /metrics HTTP server. Registers
  *        the metrics thread's RCU reader slot, binds lighthttp on the configured
- *        address and serves GET /metrics. Non-fatal on bind failure (observability
- *        only) — logs a warning and exits the thread.
+ *        address and serves GET /metrics. Publishes the bind verdict through the
+ *        startup latch, then exits the thread if the bind failed.
  *
  * @param arg
  *      FastRG control block (FastRG_t *)
  */
 void *metrics_server_run(void *arg);
+
+/**
+ * @fn metrics_server_wait_ready
+ * @brief Block until the metrics thread has published whether its listener came
+ *        up. The bind happens on that thread, so this is how the startup path
+ *        gets to see the verdict and abort on a failure instead of running on
+ *        with no way to be scraped.
+ *
+ *        Each metrics thread launch pairs with exactly one wait: the verdict is
+ *        consumed here and the latch re-arms for the next launch.
+ *
+ * @return
+ *      0 when the listener is up, -1 when it failed to start
+ */
+int metrics_server_wait_ready(void);
 
 extern struct rte_mempool *direct_pool[PORT_AMOUNT];
 extern struct rte_mempool *indirect_pool[PORT_AMOUNT];
