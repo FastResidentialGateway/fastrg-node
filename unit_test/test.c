@@ -247,6 +247,10 @@ int main()
     test_grpc_server(fastrg_ccb, &total_tests, &total_pass);
     puts("ok!");
 
+    puts("====================test metrics server startup====================");
+    test_metrics_server(fastrg_ccb, &total_tests, &total_pass);
+    puts("ok!");
+
     printf("\n====================Unit Test Summary====================\n\n");
     printf("╔════════════════════════════════════════════════════════════╗\n");
     printf("║  All Test Summary                                          ║\n");

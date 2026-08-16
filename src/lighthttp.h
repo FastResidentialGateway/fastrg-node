@@ -190,7 +190,9 @@ const lighthttp_route_t *lighthttp_match(const lighthttp_server_t *s,
  * @param addr
  *      Listen address ("host:port" or "port")
  * @return
- *      0 on success, -1 on failure
+ *      0 on success, -1 on failure with errno set to the reason: the failing
+ *      syscall's errno for socket/bind/listen, EINVAL for an unparsable
+ *      address or host
  */
 int lighthttp_init(lighthttp_server_t *s, const char *addr);
 
