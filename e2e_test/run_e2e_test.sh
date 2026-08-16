@@ -685,6 +685,18 @@ main() {
     phase33_shutdown_inactive
     phase34_wan_long_outage
     phase35_summary || true
+
+    # Exit code mirrors the RESULT line: any failed step fails the run. Counted
+    # here from the same results the summary printed, so a summary that breaks
+    # still leaves the exit code right.
+    local _fails=0
+    if [[ ${#STEP_RESULTS[@]} -gt 0 ]]; then
+        _fails=$(printf '%s\n' "${STEP_RESULTS[@]}" | grep -cx 'FAIL' || true)
+    fi
+    if [[ "$_fails" -gt 0 ]]; then
+        exit 1
+    fi
+    exit 0
 }
 
 main "$@"

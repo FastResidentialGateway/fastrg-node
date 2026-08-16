@@ -1,4 +1,5 @@
 #include <chrono>
+#include <condition_variable>
 #include <iostream>
 #include <mutex>
 #include <grpc++/grpc++.h>
@@ -10,6 +11,12 @@
 static std::mutex server_mutex;
 static grpc::Server *running_server;
 static bool shutdown_requested;
+
+/* Startup latch: the bind verdict is produced on the server thread, so the
+ * caller blocks on it and a failed bind can abort startup. */
+enum startup_state { STARTUP_PENDING, STARTUP_OK, STARTUP_FAILED };
+static startup_state startup_result = STARTUP_PENDING;
+static std::condition_variable startup_cv;
 
 #ifdef __cplusplus
 extern "C" {
@@ -34,6 +41,11 @@ void *fastrg_grpc_server_run(void *arg)
     std::unique_ptr<grpc::Server> server(builder.BuildAndStart());
     if (!server) {
         std::cerr << "grpc server failed to start" << std::endl;
+        {
+            std::lock_guard<std::mutex> lock(server_mutex);
+            startup_result = STARTUP_FAILED;
+        }
+        startup_cv.notify_all();
         return NULL;
     }
 
@@ -41,9 +53,11 @@ void *fastrg_grpc_server_run(void *arg)
     {
         std::lock_guard<std::mutex> lock(server_mutex);
         running_server = server.get();
+        startup_result = STARTUP_OK;
         if (shutdown_requested)
             running_server->Shutdown(std::chrono::system_clock::now() + std::chrono::seconds(3));
     }
+    startup_cv.notify_all();
     server->Wait();
 
     {
@@ -52,6 +66,17 @@ void *fastrg_grpc_server_run(void *arg)
             running_server = NULL;
     }
     return NULL;
+}
+
+int fastrg_grpc_server_wait_ready(void)
+{
+    std::unique_lock<std::mutex> lock(server_mutex);
+    startup_cv.wait(lock, [] { return startup_result != STARTUP_PENDING; });
+    /* Consume the verdict and re-arm the latch: every server thread launch
+     * pairs with exactly one wait. */
+    startup_state result = startup_result;
+    startup_result = STARTUP_PENDING;
+    return result == STARTUP_OK ? 0 : -1;
 }
 
 void fastrg_grpc_server_shutdown(void)

@@ -225,6 +225,10 @@ int main()
     test_cmdline(fastrg_ccb, &total_tests, &total_pass);
     puts("ok!");
 
+    puts("====================test northbound/grpc/fastrg_grpc_server.cpp====================");
+    test_grpc_server(fastrg_ccb, &total_tests, &total_pass);
+    puts("ok!");
+
     printf("\n====================Unit Test Summary====================\n\n");
     printf("╔════════════════════════════════════════════════════════════╗\n");
     printf("║  All Test Summary                                          ║\n");

@@ -510,6 +510,14 @@ STATUS northbound(FastRG_t *fastrg_ccb)
         return ERROR;
     }
     fastrg_ccb->grpc_thread_started = TRUE;
+
+    if (fastrg_grpc_server_wait_ready() != 0) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+            "gRPC server failed to start on %s / %s; shutting down",
+            fastrg_ccb->unix_sock_path, fastrg_ccb->node_grpc_ip_port);
+        fastrg_stop_northbound_threads(fastrg_ccb);
+        return ERROR;
+    }
     return SUCCESS;
 }
 
@@ -922,6 +930,8 @@ err:
     }
     /* Stop any data-plane lcores that were already launched. */
     rte_atomic16_set(&stop_flag, 1);
+    /* Enable start_flag to make sure dp lcores leave pause loop */
+    rte_atomic16_set(&start_flag, 1);
     fastrg_stop();
     close(sfd);
 
