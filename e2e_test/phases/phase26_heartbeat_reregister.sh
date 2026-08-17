@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # ---------------------------------------------------------------------------
-# Phase 26 — Controller Heartbeat / Re-registration (Steps 107-110)
+# Phase 26 — Controller Heartbeat / Re-registration (Steps 107-111)
 # ---------------------------------------------------------------------------
 
 _P26_CONTROLLER_HOST=""
@@ -345,6 +345,26 @@ phase26_heartbeat_reregister() {
             "REST record disappeared and returned; re-register logs and following heartbeat observed"
     else
         fail "Step 110: re-register after controller forgets node" "$_issue107"
+    fi
+
+    # ------------------------------------------------------------------
+    # Step 111 — the node told the controller which gRPC port to dial
+    # ------------------------------------------------------------------
+    # Read-only: it only reads the node record the registration above wrote, so
+    # it leaves no state behind. It also makes "the controller on this bench is
+    # too old to store the port" fail loudly here instead of silently dialling
+    # the default forever.
+    info "Step 111: checking the registered node record carries grpc_port..."
+    local _node_record="" _grpc_port=""
+    _node_record=$(etcdctl_get_value "nodes/${NODE_UUID}" 2>/dev/null || true)
+    _grpc_port=$(printf '%s' "$_node_record" | jq -r '.grpc_port' 2>/dev/null || true)
+
+    if [[ "$_grpc_port" == "${FASTRG_GRPC_PORT}" ]]; then
+        pass "Step 111: node reports its gRPC port at registration" \
+            "nodes/${NODE_UUID} carries grpc_port=${_grpc_port}"
+    else
+        fail "Step 111: node reports its gRPC port at registration" \
+            "expected grpc_port=${FASTRG_GRPC_PORT}, got '${_grpc_port:-missing}'; record=$(printf '%s' "$_node_record" | tr '\n' ' ' | cut -c 1-300 || true)"
     fi
 
     _cleanup_phase26_heartbeat_reregister || true

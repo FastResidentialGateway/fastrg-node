@@ -28,17 +28,21 @@ public:
     ControllerClient(std::shared_ptr<Channel> channel)
         : stub_(NodeManagement::NewStub(channel)) {}
 
-    controller_status_t RegisterNode(const std::string& node_uuid, const std::string& ip, const std::string& version, const std::string& location) {
+    controller_status_t RegisterNode(const std::string& node_uuid, const std::string& ip, const std::string& version, const std::string& location, uint32_t grpc_port) {
         // Store registration info for potential re-registration
         last_node_uuid_ = node_uuid;
         last_ip_ = ip;
         last_version_ = version;
         last_location_ = location;
+        last_grpc_port_ = grpc_port;
         NodeRegisterRequest request;
         request.set_node_uuid(node_uuid);
         request.set_ip(ip);
         request.set_version(version);
         request.set_location(location);
+        // Telling the controller our port is what lets it dial a node that does
+        // not use the default one.
+        request.set_grpc_port(grpc_port);
 
         NodeRegisterReply reply;
         ClientContext context;
@@ -97,7 +101,7 @@ public:
 
                 // Attempt to re-register using stored credentials
                 if (!last_node_uuid_.empty() && !last_ip_.empty() && !last_version_.empty()) {
-                    controller_status_t reg_status = RegisterNode(last_node_uuid_, last_ip_, last_version_, last_location_);
+                    controller_status_t reg_status = RegisterNode(last_node_uuid_, last_ip_, last_version_, last_location_, last_grpc_port_);
                     if (reg_status == CONTROLLER_SUCCESS) {
                         std::cout << "Re-registration successful, retrying heartbeat..." << std::endl;
                         // Retry heartbeat after successful registration
@@ -141,6 +145,7 @@ private:
     std::string last_ip_;
     std::string last_version_;
     std::string last_location_;
+    uint32_t last_grpc_port_ = 0;
 };
 
 static std::unique_ptr<ControllerClient> g_client = nullptr;
@@ -158,11 +163,11 @@ int controller_client_init(const char* server_address) {
     }
 }
 
-controller_status_t controller_register_node(const char* node_uuid, const char* ip, const char* version, const char* location) {
+controller_status_t controller_register_node(const char* node_uuid, const char* ip, const char* version, const char* location, uint32_t grpc_port) {
     if (!g_client) {
         return CONTROLLER_ERROR;
     }
-    return g_client->RegisterNode(std::string(node_uuid), std::string(ip), std::string(version), location ? std::string(location) : std::string());
+    return g_client->RegisterNode(std::string(node_uuid), std::string(ip), std::string(version), location ? std::string(location) : std::string(), grpc_port);
 }
 
 controller_status_t controller_report_shutdown(const char* node_uuid) {

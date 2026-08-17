@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # ---------------------------------------------------------------------------
-# Phase 37 — IPv6 stateful firewall (Steps 154-168)
+# Phase 37 — IPv6 stateful firewall (Steps 155-169)
 #
 # IPv6 is routed, not translated, so without a firewall any host on the
 # internet can address a LAN host directly. This phase checks the whole
@@ -315,13 +315,13 @@ phase37_ipv6_firewall() {
     local _positive_ok=0 _negative_seen=0 _listener_alive=1 _listener_ready=0
 
     bold "═══════════════════════════════════════════════════════"
-    bold " Phase 37 — IPv6 Stateful Firewall (Steps 154-168)"
+    bold " Phase 37 — IPv6 Stateful Firewall (Steps 155-169)"
     bold "═══════════════════════════════════════════════════════"
 
     # ------------------------------------------------------------------
-    # Step 154 — bring IPv6 up end to end again
+    # Step 155 — bring IPv6 up end to end again
     # ------------------------------------------------------------------
-    info "Step 154: enabling IPv6, redialling and provisioning both hosts..."
+    info "Step 155: enabling IPv6, redialling and provisioning both hosts..."
     _issue=""
     _P37_IPV6_SET=1
     fastrg_grpc set_ipv6 "${USER_ID}" true >/dev/null 2>&1 || true
@@ -392,17 +392,17 @@ phase37_ipv6_firewall() {
         _issue="${_issue:+${_issue}; }LAN host has no IPv6 source address towards ${_P37_WAN6_HOST_ADDR}"
 
     if [[ -z "$_issue" ]]; then
-        pass "Step 154: IPv6 firewall fixture ready" \
+        pass "Step 155: IPv6 firewall fixture ready" \
             "delegated ${_P37_PD_PREFIX}, LAN host ${_P37_LAN6}, WAN host ${_P37_WAN6_HOST_ADDR}"
     else
-        fail "Step 154: IPv6 firewall fixture ready" \
+        fail "Step 155: IPv6 firewall fixture ready" \
             "${_issue}; lan addrs='${_lan_addrs:-none}'"
     fi
 
     # ------------------------------------------------------------------
-    # Step 155 — the path is alive, so later drops can be blamed on the firewall
+    # Step 156 — the path is alive, so later drops can be blamed on the firewall
     # ------------------------------------------------------------------
-    info "Step 155: ping6 LAN→WAN to prove the path works at all..."
+    info "Step 156: ping6 LAN→WAN to prove the path works at all..."
     _ok=0
     for _i in $(seq 1 6); do
         if _p37_ping6_ok; then
@@ -412,17 +412,17 @@ phase37_ipv6_firewall() {
         sleep 5
     done
     if [[ $_ok -eq 1 ]]; then
-        pass "Step 155: LAN→WAN ping6 works" \
+        pass "Step 156: LAN→WAN ping6 works" \
             "${_P37_WAN6_HOST_ADDR} reachable with 0% packet loss"
     else
-        fail "Step 155: LAN→WAN ping6 works" \
+        fail "Step 156: LAN→WAN ping6 works" \
             "${_P37_WAN6_HOST_ADDR} - ${_P37_PING_DETAIL:-no response}; route: $(ssh_lan "ip -6 route get ${_P37_WAN6_HOST_ADDR}" 2>/dev/null | tr '\n' ' ' | cut -c 1-200 || true)"
     fi
 
     # ------------------------------------------------------------------
-    # Step 156 — a reply to something the LAN sent is allowed back in
+    # Step 157 — a reply to something the LAN sent is allowed back in
     # ------------------------------------------------------------------
-    info "Step 156: LAN-initiated UDP must get its reply back..."
+    info "Step 157: LAN-initiated UDP must get its reply back..."
     ssh_wan "rm -f '${_P37_WAN_SRV_PID}' '${_P37_WAN_SRV_OUT}';
 nohup python3 -u - '${_P37_WAN6_HOST_ADDR}' '${_P37_ECHO_PORT}' \
     >'${_P37_WAN_SRV_OUT}' 2>&1 <<'PY' &
@@ -450,17 +450,17 @@ echo \$! >'${_P37_WAN_SRV_PID}'" >/dev/null 2>&1 || true
     _out=""
     [[ $_ok -eq 1 ]] && _out=$(_p37_udp_echo 41600)
     if [[ $_ok -eq 1 ]] && printf '%s' "$_out" | grep -q 'echo-ok'; then
-        pass "Step 156: LAN-initiated UDP gets its reply" \
+        pass "Step 157: LAN-initiated UDP gets its reply" \
             "datagram from ${_P37_LAN6}:41600 echoed back through the firewall"
     else
-        fail "Step 156: LAN-initiated UDP gets its reply" \
+        fail "Step 157: LAN-initiated UDP gets its reply" \
             "server_ready=${_ok}; client: $(printf '%s' "$_out" | tr '\n' ' ' | cut -c 1-200 || true); server: $(ssh_wan "tail -n 3 '${_P37_WAN_SRV_OUT}' 2>/dev/null" 2>/dev/null | tr '\n' ' ' | cut -c 1-200 || true)"
     fi
 
     # ------------------------------------------------------------------
-    # Step 157 — an unsolicited inbound ping never reaches the LAN
+    # Step 158 — an unsolicited inbound ping never reaches the LAN
     # ------------------------------------------------------------------
-    info "Step 157: unsolicited inbound ICMPv6 echo must be dropped..."
+    info "Step 158: unsolicited inbound ICMPv6 echo must be dropped..."
     _issue=""
     if ! _p37_start_capture "'icmp6 and ip6[40] == 128'"; then
         _issue="tcpdump did not start on ${_P37_LAN_VLAN}; a silent capture proves nothing"
@@ -477,16 +477,16 @@ echo \$! >'${_P37_WAN_SRV_PID}'" >/dev/null 2>&1 || true
         _issue="${_issue:+${_issue}; }${_cap_count} echo request(s) reached ${_P37_LAN_VLAN}"
 
     if [[ -z "$_issue" ]]; then
-        pass "Step 157: unsolicited inbound ping is dropped" \
+        pass "Step 158: unsolicited inbound ping is dropped" \
             "WAN→${_P37_LAN6} 100% loss and no echo request on ${_P37_LAN_VLAN}"
     else
-        fail "Step 157: unsolicited inbound ping is dropped" "$_issue"
+        fail "Step 158: unsolicited inbound ping is dropped" "$_issue"
     fi
 
     # ------------------------------------------------------------------
-    # Step 158 — an unsolicited inbound TCP SYN never reaches the LAN
+    # Step 159 — an unsolicited inbound TCP SYN never reaches the LAN
     # ------------------------------------------------------------------
-    info "Step 158: unsolicited inbound TCP SYN must be dropped..."
+    info "Step 159: unsolicited inbound TCP SYN must be dropped..."
     _issue=""
     if ! _p37_start_capture "'ip6 and tcp and port 22'"; then
         _issue="tcpdump did not start on ${_P37_LAN_VLAN}; a silent capture proves nothing"
@@ -514,19 +514,19 @@ PY" 2>&1 || true)
         _issue="${_issue:+${_issue}; }${_cap_count} SYN(s) reached ${_P37_LAN_VLAN}"
 
     if [[ -z "$_issue" ]]; then
-        pass "Step 158: unsolicited inbound TCP SYN is dropped" \
+        pass "Step 159: unsolicited inbound TCP SYN is dropped" \
             "connect to [${_P37_LAN6}]:22 failed and no SYN on ${_P37_LAN_VLAN}"
     else
-        fail "Step 158: unsolicited inbound TCP SYN is dropped" "$_issue"
+        fail "Step 159: unsolicited inbound TCP SYN is dropped" "$_issue"
     fi
 
     # ------------------------------------------------------------------
-    # Step 159 — an idle TCP connection outlives the flat 10 second timeout
+    # Step 160 — an idle TCP connection outlives the flat 10 second timeout
     # ------------------------------------------------------------------
     # A session tracked on the flat UDP timeout would be gone after 10s of
     # silence and the server's late line would be dropped; the conntrack
     # per-state timeout keeps an established connection for 7200s.
-    info "Step 159: an idle TCP connection must survive 15s of silence..."
+    info "Step 160: an idle TCP connection must survive 15s of silence..."
     _issue=""
     ssh_wan "rm -f '${_P37_WAN_SRV_PID}' '${_P37_WAN_SRV_OUT}';
 nohup python3 -u - '${_P37_WAN6_HOST_ADDR}' '${_P37_LATE_PORT}' \
@@ -580,17 +580,17 @@ PY" 2>&1 || true)
     _p37_stop_remote ssh_wan "$_P37_WAN_SRV_PID" "Phase 37 WAN helper server" || true
 
     if [[ -z "$_issue" ]]; then
-        pass "Step 159: idle TCP session survives" \
+        pass "Step 160: idle TCP session survives" \
             "server data after 15s of silence still reached the LAN client"
     else
-        fail "Step 159: idle TCP session survives" \
+        fail "Step 160: idle TCP session survives" \
             "${_issue}; server: $(ssh_wan "tail -n 3 '${_P37_WAN_SRV_OUT}' 2>/dev/null" 2>/dev/null | tr '\n' ' ' | cut -c 1-200 || true)"
     fi
 
     # ------------------------------------------------------------------
-    # Step 160 — forged packets aimed at a live TCP session are dropped
+    # Step 161 — forged packets aimed at a live TCP session are dropped
     # ------------------------------------------------------------------
-    info "Step 160: injecting state-mismatch and out-of-window TCP from the WAN..."
+    info "Step 161: injecting state-mismatch and out-of-window TCP from the WAN..."
     _issue=""
     if ! _p37_start_iperf6_server; then
         _issue="iperf3 server never listened on ${SRV_PORT}"
@@ -644,16 +644,16 @@ PY" 2>&1 || true)
     fi
 
     if [[ -z "$_issue" ]]; then
-        pass "Step 160: forged TCP against a live IPv6 session is dropped" \
+        pass "Step 161: forged TCP against a live IPv6 session is dropped" \
             "state-mismatch SYN and out-of-window ACK on [${_P37_LAN6}]:${_sport} both dropped"
     else
-        fail "Step 160: forged TCP against a live IPv6 session is dropped" "$_issue"
+        fail "Step 161: forged TCP against a live IPv6 session is dropped" "$_issue"
     fi
 
     # ------------------------------------------------------------------
-    # Step 161 — tcp_conntrack_enabled governs IPv6 exactly as it does IPv4
+    # Step 162 — tcp_conntrack_enabled governs IPv6 exactly as it does IPv4
     # ------------------------------------------------------------------
-    info "Step 161: checking the tcp_conntrack switch on the IPv6 path..."
+    info "Step 162: checking the tcp_conntrack switch on the IPv6 path..."
     _issue=""
     if [[ ! "$_sport" =~ ^[0-9]+$ ]]; then
         _issue="no live IPv6 TCP session to inject against"
@@ -686,19 +686,19 @@ PY" 2>&1 || true)
     fi
 
     if [[ -z "$_issue" ]]; then
-        pass "Step 161: the tcp_conntrack switch governs IPv6 too" \
+        pass "Step 162: the tcp_conntrack switch governs IPv6 too" \
             "SYN forwarded to ${_P37_LAN_VLAN} while off, dropped again once back on"
     else
-        fail "Step 161: the tcp_conntrack switch governs IPv6 too" "$_issue"
+        fail "Step 162: the tcp_conntrack switch governs IPv6 too" "$_issue"
     fi
 
     # ------------------------------------------------------------------
-    # Step 162 — an ICMPv6 error is judged by the packet it quotes
+    # Step 163 — an ICMPv6 error is judged by the packet it quotes
     # ------------------------------------------------------------------
     # Letting these through is what keeps path MTU discovery working; letting
     # forged ones through would let anybody who knows a LAN address push a host
     # down to the minimum MTU. Both counters make each verdict attributable.
-    info "Step 162: forged and genuine ICMPv6 Packet Too Big..."
+    info "Step 163: forged and genuine ICMPv6 Packet Too Big..."
     _issue=""
     _out=$(_p37_udp_echo 41620)
     printf '%s' "$_out" | grep -q 'echo-ok' || \
@@ -732,10 +732,10 @@ PY" 2>&1 || true)
     fi
 
     if [[ -z "$_issue" ]]; then
-        pass "Step 162: ICMPv6 errors are judged by what they quote" \
+        pass "Step 163: ICMPv6 errors are judged by what they quote" \
             "the one quoting the live session passed, the forged one was dropped"
     else
-        fail "Step 162: ICMPv6 errors are judged by what they quote" "$_issue"
+        fail "Step 163: ICMPv6 errors are judged by what they quote" "$_issue"
     fi
 
     # Release the iperf3 flow that steps 160 and 161 injected against.
@@ -743,9 +743,9 @@ PY" 2>&1 || true)
     ssh_wan "pkill -f 'iperf3 -s' 2>/dev/null || true" >/dev/null 2>&1 || true
 
     # ------------------------------------------------------------------
-    # Step 163 — an expired session cannot be reopened from the WAN side
+    # Step 164 — an expired session cannot be reopened from the WAN side
     # ------------------------------------------------------------------
-    info "Step 163: an expired IPv6 session must not come back from the WAN..."
+    info "Step 164: an expired IPv6 session must not come back from the WAN..."
     _issue=""
     ssh_lan "rm -f '${_P37_LISTENER_PID}' '${_P37_LISTENER_OUT}' \
         '${_P37_LISTENER_READY}' '${_P37_LISTENER_RECV}';
@@ -832,17 +832,17 @@ echo \$! >'${_P37_LISTENER_PID}'" >/dev/null 2>&1 || true
         _issue="${_issue:+${_issue}; }listener did not stop"
 
     if [[ -z "$_issue" ]]; then
-        pass "Step 163: an expired session stays closed" \
+        pass "Step 164: an expired session stays closed" \
             "the live tuple reached [${_P37_LAN6}]:${_P37_REVIVE_LISTEN}, the same tuple was dropped after 15s idle"
     else
-        fail "Step 163: an expired session stays closed" \
+        fail "Step 164: an expired session stays closed" \
             "${_issue}; positive=${_positive_ok} negative=${_negative_seen} listener_alive=${_listener_alive}"
     fi
 
     # ------------------------------------------------------------------
-    # Step 164 — idle IPv6 throughput baseline
+    # Step 165 — idle IPv6 throughput baseline
     # ------------------------------------------------------------------
-    info "Step 164: measuring the idle IPv6 throughput baseline..."
+    info "Step 165: measuring the idle IPv6 throughput baseline..."
     _issue=""
     _p37_start_iperf6_server || _issue="iperf3 server never listened on ${SRV_PORT}"
     _P37_BASE_BPS=$(_p37_iperf6_bps)
@@ -850,16 +850,16 @@ echo \$! >'${_P37_LISTENER_PID}'" >/dev/null 2>&1 || true
         _issue="${_issue:+${_issue}; }no baseline throughput (${_P37_IPERF_ERR:-unknown})"
 
     if [[ -z "$_issue" ]]; then
-        pass "Step 164: IPv6 throughput baseline" \
+        pass "Step 165: IPv6 throughput baseline" \
             "$(_p37_mbps "$_P37_BASE_BPS") Mbps over IPv6 with an idle session table"
     else
-        fail "Step 164: IPv6 throughput baseline" "$_issue"
+        fail "Step 165: IPv6 throughput baseline" "$_issue"
     fi
 
     # ------------------------------------------------------------------
-    # Step 165 — fill the session table to about 90%
+    # Step 166 — fill the session table to about 90%
     # ------------------------------------------------------------------
-    info "Step 165: filling the IPv6 session table with ~59000 UDP flows..."
+    info "Step 166: filling the IPv6 session table with ~59000 UDP flows..."
     _issue=""
     _ok=0
     ssh_lan "rm -f '${_P37_SPRAY_PID}' '${_P37_SPRAY_OUT}';
@@ -915,20 +915,20 @@ echo \$! >'${_P37_SPRAY_PID}'" >/dev/null 2>&1 || true
     done
 
     if [[ $_ok -eq 1 && -z "$_issue" ]]; then
-        pass "Step 165: IPv6 session table filled to near capacity" \
+        pass "Step 166: IPv6 session table filled to near capacity" \
             "ipv6_firewall_entries_used=${_used} (target ≥ ${_P37_FILL_TARGET})"
     else
         _spray_log=$(ssh_lan "tail -n 3 '${_P37_SPRAY_OUT}' 2>/dev/null" 2>/dev/null | tr '\n' ' ' | cut -c 1-300 || true)
-        fail "Step 165: IPv6 session table filled to near capacity" \
+        fail "Step 166: IPv6 session table filled to near capacity" \
             "${_issue:+${_issue}; }ipv6_firewall_entries_used='${_used:-missing}' target=${_P37_FILL_TARGET}; sprayer: ${_spray_log:-no output}"
     fi
 
     # ------------------------------------------------------------------
-    # Step 166 — throughput and new sessions while the table stays full
+    # Step 167 — throughput and new sessions while the table stays full
     # ------------------------------------------------------------------
     # No tcpdump in this step: capturing on the LAN host is known to add packet
     # loss on this bench and would be measured as degradation.
-    info "Step 166: measuring IPv6 throughput while the table stays near capacity..."
+    info "Step 167: measuring IPv6 throughput while the table stays near capacity..."
     _issue=""
     _p37_ping6_ok || _issue="LAN→WAN ping6 ${_P37_PING_DETAIL:-no response} under load"
 
@@ -948,17 +948,17 @@ echo \$! >'${_P37_SPRAY_PID}'" >/dev/null 2>&1 || true
     _used=$(_p37_metric "fastrg_node_per_user_ipv6_firewall_entries_used")
 
     if [[ -z "$_issue" ]]; then
-        pass "Step 166: the firewall holds up near capacity" \
+        pass "Step 167: the firewall holds up near capacity" \
             "$(_p37_mbps "$_bps") Mbps of $(_p37_mbps "$_P37_BASE_BPS") Mbps baseline with ${_used} live sessions, new flows still open"
     else
-        fail "Step 166: the firewall holds up near capacity" \
+        fail "Step 167: the firewall holds up near capacity" \
             "${_issue}; ipv6_firewall_entries_used='${_used:-missing}'"
     fi
 
     # ------------------------------------------------------------------
-    # Step 167 — stop the sprayer and watch the GC drain the table
+    # Step 168 — stop the sprayer and watch the GC drain the table
     # ------------------------------------------------------------------
-    info "Step 167: stopping the sprayer and waiting for the table to drain..."
+    info "Step 168: stopping the sprayer and waiting for the table to drain..."
     _issue=""
     _p37_stop_remote ssh_lan "$_P37_SPRAY_PID" "Phase 37 IPv6 sprayer" || \
         _issue="sprayer did not stop"
@@ -978,16 +978,16 @@ echo \$! >'${_P37_SPRAY_PID}'" >/dev/null 2>&1 || true
     _p37_ping6_ok || _issue="${_issue:+${_issue}; }LAN→WAN ping6 ${_P37_PING_DETAIL:-no response} after the drain"
 
     if [[ -z "$_issue" ]]; then
-        pass "Step 167: the GC drains the session table" \
+        pass "Step 168: the GC drains the session table" \
             "ipv6_firewall_entries_used down to ${_used} (< ${_P37_DRAIN_TARGET}), IPv6 still forwarding"
     else
-        fail "Step 167: the GC drains the session table" "$_issue"
+        fail "Step 168: the GC drains the session table" "$_issue"
     fi
 
     # ------------------------------------------------------------------
-    # Step 168 — put the bench back to the canonical IPv4 fixture
+    # Step 169 — put the bench back to the canonical IPv4 fixture
     # ------------------------------------------------------------------
-    info "Step 168: restoring the bench and rechecking the canonical fixture..."
+    info "Step 169: restoring the bench and rechecking the canonical fixture..."
     _issue=""
     # Guest first: switching IPv6 off there drops the SLAAC address and the RA
     # default route with it.
@@ -1013,10 +1013,10 @@ echo \$! >'${_P37_SPRAY_PID}'" >/dev/null 2>&1 || true
     fi
 
     if [[ -z "$_issue" ]]; then
-        pass "Step 168: fixture restored" \
+        pass "Step 169: fixture restored" \
             "IPv4-only sessions healthy for users ${SUB_IDS[*]}, ${WAN_IP} reachable, IPv6 state cleared"
     else
-        fail "Step 168: fixture restored" "$_issue"
+        fail "Step 169: fixture restored" "$_issue"
     fi
 
     return 0

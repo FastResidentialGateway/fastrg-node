@@ -89,6 +89,7 @@ STATUS parse_config(const char *config_path, FastRG_t *fastrg_ccb, struct fastrg
         return ERROR;
     }
     snprintf(fastrg_cfg->node_grpc_ip_port, sizeof(fastrg_cfg->node_grpc_ip_port), "0.0.0.0:%s", node_grpc_port);
+    fastrg_cfg->node_grpc_port = (U16)port_num;
 
     if (config_lookup_string(&cfg, "ControllerAddress", &controller_address) == CONFIG_FALSE)
         controller_address = "127.0.0.1:50051";

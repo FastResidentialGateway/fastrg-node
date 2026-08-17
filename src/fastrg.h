@@ -106,6 +106,8 @@ typedef struct FastRG {
     char                    *log_path;      /* FastRG log file path (pcap captures go in its dir) */
     char                    *unix_sock_path;/* FastRG unix socket file path */
     char                    *node_grpc_ip_port; /* FastRG node grpc ip:port */
+    U16                     node_grpc_port;    /* same port as a number, reported to the controller at
+                                                * registration so it dials what this node configured */
     int                     unix_sock_fd;   /* FastRG unix socket file descriptor */
     FILE                    *fp;            /* FastRG log file pointer */
     char                    *node_uuid;     /* FastRG node uuid */
