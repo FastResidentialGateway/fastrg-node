@@ -357,6 +357,12 @@ int metrics_build(lighthttp_buf_t *out, const char **content_type, void *arg)
     lighthttp_buf_appendf(out, "fastrg_node_max_user_count{node_uuid=\"%s\"} %u\n",
         uuid, fastrg_ccb->max_user_count);
 
+    emit_header(out, "fastrg_node_subscriber_cost_bytes", "gauge",
+        "Hugepage bytes one subscriber costs, measured at startup and averaged "
+        "over the capacity solved for.");
+    lighthttp_buf_appendf(out, "fastrg_node_subscriber_cost_bytes{node_uuid=\"%s\"} %" PRIu64 "\n",
+        uuid, fastrg_ccb->subscriber_cost_bytes);
+
     /* ---- NIC port counters ---- */
     static const struct nic_metric nic_metrics[] = {
         {"fastrg_node_rx_packets_total", "Total received packets per NIC port.", offsetof(struct rte_eth_stats, ipackets)},

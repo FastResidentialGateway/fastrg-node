@@ -23,6 +23,7 @@
 
 #include "header.h"
 #include "../fastrg.h"
+#include "../init.h"
 #include "../mac_table.h"
 
 struct nd6_table;
@@ -514,5 +515,20 @@ void pppd_cleanup_ccb(FastRG_t *fastrg_ccb);
  */
 #define PPPD_GET_CCB(fastrg_ccb_ptr, ccb_id) \
     ((ppp_ccb_t *)(fastrg_ccb_ptr)->ppp_ccb[(ccb_id)])
+
+/**
+ * @fn pppd_get_subscriber_real_size
+ *
+ * @brief Calculate per ccb memory usage, store per mempool size and directly 
+ *        allocated memory size info in out
+ *
+ * @param fastrg_ccb
+ *      FastRG control block
+ * @param out
+ *      [out] Size info, filled only on success
+ * @return
+ *      SUCCESS when the measurement completed and the heap was restored exactly
+ */
+STATUS pppd_get_subscriber_real_size(FastRG_t *fastrg_ccb, ccb_memory_info_t *out);
 
 #endif
