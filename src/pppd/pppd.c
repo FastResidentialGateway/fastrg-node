@@ -20,6 +20,8 @@
 #include <rte_atomic.h>
 #include <rte_trace.h>
 #include <rte_rcu_qsbr.h>
+#include <rte_malloc.h>
+#include <inttypes.h>
 
 #include "pppd.h"
 #include "nat.h"
@@ -364,6 +366,140 @@ err:
     return ERROR;
 }
 
+static STATUS pppd_create_checked_size_ccb(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb,
+    struct rte_rcu_qsbr *rcu)
+{
+    STATUS ret;
+
+    /* Lend the caller's QSBR to the element builders and put the field back;
+     * the real one does not exist yet at this point. */
+    struct rte_rcu_qsbr *saved_rcu = fastrg_ccb->ppp_ccb_rcu;
+
+    fastrg_ccb->ppp_ccb_rcu = rcu;
+    ret = pppd_construct_ccb_elements(fastrg_ccb, ppp_ccb, 0);
+    fastrg_ccb->ppp_ccb_rcu = saved_rcu;
+
+    return ret;
+}
+
+static void pppd_destroy_checked_size_ccb(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb)
+{
+    pppd_destroy_ccb_elements(fastrg_ccb, ppp_ccb);
+}
+
+/**
+ * @fn pppd_real_heap_free_bytes
+ *
+ * @brief Free bytes across every heap, read from the allocator itself.
+ *
+ * @return
+ *      Free bytes summed over all sockets
+ */
+static uint64_t pppd_real_heap_free_bytes(void)
+{
+    uint64_t free_bytes = 0;
+
+    for(int socket_id=0; socket_id<RTE_MAX_NUMA_NODES; socket_id++) {
+        struct rte_malloc_socket_stats stats;
+        if (rte_malloc_get_socket_stats(socket_id, &stats) == 0)
+            free_bytes += stats.heap_freesz_bytes;
+    }
+    return free_bytes;
+}
+
+/**
+ * @fn pppd_probe_element_bytes
+ *
+ * @brief Measure one subscriber's element cost by building one and tearing it
+ *        down.
+ *
+ * @param fastrg_ccb
+ *      FastRG control block
+ * @param probe_bytes
+ *      [out] Measured cost of one subscriber's elements
+ * @return
+ *      SUCCESS when the measurement completed and the heap was restored exactly
+ */
+static STATUS pppd_probe_element_bytes(FastRG_t *fastrg_ccb, uint64_t *probe_bytes)
+{
+    struct rte_rcu_qsbr *probe_rcu;
+    ppp_ccb_t *probe_ccb;
+    uint64_t before, after, restored;
+    size_t rcu_size = rte_rcu_qsbr_get_memsize(RTE_MAX_LCORE);
+    STATUS ret = ERROR;
+
+    /* Measuring apparatus, not subscriber cost: allocated before the snapshot,
+     * freed after it. */
+    probe_rcu = fastrg_calloc(struct rte_rcu_qsbr, 1, rcu_size, RTE_CACHE_LINE_SIZE);
+    if (probe_rcu == NULL) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG, "Capacity probe: cannot allocate QSBR");
+        return ERROR;
+    }
+    if (rte_rcu_qsbr_init(probe_rcu, RTE_MAX_LCORE) != 0) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG, "Capacity probe: QSBR init failed");
+        fastrg_mfree(probe_rcu);
+        return ERROR;
+    }
+    probe_ccb = fastrg_calloc(ppp_ccb_t, 1, sizeof(ppp_ccb_t), RTE_CACHE_LINE_SIZE);
+    if (probe_ccb == NULL) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG, "Capacity probe: cannot allocate probe ccb");
+        fastrg_mfree(probe_rcu);
+        return ERROR;
+    }
+
+    before = pppd_real_heap_free_bytes();
+    if (pppd_create_checked_size_ccb(fastrg_ccb, probe_ccb, probe_rcu) != SUCCESS) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG,
+            "Capacity probe: building one subscriber's elements failed");
+        goto out;
+    }
+    after = pppd_real_heap_free_bytes();
+    pppd_destroy_checked_size_ccb(fastrg_ccb, probe_ccb);
+    restored = pppd_real_heap_free_bytes();
+
+    if (after >= before) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG,
+            "Capacity probe: heap did not shrink while building a subscriber");
+        goto out;
+    }
+    FastRG_LOG(INFO, fastrg_ccb->fp, NULL, PPPLOGMSG,
+        "PROBEMEASURE before=%" PRIu64 " after=%" PRIu64 " restored=%" PRIu64
+        " delta=%" PRId64, before, after, restored, (int64_t)(restored - before));
+    /* Shortfall is a leak, surplus means the window was polluted; either way
+     * the measurement is invalid. */
+    if (restored != before) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG,
+            "Capacity probe: heap not restored, before=%" PRIu64 " restored=%" PRIu64
+            " delta=%" PRId64, before, restored, (int64_t)(restored - before));
+        goto out;
+    }
+
+    *probe_bytes = before - after;
+    ret = SUCCESS;
+
+out:
+    fastrg_mfree(probe_ccb);
+    fastrg_mfree(probe_rcu);
+    return ret;
+}
+
+STATUS pppd_get_subscriber_real_size(FastRG_t *fastrg_ccb, ccb_memory_info_t *out)
+{
+    uint64_t probe_bytes = 0;
+
+    if (out == NULL)
+        return ERROR;
+    if (pppd_probe_element_bytes(fastrg_ccb, &probe_bytes) != SUCCESS)
+        return ERROR;
+
+    memset(out, 0, sizeof(*out));
+    out->plain_bytes_per_sub = probe_bytes + sizeof(ppp_ccb_t *);
+    out->n_pools = 1;
+    out->pools[0].objs_per_sub = 1;
+    out->pools[0].elt_size = sizeof(ppp_ccb_t);
+    return SUCCESS;
+}
+
 STATUS ppp_init_config_by_user(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb, U16 ccb_id, U16 vlan_id, 
     const char *user_name, const char *password)
 {
@@ -583,9 +719,6 @@ void pppd_cleanup_ccb(FastRG_t *fastrg_ccb)
 
 STATUS pppd_init(FastRG_t *fastrg_ccb)
 {
-    // calculate mempool size as the next power of 2 greater than max_user_count
-    unsigned int mempool_size = 1U << (31 - __builtin_clz(fastrg_ccb->max_user_count) + 1);
-
     if (pppd_init_rcu(fastrg_ccb) == ERROR) {
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG, 
             "pppd_init_rcu failed");
@@ -594,7 +727,7 @@ STATUS pppd_init(FastRG_t *fastrg_ccb)
 
     fastrg_ccb->ppp_ccb_mp = rte_mempool_create(
         "ppp_ccb_pool",                      /* name */
-        mempool_size,                        /* user count */
+        fastrg_ccb->max_user_count,          /* user count */
         sizeof(ppp_ccb_t),                   /* ppp_ccb size */
         /* No per-lcore cache: every object is taken exactly once at init
          * below (fixed-max prealloc) and returned only at shutdown, so a

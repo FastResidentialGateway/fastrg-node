@@ -139,7 +139,7 @@ For hugepages, NIC binding and other system configuration, please refer to DPDK 
 
 1. Subscriber devices behind FastRG should use DHCP to get IP address or set the default gateway address to their end device.
 	- The DHCP ip address pool can be configured via control plane or FastRG CLI.
-2. FastRG automatically computes its maximum subscriber capacity from the free DPDK hugepage heap at startup. It reserves 512 MiB for packet capture and runtime allocations, then budgets **175 MiB per subscriber**.
+2. FastRG automatically computes its maximum subscriber capacity from the free DPDK hugepage heap at startup. It reserves 512 MiB for packet capture and runtime allocations, then **measures what a subscriber actually costs** and divides the rest by it. The measurement is printed in the startup log and exported as `fastrg_node_subscriber_cost_bytes` gauge.
 	- All subscriber resources are fully preallocated at startup, so increasing the hugepage allocation increases the computed capacity. Restart FastRG after changing the hugepage allocation.
 	- The resulting capacity is clamped to the supported range of 1–2000 subscribers and is exposed as the `fastrg_node_max_user_count` metric.
 3. In data plane, all packets received at FastRG system should include a single tag vlan.

@@ -108,6 +108,7 @@ typedef struct FastRG {
     char                    *node_grpc_ip_port; /* FastRG node grpc ip:port */
     U16                     node_grpc_port;    /* same port as a number, reported to the controller at
                                                 * registration so it dials what this node configured */
+    U64                     subscriber_cost_bytes; /* measured hugepage cost of one subscriber */
     int                     unix_sock_fd;   /* FastRG unix socket file descriptor */
     FILE                    *fp;            /* FastRG log file pointer */
     char                    *node_uuid;     /* FastRG node uuid */
