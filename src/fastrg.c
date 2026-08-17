@@ -730,6 +730,7 @@ int fastrg_start(int argc, char **argv)
     fastrg_ccb.log_path = strdup(fastrg_cfg.log_path);
     fastrg_ccb.unix_sock_path = strdup(fastrg_cfg.unix_sock_path);
     fastrg_ccb.node_grpc_ip_port = strdup(fastrg_cfg.node_grpc_ip_port);
+    fastrg_ccb.node_grpc_port = fastrg_cfg.node_grpc_port;
     fastrg_ccb.controller_address = strdup(fastrg_cfg.controller_address);
     fastrg_ccb.etcd_endpoints = strdup(fastrg_cfg.etcd_endpoints);
     fastrg_ccb.kafka_brokers = strdup(fastrg_cfg.kafka_brokers);

@@ -101,7 +101,8 @@ int controller_register_this_node(FastRG_t *fastrg_ccb)
         fastrg_ccb->node_uuid,
         (const char *)ip_addr,
         fastrg_ccb->version,
-        fastrg_ccb->central_office_location
+        fastrg_ccb->central_office_location,
+        fastrg_ccb->node_grpc_port
     );
 
     if (status == CONTROLLER_SUCCESS) {

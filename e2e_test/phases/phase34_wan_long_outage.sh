@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # ---------------------------------------------------------------------------
-# Phase 34 — WAN outage long enough to tear PPPoE down (Steps 137-139)
+# Phase 34 — WAN outage long enough to tear PPPoE down (Steps 138-140)
 #
 # The node arms a ten-second timer when the WAN link drops and tears every
 # PPPoE session down if the link is still gone when it fires. Phase 27 keeps
@@ -187,7 +187,7 @@ _cleanup_phase34_wan_long_outage() {
 
 phase34_wan_long_outage() {
     bold "═══════════════════════════════════════════════════════"
-    bold " Phase 34 — WAN Long Outage / PPPoE Teardown (Steps 137-139)"
+    bold " Phase 34 — WAN Long Outage / PPPoE Teardown (Steps 138-140)"
     bold "═══════════════════════════════════════════════════════"
 
     local _step137_ok=1 _step138_ok=1 _step139_ok=1
@@ -202,7 +202,7 @@ phase34_wan_long_outage() {
         awk -F'"' '{print $2}' || true)
     [[ -n "$_P34_LOG_PATH" ]] || _P34_LOG_PATH=/var/log/fastrg/fastrg.log
 
-    # Step 137 — the outage must take the sessions down.
+    # Step 138 — the outage must take the sessions down.
     _body=$(e2e_metrics_body || true)
     _wan_flap_base=$(_p34_link_value "$_body" fastrg_nic_link_flaps_total 1)
     _lan_flap_base=$(_p34_link_value "$_body" fastrg_nic_link_flaps_total 0)
@@ -234,7 +234,7 @@ phase34_wan_long_outage() {
             _issue137="${_issue137:+${_issue137}; }port 1 did not report link_up=0/speed=0 within 7s (up='${_P34_OBS_UP}' speed='${_P34_OBS_SPEED}')"
         fi
 
-        info "Step 137: holding the WAN link down for ${_P34_OUTAGE_SEC}s to clear the node's teardown timer..."
+        info "Step 138: holding the WAN link down for ${_P34_OUTAGE_SEC}s to clear the node's teardown timer..."
         while (( SECONDS - _down_at < _P34_OUTAGE_SEC )); do
             sleep 1
         done
@@ -255,13 +255,13 @@ phase34_wan_long_outage() {
     fi
 
     if [[ $_step137_ok -eq 1 ]]; then
-        pass "Step 137: WAN outage past the teardown timer" \
+        pass "Step 138: WAN outage past the teardown timer" \
             "${_P34_OUTAGE_SEC}s outage; every subscriber logged a forced PPPoE termination and left Data phase (${_left})"
     else
-        fail "Step 137: WAN outage past the teardown timer" "$_issue137"
+        fail "Step 138: WAN outage past the teardown timer" "$_issue137"
     fi
 
-    # Step 138 — the node has to dial back by itself once the link returns.
+    # Step 139 — the node has to dial back by itself once the link returns.
     if [[ $_step137_ok -eq 0 ]]; then
         _step138_ok=0
         _issue138="teardown prerequisite failed"
@@ -275,7 +275,7 @@ phase34_wan_long_outage() {
             _issue138="port 1 came back at ${_P34_OBS_SPEED} Mbps, expected ${_P34_LINK_SPEED_MBPS}"
         fi
 
-        info "Step 138: waiting up to ${_P34_RECOVERY_BUDGET_SEC}s for the node to redial on its own..."
+        info "Step 139: waiting up to ${_P34_RECOVERY_BUDGET_SEC}s for the node to redial on its own..."
         _down_at=$SECONDS
         for _i in $(seq 1 "$_P34_RECOVERY_BUDGET_SEC"); do
             _left=$(_p34_users_not_in_data_phase)
@@ -301,13 +301,13 @@ phase34_wan_long_outage() {
     fi
 
     if [[ $_step138_ok -eq 1 ]]; then
-        pass "Step 138: subscribers redial themselves after the outage" \
+        pass "Step 139: subscribers redial themselves after the outage" \
             "users ${SUB_IDS[*]} back in Data phase ${_elapsed}s after the link returned, with no dial from the test"
     else
-        fail "Step 138: subscribers redial themselves after the outage" "$_issue138"
+        fail "Step 139: subscribers redial themselves after the outage" "$_issue138"
     fi
 
-    # Step 139 — data plane back, and the outage confined to the WAN port.
+    # Step 140 — data plane back, and the outage confined to the WAN port.
     if [[ $_step138_ok -eq 0 ]]; then
         _step139_ok=0
         _issue139="redial prerequisite failed"
@@ -352,10 +352,10 @@ phase34_wan_long_outage() {
     fi
 
     if [[ $_step139_ok -eq 1 ]]; then
-        pass "Step 139: data plane and fixture after the outage" \
+        pass "Step 140: data plane and fixture after the outage" \
             "${WAN_IP} reachable with 0% packet loss; port 1 flap +${_wan_delta}, port 0 unchanged; count=2, HSI keys=1,2"
     else
-        fail "Step 139: data plane and fixture after the outage" "$_issue139"
+        fail "Step 140: data plane and fixture after the outage" "$_issue139"
     fi
 
     _cleanup_phase34_wan_long_outage || true
