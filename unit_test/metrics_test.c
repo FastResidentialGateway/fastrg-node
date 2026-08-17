@@ -209,6 +209,26 @@ static void test_max_user_count_gauge(FastRG_t *fastrg_ccb)
     lighthttp_buf_free(&out);
 }
 
+static void test_subscriber_cost_gauge(FastRG_t *fastrg_ccb)
+{
+    lighthttp_buf_t out = {0};
+    const char *content_type = NULL;
+    char *saved_uuid = fastrg_ccb->node_uuid;
+    U64 saved_cost = fastrg_ccb->subscriber_cost_bytes;
+
+    fastrg_ccb->node_uuid = NULL;
+    fastrg_ccb->subscriber_cost_bytes = 123456789;
+    metrics_build(&out, &content_type, fastrg_ccb);
+    TEST_ASSERT(strstr(out.data, "# TYPE fastrg_node_subscriber_cost_bytes gauge\n") != NULL,
+        "subscriber cost gauge family is declared", "missing TYPE line");
+    TEST_ASSERT(strstr(out.data, "fastrg_node_subscriber_cost_bytes{node_uuid=\"\"} 123456789\n") != NULL,
+        "subscriber cost gauge exposes the measured cost", "sample missing or wrong value");
+
+    fastrg_ccb->subscriber_cost_bytes = saved_cost;
+    fastrg_ccb->node_uuid = saved_uuid;
+    lighthttp_buf_free(&out);
+}
+
 static void test_per_user_stats(FastRG_t *fastrg_ccb)
 {
     unsigned int lcore_id = rte_get_main_lcore();
@@ -367,6 +387,7 @@ void test_metrics(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_per_user_stats(fastrg_ccb);
     test_snapshot_persist_gauge(fastrg_ccb);
     test_max_user_count_gauge(fastrg_ccb);
+    test_subscriber_cost_gauge(fastrg_ccb);
     test_lcore_traffic_stats(fastrg_ccb);
 
     fastrg_ccb->node_uuid = saved_uuid;

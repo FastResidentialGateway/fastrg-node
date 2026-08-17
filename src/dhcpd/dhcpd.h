@@ -14,6 +14,7 @@
 
 #include "../protocol.h"
 #include "../fastrg.h"
+#include "../init.h"
 #include "../dnsd/dnsd.h"
 
 #define DHCP_CMD_DISABLE 0
@@ -188,5 +189,16 @@ void release_lan_user(struct rte_timer *tim,
  */
 #define DHCPD_GET_CCB(fastrg_ccb_ptr, ccb_id) \
     ((dhcp_ccb_t *)(fastrg_ccb_ptr)->dhcp_ccb[(ccb_id)])
+
+/**
+ * @fn dhcp_get_subscriber_real_size
+ *
+ * @brief Calculate per ccb memory usage, store per mempool size and directly 
+ *        allocated memory size info in out
+ *
+ * @param out
+ *      [out] Size info
+ */
+void dhcp_get_subscriber_real_size(ccb_memory_info_t *out);
 
 #endif

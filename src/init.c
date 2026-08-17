@@ -10,6 +10,7 @@
 #include <common.h>
 
 #include <rte_ring.h>
+#include <rte_mempool.h>
 #include <rte_errno.h>
 #include <rte_mbuf.h>
 #include <rte_byteorder.h>
@@ -20,6 +21,7 @@
 
 #include "pppd/pppd.h"
 #include "dhcpd/dhcp_codec.h"
+#include "dhcpd/dhcpd.h"
 #include "dp.h"
 #include "init.h"
 #include "fastrg.h"
@@ -37,10 +39,9 @@
 #define RING_SIZE 		16384
 #define ETCD_EVENT_RING_SIZE 4096
 
-/* Keep headroom for the pdump capture pool and miscellaneous runtime rte_malloc calls. */
+/* Headroom for the pdump pool, runtime rte_malloc calls, and the small metadata
+ * the capacity measurement does not itemise. */
 #define HUGEPAGE_RESERVE_BYTES (512ULL * 1024ULL * 1024ULL)
-/* README documents the measured 150-175 MiB range; use the conservative endpoint. */
-#define HUGEPAGE_BYTES_PER_SUBSCRIBER (175ULL * 1024ULL * 1024ULL)
 
 /* Persisted restart counter for crashloop detection (fastrg_node_restart_total). */
 #define RESTART_COUNT_DIR  "/var/lib/fastrg"
@@ -51,10 +52,16 @@ struct rte_mempool *indirect_pool[PORT_AMOUNT];
 
 #ifdef UNIT_TEST
 static uint64_t test_hugepage_free_bytes;
+static uint64_t test_subscriber_cost_bytes;
 
 void fastrg_set_hugepage_free_bytes_for_test(uint64_t free_bytes)
 {
     test_hugepage_free_bytes = free_bytes;
+}
+
+void fastrg_set_subscriber_cost_for_test(uint64_t cost_bytes)
+{
+    test_subscriber_cost_bytes = cost_bytes;
 }
 
 static int fastrg_get_socket_stats(int socket_id, struct rte_malloc_socket_stats *stats)
@@ -74,16 +81,141 @@ static int fastrg_get_socket_stats(int socket_id, struct rte_malloc_socket_stats
 #endif
 
 /**
- * @fn fastrg_compute_max_user_count
- * @brief Compute subscriber capacity from the hugepage heap remaining after
- *        fixed startup allocations.
+ * @fn fastrg_get_system_page_size_for_mempool
  *
- * @param fastrg_ccb
- *      FastRG control block
+ * @brief Page size the pools are carved from, queried once via a throwaway
+ *        empty pool and cached.
+ *
+ * @param page_size
+ *      [out] Page size in bytes
+ * @return
+ *      SUCCESS when the page size was determined
  */
-void fastrg_compute_max_user_count(FastRG_t *fastrg_ccb)
+static STATUS fastrg_get_system_page_size_for_mempool(size_t *page_size)
+{
+    static size_t cached_page_size;
+    static BOOL cached;
+    struct rte_mempool *mp;
+    STATUS ret = ERROR;
+
+    if (cached) {
+        *page_size = cached_page_size;
+        return SUCCESS;
+    }
+
+    /* flags=0 matches how the real pools are created, which is what decides
+     * whether objects have to be page-bound at all. */
+    mp = rte_mempool_create_empty("fastrg_pgsz_probe", 1, 64, 0, 0,
+        (int)rte_socket_id(), 0);
+    if (mp == NULL)
+        return ERROR;
+    if (rte_mempool_set_ops_byname(mp, "ring_mp_mc", NULL) == 0 &&
+            rte_mempool_get_page_size(mp, &cached_page_size) == 0) {
+        cached = TRUE;
+        *page_size = cached_page_size;
+        ret = SUCCESS;
+    }
+    rte_mempool_free(mp);
+
+    return ret;
+}
+
+/**
+ * @fn fastrg_get_real_mempool_elt_size_in_hugepage
+ *
+ * @brief One object's footprint inside a pool: the object plus the header and
+ *        trailer the pool wraps it in.
+ *
+ * @param elt_size
+ *      Size of one object as handed to rte_mempool_create
+ * @return
+ *      Bytes one object occupies
+ */
+static uint64_t fastrg_get_real_mempool_elt_size_in_hugepage(uint32_t elt_size)
+{
+    struct rte_mempool_objsz sz;
+
+    rte_mempool_calc_obj_size(elt_size, 0, &sz);
+    return sz.total_size;
+}
+
+STATUS fastrg_get_mempool_span_bytes(uint32_t elt_size, uint32_t objs, uint64_t *span)
+{
+    uint64_t total_elt = fastrg_get_real_mempool_elt_size_in_hugepage(elt_size);
+    uint64_t objs_per_page;
+    size_t page_size;
+
+    if (objs == 0 || total_elt == 0) {
+        *span = 0;
+        return SUCCESS;
+    }
+    if (fastrg_get_system_page_size_for_mempool(&page_size) != SUCCESS)
+        return ERROR;
+    if (page_size == 0) {
+        *span = total_elt * objs;   /* no pages to straddle */
+        return SUCCESS;
+    }
+
+    /* Per-object upper bound of rte_mempool_op_calc_mem_size_helper()
+     * (rte_mempool_ops_default.c); the per-pool constant part lives in
+     * fastrg_get_mempool_fixed_usage_bytes(). */
+    objs_per_page = (uint64_t)page_size / total_elt;
+    if (objs_per_page == 0) {
+        /* Object larger than a page: it gets whole pages to itself. */
+        uint64_t pages_per_obj = (total_elt + page_size - 1) / page_size;
+
+        *span = pages_per_obj * page_size * objs;
+        return SUCCESS;
+    }
+    /* Objects from all subscribers pack into shared pages: each one carries
+     * page_size / objs_per_page, never a whole page. */
+    *span = ((uint64_t)objs * page_size + objs_per_page - 1) / objs_per_page;
+    return SUCCESS;
+}
+
+uint64_t fastrg_get_mempool_fixed_usage_bytes(uint32_t elt_size)
+{
+    uint64_t total_elt = fastrg_get_real_mempool_elt_size_in_hugepage(elt_size);
+
+    /* Chunk alignment slack plus the smallest ring: bounded, charged once per
+     * pool. */
+    return (total_elt > 0 ? total_elt - 1 : 0) +
+        rte_ring_get_memsize(1) + 16ULL;
+}
+
+/**
+ * @fn fastrg_get_subscriber_capacity
+ *
+ * @brief Subscriber count that fits: (free - overhead) / cost, clamped to
+ *        [MIN_USER_COUNT, MAX_USER_COUNT].
+ *
+ * @param free_bytes
+ *      Free hugepage heap
+ * @param overhead
+ *      Bytes reserved before any subscriber is charged
+ * @param cost
+ *      Bytes one subscriber costs
+ * @return
+ *      Subscriber count
+ */
+static uint64_t fastrg_get_subscriber_capacity(uint64_t free_bytes, uint64_t overhead,
+    uint64_t cost)
+{
+    uint64_t budget = free_bytes > overhead ? free_bytes - overhead : 0;
+    uint64_t n = cost > 0 ? budget / cost : 0;
+
+    if (n < MIN_USER_COUNT)
+        n = MIN_USER_COUNT;
+    else if (n > MAX_USER_COUNT)
+        n = MAX_USER_COUNT;
+    return n;
+}
+
+STATUS fastrg_compute_max_user_count(FastRG_t *fastrg_ccb)
 {
     uint64_t free_bytes = 0;
+    uint64_t stats_per_sub = 0;
+    unsigned int lcore_id;
 
     for(int socket_id=0; socket_id<RTE_MAX_NUMA_NODES; socket_id++) {
         struct rte_malloc_socket_stats stats;
@@ -91,18 +223,74 @@ void fastrg_compute_max_user_count(FastRG_t *fastrg_ccb)
             free_bytes += stats.heap_freesz_bytes;
     }
 
-    uint64_t subscriber_budget = free_bytes > HUGEPAGE_RESERVE_BYTES ?
-        free_bytes - HUGEPAGE_RESERVE_BYTES : 0;
-    uint64_t computed = subscriber_budget / HUGEPAGE_BYTES_PER_SUBSCRIBER;
-    if (computed < MIN_USER_COUNT)
-        computed = MIN_USER_COUNT;
-    else if (computed > MAX_USER_COUNT)
-        computed = MAX_USER_COUNT;
+#ifdef UNIT_TEST
+    if (test_subscriber_cost_bytes != 0) {
+        /* Injected cost replaces the measured inputs; the solve below is the
+         * shared production one. */
+        fastrg_ccb->max_user_count = (U16)fastrg_get_subscriber_capacity(free_bytes,
+            HUGEPAGE_RESERVE_BYTES, test_subscriber_cost_bytes);
+        fastrg_ccb->subscriber_cost_bytes = test_subscriber_cost_bytes;
+        return SUCCESS;
+    }
+#endif
 
-    fastrg_ccb->max_user_count = (U16)computed;
+    ccb_memory_info_t ppp_size_info = {0}, dhcp_size_info = {0};
+
+    if (pppd_get_subscriber_real_size(fastrg_ccb, &ppp_size_info) != SUCCESS)
+        return ERROR;
+    dhcp_get_subscriber_real_size(&dhcp_size_info);
+
+    /* init.c's own per-subscriber rows: one stats row per lcore per port, plus
+     * one PPPoE row per lcore. */
+    /* The +1 unknown-user slot in each row is charged to the reserve. */
+    RTE_LCORE_FOREACH(lcore_id) {
+        stats_per_sub += (uint64_t)PORT_AMOUNT * sizeof(struct per_ccb_stats);
+        stats_per_sub += sizeof(struct pppoes_lcore_stats);
+    }
+
+    /* Plain size: the figure a reader can check against the structure
+     * definitions. */
+    const ccb_memory_info_t *size_infos[] = { &ppp_size_info, &dhcp_size_info };
+    uint64_t plain_bytes = stats_per_sub;
+    uint64_t cost = stats_per_sub;
+    uint64_t fixed = 0;
+
+    for(unsigned i=0; i<sizeof(size_infos)/sizeof(size_infos[0]); i++) {
+        const ccb_memory_info_t *info = size_infos[i];
+
+        plain_bytes += info->plain_bytes_per_sub;
+        cost += info->plain_bytes_per_sub;
+        for(int j=0; j<info->n_pools; j++) {
+            uint32_t objs = info->pools[j].objs_per_sub;
+            uint32_t elt = info->pools[j].elt_size;
+            uint64_t span;
+
+            plain_bytes += (uint64_t)objs * elt;
+            if (fastrg_get_mempool_span_bytes(elt, objs, &span) != SUCCESS) {
+                FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+                    "Subscriber capacity: cannot determine mempool page size");
+                return ERROR;
+            }
+            /* 16 bytes per object covers the worst-case ring slot: 8 bytes,
+             * rounded up to a power-of-two slot count. */
+            cost += span + 16ULL * objs;
+            fixed += fastrg_get_mempool_fixed_usage_bytes(elt);
+        }
+    }
+
+    uint64_t n = fastrg_get_subscriber_capacity(free_bytes,
+        HUGEPAGE_RESERVE_BYTES + fixed, cost);
+
+    fastrg_ccb->max_user_count = (U16)n;
+    fastrg_ccb->subscriber_cost_bytes = cost;
     FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
-        "Subscriber capacity: free bytes=%" PRIu64 ", per-sub cost=%" PRIu64 ", computed max=%u",
-        free_bytes, HUGEPAGE_BYTES_PER_SUBSCRIBER, fastrg_ccb->max_user_count);
+        "Subscriber capacity: free=%" PRIu64 " reserve=%" PRIu64
+        " ccb plain=%" PRIu64 " page+ring correction=%" PRIu64
+        " cost/sub=%" PRIu64 " fixed=%" PRIu64 " computed max=%u",
+        free_bytes, HUGEPAGE_RESERVE_BYTES,
+        plain_bytes, cost - plain_bytes, cost, fixed, fastrg_ccb->max_user_count);
+
+    return SUCCESS;
 }
 
 struct nic_info vendor[] = {
@@ -499,7 +687,11 @@ STATUS sys_init(FastRG_t *fastrg_ccb, struct fastrg_config *fastrg_cfg)
     if (ret != 0)
         goto err;
 
-    fastrg_compute_max_user_count(fastrg_ccb);
+    if (fastrg_compute_max_user_count(fastrg_ccb) != SUCCESS) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+            "Cannot determine subscriber capacity");
+        goto err;
+    }
 
     /* Seed Prometheus observability state now that NIC ports are up. */
     init_node_runtime_state(fastrg_ccb);
