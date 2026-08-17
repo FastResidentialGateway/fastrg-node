@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # ---------------------------------------------------------------------------
-# Phase 36 — IPv4 NAT near capacity (Steps 150-153)
+# Phase 36 — IPv4 NAT near capacity (Steps 151-154)
 #
 # The rest of the suite proves NAT works with a handful of flows. This phase
 # asks what it does with the table nearly full: a LAN-side sprayer holds about
@@ -148,13 +148,13 @@ phase36_nat_capacity() {
     local _bps=0 _floor=0 _spray_ready=0 _spray_log=""
 
     bold "═══════════════════════════════════════════════════════"
-    bold " Phase 36 — IPv4 NAT Near Capacity (Steps 150-153)"
+    bold " Phase 36 — IPv4 NAT Near Capacity (Steps 151-154)"
     bold "═══════════════════════════════════════════════════════"
 
     # ------------------------------------------------------------------
-    # Step 150 — idle baseline the later throughput check is measured against
+    # Step 151 — idle baseline the later throughput check is measured against
     # ------------------------------------------------------------------
-    info "Step 150: measuring the idle NAT baseline..."
+    info "Step 151: measuring the idle NAT baseline..."
     _issue=""
     _used_before=$(_p36_nat_used)
     _alloc_before=$(_p36_nat_alloc_fail)
@@ -171,16 +171,16 @@ phase36_nat_capacity() {
         _issue="${_issue:+${_issue}; }no baseline throughput (${_P36_IPERF_ERR:-unknown})"
 
     if [[ -z "$_issue" ]]; then
-        pass "Step 150: NAT capacity baseline" \
+        pass "Step 151: NAT capacity baseline" \
             "idle pool ${_used_before} entries, ping 0% loss, baseline $(_p36_mbps "$_P36_BASE_BPS") Mbps"
     else
-        fail "Step 150: NAT capacity baseline" "$_issue"
+        fail "Step 151: NAT capacity baseline" "$_issue"
     fi
 
     # ------------------------------------------------------------------
-    # Step 151 — fill the pool to about 90% and keep it there
+    # Step 152 — fill the pool to about 90% and keep it there
     # ------------------------------------------------------------------
-    info "Step 151: filling the NAT pool with ~236000 UDP flows..."
+    info "Step 152: filling the NAT pool with ~236000 UDP flows..."
     _issue=""
     ssh_lan "rm -f '${_P36_SPRAY_PID}' '${_P36_SPRAY_OUT}';
 nohup python3 -u - '${WAN_IP}' '${_P36_SRC_BASE}' '${_P36_SRC_COUNT}' '${_P36_DST_BASE}' '${_P36_DST_COUNT}' '${_P36_SWEEP_SEC}' \
@@ -241,20 +241,20 @@ echo \$! >'${_P36_SPRAY_PID}'" >/dev/null 2>&1 || true
     _alloc_after=$(_p36_nat_alloc_fail)
 
     if [[ $_ok -eq 1 && -z "$_issue" ]]; then
-        pass "Step 151: NAT pool filled to near capacity" \
+        pass "Step 152: NAT pool filled to near capacity" \
             "nat_entries_used=${_used} (target ≥ ${_P36_FILL_TARGET}); alloc_fail ${_alloc_before}→${_alloc_after}"
     else
         _spray_log=$(ssh_lan "tail -n 3 '${_P36_SPRAY_OUT}' 2>/dev/null" 2>/dev/null | tr '\n' ' ' | cut -c 1-300 || true)
-        fail "Step 151: NAT pool filled to near capacity" \
+        fail "Step 152: NAT pool filled to near capacity" \
             "${_issue:+${_issue}; }nat_entries_used='${_used:-missing}' target=${_P36_FILL_TARGET}; alloc_fail='${_alloc_after:-missing}'; sprayer: ${_spray_log:-no output}"
     fi
 
     # ------------------------------------------------------------------
-    # Step 152 — throughput and new-flow setup while the pool stays full
+    # Step 153 — throughput and new-flow setup while the pool stays full
     # ------------------------------------------------------------------
     # No tcpdump anywhere in this step: capturing on the LAN host is known to
     # add packet loss on this bench and would be measured as degradation.
-    info "Step 152: measuring throughput while the pool stays near capacity..."
+    info "Step 153: measuring throughput while the pool stays near capacity..."
     _issue=""
     # A ping needs a fresh ICMP mapping, so this also shows new flows can still
     # be learned with the pool nearly full.
@@ -270,17 +270,17 @@ echo \$! >'${_P36_SPRAY_PID}'" >/dev/null 2>&1 || true
     _used=$(_p36_nat_used)
 
     if [[ -z "$_issue" ]]; then
-        pass "Step 152: throughput holds up near capacity" \
+        pass "Step 153: throughput holds up near capacity" \
             "$(_p36_mbps "$_bps") Mbps of $(_p36_mbps "$_P36_BASE_BPS") Mbps baseline with ${_used} live mappings, ping 0% loss"
     else
-        fail "Step 152: throughput holds up near capacity" \
+        fail "Step 153: throughput holds up near capacity" \
             "${_issue}; nat_entries_used='${_used:-missing}'"
     fi
 
     # ------------------------------------------------------------------
-    # Step 153 — stop the sprayer and watch the GC drain the pool
+    # Step 154 — stop the sprayer and watch the GC drain the pool
     # ------------------------------------------------------------------
-    info "Step 153: stopping the sprayer and waiting for the pool to drain..."
+    info "Step 154: stopping the sprayer and waiting for the pool to drain..."
     _issue=""
     _p36_stop_remote ssh_lan "$_P36_SPRAY_PID" "Phase 36 NAT sprayer" || \
         _issue="sprayer did not stop"
@@ -300,10 +300,10 @@ echo \$! >'${_P36_SPRAY_PID}'" >/dev/null 2>&1 || true
     _p36_ping_ok || _issue="${_issue:+${_issue}; }LAN→WAN ping ${_P36_PING_DETAIL:-no response} after the drain"
 
     if [[ -z "$_issue" ]]; then
-        pass "Step 153: the GC drains the pool" \
+        pass "Step 154: the GC drains the pool" \
             "nat_entries_used down to ${_used} (< ${_P36_DRAIN_TARGET}), ${WAN_IP} still reachable"
     else
-        fail "Step 153: the GC drains the pool" "$_issue"
+        fail "Step 154: the GC drains the pool" "$_issue"
     fi
 
     _cleanup_phase36_nat_capacity
