@@ -57,6 +57,40 @@ _P37_LISTENER_RECV=/tmp/e2e_fw6_listener.recv
 _P37_SPRAY_PID=/tmp/e2e_fw6_spray.pid
 _P37_SPRAY_OUT=/tmp/e2e_fw6_spray.out
 
+# Drill: point the capture at an interface the traffic never crosses. tcpdump
+# still starts and still reports silence, so only the positive controls in
+# Steps 158/159 can tell this apart from a firewall that really dropped
+# everything.
+_p37_inject_capture_wrong_interface() {
+    _P37_LAN_VLAN=lo
+}
+
+_p37_cleanup_capture_wrong_interface() {
+    restore_phase_functions phase37_ipv6_firewall.sh
+}
+
+case_validation_register fw6_capture_wrong_interface phase37_ipv6_firewall \
+    _p37_inject_capture_wrong_interface _p37_cleanup_capture_wrong_interface \
+    'Step 15[89]:'
+
+# Drill: let the capture start normally, then kill it inside the window. It
+# printed "listening on" before dying, so only the liveness check separates this
+# from a window that really was silent.
+_p37_inject_capture_dies() {
+    sabotage_override_function _p37_start_capture \
+        '_p37_start_capture_real "$@" || return 1
+         ssh_lan "kill -9 \$(cat '"'"'${_P37_CAP_PID}'"'"') 2>/dev/null || true" >/dev/null 2>&1
+         return 0'
+}
+
+_p37_cleanup_capture_dies() {
+    restore_phase_functions phase37_ipv6_firewall.sh
+}
+
+case_validation_register fw6_capture_dies phase37_ipv6_firewall \
+    _p37_inject_capture_dies _p37_cleanup_capture_dies \
+    'Step 15[89]:'
+
 # Values discovered at runtime.
 _P37_PD_PREFIX=""
 _P37_LAN6=""
@@ -101,6 +135,19 @@ _p37_redial() {
     done
     _P37_REDIAL_STAGE="${_P37_REDIAL_STAGE:+${_P37_REDIAL_STAGE}; }did not return to Data phase (last='${_phase:-missing}')"
     return 1
+}
+
+# Whether a recorded remote pid is still running. A collector that died partway
+# through the window leaves a short file that reads exactly like silence.
+_p37_remote_pid_alive() {
+    local _ssh_fn="$1" _pid_file="$2"
+
+    "$_ssh_fn" "if [ -s '${_pid_file}' ]; then
+            _pid=\$(cat '${_pid_file}' 2>/dev/null || true)
+            [ -n \"\$_pid\" ] && kill -0 \"\$_pid\" 2>/dev/null
+        else
+            false
+        fi" >/dev/null 2>&1
 }
 
 _p37_stop_remote() {
@@ -462,14 +509,25 @@ echo \$! >'${_P37_WAN_SRV_PID}'" >/dev/null 2>&1 || true
     # ------------------------------------------------------------------
     info "Step 158: unsolicited inbound ICMPv6 echo must be dropped..."
     _issue=""
-    if ! _p37_start_capture "'icmp6 and ip6[40] == 128'"; then
+    if ! _p37_start_capture "'icmp6'"; then
         _issue="tcpdump did not start on ${_P37_LAN_VLAN}; a silent capture proves nothing"
     fi
+    # Control, in this same capture: soliciting an unused link-local neighbour
+    # puts a packet on the segment that the node never sees, so it cannot
+    # perturb what is being tested while still proving the capture was awake.
+    ssh_lan "ping -6 -c 1 -W 1 -I ${_P37_LAN_VLAN} fe80::dead:beef >/dev/null 2>&1 || true" \
+        2>/dev/null || true
     _out=$(ssh_wan "ping -6 -c 4 -W 2 ${_P37_LAN6} 2>&1" || true)
     sleep 2
+    _p37_remote_pid_alive ssh_lan "$_P37_CAP_PID" || \
+        _issue="${_issue:+${_issue}; }tcpdump died mid-capture on ${_P37_LAN_VLAN}; the silent window proves nothing"
     _p37_stop_remote ssh_lan "$_P37_CAP_PID" "Phase 37 tcpdump" || \
         _issue="${_issue:+${_issue}; }tcpdump did not stop"
+    _control_count=$(_p37_capture_count 'neighbor solicitation')
     _cap_count=$(_p37_capture_count 'echo request')
+
+    [[ "$_control_count" =~ ^[1-9] ]] || \
+        _issue="${_issue:+${_issue}; }no neighbour solicitation in the capture (control='${_control_count:-missing}'); the capture saw nothing at all"
 
     printf '%s' "$_out" | grep -q '100% packet loss' || \
         _issue="${_issue:+${_issue}; }WAN host saw a reply ($(printf '%s' "$_out" | grep -oE '[0-9]+(\.[0-9]+)?% packet loss' | head -1 || true))"
@@ -488,9 +546,23 @@ echo \$! >'${_P37_WAN_SRV_PID}'" >/dev/null 2>&1 || true
     # ------------------------------------------------------------------
     info "Step 159: unsolicited inbound TCP SYN must be dropped..."
     _issue=""
-    if ! _p37_start_capture "'ip6 and tcp and port 22'"; then
+    if ! _p37_start_capture "'ip6 and tcp'"; then
         _issue="tcpdump did not start on ${_P37_LAN_VLAN}; a silent capture proves nothing"
     fi
+    # Control, in this same capture: a LAN-initiated SYN to an unrelated port.
+    # It opens state for that port only, so it cannot admit the inbound SYN
+    # under test, and every SYN in the window is accounted for below.
+    ssh_lan "python3 - '${_P37_WAN6_HOST_ADDR}' <<'PY' >/dev/null 2>&1 || true
+import socket
+import sys
+
+sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+sock.settimeout(2)
+try:
+    sock.connect((sys.argv[1], 9))
+except Exception:
+    pass
+PY" 2>/dev/null || true
     _out=$(ssh_wan "python3 - '${_P37_LAN6}' <<'PY' 2>&1
 import socket
 import sys
@@ -504,14 +576,21 @@ except Exception as exc:
     print('connect-fail:%s' % exc)
 PY" 2>&1 || true)
     sleep 1
+    _p37_remote_pid_alive ssh_lan "$_P37_CAP_PID" || \
+        _issue="${_issue:+${_issue}; }tcpdump died mid-capture on ${_P37_LAN_VLAN}; the silent window proves nothing"
     _p37_stop_remote ssh_lan "$_P37_CAP_PID" "Phase 37 tcpdump" || \
         _issue="${_issue:+${_issue}; }tcpdump did not stop"
+    _control_count=$(_p37_capture_count '\.9: Flags \[S\]')
     _cap_count=$(_p37_capture_count 'Flags \[S\]')
 
     printf '%s' "$_out" | grep -q 'connect-fail' || \
         _issue="${_issue:+${_issue}; }WAN host connected (${_out})"
-    [[ "$_cap_count" == "0" ]] || \
-        _issue="${_issue:+${_issue}; }${_cap_count} SYN(s) reached ${_P37_LAN_VLAN}"
+    [[ "$_control_count" =~ ^[1-9] ]] || \
+        _issue="${_issue:+${_issue}; }no control SYN in the capture (control='${_control_count:-missing}'); the capture saw nothing at all"
+    # Every SYN in the window must be one of the control SYNs; anything above
+    # that count is an inbound SYN that got through.
+    [[ "$_cap_count" == "$_control_count" ]] || \
+        _issue="${_issue:+${_issue}; }${_cap_count} SYN(s) on ${_P37_LAN_VLAN} but only ${_control_count} control SYN(s); an unsolicited SYN reached the LAN"
 
     if [[ -z "$_issue" ]]; then
         pass "Step 159: unsolicited inbound TCP SYN is dropped" \

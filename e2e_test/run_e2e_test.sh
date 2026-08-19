@@ -17,6 +17,13 @@
 #   --runner-host  IP     E2E runner host IP      (default: 192.168.10.207)
 #   --bras-host    IP     BRAS (dpdk-bras) host IP (default: 192.168.10.215)
 #   --ssh-key      PATH   SSH identity file       (default: auto-detect id_ed25519 or id_rsa)
+#   (no mode flag)        Run everything, in order: --local-validate,
+#                         --run-case, then --validate-case all.
+#   --run-case            E2e case correctness validation + the full suite (commit gate).
+#   --validate-case all   E2e case correctness validation + phase0 + every drill.
+#   --validate-case IDS   Same, limited to the comma-separated drill ids.
+#   --local-validate      Run the offline e2e case correctness validation and stop
+#                         (it already runs first in every other mode).
 #   --help                Show this help
 #
 # Requirements (local machine):
@@ -68,26 +75,80 @@ bold()  { printf "${BOLD}%s${NC}\n" "$*"; }
 # re-executes there.
 # Set _FASTRG_E2E_RELOCATED=1 to skip this check (set automatically on relay).
 # ---------------------------------------------------------------------------
-# Allow --runner-host to override the default before argument parsing runs.
-# We do a quick pre-scan of $@ here so the self-relocation block can use it.
+# ---------------------------------------------------------------------------
+# Every flag the suite accepts, listed once. The pre-check below and the parser
+# further down both read these; a flag added to the parser but not here is
+# rejected the first time anyone uses it.
+# ---------------------------------------------------------------------------
+_E2E_VALUE_FLAGS=(--fastrg-node --lan-host --wan-host --wan-ip --runner-host
+    --bras-host --sub-id --ssh-key --grpc-port --controller-rest
+    --controller-grpc --controller-user --controller-pass --validate-case)
+_E2E_BOOLEAN_FLAGS=(--help -h --run-case --local-validate)
+
+_e2e_flag_listed() {
+    local _needle="$1" _flag
+
+    shift
+    for _flag in "$@"; do
+        [[ "$_flag" == "$_needle" ]] && return 0
+    done
+    return 1
+}
+
+# Read-only pre-check, before anything is uploaded: unknown flag or a missing
+# value stops here instead of on the runner. It deliberately assigns nothing and
+# judges no combinations — that stays with the parser, so this cannot drift into
+# being a second one.
 _E2E_RUNNER_HOST="192.168.10.104"
-for _arg in "$@"; do
-    if [[ "$_arg" == --runner-host=* ]]; then
-        _E2E_RUNNER_HOST="${_arg#--runner-host=}"
+_E2E_LOCAL_VALIDATE=0
+_e2e_index=1
+while [[ $_e2e_index -le $# ]]; do
+    _e2e_arg="${!_e2e_index}"
+    if [[ "$_e2e_arg" == --runner-host=* ]]; then
+        _E2E_RUNNER_HOST="${_e2e_arg#--runner-host=}"
+        _e2e_index=$(( _e2e_index + 1 ))
+        continue
     fi
-done
-# Also support the two-token form: --runner-host <IP>
-_prev=""
-for _arg in "$@"; do
-    if [[ "$_prev" == "--runner-host" ]]; then
-        _E2E_RUNNER_HOST="$_arg"
+    [[ "$_e2e_arg" == "--local-validate" ]] && _E2E_LOCAL_VALIDATE=1
+    if _e2e_flag_listed "$_e2e_arg" "${_E2E_VALUE_FLAGS[@]}"; then
+        _e2e_next_index=$(( _e2e_index + 1 ))
+        _e2e_next="${!_e2e_next_index:-}"
+        if [[ -z "$_e2e_next" ]]; then
+            error "${_e2e_arg} needs a value — run with --help for usage"
+            exit 1
+        fi
+        [[ "$_e2e_arg" == "--runner-host" ]] && _E2E_RUNNER_HOST="$_e2e_next"
+        _e2e_index=$(( _e2e_index + 2 ))
+        continue
     fi
-    _prev="$_arg"
+    if ! _e2e_flag_listed "$_e2e_arg" "${_E2E_BOOLEAN_FLAGS[@]}"; then
+        error "Unknown option: ${_e2e_arg} — run with --help for usage"
+        exit 1
+    fi
+    _e2e_index=$(( _e2e_index + 1 ))
 done
-unset _prev _arg
+unset _e2e_index _e2e_arg _e2e_next_index _e2e_next
+
 _E2E_RUNNER_USER="root"
 _E2E_REMOTE_DIR='~/fastrg_e2e_test'
 _E2E_REMOTE_PATH="${_E2E_REMOTE_DIR}/run_e2e_test.sh"
+
+# Offline mode, so it is answered before the relocation block below.
+if [[ "$_E2E_LOCAL_VALIDATE" -eq 1 ]]; then
+    _E2E_PHASES_DIR="$(cd "$(dirname "$0")" && pwd)/phases"
+    # shellcheck source=/dev/null
+    source "${_E2E_PHASES_DIR}/local_validation_lib.sh"
+    source "${_E2E_PHASES_DIR}/case_validation_lib.sh"
+    for _registrar in "${_E2E_PHASES_DIR}"/*.sh; do
+        case "$_registrar" in
+            */local_validation_lib.sh|*/case_validation_lib.sh) continue ;;
+        esac
+        # shellcheck source=/dev/null
+        source "$_registrar"
+    done
+    local_validation_run || exit 1
+    exit 0
+fi
 
 if [[ -z "${_FASTRG_E2E_RELOCATED:-}" ]]; then
     # Collect local IPs — hostname -I on Linux, ifconfig on macOS
@@ -148,6 +209,8 @@ if [[ -z "${_FASTRG_E2E_RELOCATED:-}" ]]; then
             ssh $_SSH_OPTS "${_E2E_RUNNER_USER}@${_E2E_RUNNER_HOST}" \
                 "mkdir -p ${_E2E_REMOTE_DIR}/phases"
             scp $_SSH_OPTS "${_SCRIPT_DIR}/phases/"*.sh \
+                "${_E2E_RUNNER_USER}@${_E2E_RUNNER_HOST}:${_E2E_REMOTE_DIR}/phases/"
+            scp $_SSH_OPTS "${_SCRIPT_DIR}/phases/local_validation_fixtures.txt" \
                 "${_E2E_RUNNER_USER}@${_E2E_RUNNER_HOST}:${_E2E_REMOTE_DIR}/phases/"
         else
             warn "phases/ directory not found at ${_SCRIPT_DIR}/phases"
@@ -295,28 +358,50 @@ usage() {
     exit 0
 }
 
+RUN_CASE_MODE=0
+VALIDATE_CASE_MODE=0
+VALIDATE_CASE_IDS=""
+
+# Second layer behind the pre-check: that one stops a missing value before
+# anything is uploaded, this keeps the parser correct on its own.
+_need_value() {
+    [[ -n "$2" ]] || { error "$1 needs a value — run with --help for usage"; exit 1; }
+}
+
 while [[ $# -gt 0 ]]; do
+    # Flags here must also appear in the _E2E_*_FLAGS lists near the top; the
+    # pre-check rejects anything missing from those.
     case "$1" in
         --help|-h)       usage ;;
-        --fastrg-node)   FASTRG_NODE="$2"; shift 2 ;;
-        --lan-host)      LAN_HOST="$2";    shift 2 ;;
-        --wan-host)      WAN_HOST="$2";    shift 2 ;;
-        --wan-ip)        WAN_IP="$2";      shift 2 ;;
-        --runner-host)   _E2E_RUNNER_HOST="$2"; shift 2 ;;
-        --bras-host)     BRAS_HOST="$2";   shift 2 ;;
-        --sub-id)        SUB_ID_SPEC="$2"; shift 2 ;;
-        --ssh-key)       SSH_KEY="$2";     shift 2 ;;
-        --grpc-port)     FASTRG_GRPC_PORT="$2"; shift 2 ;;
-        --controller-rest) CONTROLLER_REST="$2"; shift 2 ;;
-        --controller-grpc) CONTROLLER_GRPC="$2"; shift 2 ;;
-        --controller-user) CONTROLLER_USER="$2"; shift 2 ;;
-        --controller-pass) CONTROLLER_PASS="$2"; shift 2 ;;
+        --fastrg-node)   _need_value "$1" "${2:-}"; FASTRG_NODE="$2";      shift 2 ;;
+        --lan-host)      _need_value "$1" "${2:-}"; LAN_HOST="$2";         shift 2 ;;
+        --wan-host)      _need_value "$1" "${2:-}"; WAN_HOST="$2";         shift 2 ;;
+        --wan-ip)        _need_value "$1" "${2:-}"; WAN_IP="$2";           shift 2 ;;
+        --runner-host)   _need_value "$1" "${2:-}"; _E2E_RUNNER_HOST="$2"; shift 2 ;;
+        --bras-host)     _need_value "$1" "${2:-}"; BRAS_HOST="$2";        shift 2 ;;
+        --sub-id)        _need_value "$1" "${2:-}"; SUB_ID_SPEC="$2";      shift 2 ;;
+        --ssh-key)       _need_value "$1" "${2:-}"; SSH_KEY="$2";          shift 2 ;;
+        --grpc-port)     _need_value "$1" "${2:-}"; FASTRG_GRPC_PORT="$2"; shift 2 ;;
+        --controller-rest) _need_value "$1" "${2:-}"; CONTROLLER_REST="$2"; shift 2 ;;
+        --controller-grpc) _need_value "$1" "${2:-}"; CONTROLLER_GRPC="$2"; shift 2 ;;
+        --controller-user) _need_value "$1" "${2:-}"; CONTROLLER_USER="$2"; shift 2 ;;
+        --controller-pass) _need_value "$1" "${2:-}"; CONTROLLER_PASS="$2"; shift 2 ;;
+        --run-case)      RUN_CASE_MODE=1; shift ;;
+        --local-validate) shift ;;
+        --validate-case)
+            _need_value "$1" "${2:-}"
+            VALIDATE_CASE_MODE=1; VALIDATE_CASE_IDS="$2"; shift 2 ;;
         -*)              error "Unknown option: $1"; exit 1 ;;
         *)
             error "Unexpected argument: $1 (subscriber IDs are now passed via --sub-id)"
             exit 1 ;;
     esac
 done
+
+if [[ "$RUN_CASE_MODE" -eq 1 && "$VALIDATE_CASE_MODE" -eq 1 ]]; then
+    error "--run-case and --validate-case are separate modes; run with no flag to get both"
+    exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # LAN-side topology. These are facts about the bench the suite runs on — not
@@ -514,6 +599,10 @@ _ctrl_desire_status() {
 # ---------------------------------------------------------------------------
 _E2E_PHASES_DIR="${GRPC_CLIENT_DIR}/phases"
 # shellcheck source=/dev/null
+# Registration APIs for both validation layers; must be sourced before anything
+# that registers a predicate or a sabotage entry.
+source "${_E2E_PHASES_DIR}/local_validation_lib.sh"
+source "${_E2E_PHASES_DIR}/case_validation_lib.sh"
 # Shared /metrics sampling helpers — not a phase; must be sourced first.
 source "${_E2E_PHASES_DIR}/metrics_lib.sh"
 source "${_E2E_PHASES_DIR}/phase0_setup.sh"
@@ -653,6 +742,20 @@ main() {
     info "Subscribers: ${SUB_IDS[*]} (primary=${USER_ID}, secondaries='${SUB_SECONDARY_IDS[*]:-none}')"
     printf "\n"
 
+    # A broken assertion cannot be told from a passing system, so the suite
+    # verifies its own predicates before it trusts any of them.
+    if ! local_validation_run; then
+        error "Local correctness validation failed — assertion logic is unreliable, aborting"
+        exit 1
+    fi
+
+    if [[ "$VALIDATE_CASE_MODE" -eq 1 ]]; then
+        phase0_setup
+        [[ "$VALIDATE_CASE_IDS" == "all" ]] && VALIDATE_CASE_IDS=""
+        case_validation_run "$VALIDATE_CASE_IDS"
+        exit $?
+    fi
+
     phase0_setup
     phase1_subscriber_count_tests
     phase2_etcd_config_sync
@@ -703,8 +806,16 @@ main() {
         _fails=$(printf '%s\n' "${STEP_RESULTS[@]}" | grep -cx 'FAIL' || true)
     fi
     if [[ "$_fails" -gt 0 ]]; then
+        # Drills deliberately break the system; running them on an already
+        # broken one produces failures nobody can attribute.
+        [[ "$RUN_CASE_MODE" -eq 1 ]] || printf 'VALIDATE SKIPPED: normal suite failed\n'
         exit 1
     fi
+    [[ "$RUN_CASE_MODE" -eq 1 ]] && exit 0
+
+    # No mode flag: the drills follow the clean suite, so a cleanup bug in one
+    # of them cannot leak backwards into the run that just passed.
+    case_validation_run "" || exit 1
     exit 0
 }
 
