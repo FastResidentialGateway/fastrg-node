@@ -12,8 +12,50 @@ _P20_LAN_LISTENER_PID=/tmp/e2e_nat_expiry_listener.pid
 _P20_LAN_LISTENER_OUT=/tmp/e2e_nat_expiry_listener.out
 _P20_LAN_LISTENER_READY=/tmp/e2e_nat_expiry_listener.ready
 _P20_LAN_LISTENER_RECV=/tmp/e2e_nat_expiry_listener.recv
+# Drill: point the WAN capture at an interface the flows never cross. tcpdump
+# still starts and still reports silence, so only Step 82's positive control
+# can tell this apart from NAT genuinely rejecting the inbound datagram.
+_P20_SAVED_WAN_NIC=""
+
+_p20_inject_capture_wrong_interface() {
+    _P20_SAVED_WAN_NIC="$WAN_NIC"
+    WAN_NIC=lo
+}
+
+_p20_cleanup_capture_wrong_interface() {
+    WAN_NIC="$_P20_SAVED_WAN_NIC"
+}
+
+case_validation_register nat_expiry_capture_wrong_interface phase20_nat_expiry \
+    _p20_inject_capture_wrong_interface _p20_cleanup_capture_wrong_interface \
+    'Step 82:'
+
+# Drill: empty the capture file just before the phase reads it, so the parsing
+# below works on a genuinely empty artifact. The file is named literally, so no
+# phase command can be steered somewhere it should not write.
+_p20_inject_capture_output_lost() {
+    sabotage_copy_function _p20_get_wan_capture _p20_get_wan_capture_real
+    sabotage_override_function _p20_get_wan_capture \
+        'ssh_wan "truncate -s 0 /tmp/e2e_nat_expiry_tcpdump.out" >/dev/null 2>&1 || true
+         _p20_get_wan_capture_real'
+}
+
+_p20_cleanup_capture_output_lost() {
+    restore_phase_functions phase20_nat_expiry.sh
+}
+
+case_validation_register nat_expiry_capture_output_lost phase20_nat_expiry \
+    _p20_inject_capture_output_lost _p20_cleanup_capture_output_lost \
+    'Step 82:'
+
 _P20_WAN_TCPDUMP_PID=/tmp/e2e_nat_expiry_tcpdump.pid
 _P20_WAN_TCPDUMP_OUT=/tmp/e2e_nat_expiry_tcpdump.out
+
+# The running capture's text. Separated from the parsing below so a drill can
+# break the artifact without touching how it is read.
+_p20_get_wan_capture() {
+    ssh_wan "cat '${_P20_WAN_TCPDUMP_OUT}' 2>/dev/null" || true
+}
 
 _p20_stop_remote_pid() {
     local _ssh_fn="$1"
@@ -47,9 +89,11 @@ _cleanup_phase20_nat_expiry() {
 
     ssh_lan "rm -f '${_P20_LAN_IPERF_PID}' '${_P20_LAN_IPERF_OUT}' \
         '${_P20_LAN_LISTENER_PID}' '${_P20_LAN_LISTENER_OUT}' \
-        '${_P20_LAN_LISTENER_READY}' '${_P20_LAN_LISTENER_RECV}'" >/dev/null 2>&1 || true
+        '${_P20_LAN_LISTENER_READY}' '${_P20_LAN_LISTENER_RECV}'" > /dev/null 2>&1 || true
+    # Literal paths: a destructive command must never read a variable a drill
+    # can point somewhere else.
     ssh_wan "rm -f '${_P20_WAN_IPERF_PID}' '${_P20_WAN_IPERF_OUT}' \
-        '${_P20_WAN_TCPDUMP_PID}' '${_P20_WAN_TCPDUMP_OUT}'" >/dev/null 2>&1 || true
+        '/tmp/e2e_nat_expiry_tcpdump.pid' '/tmp/e2e_nat_expiry_tcpdump.out'" > /dev/null 2>&1 || true
     return 0
 }
 
@@ -218,7 +262,8 @@ PY"; then
         _capture_ready=0
         _listener_ready=0
         _nat_port=""
-        ssh_wan "rm -f '${_P20_WAN_TCPDUMP_PID}' '${_P20_WAN_TCPDUMP_OUT}'; \
+        # Literal paths here too, for the same reason as the cleanup above.
+        ssh_wan "rm -f '/tmp/e2e_nat_expiry_tcpdump.pid' '/tmp/e2e_nat_expiry_tcpdump.out'; \
             nohup tcpdump -l -nn -i '${WAN_NIC}' -c 1 \
             'udp and src host ${_ppp_ip} and dst host ${WAN_IP} and dst port ${_remote_port}' \
             >'${_P20_WAN_TCPDUMP_OUT}' 2>&1 < /dev/null & echo \$! >'${_P20_WAN_TCPDUMP_PID}'" || true
@@ -282,7 +327,7 @@ echo \$! >'${_P20_LAN_LISTENER_PID}'" || true
         _ppp_ip_re=${_ppp_ip//./\\.}
         _wan_ip_re=${WAN_IP//./\\.}
         for _i in $(seq 1 12); do
-            _cap=$(ssh_wan "cat '${_P20_WAN_TCPDUMP_OUT}' 2>/dev/null" || true)
+            _cap=$(_p20_get_wan_capture)
             _nat_port=$(printf '%s\n' "$_cap" | sed -nE \
                 "s/.*${_ppp_ip_re}\.([0-9]+) > ${_wan_ip_re}\.${_remote_port}:.*/\\1/p" | head -1)
             [[ "$_nat_port" =~ ^[0-9]+$ ]] && break

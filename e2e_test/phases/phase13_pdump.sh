@@ -151,20 +151,29 @@ phase13_pdump() {
     bold "---"
     info "Step 50: pdump invalid filter expression → expect error..."
 
-    _P48_OUT=$(fastrg_grpc pdump_start 0 0 "(unclosed-paren-syntax-error" 2>&1 || true)
-    # Success means gRPC returned a non-empty pcap_file path.
-    # Any other outcome (gRPC error, connection failure, empty response) means
-    # the invalid filter was rejected — which is the expected behaviour.
-    _P48_FILE=$(printf '%s' "$_P48_OUT" | python3 -c \
+    # Control: a legal filter must open a session first. Without it, a dead
+    # control path returns no pcap_file for the invalid filter too, and the
+    # rejection below would read as a pass.
+    _P48_CONTROL_OUT=$(fastrg_grpc pdump_start 2 "${USER_ID}" "vlan and icmp" 2>&1 || true)
+    _P48_CONTROL_FILE=$(printf '%s' "$_P48_CONTROL_OUT" | python3 -c \
         "import sys,json; d=json.load(sys.stdin); print(d.get('pcap_file',''))" 2>/dev/null || true)
+    fastrg_grpc pdump_stop 2 "${USER_ID}" >/dev/null 2>&1 || true
 
-    if [[ -n "$_P48_FILE" ]]; then
-        # pdump_start actually succeeded and handed back a real pcap path — fail.
-        fastrg_grpc pdump_stop 0 0 >/dev/null 2>&1 || true
+    if [[ -z "$_P48_CONTROL_FILE" ]]; then
         fail "Step 50: pdump invalid filter rejected" \
-            "expected error but got pcap_file=${_P48_FILE}"
+            "pdump control path broken: a legal filter returned no pcap_file: $(printf '%s' "$_P48_CONTROL_OUT" | tr '\n' ' ' | cut -c 1-200)"
     else
-        pass "Step 50: pdump invalid filter rejected" \
-            "no pcap_file returned (filter correctly rejected or gRPC error)"
+        _P48_OUT=$(fastrg_grpc pdump_start 0 0 "(unclosed-paren-syntax-error" 2>&1 || true)
+        _P48_FILE=$(printf '%s' "$_P48_OUT" | python3 -c \
+            "import sys,json; d=json.load(sys.stdin); print(d.get('pcap_file',''))" 2>/dev/null || true)
+
+        if [[ -n "$_P48_FILE" ]]; then
+            fastrg_grpc pdump_stop 0 0 >/dev/null 2>&1 || true
+            fail "Step 50: pdump invalid filter rejected" \
+                "expected error but got pcap_file=${_P48_FILE}"
+        else
+            pass "Step 50: pdump invalid filter rejected" \
+                "a legal filter opened a session in this step; the invalid one returned no pcap_file"
+        fi
     fi
 }
