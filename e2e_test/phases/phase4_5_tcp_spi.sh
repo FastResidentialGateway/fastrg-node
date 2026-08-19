@@ -12,6 +12,24 @@
 # GetFastrgSystemStats gRPC before and after each injection, and confirming
 # the delta is ≥ 1.
 # ---------------------------------------------------------------------------
+# Drill: point the WAN capture at an interface the NAT flow never crosses, so
+# the source-port discovery finds nothing. The step must report that it could
+# not capture, rather than carrying an empty port forward.
+_P45_SAVED_WAN_NIC=""
+
+_p45_inject_capture_wrong_interface() {
+    _P45_SAVED_WAN_NIC="$WAN_NIC"
+    WAN_NIC=lo
+}
+
+_p45_cleanup_capture_wrong_interface() {
+    WAN_NIC="$_P45_SAVED_WAN_NIC"
+}
+
+case_validation_register tcp_spi_capture_wrong_interface phase4_5_tcp_spi \
+    _p45_inject_capture_wrong_interface _p45_cleanup_capture_wrong_interface \
+    'Phase 4\.5: TCP SPI'
+
 phase4_5_tcp_spi() {
     bold "═══════════════════════════════════════════════════════"
     bold " Phase 4.5 — Reverse-direction TCP SPI"

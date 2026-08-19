@@ -73,6 +73,9 @@ _e2e_metric_scan() {
             }
         }
         END {
+            # No matching row prints nothing, so an absent family reads as
+            # missing rather than as a legitimate zero.
+            if (rows == 0) exit
             if (mode == "sum")   printf "%d\n", total
             if (mode == "count") printf "%d\n", rows
         }
@@ -152,3 +155,26 @@ e2e_all_uint() {
     done
     return 0
 }
+
+# Sample-based self-verification of the extractors above; the phases call these
+# same functions.
+local_validation_register metric_scan _e2e_metric_scan \
+    metric_scan_good metric_scan_empty_input metric_scan_no_matching_rows
+local_validation_register metric_value e2e_metric_value \
+    metric_value_good metric_value_family_prefix_collision \
+    metric_value_value_in_last_field metric_value_empty_input \
+    metric_value_legitimate_zero
+local_validation_register metric_sum e2e_metric_sum \
+    metric_sum_good metric_sum_family_prefix_collision \
+    metric_sum_empty_input metric_sum_no_matching_rows
+local_validation_register metric_rows e2e_metric_rows \
+    metric_rows_good metric_rows_empty_input metric_rows_no_matching_rows
+local_validation_register metric_label e2e_metric_label \
+    metric_label_good metric_label_empty_input metric_label_absent_label
+local_validation_register metric_label_values e2e_metric_label_values \
+    metric_label_values_good metric_label_values_empty_input \
+    metric_label_values_no_matching_rows
+local_validation_register is_uint e2e_is_uint \
+    is_uint_good is_uint_empty_input is_uint_non_numeric is_uint_negative
+local_validation_register all_uint e2e_all_uint \
+    all_uint_good all_uint_empty_input all_uint_one_non_numeric

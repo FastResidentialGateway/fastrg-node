@@ -1,0 +1,291 @@
+# Case correctness local validation fixtures, one block per case.
+# A case runs from its '==== fixture: <name>' line to the next one or EOF.
+# A body line may therefore never start with '==== fixture: '.
+==== fixture: all_uint_empty_input
+# expect-status: 1
+---
+
+==== fixture: all_uint_good
+# invoke: args-only
+# args: 1 2 3
+# expect-status: 0
+---
+
+==== fixture: all_uint_one_non_numeric
+# invoke: args-only
+# args: 1 NA 3
+# expect-status: 1
+---
+
+==== fixture: capture_window_empty_input
+# args: vlan3
+# expect-output: err
+---
+
+==== fixture: capture_window_good
+# args: vlan3
+# expect-output: 2 0
+---
+tcpdump: verbose output suppressed, use -v[v]... for full protocol decode
+listening on vlan3, link-type EN10MB (Ethernet), capture size 262144 bytes
+12:00:01.000000 IP6 fe80::1 > ff02::1: ICMP6, neighbor solicitation, who has fe80::dead:beef, length 32
+12:00:02.000000 IP6 fe80::1 > ff02::1: ICMP6, neighbor solicitation, who has fe80::dead:beef, length 32
+==== fixture: capture_window_never_listened
+# args: vlan3
+# expect-output: err
+---
+tcpdump: vlan3: You do not have permission to capture on that device
+==== fixture: capture_window_no_control
+# args: vlan3
+# expect-output: 0 0
+---
+tcpdump: verbose output suppressed, use -v[v]... for full protocol decode
+listening on vlan3, link-type EN10MB (Ethernet), capture size 262144 bytes
+==== fixture: capture_window_ra_present
+# args: vlan3
+# expect-output: 1 3
+---
+tcpdump: verbose output suppressed, use -v[v]... for full protocol decode
+listening on vlan3, link-type EN10MB (Ethernet), capture size 262144 bytes
+12:00:01.000000 IP6 fe80::1 > ff02::1: ICMP6, neighbor solicitation, who has fe80::dead:beef, length 32
+12:00:03.000000 IP6 fe80::2 > ff02::1: ICMP6, router advertisement, length 64
+12:00:04.000000 IP6 fe80::2 > ff02::1: ICMP6, router advertisement, length 64
+12:00:05.000000 IP6 fe80::2 > ff02::1: ICMP6, router advertisement, length 64
+==== fixture: capture_window_wrong_interface
+# args: vlan3
+# expect-output: err
+---
+tcpdump: verbose output suppressed, use -v[v]... for full protocol decode
+listening on lo, link-type EN10MB (Ethernet), capture size 262144 bytes
+12:00:01.000000 IP6 fe80::1 > ff02::1: ICMP6, neighbor solicitation, who has fe80::dead:beef, length 32
+==== fixture: is_uint_empty_input
+# expect-status: 1
+---
+
+==== fixture: is_uint_good
+# expect-status: 0
+---
+900
+==== fixture: is_uint_negative
+# expect-status: 1
+---
+-1
+==== fixture: is_uint_non_numeric
+# expect-status: 1
+---
+NA
+==== fixture: metric_label_absent_label
+# args: fastrg_nic_info absent_label port=0
+# expect-output:
+---
+fastrg_node_rx_packets_total_dropped{node_uuid="u1",port="0"} 555
+fastrg_node_per_user_rx_packets_total{node_uuid="u1",user_id="1",nic_index="0"} 7
+fastrg_nic_info{node_uuid="u1",port="2",model="fastrg_node_rx_packets_total"} 2
+fastrg_node_rx_packets_total{node_uuid="u1",port="0"} 900
+fastrg_node_rx_packets_total{node_uuid="u1",port="1"} 100
+fastrg_nic_info{node_uuid="u1",port="0",model="Intel Corporation Ethernet Controller X710 for 10GbE SFP+"} 1
+fastrg_node_snapshot_persist_ok{node_uuid="u1"} 0
+==== fixture: metric_label_empty_input
+# args: fastrg_nic_info model
+# expect-output:
+---
+
+==== fixture: metric_label_good
+# args: fastrg_nic_info model port=0
+# expect-output: Intel Corporation Ethernet Controller X710 for 10GbE SFP+
+---
+fastrg_node_rx_packets_total_dropped{node_uuid="u1",port="0"} 555
+fastrg_node_per_user_rx_packets_total{node_uuid="u1",user_id="1",nic_index="0"} 7
+fastrg_nic_info{node_uuid="u1",port="2",model="fastrg_node_rx_packets_total"} 2
+fastrg_node_rx_packets_total{node_uuid="u1",port="0"} 900
+fastrg_node_rx_packets_total{node_uuid="u1",port="1"} 100
+fastrg_nic_info{node_uuid="u1",port="0",model="Intel Corporation Ethernet Controller X710 for 10GbE SFP+"} 1
+fastrg_node_snapshot_persist_ok{node_uuid="u1"} 0
+==== fixture: metric_label_values_empty_input
+# args: fastrg_node_rx_packets_total port
+# expect-output:
+---
+
+==== fixture: metric_label_values_good
+# args: fastrg_node_rx_packets_total port port=1
+# expect-output: 1
+---
+fastrg_node_rx_packets_total_dropped{node_uuid="u1",port="0"} 555
+fastrg_node_per_user_rx_packets_total{node_uuid="u1",user_id="1",nic_index="0"} 7
+fastrg_nic_info{node_uuid="u1",port="2",model="fastrg_node_rx_packets_total"} 2
+fastrg_node_rx_packets_total{node_uuid="u1",port="0"} 900
+fastrg_node_rx_packets_total{node_uuid="u1",port="1"} 100
+fastrg_nic_info{node_uuid="u1",port="0",model="Intel Corporation Ethernet Controller X710 for 10GbE SFP+"} 1
+fastrg_node_snapshot_persist_ok{node_uuid="u1"} 0
+==== fixture: metric_label_values_no_matching_rows
+# args: fastrg_node_absent_family port
+# expect-output:
+---
+fastrg_node_rx_packets_total_dropped{node_uuid="u1",port="0"} 555
+fastrg_node_per_user_rx_packets_total{node_uuid="u1",user_id="1",nic_index="0"} 7
+fastrg_nic_info{node_uuid="u1",port="2",model="fastrg_node_rx_packets_total"} 2
+fastrg_node_rx_packets_total{node_uuid="u1",port="0"} 900
+fastrg_node_rx_packets_total{node_uuid="u1",port="1"} 100
+fastrg_nic_info{node_uuid="u1",port="0",model="Intel Corporation Ethernet Controller X710 for 10GbE SFP+"} 1
+fastrg_node_snapshot_persist_ok{node_uuid="u1"} 0
+==== fixture: metric_rows_empty_input
+# args: fastrg_node_rx_packets_total
+# expect-output:
+---
+
+==== fixture: metric_rows_good
+# args: fastrg_node_rx_packets_total
+# expect-output: 2
+---
+fastrg_node_rx_packets_total_dropped{node_uuid="u1",port="0"} 555
+fastrg_node_per_user_rx_packets_total{node_uuid="u1",user_id="1",nic_index="0"} 7
+fastrg_nic_info{node_uuid="u1",port="2",model="fastrg_node_rx_packets_total"} 2
+fastrg_node_rx_packets_total{node_uuid="u1",port="0"} 900
+fastrg_node_rx_packets_total{node_uuid="u1",port="1"} 100
+fastrg_nic_info{node_uuid="u1",port="0",model="Intel Corporation Ethernet Controller X710 for 10GbE SFP+"} 1
+fastrg_node_snapshot_persist_ok{node_uuid="u1"} 0
+==== fixture: metric_rows_no_matching_rows
+# args: fastrg_node_absent_family
+# expect-output:
+---
+fastrg_node_rx_packets_total_dropped{node_uuid="u1",port="0"} 555
+fastrg_node_per_user_rx_packets_total{node_uuid="u1",user_id="1",nic_index="0"} 7
+fastrg_nic_info{node_uuid="u1",port="2",model="fastrg_node_rx_packets_total"} 2
+fastrg_node_rx_packets_total{node_uuid="u1",port="0"} 900
+fastrg_node_rx_packets_total{node_uuid="u1",port="1"} 100
+fastrg_nic_info{node_uuid="u1",port="0",model="Intel Corporation Ethernet Controller X710 for 10GbE SFP+"} 1
+fastrg_node_snapshot_persist_ok{node_uuid="u1"} 0
+==== fixture: metric_scan_empty_input
+# args: fastrg_node_rx_packets_total sum
+# expect-output:
+---
+
+==== fixture: metric_scan_good
+# args: fastrg_node_rx_packets_total first
+# expect-output: 900
+---
+fastrg_node_rx_packets_total_dropped{node_uuid="u1",port="0"} 555
+fastrg_node_per_user_rx_packets_total{node_uuid="u1",user_id="1",nic_index="0"} 7
+fastrg_nic_info{node_uuid="u1",port="2",model="fastrg_node_rx_packets_total"} 2
+fastrg_node_rx_packets_total{node_uuid="u1",port="0"} 900
+fastrg_node_rx_packets_total{node_uuid="u1",port="1"} 100
+fastrg_nic_info{node_uuid="u1",port="0",model="Intel Corporation Ethernet Controller X710 for 10GbE SFP+"} 1
+fastrg_node_snapshot_persist_ok{node_uuid="u1"} 0
+==== fixture: metric_scan_no_matching_rows
+# args: fastrg_node_absent_family count
+# expect-output:
+---
+fastrg_node_rx_packets_total_dropped{node_uuid="u1",port="0"} 555
+fastrg_node_per_user_rx_packets_total{node_uuid="u1",user_id="1",nic_index="0"} 7
+fastrg_nic_info{node_uuid="u1",port="2",model="fastrg_node_rx_packets_total"} 2
+fastrg_node_rx_packets_total{node_uuid="u1",port="0"} 900
+fastrg_node_rx_packets_total{node_uuid="u1",port="1"} 100
+fastrg_nic_info{node_uuid="u1",port="0",model="Intel Corporation Ethernet Controller X710 for 10GbE SFP+"} 1
+fastrg_node_snapshot_persist_ok{node_uuid="u1"} 0
+==== fixture: metric_sum_empty_input
+# args: fastrg_node_rx_packets_total
+# expect-output:
+---
+
+==== fixture: metric_sum_family_prefix_collision
+# args: fastrg_node_rx_packets_total
+# expect-output: 1000
+---
+fastrg_node_rx_packets_total_dropped{node_uuid="u1",port="0"} 555
+fastrg_node_per_user_rx_packets_total{node_uuid="u1",user_id="1",nic_index="0"} 7
+fastrg_nic_info{node_uuid="u1",port="2",model="fastrg_node_rx_packets_total"} 2
+fastrg_node_rx_packets_total{node_uuid="u1",port="0"} 900
+fastrg_node_rx_packets_total{node_uuid="u1",port="1"} 100
+fastrg_nic_info{node_uuid="u1",port="0",model="Intel Corporation Ethernet Controller X710 for 10GbE SFP+"} 1
+fastrg_node_snapshot_persist_ok{node_uuid="u1"} 0
+==== fixture: metric_sum_good
+# args: fastrg_node_rx_packets_total port=0
+# expect-output: 900
+---
+fastrg_node_rx_packets_total_dropped{node_uuid="u1",port="0"} 555
+fastrg_node_per_user_rx_packets_total{node_uuid="u1",user_id="1",nic_index="0"} 7
+fastrg_nic_info{node_uuid="u1",port="2",model="fastrg_node_rx_packets_total"} 2
+fastrg_node_rx_packets_total{node_uuid="u1",port="0"} 900
+fastrg_node_rx_packets_total{node_uuid="u1",port="1"} 100
+fastrg_nic_info{node_uuid="u1",port="0",model="Intel Corporation Ethernet Controller X710 for 10GbE SFP+"} 1
+fastrg_node_snapshot_persist_ok{node_uuid="u1"} 0
+==== fixture: metric_sum_no_matching_rows
+# args: fastrg_node_absent_family
+# expect-output:
+---
+fastrg_node_rx_packets_total_dropped{node_uuid="u1",port="0"} 555
+fastrg_node_per_user_rx_packets_total{node_uuid="u1",user_id="1",nic_index="0"} 7
+fastrg_nic_info{node_uuid="u1",port="2",model="fastrg_node_rx_packets_total"} 2
+fastrg_node_rx_packets_total{node_uuid="u1",port="0"} 900
+fastrg_node_rx_packets_total{node_uuid="u1",port="1"} 100
+fastrg_nic_info{node_uuid="u1",port="0",model="Intel Corporation Ethernet Controller X710 for 10GbE SFP+"} 1
+fastrg_node_snapshot_persist_ok{node_uuid="u1"} 0
+==== fixture: metric_value_empty_input
+# args: fastrg_node_rx_packets_total
+# expect-output:
+---
+
+==== fixture: metric_value_family_prefix_collision
+# args: fastrg_node_rx_packets_total
+# expect-output: 900
+---
+fastrg_node_rx_packets_total_dropped{node_uuid="u1",port="0"} 555
+fastrg_node_per_user_rx_packets_total{node_uuid="u1",user_id="1",nic_index="0"} 7
+fastrg_nic_info{node_uuid="u1",port="2",model="fastrg_node_rx_packets_total"} 2
+fastrg_node_rx_packets_total{node_uuid="u1",port="0"} 900
+fastrg_node_rx_packets_total{node_uuid="u1",port="1"} 100
+fastrg_nic_info{node_uuid="u1",port="0",model="Intel Corporation Ethernet Controller X710 for 10GbE SFP+"} 1
+fastrg_node_snapshot_persist_ok{node_uuid="u1"} 0
+==== fixture: metric_value_good
+# args: fastrg_node_rx_packets_total port=1
+# expect-output: 100
+---
+fastrg_node_rx_packets_total_dropped{node_uuid="u1",port="0"} 555
+fastrg_node_per_user_rx_packets_total{node_uuid="u1",user_id="1",nic_index="0"} 7
+fastrg_nic_info{node_uuid="u1",port="2",model="fastrg_node_rx_packets_total"} 2
+fastrg_node_rx_packets_total{node_uuid="u1",port="0"} 900
+fastrg_node_rx_packets_total{node_uuid="u1",port="1"} 100
+fastrg_nic_info{node_uuid="u1",port="0",model="Intel Corporation Ethernet Controller X710 for 10GbE SFP+"} 1
+fastrg_node_snapshot_persist_ok{node_uuid="u1"} 0
+==== fixture: metric_value_legitimate_zero
+# args: fastrg_node_snapshot_persist_ok
+# expect-output: 0
+---
+fastrg_node_rx_packets_total_dropped{node_uuid="u1",port="0"} 555
+fastrg_node_per_user_rx_packets_total{node_uuid="u1",user_id="1",nic_index="0"} 7
+fastrg_nic_info{node_uuid="u1",port="2",model="fastrg_node_rx_packets_total"} 2
+fastrg_node_rx_packets_total{node_uuid="u1",port="0"} 900
+fastrg_node_rx_packets_total{node_uuid="u1",port="1"} 100
+fastrg_nic_info{node_uuid="u1",port="0",model="Intel Corporation Ethernet Controller X710 for 10GbE SFP+"} 1
+fastrg_node_snapshot_persist_ok{node_uuid="u1"} 0
+==== fixture: metric_value_value_in_last_field
+# args: fastrg_nic_info port=0
+# expect-output: 1
+---
+fastrg_node_rx_packets_total_dropped{node_uuid="u1",port="0"} 555
+fastrg_node_per_user_rx_packets_total{node_uuid="u1",user_id="1",nic_index="0"} 7
+fastrg_nic_info{node_uuid="u1",port="2",model="fastrg_node_rx_packets_total"} 2
+fastrg_node_rx_packets_total{node_uuid="u1",port="0"} 900
+fastrg_node_rx_packets_total{node_uuid="u1",port="1"} 100
+fastrg_nic_info{node_uuid="u1",port="0",model="Intel Corporation Ethernet Controller X710 for 10GbE SFP+"} 1
+fastrg_node_snapshot_persist_ok{node_uuid="u1"} 0
+==== fixture: registration_grpc_port_field_missing
+# expect-output:
+---
+{"node_uuid":"u1","ip":"192.168.10.212","status":"online"}
+==== fixture: registration_grpc_port_field_misspelled
+# expect-output:
+---
+{"node_uuid":"u1","grpcport":"50052","status":"online"}
+==== fixture: registration_grpc_port_good
+# expect-output: 50052
+---
+{"node_uuid":"u1","ip":"192.168.10.212","grpc_port":"50052","status":"online"}
+==== fixture: registration_grpc_port_legitimate_zero
+# expect-output: 0
+---
+{"node_uuid":"u1","grpc_port":0,"status":"online"}
+==== fixture: registration_grpc_port_wrong_value
+# expect-output: 50051
+---
+{"node_uuid":"u1","grpc_port":"50051","status":"online"}

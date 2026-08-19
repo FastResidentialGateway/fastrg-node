@@ -27,6 +27,21 @@ _P35_WAN6_PLEN=64
 _P35_PD_ROUTE="2001:db8:6400::/48"       # delegation pool; needs a return route
 _P35_LAN_VLAN="vlan3"                    # primary subscriber's LAN interface
 
+# Drill: point the capture at an interface the segment's traffic never crosses.
+# tcpdump still starts and still reports no RAs, so the interface-anchored guard
+# and the control packet are what tell this apart from RAs really having stopped.
+_p35_inject_capture_wrong_interface() {
+    _P35_LAN_VLAN=lo
+}
+
+_p35_cleanup_capture_wrong_interface() {
+    restore_phase_functions phase35_ipv6.sh
+}
+
+case_validation_register ra_capture_wrong_interface phase35_ipv6 \
+    _p35_inject_capture_wrong_interface _p35_cleanup_capture_wrong_interface \
+    'Step 149:'
+
 # Bench state to undo, and the values read from the node.
 _P35_IPV6_SET=0
 _P35_LAN_SYSCTL_SAVED=""
@@ -49,11 +64,27 @@ _p35_user_phase() {
 # One HSI field of a subscriber. The IPv6 fields come back empty whenever the
 # forwarding gate is closed, which is what makes them a readiness signal.
 _p35_hsi_field() {
-    local _uid="$1" _field="$2"
+    local _uid="$1" _field="$2" _out="" _rc=0
 
-    fastrg_grpc get_hsi_info 2>/dev/null | \
+    _out=$(fastrg_grpc get_hsi_info 2>/dev/null) || _rc=$?
+    # "err" rather than empty when the RPC itself failed: empty is a pass
+    # condition below, so a dead RPC must not be able to produce it.
+    if [[ "$_rc" -ne 0 || -z "$_out" ]]; then
+        printf 'err'
+        return 0
+    fi
+    printf '%s' "$_out" | \
         jq -r ".hsi_infos[]? | select(.user_id == ${_uid}) | .${_field} // empty" \
         2>/dev/null || true
+}
+
+# Whether get_hsi_info still lists a subscriber at all. An RPC that answers
+# nothing looks exactly like fields that were correctly cleared.
+_p35_hsi_has_record() {
+    local _uid="$1"
+
+    fastrg_grpc get_hsi_info 2>/dev/null | \
+        jq -e ".hsi_infos[]? | select(.user_id == ${_uid})" >/dev/null 2>&1
 }
 
 # IPv6 DNS servers as one comma-separated string — the form the controller
@@ -92,18 +123,43 @@ _p35_redial() {
     return 1
 }
 
-# Router Advertisements seen on the LAN interface over a window. Prints the
-# count, or "err" when tcpdump never started — a capture that failed to run
-# must not read as silence.
-_p35_ra_count() {
-    local _secs="$1" _raw=""
+# One capture window on the LAN interface, printed as "<control> <ra>": how many
+# neighbour solicitations the test's own probe put on the segment, and how many
+# Router Advertisements arrived. Prints "err" when tcpdump never started on that
+# interface — a capture that failed to run must not read as silence.
+# Read one capture window's text: "err" when tcpdump never listened on the
+# interface asked for, otherwise "<control> <ra>".
+e2e_get_capture_window_counts() {
+    local _raw="$1" _interface="$2" _control=0 _ra=0
 
-    _raw=$(ssh_lan "timeout ${_secs} tcpdump -l -n -i ${_P35_LAN_VLAN} 'icmp6 and ip6[40] == 134' 2>&1" || true)
-    if ! printf '%s\n' "$_raw" | grep -q 'listening on'; then
+    # Anchored on the interface name: "listening on lo" must not pass for vlan3.
+    if ! printf '%s\n' "$_raw" | grep -q "listening on ${_interface}"; then
         printf 'err'
         return 0
     fi
-    printf '%s\n' "$_raw" | grep -c 'router advertisement' || true
+    _control=$(printf '%s\n' "$_raw" | grep -c 'neighbor solicitation' || true)
+    _ra=$(printf '%s\n' "$_raw" | grep -c 'router advertisement' || true)
+    printf '%s %s' "$_control" "$_ra"
+}
+
+local_validation_register capture_window_counts e2e_get_capture_window_counts \
+    capture_window_good \
+    capture_window_empty_input \
+    capture_window_never_listened \
+    capture_window_wrong_interface \
+    capture_window_no_control \
+    capture_window_ra_present
+
+_p35_ra_window() {
+    local _secs="$1" _raw=""
+
+    # Soliciting an unused link-local neighbour puts an icmp6 packet on the
+    # segment that the node never sees, so it proves the capture was awake
+    # without touching what is being measured.
+    ssh_lan "( sleep 2; ping -6 -c 1 -W 1 -I ${_P35_LAN_VLAN} fe80::dead:beef >/dev/null 2>&1 || true ) &" \
+        >/dev/null 2>&1 || true
+    _raw=$(ssh_lan "timeout ${_secs} tcpdump -l -n -i ${_P35_LAN_VLAN} 'icmp6' 2>&1" || true)
+    e2e_get_capture_window_counts "$_raw" "${_P35_LAN_VLAN}"
 }
 
 # The PPPoE status row the controller recorded for a user (Kafka-fed).
@@ -284,6 +340,11 @@ phase35_ipv6() {
         _issue="cannot read net.ipv6.conf.${_P35_LAN_VLAN}.disable_ipv6"
     fi
 
+    # Each redial delegates a fresh prefix while the previous SLAAC addresses sit
+    # out their 24h lifetime, so clear the global ones and let the poll below
+    # watch the current prefix form. Link-local is kept: RS/RA runs on it.
+    ssh_lan "ip -6 addr flush dev ${_P35_LAN_VLAN} scope global" >/dev/null 2>&1 || true
+
     for _i in $(seq 1 25); do
         _lan_addrs=$(ssh_lan "ip -6 -o addr show dev ${_P35_LAN_VLAN} scope global" 2>/dev/null | \
             grep -v tentative | awk '{print $4}' | cut -d/ -f1 | tr '\n' ' ' || true)
@@ -389,8 +450,12 @@ print(lan64)' "$_P35_PD_PREFIX" ${_lan_addrs} 2>/dev/null || true)
     # ------------------------------------------------------------------
     info "Step 147: comparing controller DB IPv6 columns with the node's gRPC report..."
     _ok=0
+    _row_seen=0
     for _i in $(seq 1 12); do
         _row=$(_p35_ctrl_row "${USER_ID}")
+        # Same RPC, same call: the row has to be there for "IPv6 fields empty"
+        # to be a statement about the data rather than about a dead RPC.
+        printf '%s' "$_row" | jq -e '.user_id? // .hsi_id?' >/dev/null 2>&1 && _row_seen=1
         _db_prefix=$(printf '%s' "$_row" | jq -r '.hsi_ipv6_pd_prefix // empty' 2>/dev/null || true)
         _db_addr=$(printf '%s' "$_row" | jq -r '.hsi_ipv6 // empty' 2>/dev/null || true)
         _db_dns=$(printf '%s' "$_row" | jq -r '.hsi_ipv6_dns // empty' 2>/dev/null || true)
@@ -408,8 +473,14 @@ print(lan64)' "$_P35_PD_PREFIX" ${_lan_addrs} 2>/dev/null || true)
         pass "Step 147: northbound IPv6 report matches the node" \
             "controller DB and node gRPC both report ${_db_prefix}, ${_db_addr}, DNS ${_db_dns}"
     else
+        # The raw row and the node's own IPv6 log tell "the row never arrived"
+        # apart from "the row is there but the columns are empty".
+        info "  Step 147 diagnostic — last ctrl_pppoe_status row:"
+        printf '%s\n' "${_row:-<empty>}"
+        info "  Step 147 diagnostic — node IPv6 log:"
+        _p35_node_ipv6_log
         fail "Step 147: northbound IPv6 report matches the node" \
-            "node: prefix='${_P35_PD_PREFIX}' addr='${_P35_V6_ADDR}' dns='${_P35_V6_DNS_JOINED}'; DB: prefix='${_db_prefix:-missing}' addr='${_db_addr:-missing}' dns='${_db_dns:-missing}'"
+            "node: prefix='${_P35_PD_PREFIX}' addr='${_P35_V6_ADDR}' dns='${_P35_V6_DNS_JOINED}'; DB: row_seen=${_row_seen} prefix='${_db_prefix:-missing}' addr='${_db_addr:-missing}' dns='${_db_dns:-missing}'"
     fi
 
     # ------------------------------------------------------------------
@@ -430,6 +501,9 @@ print(lan64)' "$_P35_PD_PREFIX" ${_lan_addrs} 2>/dev/null || true)
         fi
     done
     [[ $_ok -eq 1 ]] || _issue="gRPC still reports ipv6_pd_prefix='${_pfx}' 15s after disable"
+    # The cleared field only means something if the RPC still lists this user.
+    _p35_hsi_has_record "${USER_ID}" || \
+        _issue="${_issue:+${_issue}; }get_hsi_info lists no record for user ${USER_ID}; a cleared field proves nothing"
 
     # The guest keeps its address and default route, so these packets do reach
     # the node — and get dropped there.
@@ -456,14 +530,19 @@ print(lan64)' "$_P35_PD_PREFIX" ${_lan_addrs} 2>/dev/null || true)
         sleep $(( 35 - _elapsed ))
     fi
     info "Step 149: watching ${_P35_LAN_VLAN} for Router Advertisements for 40s..."
-    _ra_count=$(_p35_ra_count 40)
+    _ra_window=$(_p35_ra_window 40)
+    _ra_control="${_ra_window%% *}"
+    _ra_count="${_ra_window##* }"
 
-    if [[ "$_ra_count" == "0" ]]; then
-        pass "Step 149: RAs stop after disable" \
-            "no Router Advertisement on ${_P35_LAN_VLAN} in a 40s window"
-    elif [[ "$_ra_count" == "err" ]]; then
+    if [[ "$_ra_window" == "err" ]]; then
         fail "Step 149: RAs stop after disable" \
             "tcpdump did not start on ${_P35_LAN_VLAN}; the silent window proves nothing"
+    elif ! [[ "$_ra_control" =~ ^[1-9] ]]; then
+        fail "Step 149: RAs stop after disable" \
+            "no neighbour solicitation in the capture (control='${_ra_control:-missing}'); the capture saw nothing at all"
+    elif [[ "$_ra_count" == "0" ]]; then
+        pass "Step 149: RAs stop after disable" \
+            "capture saw ${_ra_control} control packet(s) and no Router Advertisement on ${_P35_LAN_VLAN} in a 40s window"
     else
         fail "Step 149: RAs stop after disable" \
             "${_ra_count} Router Advertisement(s) still sent on ${_P35_LAN_VLAN}"
@@ -514,6 +593,8 @@ print(lan64)' "$_P35_PD_PREFIX" ${_lan_addrs} 2>/dev/null || true)
     done
     [[ $_ok -eq 1 ]] || \
         _issue="${_issue:+${_issue}; }controller DB still carries IPv6 (prefix='${_db_prefix}', addr='${_db_addr}', dns='${_db_dns}')"
+    [[ $_row_seen -eq 1 ]] || \
+        _issue="${_issue:+${_issue}; }ctrl_pppoe_status returned no row for user ${USER_ID}; cleared IPv6 fields prove nothing"
 
     if [[ -z "$_issue" ]]; then
         pass "Step 150: fixture restored" \

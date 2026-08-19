@@ -4,6 +4,20 @@
 # Phase 26 — Controller Heartbeat / Re-registration (Steps 107-111)
 # ---------------------------------------------------------------------------
 
+# The gRPC port a registered node record advertises; empty when the field is
+# absent. has() rather than "// empty" so a literal 0 reads as 0, not missing.
+e2e_registration_grpc_port() {
+    printf '%s' "$1" | jq -r 'if has("grpc_port") then .grpc_port else empty end' \
+        2>/dev/null || true
+}
+
+local_validation_register registration_grpc_port e2e_registration_grpc_port \
+    registration_grpc_port_good \
+    registration_grpc_port_field_missing \
+    registration_grpc_port_field_misspelled \
+    registration_grpc_port_wrong_value \
+    registration_grpc_port_legitimate_zero
+
 _P26_CONTROLLER_HOST=""
 _P26_CONTROLLER_PORT=""
 _P26_LOG_PATH=""
@@ -357,7 +371,7 @@ phase26_heartbeat_reregister() {
     info "Step 111: checking the registered node record carries grpc_port..."
     local _node_record="" _grpc_port=""
     _node_record=$(etcdctl_get_value "nodes/${NODE_UUID}" 2>/dev/null || true)
-    _grpc_port=$(printf '%s' "$_node_record" | jq -r '.grpc_port' 2>/dev/null || true)
+    _grpc_port=$(e2e_registration_grpc_port "$_node_record")
 
     if [[ "$_grpc_port" == "${FASTRG_GRPC_PORT}" ]]; then
         pass "Step 111: node reports its gRPC port at registration" \
