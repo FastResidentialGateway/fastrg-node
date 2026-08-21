@@ -145,6 +145,21 @@ _p34_user_log_hits() {
 }
 
 # Every canonical subscriber back in Data phase. Prints the ones that are not.
+# Condition: every subscriber is in Data phase. One RPC covers them all, and a
+# failed RPC means the node could not be asked rather than that the sessions
+# are missing.
+_p34_all_users_in_data_phase() {
+    local _info _uid _status
+
+    _info=$(fastrg_grpc_checked get_hsi_info) || return 2
+    for _uid in "${SUB_IDS[@]}"; do
+        _status=$(printf '%s' "$_info" | \
+            jq -r ".hsi_infos[] | select(.user_id == ${_uid}) | .status" 2>/dev/null || true)
+        [[ "$_status" == "Data phase" ]] || return 1
+    done
+    return 0
+}
+
 _p34_users_not_in_data_phase() {
     local _uid _status _out=""
 
@@ -164,23 +179,30 @@ _cleanup_phase34_wan_long_outage() {
     _p34_wan_link_restore
     [[ ${_p34_needs_recovery:-0} -eq 1 ]] || return 0
 
-    for _i in $(seq 1 "$_P34_RECOVERY_BUDGET_SEC"); do
-        _left=$(_p34_users_not_in_data_phase)
-        if [[ -z "$_left" ]]; then
-            _p34_needs_recovery=0
-            return 0
-        fi
-        sleep 1
-    done
+    local _rc=0
+    _e2e_wait_for "Cleanup(phase34): sessions returning on their own" \
+        "$_P34_RECOVERY_BUDGET_SEC" 1 _p34_all_users_in_data_phase || _rc=$?
+    if [[ "$_rc" -eq 0 ]]; then
+        _p34_needs_recovery=0
+        return 0
+    fi
+    [[ "$_rc" -ge 2 ]] && return 1
 
+    _left=$(_p34_users_not_in_data_phase)
     warn "Cleanup(phase34): sessions did not return on their own (${_left}); dialling them back."
     for _uid in "${SUB_IDS[@]}"; do
         fastrg_grpc connect_hsi "${_uid}" >/dev/null 2>&1 || true
     done
-    for _i in $(seq 1 60); do
-        [[ -z "$(_p34_users_not_in_data_phase)" ]] && { _p34_needs_recovery=0; return 0; }
-        sleep 2
-    done
+
+    _rc=0
+    _e2e_wait_for "Cleanup(phase34): sessions returning after the fallback dial" \
+        60 2 _p34_all_users_in_data_phase || _rc=$?
+    if [[ "$_rc" -eq 0 ]]; then
+        _p34_needs_recovery=0
+        return 0
+    fi
+    [[ "$_rc" -ge 2 ]] && return 1
+
     warn "Cleanup(phase34): subscribers still not in Data phase after the fallback dial."
     return 1
 }

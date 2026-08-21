@@ -278,6 +278,22 @@ else
     echo "⚠️  etcd server is not available. Skipping etcd CAS put test."
 fi
 
+# Test 5: Kafka retry policy (no broker, no WAL, no etcd needed)
+echo ""
+echo "🔧 Test 5: Kafka retry policy test"
+if [ -f "./test/test_kafka_retry" ]; then
+    ./test/test_kafka_retry
+    if [ $? -ne 0 ]; then
+        echo "❌ Kafka retry policy test failed."
+        TEST_FAILED=1
+    else
+        echo "✅ Kafka retry policy test completed!"
+    fi
+else
+    echo "❌ test_kafka_retry executable not found."
+    TEST_FAILED=1
+fi
+
 echo ""
 echo "✅ All tests completed!"
 exit "$TEST_FAILED"

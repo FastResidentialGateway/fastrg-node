@@ -1,4 +1,5 @@
 #include "kafka_producer.h"
+#include "kafka_retry_policy.h"
 #include "etcd_client.h"
 #include "config_snapshot.h"
 #include "proto/kafka-events.pb.h"
@@ -22,6 +23,25 @@
 
 namespace ev = fastrg::events::v1;
 
+std::size_t KafkaRetryPolicy::select(const unsigned char *failed_flags,
+                                    std::size_t count,
+                                    std::size_t *out_indices,
+                                    std::size_t max_out) {
+    if (failed_flags == nullptr || out_indices == nullptr) return 0;
+
+    std::size_t written = 0;
+    for (std::size_t i = 0; i < count && written < max_out; ++i) {
+        if (failed_flags[i]) out_indices[written++] = i;
+    }
+    return written;
+}
+
+bool KafkaRetryPolicy::is_due(std::int64_t now_sec, std::int64_t last_sec,
+                              std::int64_t interval_sec) {
+    if (interval_sec <= 0) return true;
+    return (now_sec - last_sec) >= interval_sec;
+}
+
 namespace {
 
 rd_kafka_t       *g_rk = nullptr;
@@ -39,11 +59,19 @@ constexpr size_t      MAX_WAL_EVENTS   = 100000;
 struct PendingEvent {
     int64_t     seq;       // local monotonic id, used as the per-message opaque
     std::string payload;   // serialized NodeEvent protobuf bytes
+    // Set when an attempt to hand this event to the broker failed. In memory
+    // only: a restart replays the whole WAL anyway, so persisting it would add
+    // a field to the file format for no gain.
+    bool        delivery_failed = false;
 };
 
 std::mutex                 g_wal_mutex;   // guards g_pending + the WAL file
 std::vector<PendingEvent>  g_pending;     // events appended but not yet confirmed
 std::atomic<int64_t>       g_seq{0};      // last assigned seq
+
+// How often the background poller re-produces events the broker never took.
+// Long enough that a broker outage does not turn into a produce loop.
+constexpr int64_t          RETRY_INTERVAL_SEC = 30;
 
 std::thread                g_poll_thread; // serves delivery reports while idle
 std::atomic<bool>          g_poll_run{false};
@@ -131,6 +159,16 @@ void load_wal() {
     g_seq.store(maxseq);
 }
 
+// Arm the retry flag for one event, so the background poller produces it again.
+// Every caller reaches this without holding the WAL lock, which is what makes
+// taking it here safe.
+void mark_delivery_failed(int64_t seq) {
+    std::lock_guard<std::mutex> lk(g_wal_mutex);
+    for (auto &e : g_pending) {
+        if (e.seq == seq) { e.delivery_failed = true; return; }
+    }
+}
+
 // Re-produce every buffered event after (re)start. Called once at init, after the
 // producer is ready. Does not re-persist (entries are already in the WAL); a
 // delivery report removes each one as it is confirmed.
@@ -143,7 +181,7 @@ void replay_pending() {
     if (snap.empty()) return;
     std::fprintf(stderr, "[kafka] replaying %zu buffered event(s) from WAL\n", snap.size());
     for (const auto &e : snap) {
-        rd_kafka_producev(
+        rd_kafka_resp_err_t err = rd_kafka_producev(
             g_rk,
             RD_KAFKA_V_TOPIC(KAFKA_TOPIC),
             RD_KAFKA_V_KEY(g_node_uuid.data(), g_node_uuid.size()),
@@ -151,18 +189,28 @@ void replay_pending() {
             RD_KAFKA_V_MSGFLAGS(RD_KAFKA_MSG_F_COPY),
             RD_KAFKA_V_OPAQUE((void *)(intptr_t)e.seq),
             RD_KAFKA_V_END);
+        if (err) {
+            // A full local queue is likely here: a WAL at its cap holds as many
+            // events as the queue accepts. Nothing was enqueued, so no delivery
+            // report will arrive; arm the flag so the poller comes back to it.
+            std::fprintf(stderr, "[kafka] replay enqueue deferred (seq=%lld): %s\n",
+                (long long)e.seq, rd_kafka_err2str(err));
+            mark_delivery_failed(e.seq);
+        }
     }
     rd_kafka_poll(g_rk, 0);
 }
 
 // Delivery-report callback (runs on rd_kafka_poll / flush). On success, drop the
-// confirmed event from the WAL; on failure keep it so it is replayed next start.
+// confirmed event from the WAL; on failure keep it and arm its retry flag, so
+// the background poller produces it again without waiting for a restart.
 void dr_msg_cb(rd_kafka_t *, const rd_kafka_message_t *rkmessage, void *) {
     int64_t seq = (int64_t)(intptr_t)rkmessage->_private;
     if (rkmessage->err) {
         std::fprintf(stderr, "[kafka] delivery failed (seq=%lld): %s\n",
             (long long)seq, rd_kafka_err2str(rkmessage->err));
-        return;   // keep in WAL for restart replay
+        if (seq > 0) mark_delivery_failed(seq);
+        return;   // the background poller retries it
     }
     if (seq <= 0) return;
     std::lock_guard<std::mutex> lk(g_wal_mutex);
@@ -211,22 +259,76 @@ void produce_event(const ev::NodeEvent &evt) {
         RD_KAFKA_V_END);
 
     if (err) {
-        // Local queue full: the event stays in the WAL and is replayed on the next
-        // start. Do not block waiting for queue space.
+        // Local queue full: no delivery report will ever arrive for this event,
+        // so arm the retry flag here instead. Do not block waiting for space.
         std::fprintf(stderr, "[kafka] enqueue deferred (seq=%lld): %s\n",
             (long long)seq, rd_kafka_err2str(err));
+        mark_delivery_failed(seq);
     }
 
     // Serve delivery reports without blocking.
     rd_kafka_poll(g_rk, 0);
 }
 
+// Hand the failed events back to the broker. The flag is cleared before the
+// attempt and re-armed by whichever path reports the failure -- the delivery
+// report when the broker refuses it, or the enqueue below when it never gets
+// that far -- so the event stays in the WAL until it is confirmed.
+void retry_failed_deliveries() {
+    std::vector<PendingEvent> batch;
+    {
+        std::lock_guard<std::mutex> lk(g_wal_mutex);
+        std::vector<unsigned char> flags(g_pending.size());
+        for (size_t i = 0; i < g_pending.size(); ++i)
+            flags[i] = g_pending[i].delivery_failed ? 1u : 0u;
+
+        std::vector<size_t> hits(g_pending.size());
+        size_t n = KafkaRetryPolicy::select(flags.data(), flags.size(),
+                                            hits.data(), hits.size());
+        batch.reserve(n);
+        for (size_t k = 0; k < n; ++k) {
+            batch.push_back(g_pending[hits[k]]);
+            g_pending[hits[k]].delivery_failed = false;
+        }
+    }
+    if (batch.empty()) return;
+
+    std::fprintf(stderr, "[kafka] retrying %zu undelivered event(s)\n", batch.size());
+    for (const auto &e : batch) {
+        rd_kafka_resp_err_t err = rd_kafka_producev(
+            g_rk,
+            RD_KAFKA_V_TOPIC(KAFKA_TOPIC),
+            RD_KAFKA_V_KEY(g_node_uuid.data(), g_node_uuid.size()),
+            RD_KAFKA_V_VALUE(const_cast<char *>(e.payload.data()), e.payload.size()),
+            RD_KAFKA_V_MSGFLAGS(RD_KAFKA_MSG_F_COPY),
+            RD_KAFKA_V_OPAQUE((void *)(intptr_t)e.seq),
+            RD_KAFKA_V_END);
+        if (err) {
+            // The queue is most likely still full from the outage this retry is
+            // recovering from. The flag was cleared above, so re-arm it here or
+            // the event would sit in the WAL with nothing left to pick it up.
+            std::fprintf(stderr, "[kafka] retry enqueue deferred (seq=%lld): %s\n",
+                (long long)e.seq, rd_kafka_err2str(err));
+            mark_delivery_failed(e.seq);
+        }
+    }
+    rd_kafka_poll(g_rk, 0);
+}
+
 // Background poller: serve delivery reports continuously so that confirmations
-// (and WAL pruning) happen even when no new events are being produced.
+// (and WAL pruning) happen even when no new events are being produced, and
+// retry what the broker never took so an outage does not strand events until
+// the next restart.
 void poll_loop() {
+    int64_t last_retry = now_unix();
     while (g_poll_run.load()) {
-        if (g_rk) rd_kafka_poll(g_rk, 200);
-        else      break;
+        if (!g_rk) break;
+        rd_kafka_poll(g_rk, 200);
+        int64_t now = now_unix();
+        if (KafkaRetryPolicy::is_due(now, last_retry, RETRY_INTERVAL_SEC)) {
+            last_retry = now;
+            retry_failed_deliveries();
+        }
     }
 }
 
