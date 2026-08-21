@@ -68,24 +68,25 @@ _p23_etcd_path_is_down() {
     [[ -z "$_established" ]]
 }
 
+# Condition: both etcd and the node report the canonical subscriber count. A
+# failed read of either one means that side could not be asked, which the
+# waiter treats differently from "the count has not caught up yet".
+_p23_count_is_canonical() {
+    local _raw _etcd_count _local_count
+
+    _raw=$(etcdctl_get_value "user_counts/${NODE_UUID}/") || return 2
+    _etcd_count=$(printf '%s' "$_raw" | jq -r '.subscriber_count // empty' 2>/dev/null || true)
+    _raw=$(fastrg_grpc_checked get_system_info) || return 2
+    _local_count=$(printf '%s' "$_raw" | jq -r '.num_users // empty' 2>/dev/null || true)
+
+    [[ "$_etcd_count" == "${_P23_CANONICAL_COUNT}" ]] && \
+        [[ "$_local_count" == "${_P23_CANONICAL_COUNT}" ]]
+}
+
 _p23_restore_count() {
-    local _etcd_count="" _local_count="" _i
-
     fastrg_grpc set_subscriber_count "${_P23_CANONICAL_COUNT}" >/dev/null 2>&1 || true
-    for _i in $(seq 1 15); do
-        _etcd_count=$(etcdctl_get_value "user_counts/${NODE_UUID}/" 2>/dev/null | \
-            jq -r '.subscriber_count // empty' 2>/dev/null || true)
-        _local_count=$(fastrg_grpc get_system_info 2>/dev/null | \
-            jq -r '.num_users // empty' 2>/dev/null || true)
-        if [[ "$_etcd_count" == "${_P23_CANONICAL_COUNT}" ]] && \
-           [[ "$_local_count" == "${_P23_CANONICAL_COUNT}" ]]; then
-            return 0
-        fi
-        sleep 2
-    done
-
-    warn "Cleanup(phase23): subscriber count restore not observed (etcd='${_etcd_count:-empty}', local='${_local_count:-empty}')."
-    return 1
+    _e2e_wait_for "Cleanup(phase23): subscriber count back to ${_P23_CANONICAL_COUNT}" \
+        15 2 _p23_count_is_canonical
 }
 
 # Idempotent: called at the end of phase23 and from the top-level EXIT trap.

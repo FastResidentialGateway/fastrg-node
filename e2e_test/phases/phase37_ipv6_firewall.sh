@@ -358,6 +358,7 @@ phase37_ipv6_firewall() {
     local _drop_before=0 _drop_after=0 _drop_delta=0
     local _pass_before="" _pass_after="" _drop6_before="" _drop6_after=""
     local _cap_count="" _out="" _sport="" _used="" _bps=0 _floor=0
+    local _flow6="" _flow_ep="" _listen6=""
     local _inject_out="" _spray_log=""
     local _positive_ok=0 _negative_seen=0 _listener_alive=1 _listener_ready=0
 
@@ -678,14 +679,25 @@ PY" 2>&1 || true)
         nohup iperf3 -6 -c '${_P37_WAN6_HOST_ADDR}' -p '${SRV_PORT}' -t 60 -i 1 --forceflush \
         >'${_P37_LAN_IPERF_OUT}' 2>&1 < /dev/null & echo \$! >'${_P37_LAN_IPERF_PID}'" \
         >/dev/null 2>&1 || true
+    # The forged packets have to name this session exactly as the node recorded
+    # it, so the address and the port are read off the same socket. Taking the
+    # address from an earlier snapshot lets the two disagree: the LAN host
+    # prefers a temporary address, which can appear after the snapshot was made,
+    # and every injection then names a session that never existed. Matching on
+    # the peer column also keeps a row from some unrelated socket out of it.
+    _flow6=""
     _sport=""
     for _i in $(seq 1 12); do
         sleep 1
-        _sport=$(ssh_lan "ss -6 -tn 2>/dev/null | grep -F ']:${SRV_PORT}'" 2>/dev/null | \
-            awk '{print $4}' | sed -E 's/.*\]:([0-9]+)$/\1/' | head -1 || true)
-        [[ "$_sport" =~ ^[0-9]+$ ]] && break
+        _flow_ep=$(ssh_lan "ss -6 -tn 2>/dev/null" 2>/dev/null | \
+            awk -v peer="[${_P37_WAN6_HOST_ADDR}]:${SRV_PORT}" \
+                '$1 == "ESTAB" && $5 == peer { print $4; exit }' || true)
+        _flow6=$(printf '%s' "$_flow_ep" | sed -E 's/^\[(.+)\]:[0-9]+$/\1/')
+        _sport=$(printf '%s' "$_flow_ep" | sed -E 's/^\[.+\]:([0-9]+)$/\1/')
+        [[ -n "$_flow6" ]] && [[ "$_sport" =~ ^[0-9]+$ ]] && break
     done
-    [[ "$_sport" =~ ^[0-9]+$ ]] || _issue="${_issue:+${_issue}; }could not read the LAN source port of the iperf3 flow"
+    [[ -n "$_flow6" ]] && [[ "$_sport" =~ ^[0-9]+$ ]] || \
+        _issue="${_issue:+${_issue}; }could not read the LAN endpoint of the iperf3 flow"
 
     # Control first: a forged Packet Too Big quoting this very live session has
     # to be accepted. It moves a counter only the firewall touches, so it
@@ -693,7 +705,7 @@ PY" 2>&1 || true)
     # could just mean the node discarded an unrecognised frame.
     if [[ -z "$_issue" ]]; then
         _pass_before=$(_p37_metric "fastrg_node_per_user_ipv6_firewall_icmp6_err_passed_total")
-        _inject_out=$(_p37_inject "sendp(eth / IPv6(src='${_P37_ROUTER6}', dst='${_P37_LAN6}', hlim=64) / ICMPv6PacketTooBig(mtu=1280) / IPv6(src='${_P37_LAN6}', dst='${_P37_WAN6_HOST_ADDR}') / TCP(sport=${_sport}, dport=${SRV_PORT}), iface='${WAN_NIC}', verbose=0)")
+        _inject_out=$(_p37_inject "sendp(eth / IPv6(src='${_P37_ROUTER6}', dst='${_flow6}', hlim=64) / ICMPv6PacketTooBig(mtu=1280) / IPv6(src='${_flow6}', dst='${_P37_WAN6_HOST_ADDR}') / TCP(sport=${_sport}, dport=${SRV_PORT}), iface='${WAN_NIC}', verbose=0)")
         sleep 2
         _pass_after=$(_p37_metric "fastrg_node_per_user_ipv6_firewall_icmp6_err_passed_total")
         if ! e2e_all_uint "$_pass_before" "$_pass_after" || \
@@ -704,7 +716,7 @@ PY" 2>&1 || true)
 
     if [[ -z "$_issue" ]]; then
         _drop_before=$(_p37_drop_count)
-        _inject_out=$(_p37_inject "sendp(eth / IPv6(src='${_P37_WAN6_HOST_ADDR}', dst='${_P37_LAN6}', hlim=64) / TCP(sport=${SRV_PORT}, dport=${_sport}, flags='S', seq=0x12345678), iface='${WAN_NIC}', verbose=0)")
+        _inject_out=$(_p37_inject "sendp(eth / IPv6(src='${_P37_WAN6_HOST_ADDR}', dst='${_flow6}', hlim=64) / TCP(sport=${SRV_PORT}, dport=${_sport}, flags='S', seq=0x12345678), iface='${WAN_NIC}', verbose=0)")
         sleep 2
         _drop_after=$(_p37_drop_count)
         _drop_delta=$(( _drop_after - _drop_before ))
@@ -714,7 +726,7 @@ PY" 2>&1 || true)
 
     if [[ -z "$_issue" ]]; then
         _drop_before=$(_p37_drop_count)
-        _inject_out=$(_p37_inject "sendp(eth / IPv6(src='${_P37_WAN6_HOST_ADDR}', dst='${_P37_LAN6}', hlim=64) / TCP(sport=${SRV_PORT}, dport=${_sport}, flags='A', seq=0x40000000, ack=0xCAFEBABE), iface='${WAN_NIC}', verbose=0)")
+        _inject_out=$(_p37_inject "sendp(eth / IPv6(src='${_P37_WAN6_HOST_ADDR}', dst='${_flow6}', hlim=64) / TCP(sport=${SRV_PORT}, dport=${_sport}, flags='A', seq=0x40000000, ack=0xCAFEBABE), iface='${WAN_NIC}', verbose=0)")
         sleep 2
         _drop_after=$(_p37_drop_count)
         _drop_delta=$(( _drop_after - _drop_before ))
@@ -724,7 +736,7 @@ PY" 2>&1 || true)
 
     if [[ -z "$_issue" ]]; then
         pass "Step 161: forged TCP against a live IPv6 session is dropped" \
-            "state-mismatch SYN and out-of-window ACK on [${_P37_LAN6}]:${_sport} both dropped"
+            "state-mismatch SYN and out-of-window ACK on [${_flow6}]:${_sport} both dropped"
     else
         fail "Step 161: forged TCP against a live IPv6 session is dropped" "$_issue"
     fi
@@ -743,7 +755,7 @@ PY" 2>&1 || true)
         if ! _p37_start_capture "'ip6 and tcp and port ${_sport}'"; then
             _issue="tcpdump did not start on ${_P37_LAN_VLAN}; a silent capture proves nothing"
         fi
-        _inject_out=$(_p37_inject "sendp(eth / IPv6(src='${_P37_WAN6_HOST_ADDR}', dst='${_P37_LAN6}', hlim=64) / TCP(sport=${SRV_PORT}, dport=${_sport}, flags='S', seq=0x12345678), iface='${WAN_NIC}', verbose=0)")
+        _inject_out=$(_p37_inject "sendp(eth / IPv6(src='${_P37_WAN6_HOST_ADDR}', dst='${_flow6}', hlim=64) / TCP(sport=${SRV_PORT}, dport=${_sport}, flags='S', seq=0x12345678), iface='${WAN_NIC}', verbose=0)")
         sleep 3
         _p37_stop_remote ssh_lan "$_P37_CAP_PID" "Phase 37 tcpdump" || \
             _issue="${_issue:+${_issue}; }tcpdump did not stop"
@@ -756,7 +768,7 @@ PY" 2>&1 || true)
         _P37_CONNTRACK_TOGGLED=0
         sleep 1
         _drop_before=$(_p37_drop_count)
-        _inject_out=$(_p37_inject "sendp(eth / IPv6(src='${_P37_WAN6_HOST_ADDR}', dst='${_P37_LAN6}', hlim=64) / TCP(sport=${SRV_PORT}, dport=${_sport}, flags='S', seq=0x12345678), iface='${WAN_NIC}', verbose=0, count=2)")
+        _inject_out=$(_p37_inject "sendp(eth / IPv6(src='${_P37_WAN6_HOST_ADDR}', dst='${_flow6}', hlim=64) / TCP(sport=${SRV_PORT}, dport=${_sport}, flags='S', seq=0x12345678), iface='${WAN_NIC}', verbose=0, count=2)")
         sleep 2
         _drop_after=$(_p37_drop_count)
         _drop_delta=$(( _drop_after - _drop_before ))
@@ -785,7 +797,7 @@ PY" 2>&1 || true)
 
     if [[ -z "$_issue" ]]; then
         _pass_before=$(_p37_metric "fastrg_node_per_user_ipv6_firewall_icmp6_err_passed_total")
-        _inject_out=$(_p37_inject "sendp(eth / IPv6(src='${_P37_ROUTER6}', dst='${_P37_LAN6}', hlim=64) / ICMPv6PacketTooBig(mtu=1280) / IPv6(src='${_P37_LAN6}', dst='${_P37_WAN6_HOST_ADDR}') / UDP(sport=41620, dport=${_P37_ECHO_PORT}), iface='${WAN_NIC}', verbose=0)")
+        _inject_out=$(_p37_inject "sendp(eth / IPv6(src='${_P37_ROUTER6}', dst='${_flow6}', hlim=64) / ICMPv6PacketTooBig(mtu=1280) / IPv6(src='${_flow6}', dst='${_P37_WAN6_HOST_ADDR}') / UDP(sport=41620, dport=${_P37_ECHO_PORT}), iface='${WAN_NIC}', verbose=0)")
         sleep 2
         _pass_after=$(_p37_metric "fastrg_node_per_user_ipv6_firewall_icmp6_err_passed_total")
         if ! e2e_all_uint "$_pass_before" "$_pass_after" || \
@@ -797,7 +809,7 @@ PY" 2>&1 || true)
     if [[ -z "$_issue" ]]; then
         _drop6_before=$(_p37_metric "fastrg_node_per_user_ipv6_firewall_icmp6_err_dropped_total")
         _drop_before=$(_p37_drop_count)
-        _inject_out=$(_p37_inject "sendp(eth / IPv6(src='${_P37_ROUTER6}', dst='${_P37_LAN6}', hlim=64) / ICMPv6PacketTooBig(mtu=1280) / IPv6(src='${_P37_LAN6}', dst='${_P37_WAN6_HOST_ADDR}') / UDP(sport=41621, dport=${_P37_ECHO_PORT}), iface='${WAN_NIC}', verbose=0)")
+        _inject_out=$(_p37_inject "sendp(eth / IPv6(src='${_P37_ROUTER6}', dst='${_flow6}', hlim=64) / ICMPv6PacketTooBig(mtu=1280) / IPv6(src='${_flow6}', dst='${_P37_WAN6_HOST_ADDR}') / UDP(sport=41621, dport=${_P37_ECHO_PORT}), iface='${WAN_NIC}', verbose=0)")
         sleep 2
         _drop6_after=$(_p37_metric "fastrg_node_per_user_ipv6_firewall_icmp6_err_dropped_total")
         _drop_after=$(_p37_drop_count)
@@ -843,10 +855,20 @@ recv_path = sys.argv[5]
 
 sock = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-sock.bind(('::', listen_port))
+# Ask the kernel which source address it will use towards the WAN host and bind
+# to it, so the injections can name this exact tuple. A wildcard bind would
+# leave the address to whatever is preferred at send time, and the address the
+# test injects against would not have to be the one the node recorded. The
+# probe socket only answers the question and is closed again; the listener
+# itself stays unconnected, so ICMP errors from the peer are ignored as before.
+probe = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+probe.connect((wan6, remote_port))
+local6 = probe.getsockname()[0]
+probe.close()
+sock.bind((local6, listen_port))
 sock.settimeout(0.5)
 with open(ready_path, 'w', encoding='ascii') as ready:
-    ready.write('ready\n')
+    ready.write(local6 + '\n')
 sock.sendto(b'fw6-expiry-seed', (wan6, remote_port))
 
 deadline = time.monotonic() + 45
@@ -867,9 +889,16 @@ echo \$! >'${_P37_LISTENER_PID}'" >/dev/null 2>&1 || true
         sleep 1
     done
     [[ $_listener_ready -eq 1 ]] || _issue="LAN listener never became ready"
+    # The listener reports the source address its own socket settled on, for the
+    # same reason as the flow above: the injected tuple must match what the node
+    # recorded, not what the address preference happened to be earlier.
+    if [[ -z "$_issue" ]]; then
+        _listen6=$(ssh_lan "cat '${_P37_LISTENER_READY}' 2>/dev/null" 2>/dev/null | tr -d ' \r\n')
+        [[ -n "$_listen6" ]] || _issue="LAN listener did not report its source address"
+    fi
 
     if [[ -z "$_issue" ]]; then
-        _inject_out=$(_p37_inject "sendp(eth / IPv6(src='${_P37_WAN6_HOST_ADDR}', dst='${_P37_LAN6}', hlim=64) / UDP(sport=${_P37_REVIVE_REMOTE}, dport=${_P37_REVIVE_LISTEN}) / b'fw6-expiry-positive', iface='${WAN_NIC}', verbose=0)")
+        _inject_out=$(_p37_inject "sendp(eth / IPv6(src='${_P37_WAN6_HOST_ADDR}', dst='${_listen6}', hlim=64) / UDP(sport=${_P37_REVIVE_REMOTE}, dport=${_P37_REVIVE_LISTEN}) / b'fw6-expiry-positive', iface='${WAN_NIC}', verbose=0)")
         for _i in $(seq 1 5); do
             if ssh_lan "grep -qx 'fw6-expiry-positive' '${_P37_LISTENER_RECV}' 2>/dev/null"; then
                 _positive_ok=1
@@ -896,7 +925,7 @@ echo \$! >'${_P37_LISTENER_PID}'" >/dev/null 2>&1 || true
     fi
 
     if [[ -z "$_issue" ]]; then
-        _inject_out=$(_p37_inject "sendp(eth / IPv6(src='${_P37_WAN6_HOST_ADDR}', dst='${_P37_LAN6}', hlim=64) / UDP(sport=${_P37_REVIVE_REMOTE}, dport=${_P37_REVIVE_LISTEN}) / b'fw6-expiry-expired', iface='${WAN_NIC}', verbose=0)")
+        _inject_out=$(_p37_inject "sendp(eth / IPv6(src='${_P37_WAN6_HOST_ADDR}', dst='${_listen6}', hlim=64) / UDP(sport=${_P37_REVIVE_REMOTE}, dport=${_P37_REVIVE_LISTEN}) / b'fw6-expiry-expired', iface='${WAN_NIC}', verbose=0)")
         for _i in $(seq 1 5); do
             sleep 1
             if ssh_lan "grep -qx 'fw6-expiry-expired' '${_P37_LISTENER_RECV}' 2>/dev/null"; then
@@ -904,15 +933,26 @@ echo \$! >'${_P37_LISTENER_PID}'" >/dev/null 2>&1 || true
                 break
             fi
         done
+        # Silence is the pass condition here, so it only means something while
+        # someone is still listening. Re-check now instead of trusting the poll
+        # from before the injection: a listener that died in between makes a
+        # dropped packet and a dead process look exactly alike.
+        if ! ssh_lan "_pid=\$(cat '${_P37_LISTENER_PID}' 2>/dev/null); \
+            test -n \"\$_pid\" && kill -0 \"\$_pid\" 2>/dev/null"; then
+            _listener_alive=0
+        fi
         [[ $_negative_seen -eq 0 ]] || \
             _issue="the same tuple still reached the listener after the session expired"
+        if [[ -z "$_issue" ]] && [[ $_listener_alive -ne 1 ]]; then
+            _issue="the listener died before the negative check could mean anything"
+        fi
     fi
     _p37_stop_remote ssh_lan "$_P37_LISTENER_PID" "Phase 37 UDP listener" || \
         _issue="${_issue:+${_issue}; }listener did not stop"
 
     if [[ -z "$_issue" ]]; then
         pass "Step 164: an expired session stays closed" \
-            "the live tuple reached [${_P37_LAN6}]:${_P37_REVIVE_LISTEN}, the same tuple was dropped after 15s idle"
+            "the live tuple reached [${_listen6}]:${_P37_REVIVE_LISTEN}, the same tuple was dropped after 15s idle"
     else
         fail "Step 164: an expired session stays closed" \
             "${_issue}; positive=${_positive_ok} negative=${_negative_seen} listener_alive=${_listener_alive}"

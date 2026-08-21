@@ -6,6 +6,14 @@
 _FASTRG_DAEMON="/root/fastrg/fastrg-node/fastrg"
 _FASTRG_START_CMD="${_FASTRG_DAEMON} -l 1-8 -n 4 --socket-mem 17408 -a 0000:07:00.0 -a 0000:08:00.0"
 
+# Phase 0 bounces the LAN subscriber connection to force a DHCP renew. An
+# interrupt landing between the down and the up would leave the interface down
+# for every later run, so bring it back whatever happened. Idempotent.
+_cleanup_phase0_setup() {
+    ssh_lan "nmcli con up netplan-vlan3 >/dev/null 2>&1 || netplan apply >/dev/null 2>&1; true" \
+        >/dev/null 2>&1 || true
+}
+
 phase0_setup() {
     bold "═══════════════════════════════════════════════════════"
     bold " Phase 0 — Prerequisite Checks"
@@ -118,7 +126,14 @@ phase0_setup() {
     # node picks it up on boot (must happen BEFORE the daemon starts).
     # ------------------------------------------------------------------
     info "Checking etcd HSI fixture for USER_ID=${USER_ID}..."
-    _seed_hsi=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/${USER_ID}" 2>/dev/null || true)
+    # An unreachable endpoint reads as an empty value, which would look like a
+    # missing fixture and send the whole run chasing the wrong problem. Stop on
+    # the real cause instead.
+    if ! _seed_hsi=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/${USER_ID}"); then
+        error "Cannot reach etcd at ${ETCD_ENDPOINT} to read the HSI fixture."
+        error "The suite reads its configuration from etcd; fix connectivity before rerunning."
+        exit 1
+    fi
     # Validate the fixture: it must exist AND have a non-zero vlan_id (vlan=0 means
     # a previous run left a bad/un-rolled-back test config — reseed in that case too).
     _seed_vlan=$(printf '%s' "$_seed_hsi" | jq -r '.config.vlan_id // empty' 2>/dev/null || true)
@@ -129,7 +144,12 @@ phase0_setup() {
             warn "etcd HSI config for USER_ID=${USER_ID} is corrupt/stale (vlan=${_seed_vlan:-empty}) — reseeding..."
         fi
         ssh_node "bash /root/fastrg/fastrg-node/e2e_test/restore_etcd_config.sh --force" 2>&1 | sed 's/^/    /'
-        _seed_hsi=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/${USER_ID}" 2>/dev/null || true)
+        # Seeding writes through the controller REST API but this reads etcd
+        # directly, so the two can disagree; say which one failed.
+        if ! _seed_hsi=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/${USER_ID}"); then
+            error "Seeded the HSI fixture, but etcd at ${ETCD_ENDPOINT} is unreachable for the read-back."
+            exit 1
+        fi
         if [[ -z "$_seed_hsi" ]]; then
             error "Failed to seed etcd HSI fixture for USER_ID=${USER_ID}."
             exit 1
