@@ -372,11 +372,11 @@ static __always_inline U16 ipv6_build_packet_too_big(ppp_ccb_t *ppp_ccb,
 }
 
 /**
- * @fn ipv6_send_packet_too_big
+ * @fn build_ipv6_packet_too_big_reply
  *
- * @brief Answer an oversized LAN packet with ICMPv6 Packet Too Big on the
- *        caller's LAN TX queue and free the oversized packet. Mirrors what
- *        build_icmp_unreach does for IPv4.
+ * @brief Build the ICMPv6 Packet Too Big answer to an oversized LAN packet and
+ *        free the oversized packet. Mirrors build_icmp_unreach for IPv4.
+ *
  *
  * @param fastrg_ccb
  *      FastRG control block
@@ -392,32 +392,35 @@ static __always_inline U16 ipv6_build_packet_too_big(ppp_ccb_t *ppp_ccb,
  *      VLAN header of the oversized packet
  * @param ip6
  *      IPv6 header of the oversized packet
- * @param lan_tx_queue
- *      LAN TX queue owned by the calling lcore
+ * @param pool
+ *      Mempool to build the reply from. The caller passes the pool the queue
+ *      it will leave on already carries.
  * @return
- *      void
+ *      Reply packet for the caller to send, or NULL when there is nothing to
+ *      send
  */
-static __always_inline void ipv6_send_packet_too_big(FastRG_t *fastrg_ccb,
+static __always_inline struct rte_mbuf *build_ipv6_packet_too_big_reply(FastRG_t *fastrg_ccb,
     ppp_ccb_t *ppp_ccb, struct rte_mbuf *pkt, U16 ccb_id,
     struct rte_ether_hdr *eth_hdr, vlan_header_t *vlan_hdr,
-    struct rte_ipv6_hdr *ip6, U16 lan_tx_queue)
+    struct rte_ipv6_hdr *ip6, struct rte_mempool *pool)
 {
-    struct rte_mbuf *reply = rte_pktmbuf_alloc(direct_pool[0]);
+    /* Reply comes from the pool the other packets on that queue came from:
+     * one queue carries one pool. */
+    struct rte_mbuf *reply = rte_pktmbuf_alloc(pool);
     U16 reply_len;
 
     count_rx_packet(fastrg_ccb, pkt, LAN_PORT, ccb_id);
     if (unlikely(reply == NULL)) {
         drop_packet(fastrg_ccb, pkt, LAN_PORT, ccb_id);
-        return;
+        return NULL;
     }
     reply_len = ipv6_build_packet_too_big(ppp_ccb, eth_hdr, vlan_hdr, ip6,
         (U16)(pkt->pkt_len - IPV6_L2_LEN), rte_pktmbuf_mtod(reply, U8 *));
     reply->pkt_len = reply_len;
     reply->data_len = reply_len;
     count_tx_packet(fastrg_ccb, reply, LAN_PORT, ccb_id);
-    if (rte_eth_tx_burst(LAN_PORT, lan_tx_queue, &reply, 1) == 0)
-        drop_packet(fastrg_ccb, reply, LAN_PORT, ccb_id);
     drop_packet(fastrg_ccb, pkt, LAN_PORT, ccb_id);
+    return reply;
 }
 
 /**

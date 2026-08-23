@@ -125,7 +125,9 @@ static int encaps_udp(FastRG_t *fastrg_ccb, struct rte_mbuf **single_pkt,
 
     if (unlikely((*single_pkt)->pkt_len > (ETH_MTU - (sizeof(vlan_header_t) + 
             sizeof(pppoe_header_t) + sizeof(ppp_payload_t))))) {
-        struct rte_mbuf *pkt = rte_pktmbuf_alloc(direct_pool[0]);
+        /* We use WAN mempool here because it is sent via LAN port and most 
+        other packets sent via LAN port are allocated from the WAN pool. */
+        struct rte_mbuf *pkt = rte_pktmbuf_alloc(direct_pool[WAN_PORT]);
         if (unlikely(pkt == NULL)) {
             drop_packet(fastrg_ccb, *single_pkt, LAN_PORT, ccb_id);
             return 0;
@@ -133,7 +135,9 @@ static int encaps_udp(FastRG_t *fastrg_ccb, struct rte_mbuf **single_pkt,
         build_icmp_unreach(fastrg_ccb, pkt, ccb_id, eth_hdr, *vlan_header, ip_hdr);
         count_rx_packet(fastrg_ccb, *single_pkt, LAN_PORT, ccb_id);
         count_tx_packet(fastrg_ccb, pkt, LAN_PORT, ccb_id);
-        rte_eth_tx_burst(LAN_PORT, lan_tx_queue, &pkt, 1);
+        /* Packet sent via LAN port is belong to wan to lan lcore */
+        if (unlikely(send_pkt_to_other_lcore(fastrg_ccb, LAN_PORT, lan_tx_queue, pkt) == ERROR))
+            drop_packet(fastrg_ccb, pkt, LAN_PORT, ccb_id);
         drop_packet(fastrg_ccb, *single_pkt, LAN_PORT, ccb_id);
         new_pkt_num = 0;
     } else {
@@ -230,7 +234,9 @@ static int encaps_tcp(FastRG_t *fastrg_ccb, struct rte_mbuf **single_pkt,
         }
         (*single_pkt) = new_pkt;
         #else
-        struct rte_mbuf *pkt = rte_pktmbuf_alloc(direct_pool[0]);
+        /* We use WAN mempool here because it is sent via LAN port and most 
+        other packets sent via LAN port are allocated from the WAN pool. */
+        struct rte_mbuf *pkt = rte_pktmbuf_alloc(direct_pool[WAN_PORT]);
         if (unlikely(pkt == NULL)) {
             drop_packet(fastrg_ccb, *single_pkt, LAN_PORT, ccb_id);
             return 0;
@@ -238,7 +244,9 @@ static int encaps_tcp(FastRG_t *fastrg_ccb, struct rte_mbuf **single_pkt,
         build_icmp_unreach(fastrg_ccb, pkt, ccb_id, eth_hdr, *vlan_header, ip_hdr);
         count_rx_packet(fastrg_ccb, *single_pkt, LAN_PORT, ccb_id);
         count_tx_packet(fastrg_ccb, pkt, LAN_PORT, ccb_id);
-        rte_eth_tx_burst(LAN_PORT, lan_tx_queue, &pkt, 1);
+        /* Packet sent via LAN port is belong to wan to lan lcore */
+        if (unlikely(send_pkt_to_other_lcore(fastrg_ccb, LAN_PORT, lan_tx_queue, pkt) == ERROR))
+            drop_packet(fastrg_ccb, pkt, LAN_PORT, ccb_id);
         drop_packet(fastrg_ccb, *single_pkt, LAN_PORT, ccb_id);
         new_pkt_num = 0;
         #endif
@@ -348,10 +356,12 @@ static int decaps_udp(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt,
             /* MAC unknown: queue packet and send ARP request */
             dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
             arp_pending_enqueue(fastrg_ccb->arp_pending_mp,
-                &ppp_ccb->arp_pq, single_pkt, fwd_dip);
+                &ppp_ccb->arp_pq, single_pkt, fwd_dip, tx_q);
             if (send_arp_request(&fastrg_ccb->nic_info.hsi_lan_mac,
                     dhcp_ccb->dhcp_server_ip, fwd_dip,
-                    rte_atomic16_read(&ppp_ccb->vlan_id), tx_q) == SUCCESS)
+                    rte_atomic16_read(&ppp_ccb->vlan_id), tx_q,
+                    /* ARP packets are sent via LAN port, so use WAN pool for allocation */
+                    direct_pool[WAN_PORT]) == SUCCESS)
                 count_tx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
             return 0;  /* packet held in pending queue */
         }
@@ -410,10 +420,12 @@ static int decaps_tcp(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt,
             /* MAC unknown: queue packet and send ARP request */
             dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
             arp_pending_enqueue(fastrg_ccb->arp_pending_mp,
-                &ppp_ccb->arp_pq, single_pkt, fwd_dip);
+                &ppp_ccb->arp_pq, single_pkt, fwd_dip, tx_q);
             if (send_arp_request(&fastrg_ccb->nic_info.hsi_lan_mac,
                     dhcp_ccb->dhcp_server_ip, fwd_dip,
-                    rte_atomic16_read(&ppp_ccb->vlan_id), tx_q) == SUCCESS)
+                    rte_atomic16_read(&ppp_ccb->vlan_id), tx_q,
+                    /* ARP packets are sent via LAN port, so use WAN pool for allocation */
+                    direct_pool[WAN_PORT]) == SUCCESS)
                 count_tx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
             return 0;  /* packet held in pending queue */
         }
