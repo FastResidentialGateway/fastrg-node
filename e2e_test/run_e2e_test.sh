@@ -43,6 +43,9 @@
 #                  because nothing inside the peer can drop the physical
 #                  signal the node observes.       (default: enp1s0f0)
 #   LAN_PEER_NIC   NIC the LAN peer uses for LAN traffic.  (default: enp8s0)
+#   LAN_PEER_VLAN  Subscriber VLAN interface on top of LAN_PEER_NIC; the
+#                  sustained-traffic steps read its RX drops when they
+#                  fail.                            (default: vlan3)
 #   LAN_VF_ID      Index of the VF that LAN_PEER_NIC consumes. (default: 0)
 #                  Leave it EMPTY (LAN_VF_ID=) on a bench without SR-IOV on
 #                  the LAN side: every VF-specific assertion and every
@@ -52,6 +55,14 @@
 #   The node computes its subscriber capacity from the hugepage heap at startup.
 #   The bench must start it with --socket-mem 17408 so rte_malloc owns all 17
 #   1-GiB pages up front; PA mode cannot dynamically add free system hugepages.
+#
+# Progress and ETA:
+#   Every phase prints its position in the run, the time spent so far and an
+#   ETA. The ETA adds up how long each remaining phase took in earlier runs, so
+#   the very first run on a machine has nothing to go on and says "n/a".
+#   Those durations are kept on the runner in ~/.fastrg_e2e_phase_history.tsv;
+#   set E2E_PHASE_HISTORY to put the file somewhere else. Only phases that
+#   finished with no failed step are recorded, and the drills never record.
 # =============================================================================
 
 # ---------------------------------------------------------------------------
@@ -416,7 +427,9 @@ if [[ -z "${_FASTRG_E2E_RELOCATED:-}" ]]; then
         for _a in "$@"; do _remote_args="${_remote_args} '${_a}'"; done
         ssh $_SSH_OPTS "${_E2E_RUNNER_USER}@${_E2E_RUNNER_HOST}" \
             "chmod +x ${_E2E_REMOTE_PATH} && LAN_FLAP_HOST='${LAN_FLAP_HOST:-}' LAN_FLAP_NIC='${LAN_FLAP_NIC:-}' \
-             LAN_PEER_NIC='${LAN_PEER_NIC:-}' LAN_VF_ID='${LAN_VF_ID-0}' \
+             LAN_PEER_NIC='${LAN_PEER_NIC:-}' LAN_PEER_VLAN='${LAN_PEER_VLAN:-}' \
+             LAN_VF_ID='${LAN_VF_ID-0}' \
+             E2E_PHASE_HISTORY='${E2E_PHASE_HISTORY:-}' \
              _FASTRG_E2E_RELOCATED=1 ${_E2E_REMOTE_PATH}${_remote_args}"
         _ssh_rc=$?
         trap - INT TERM
@@ -579,6 +592,7 @@ fi
 LAN_FLAP_HOST="${LAN_FLAP_HOST:-${WAN_HOST}}"
 LAN_FLAP_NIC="${LAN_FLAP_NIC:-enp1s0f0}"
 LAN_PEER_NIC="${LAN_PEER_NIC:-enp8s0}"
+LAN_PEER_VLAN="${LAN_PEER_VLAN:-vlan3}"
 LAN_VF_ID="${LAN_VF_ID-0}"
 
 if [[ -n "$LAN_VF_ID" && ! "$LAN_VF_ID" =~ ^[0-9]+$ ]]; then
@@ -671,23 +685,32 @@ record_result() {
     STEP_DETAILS+=("$detail")
 }
 
+# "  (+MM:SS)" — how far into the current phase this step landed. Empty when no
+# phase is being timed, which is the case for the drills: they call phases
+# directly instead of going through the progress loop. Display only; the three
+# arrays above are what every later check reads.
+_e2e_step_elapsed_suffix() {
+    [[ -n "${_E2E_PHASE_T0:-}" ]] || return 0
+    printf '  (+%s)' "$(e2e_fmt_ms "$(( SECONDS - _E2E_PHASE_T0 ))")"
+}
+
 pass() {
     local name="$1" detail="${2:-}"
-    printf "  ${GREEN}[PASS]${NC} %s\n" "$name"
+    printf "  ${GREEN}[PASS]${NC} %s%s\n" "$name" "$(_e2e_step_elapsed_suffix)"
     [[ -n "$detail" ]] && printf "         %s\n" "$detail"
     record_result "$name" "PASS" "$detail"
 }
 
 fail() {
     local name="$1" detail="${2:-}"
-    printf "  ${RED}[FAIL]${NC} %s\n" "$name"
+    printf "  ${RED}[FAIL]${NC} %s%s\n" "$name" "$(_e2e_step_elapsed_suffix)"
     [[ -n "$detail" ]] && printf "         %s\n" "$detail"
     record_result "$name" "FAIL" "$detail"
 }
 
 skip() {
     local name="$1" detail="${2:-}"
-    printf "  ${YELLOW}[SKIP]${NC} %s\n" "$name"
+    printf "  ${YELLOW}[SKIP]${NC} %s%s\n" "$name" "$(_e2e_step_elapsed_suffix)"
     [[ -n "$detail" ]] && printf "         %s\n" "$detail"
     record_result "$name" "SKIP" "$detail"
 }
@@ -865,6 +888,8 @@ source "${_E2E_PHASES_DIR}/local_validation_lib.sh"
 source "${_E2E_PHASES_DIR}/case_validation_lib.sh"
 # Shared /metrics sampling helpers — not a phase; must be sourced first.
 source "${_E2E_PHASES_DIR}/metrics_lib.sh"
+# Duration formatting and the ETA arithmetic — not a phase either.
+source "${_E2E_PHASES_DIR}/progress_lib.sh"
 source "${_E2E_PHASES_DIR}/phase0_setup.sh"
 source "${_E2E_PHASES_DIR}/phase1_subscriber_count_tests.sh"
 source "${_E2E_PHASES_DIR}/phase2_etcd_config_sync.sh"
@@ -906,6 +931,229 @@ source "${_E2E_PHASES_DIR}/phase35_ipv6.sh"
 source "${_E2E_PHASES_DIR}/phase36_nat_capacity.sh"
 source "${_E2E_PHASES_DIR}/phase37_ipv6_firewall.sh"
 source "${_E2E_PHASES_DIR}/phase38_summary.sh"
+
+# ---------------------------------------------------------------------------
+# Phase table, progress display and phase-duration history
+#
+# The suite runs its phases from this table, in this order, so the progress
+# line can say which phase this is out of how many. A phase added to the suite
+# belongs here; nothing else keeps a second copy of the order.
+# ---------------------------------------------------------------------------
+E2E_PHASES=(
+    phase0_setup
+    phase1_subscriber_count_tests
+    phase2_etcd_config_sync
+    phase3_dhcp_and_count
+    phase3_5_enable_status
+    phase4_lan_to_wan
+    phase4_5_tcp_spi
+    phase5_dnat_test
+    phase6_dns_ping
+    phase7_extra_user_config_tests
+    phase8_cli_config_sync
+    phase9_cli_fallback
+    phase10_desire_diff
+    phase11_kafka_pipeline
+    phase12_rollback
+    phase13_pdump
+    phase14_stress_test
+    phase15_metrics_route
+    phase16_rcu_concurrency
+    phase17_etcd_offline_queue
+    phase18_dns_cache
+    phase19_node_restart
+    phase20_nat_expiry
+    phase21_rpc_coverage
+    phase22_dhcp_lease
+    phase23_hsi_sweep
+    phase24_multi_lan
+    phase25_udp_icmp_traffic
+    phase26_heartbeat_reregister
+    phase27_link_flap
+    phase28_chap_auth
+    phase29_protocol_reject
+    phase30_keepalive_failure
+    phase31_subscriber_scale
+    phase32_metric_values
+    phase33_shutdown_inactive
+    phase34_wan_long_outage
+    phase35_ipv6
+    phase36_nat_capacity
+    phase37_ipv6_firewall
+    phase38_summary
+)
+
+# Both are index-aligned with E2E_PHASES: how long each phase took in this run,
+# and the estimate read from the history file. Plain indexed arrays, like the
+# result arrays above, so the suite keeps parsing on bash 3.2.
+E2E_PHASE_SECONDS=()
+E2E_PHASE_EST=()
+# Stand-in for a phase with no history of its own: the median of the estimates
+# that do exist. Empty when the history file gave us nothing at all.
+E2E_PHASE_EST_FALLBACK=""
+
+# $SECONDS when the run started and when the running phase started. Empty means
+# "not being timed", which is how the step suffix and the summary tell that they
+# were reached outside the progress loop.
+_E2E_RUN_T0=""
+_E2E_PHASE_T0=""
+
+# Position of the phase that ran last, so the next one can be checked against it.
+_E2E_LAST_PHASE_IDX=0
+
+# One line per finished phase: name, seconds, when. It lives in $HOME rather
+# than the uploaded working directory, which is deleted and re-uploaded on
+# every run.
+_E2E_PHASE_HISTORY_FILE="${E2E_PHASE_HISTORY:-${HOME}/.fastrg_e2e_phase_history.tsv}"
+
+# How many past runs of a phase feed its estimate, and how many are kept.
+_E2E_HISTORY_SAMPLES=5
+_E2E_HISTORY_KEEP=10
+
+# Fill E2E_PHASE_SECONDS/E2E_PHASE_EST for this run. A missing or unreadable
+# history file simply leaves every estimate empty.
+_e2e_history_load() {
+    local _i _samples _median _known=""
+
+    E2E_PHASE_SECONDS=()
+    E2E_PHASE_EST=()
+    for (( _i = 0; _i < ${#E2E_PHASES[@]}; _i++ )); do
+        E2E_PHASE_SECONDS+=("")
+        E2E_PHASE_EST+=("")
+    done
+    [[ -r "$_E2E_PHASE_HISTORY_FILE" ]] || return 0
+
+    for (( _i = 0; _i < ${#E2E_PHASES[@]}; _i++ )); do
+        _samples=$(awk -F'\t' -v want="${E2E_PHASES[$_i]}" \
+            '$1 == want && $2 ~ /^[0-9]+$/ { print $2 }' \
+            "$_E2E_PHASE_HISTORY_FILE" 2>/dev/null | tail -n "$_E2E_HISTORY_SAMPLES")
+        [[ -n "$_samples" ]] || continue
+        _median=$(e2e_median_of_lines "$_samples" || true)
+        [[ -n "$_median" ]] || continue
+        E2E_PHASE_EST[$_i]="$_median"
+        _known="${_known}${_median}
+"
+    done
+    [[ -n "$_known" ]] && E2E_PHASE_EST_FALLBACK=$(e2e_median_of_lines "$_known" || true)
+    return 0
+}
+
+# Append one phase's duration, then trim that phase back to its last few runs.
+# Every failure here is a warning only: an estimate is a convenience and must
+# never change what the run reports.
+_e2e_history_append() {
+    local _name="$1" _seconds="$2" _tmp
+
+    if [[ -e "$_E2E_PHASE_HISTORY_FILE" && ! -f "$_E2E_PHASE_HISTORY_FILE" ]]; then
+        warn "Phase history: ${_E2E_PHASE_HISTORY_FILE} is not a regular file; not recording durations."
+        return 0
+    fi
+    _tmp=$(mktemp "${_E2E_PHASE_HISTORY_FILE}.XXXXXX" 2>/dev/null) || {
+        warn "Phase history: cannot write next to ${_E2E_PHASE_HISTORY_FILE}; durations not recorded."
+        return 0
+    }
+    {
+        cat "$_E2E_PHASE_HISTORY_FILE" 2>/dev/null || true
+        printf '%s\t%s\t%s\n' "$_name" "$_seconds" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    } | awk -F'\t' -v keep="$_E2E_HISTORY_KEEP" '
+        { line[NR] = $0; name[NR] = $1; seen[$1]++ }
+        END {
+            for (i = 1; i <= NR; i++) {
+                if (kept[name[i]]++ < seen[name[i]] - keep)
+                    continue
+                print line[i]
+            }
+        }
+    ' > "$_tmp" 2>/dev/null && mv -f "$_tmp" "$_E2E_PHASE_HISTORY_FILE" 2>/dev/null && return 0
+
+    rm -f "$_tmp" 2>/dev/null || true
+    warn "Phase history: failed to update ${_E2E_PHASE_HISTORY_FILE}; durations not recorded."
+    return 0
+}
+
+# What to print after "ETA" for a run positioned at phase index INDEX (0-based).
+_e2e_eta_text() {
+    local _from="$1" _i _csv="" _answer _secs _unknown
+
+    if [[ -z "$E2E_PHASE_EST_FALLBACK" ]]; then
+        printf 'n/a (no history)'
+        return 0
+    fi
+    for (( _i = _from; _i < ${#E2E_PHASES[@]}; _i++ )); do
+        _csv="${_csv}${E2E_PHASE_EST[$_i]},"
+    done
+    _answer=$(e2e_eta_seconds "$E2E_PHASE_EST_FALLBACK" "${_csv%,}")
+    _secs="${_answer%% *}"
+    _unknown="${_answer##* }"
+    printf '~%s' "$(e2e_fmt_hms "$_secs")"
+    [[ "$_unknown" -gt 0 ]] && printf ' (+%d phases w/o history)' "$_unknown"
+    return 0
+}
+
+# _e2e_run_phase NAME INDEX TOTAL — run one phase with a progress line on each
+# side of it, and remember how long it took.
+#
+# The phase is called bare, so `set -e` still ends the run on a non-zero return
+# exactly as a direct call did. Callers must not guard this with `||` unless
+# they mean to switch `set -e` off inside the phase as well.
+#
+# Every name here carries the _e2e_rp_ prefix on purpose. A `local` stays
+# visible inside everything the function calls, and several phases use short
+# names such as _i or _name as ordinary globals; a plain name here would be
+# handed to the phase to overwrite, and a counter overwritten mid-loop sends
+# the suite back to a phase it already ran.
+_e2e_run_phase() {
+    local _e2e_rp_name="$1" _e2e_rp_idx="$2" _e2e_rp_total="$3"
+    local _e2e_rp_mark="${#STEP_RESULTS[@]}"
+    local _e2e_rp_slot=$(( _e2e_rp_idx - 1 )) _e2e_rp_dt _e2e_rp_fails=0
+
+    # A phase run out of position means the loop counter was overwritten and the
+    # suite is repeating work whose setup no longer holds. Stopping here says so
+    # plainly; carrying on surfaces later as some unrelated step failing.
+    if ! e2e_phase_step_ok "$(( _E2E_LAST_PHASE_IDX + 1 ))" "$_e2e_rp_idx"; then
+        error "Phase order broken: expected phase $(( _E2E_LAST_PHASE_IDX + 1 )), got ${_e2e_rp_idx} (${_e2e_rp_name})"
+        exit 1
+    fi
+    _E2E_LAST_PHASE_IDX="$_e2e_rp_idx"
+
+    printf "\n${CYAN}[PHASE %s/%s]${NC} %s  elapsed %s  ETA %s\n" \
+        "$_e2e_rp_idx" "$_e2e_rp_total" "$_e2e_rp_name" \
+        "$(e2e_fmt_hms "$(( SECONDS - _E2E_RUN_T0 ))")" "$(_e2e_eta_text "$_e2e_rp_slot")"
+
+    _E2E_PHASE_T0=$SECONDS
+    "$_e2e_rp_name"
+    _e2e_rp_dt=$(( SECONDS - _E2E_PHASE_T0 ))
+    _E2E_PHASE_T0=""
+    E2E_PHASE_SECONDS[$_e2e_rp_slot]="$_e2e_rp_dt"
+
+    printf "${CYAN}[PHASE %s/%s]${NC} %s done in %s\n" \
+        "$_e2e_rp_idx" "$_e2e_rp_total" "$_e2e_rp_name" "$(e2e_fmt_ms "$_e2e_rp_dt")"
+
+    # A phase that failed a step normally cut itself short or sat out a timeout,
+    # so its duration says nothing about a healthy run. Only clean phases feed
+    # the estimates.
+    if [[ ${#STEP_RESULTS[@]} -gt $_e2e_rp_mark ]]; then
+        _e2e_rp_fails=$(printf '%s\n' "${STEP_RESULTS[@]:$_e2e_rp_mark}" | grep -cx 'FAIL' || true)
+    fi
+    [[ "$_e2e_rp_fails" -eq 0 ]] && _e2e_history_append "$_e2e_rp_name" "$_e2e_rp_dt"
+    return 0
+}
+
+# Wall-clock total for the run plus what each finished phase cost. Prints
+# nothing when the summary is reached outside the progress loop.
+e2e_print_phase_timings() {
+    local _i _secs
+
+    [[ -n "$_E2E_RUN_T0" ]] || return 0
+    printf "  Elapsed: %s\n\n" "$(e2e_fmt_hms "$(( SECONDS - _E2E_RUN_T0 ))")"
+    for (( _i = 0; _i < ${#E2E_PHASES[@]}; _i++ )); do
+        _secs="${E2E_PHASE_SECONDS[$_i]}"
+        [[ -n "$_secs" ]] || continue
+        printf "    %-36s %s\n" "${E2E_PHASES[$_i]}" "$(e2e_fmt_ms "$_secs")"
+    done
+    printf "\n"
+    return 0
+}
 
 # ---------------------------------------------------------------------------
 # Cleanup — kill fastrg only if the script started it
@@ -1115,6 +1363,9 @@ main() {
     fi
     printf "\n"
 
+    _E2E_RUN_T0=$SECONDS
+    _e2e_history_load
+
     # A broken assertion cannot be told from a passing system, so the suite
     # verifies its own predicates before it trusts any of them.
     if ! local_validation_run; then
@@ -1129,47 +1380,18 @@ main() {
         exit $?
     fi
 
-    phase0_setup
-    phase1_subscriber_count_tests
-    phase2_etcd_config_sync
-    phase3_dhcp_and_count
-    phase3_5_enable_status
-    phase4_lan_to_wan
-    phase4_5_tcp_spi
-    phase5_dnat_test
-    phase6_dns_ping
-    phase7_extra_user_config_tests
-    phase8_cli_config_sync
-    phase9_cli_fallback
-    phase10_desire_diff
-    phase11_kafka_pipeline
-    phase12_rollback
-    phase13_pdump
-    phase14_stress_test
-    phase15_metrics_route
-    phase16_rcu_concurrency
-    phase17_etcd_offline_queue
-    phase18_dns_cache
-    phase19_node_restart
-    phase20_nat_expiry
-    phase21_rpc_coverage
-    phase22_dhcp_lease
-    phase23_hsi_sweep
-    phase24_multi_lan
-    phase25_udp_icmp_traffic
-    phase26_heartbeat_reregister
-    phase27_link_flap
-    phase28_chap_auth
-    phase29_protocol_reject
-    phase30_keepalive_failure
-    phase31_subscriber_scale
-    phase32_metric_values
-    phase33_shutdown_inactive
-    phase34_wan_long_outage
-    phase35_ipv6
-    phase36_nat_capacity
-    phase37_ipv6_firewall
-    phase38_summary || true
+    # The counter is prefixed for the same reason the ones in _e2e_run_phase
+    # are: a `local` reaches into every phase this loop calls, and a phase that
+    # uses the same name as a global would move the loop under its own feet.
+    local _e2e_main_i _e2e_main_total="${#E2E_PHASES[@]}"
+
+    for (( _e2e_main_i = 0; _e2e_main_i < _e2e_main_total - 1; _e2e_main_i++ )); do
+        _e2e_run_phase "${E2E_PHASES[$_e2e_main_i]}" "$(( _e2e_main_i + 1 ))" "$_e2e_main_total"
+    done
+    # The summary returns non-zero when a step failed; the run's own exit status
+    # is worked out below, so its return must not end the script here.
+    _e2e_run_phase "${E2E_PHASES[$(( _e2e_main_total - 1 ))]}" \
+        "$_e2e_main_total" "$_e2e_main_total" || true
 
     # Exit code mirrors the RESULT line: any failed step fails the run. Counted
     # here from the same results the summary printed, so a summary that breaks
