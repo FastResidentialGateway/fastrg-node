@@ -93,6 +93,14 @@ struct lcore_usage_counter {
     const char *role;
 } __rte_cache_aligned;
 
+/* Statistics for TX queue refused packets. Each lcore writes only its own row
+ * with a plain +=; readers sum the rows with RELAXED loads. */
+struct tx_queue_stats {
+    uint64_t full_packets;    /* packets the queue refused */
+    uint64_t short_bursts;    /* bursts in which it refused at least one */
+    uint64_t handoff_dropped; /* packets dropped because the owner's ring was full */
+};
+
 /* FastRG system data structure */
 typedef struct FastRG {
     U8                      loglvl;         /* FastRG loglvl */
@@ -141,6 +149,12 @@ typedef struct FastRG {
      * rows are allocated; each lcore writes only its own row, readers sum
      * across rows. */
     struct per_ccb_stats    *per_subscriber_stats[RTE_MAX_LCORE][PORT_AMOUNT];
+
+    U16                     tx_queue_count[PORT_AMOUNT]; /* Tx queue count per port */
+    struct tx_queue_stats   *tx_queue_stats[RTE_MAX_LCORE][PORT_AMOUNT]; /* TX queue statistics per lcore */
+    struct rte_ring         **tx_handoff_ring[PORT_AMOUNT]; /* Per queue ring for packet handoff */
+    /* Log flag while tx queue is full to ensure no duplicate logging */
+    U8                      *tx_full_logged_flag[PORT_AMOUNT];
     /* pdump_rcu does not protect a data pointer. It marks intervals
      * where data-plane lcores may be inside RX/TX bursts and therefore pdump
      * callbacks. Callback removal does not wait for callbacks already in
@@ -154,8 +168,9 @@ typedef struct FastRG {
     struct rte_timer        heartbeat_timer;/* for controller heartbeat timer */
     struct rte_timer        nd6_age_timer;  /* periodic IPv6 neighbor cache aging sweep */
     datapath_mode_t         datapath_mode;    /* RSS multi-queue vs software distributor */
-    U16                     dp_ctrl_txq_self; /* data core self-port control packet TX queue (N+1) */
-    U16                     dp_ctrl_txq_opposite;/* data core opposite-port control packet TX queue (N+2) */
+    U16                     dp_ctrl_txq_self[PORT_AMOUNT]; /* Tx queue self own(N+1) */
+    U16                     dp_ctrl_txq_opposite[PORT_AMOUNT];/* Tx queue opposite port own(N+2) */
+    U16                     dp_ctrl_txq_cp[PORT_AMOUNT]; /* control thread TX queue per port */
     struct rte_distributor  *wan_dist;        /* WAN ingress software distributor (DP_MODE_DISTRIBUTOR) */
     struct rte_distributor  *lan_dist;        /* LAN ingress software distributor (DP_MODE_DISTRIBUTOR) */
     struct rte_ring         *cp_q;            /* data/ctrl plane -> control loop event ring */

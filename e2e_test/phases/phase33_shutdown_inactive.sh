@@ -9,6 +9,10 @@
 # ---------------------------------------------------------------------------
 
 _P33_LOG_PATH=""
+# Where the start command sends the node's stdout and stderr. A teardown
+# crash writes its reason here (glibc abort text, C++ terminate) and never to
+# the application log, and the next start truncates it.
+_P33_STDERR_LOG="/var/log/fastrg.log"
 _P33_RESTART_NEEDED=0
 
 _p33_process_state() {
@@ -50,6 +54,31 @@ _p33_wait_for_new_log() {
 
 _p33_log_snippet() {
     _p33_new_log "$1" "$2" | tr '\n' '|' | tail -c 1000 || true
+}
+
+# One evidence line: the content joined onto a single bounded line, or
+# "unavailable" when the source could not be read.
+_p33_evidence_line() {
+    local _label="$1" _body="$2"
+
+    _body=$(printf '%s' "$_body" | tr '\n' '|' | tail -c 2000 || true)
+    [[ -n "${_body//[|[:space:]]/}" ]] || _body=""
+    info "  Step 136 evidence: ${_label}: ${_body:-unavailable}"
+}
+
+# Printed only after Step 136 has already failed, and only from inside Step 136
+# so it still runs before Step 137 cold-starts the node and truncates the logs.
+# Answers "did the node die, did it say why, and was the machine short of
+# memory when it happened".
+_p33_failure_evidence() {
+    _p33_evidence_line "node stdout+stderr, last 40 lines" \
+        "$(ssh_node "tail -40 '${_P33_STDERR_LOG}' 2>/dev/null" 2>/dev/null || true)"
+    _p33_evidence_line "crash reporter, last 5 lines" \
+        "$(ssh_node "tail -5 /var/log/apport.log 2>/dev/null" 2>/dev/null || true)"
+    _p33_evidence_line "node memory" \
+        "$(ssh_node "awk '/^MemAvailable:|^SwapFree:/ { printf \"%s %s kB \", \$1, \$2 }' /proc/meminfo 2>/dev/null" 2>/dev/null || true)"
+    _p33_evidence_line "kernel OOM lines" \
+        "$(ssh_node "dmesg -T 2>/dev/null | grep -i oom | tail -3" 2>/dev/null || true)"
 }
 
 # Prints this node's controller record as "present <status> <reason>", or
@@ -237,6 +266,7 @@ phase33_shutdown_inactive() {
                 "node still listed after SIGTERM (exited in ${_shutdown_seconds}s): status=${_status}, inactive_reason=${_reason}; shutdown report logged"
         else
             fail "Step 136: graceful stop marks node inactive" "${_issue135# }"
+            _p33_failure_evidence
         fi
     fi
 

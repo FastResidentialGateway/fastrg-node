@@ -55,8 +55,25 @@ typedef struct {
 
 /* Memory operation wrappers */
 #ifdef UNIT_TEST
-#define fastrg_malloc(type, size, aligned) (type *)malloc(size)
-#define fastrg_calloc(type, num, size, aligned) (type *)calloc(num, size)
+static inline void *_fastrg_test_alloc(size_t size, unsigned int aligned, int zero)
+{
+    void *ptr = NULL;
+    size_t want = (aligned != 0) ? aligned : RTE_CACHE_LINE_SIZE;
+    size_t align = sizeof(void *);
+
+    if (size == 0)
+        return NULL;
+    while (align < want)
+        align <<= 1;
+    if (posix_memalign(&ptr, align, size) != 0)
+        return NULL;
+    if (zero)
+        memset(ptr, 0, size);
+    return ptr;
+}
+
+#define fastrg_malloc(type, size, aligned) (type *)_fastrg_test_alloc(size, aligned, 0)
+#define fastrg_calloc(type, num, size, aligned) (type *)_fastrg_test_alloc((num)*(size), aligned, 1)
 #define fastrg_realloc(type, ptr, size, aligned) (type *)realloc(ptr, size)
 #define fastrg_mfree(ptr) free(ptr)
 #else
@@ -108,7 +125,7 @@ static inline uint64_t simulate_get_timer_hz(void)
 #define fastrg_get_cur_cycles rte_rdtsc
 #endif
 
-#define MAX_DATA_QUEUES 16
+#define MAX_DATA_QUEUES 128
 
 /**
  * Data-plane mode, selected once at init based on NIC capability + core count.

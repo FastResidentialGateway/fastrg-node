@@ -7,10 +7,12 @@
 #ifndef _DP_H_
 #define _DP_H_
 
+#include <rte_ethdev.h>
 #include <rte_hash_crc.h>
 #include <rte_ip.h>
 #include <rte_udp.h>
 
+#include "dbg.h"
 #include "dhcpd/dhcpd.h"
 #include "fastrg.h"
 #include "pppd/pppd.h"
@@ -176,6 +178,270 @@ static inline STATUS parse_l2_hdr(FastRG_t *fastrg_ccb, struct rte_mbuf *single_
     mbuf_priv->dhcp_server_ip = dhcp_ccb->dhcp_server_ip;
     mbuf_priv->dhcp_subnet_mask = dhcp_ccb->subnet_mask;
 
+    return SUCCESS;
+}
+
+/* TX ring depth per queue. Shared because the TX-shortfall report walks the
+ * ring to say where the descriptors stand. */
+#define TX_RING_SIZE 512
+
+/* ---------------------------------------------------------------------------
+ * TX queue ownership
+ *
+ * One lcore per TX queue. Two lcores writing one queue corrupt its ring, so
+ * queue numbers are decided only here — add a sender to this list, never pick
+ * a number at the call site. get_tx_queue_id_for_sender() is the only reader, and
+ * the unit test proves no two senders share a queue.
+ *
+ * With N data queues, per port:
+ *   queue 0      control thread, for the frames it builds on this port
+ *   queue 1..N   the data lcore reading the other port, for what it forwards here
+ *   queue N+1    this port's queue-0 poller, for the replies it sends here
+ *   queue N+2    the other port's queue-0 poller, for what it forwards here
+ *
+ * Sending on a queue you do not own: hand the packet over with
+ * send_pkt_to_other_lcore(); the owner collects it with
+ * check_pkt_from_other_lcore() and sends it in its own next burst.
+ * ------------------------------------------------------------------------- */
+typedef enum {
+    FASTRG_TX_SENDER_CTRL_THREAD = 0, /* only index 0 exists */
+    FASTRG_TX_SENDER_WAN_DATA,        /* index = data queue index, 0..N-1 */
+    FASTRG_TX_SENDER_LAN_DATA,        /* index = data queue index, 0..N-1 */
+    /* The two queue-0 pollers. Each owns a queue on both ports: one for the
+     * replies it sends on the port it polls, one for what it forwards to the
+     * other port. Only index 0 exists, one poller per port. */
+    FASTRG_TX_SENDER_LAN_CTRL,        /* polls LAN queue 0 */
+    FASTRG_TX_SENDER_WAN_CTRL         /* polls WAN queue 0 */
+} fastrg_tx_sender_t;
+
+/* Returned when a sender does not transmit on the port asked about. */
+#define FASTRG_TX_QUEUE_NONE 0xFFFF
+
+/* How deep one handoff ring is. Bounded on purpose: a slow owner must not be
+ * able to back-pressure the lcore handing the packet over. */
+#define TX_HANDOFF_RING_SIZE 256
+
+/**
+ * @fn get_tx_queue_count
+ *
+ * @brief TX queues a port needs for a given number of data queues.
+ *
+ * @param data_queues
+ *      Number of data queues (N)
+ * @return
+ *      Queue count: N data queues, queue 0, and the two poller queues
+ */
+U16 get_tx_queue_count(U16 data_queues);
+
+/**
+ * @fn get_tx_queue_id_for_sender
+ *
+ * @brief Get TX queue ID for specific sender.
+ *
+ * @param sender
+ *      Which kind of lcore is asking
+ * @param index
+ *      Data queue index for the data lcores, polled port id for the pollers,
+ *      must be 0 for the control thread
+ * @param port_id
+ *      Port being transmitted on
+ * @param data_queues
+ *      Number of data queues (N)
+ * @return
+ *      Queue id, or FASTRG_TX_QUEUE_NONE when that sender does not transmit on
+ *      that port
+ */
+U16 get_tx_queue_id_for_sender(fastrg_tx_sender_t sender, U16 index, U16 port_id, U16 data_queues);
+
+/**
+ * @fn check_pkt_from_other_lcore
+ *
+ * @brief Get packets packets handed over from other lcores into this burst.
+ *
+ * The reason we need to pass pkts to other lcores is because the 
+ * TX queue is owned by one lcore only. If another lcore has a packet 
+ * to send on that queue, it must hand it over to the owner. The owner 
+ * collects those packets from the handoff ring and sends them in its own burst.
+ *
+ * @param ring
+ *      The queue's handoff ring, may be NULL
+ * @param batch
+ *      Batch being built
+ * @param batch_len
+ *      Packets already in the batch
+ * @param batch_max
+ *      Capacity of the batch
+ * @return
+ *      New batch length
+ */
+U16 check_pkt_from_other_lcore(struct rte_ring *ring, struct rte_mbuf **batch,
+    U16 batch_len, U16 batch_max);
+
+/**
+ * @fn dp_tx_handoff_pkt_init
+ *
+ * @brief Resolve the control TX queues, size the per-queue tables and create
+ *        the handoff rings.
+ *
+ * One ring per data queue. Rings are MP-SC.
+ *
+ * @param fastrg_ccb
+ *      FastRG control block pointer
+ * @return
+ *      SUCCESS, or ERROR when a control queue is missing from the layout or a
+ *      ring cannot be created
+ */
+STATUS dp_tx_handoff_pkt_init(FastRG_t *fastrg_ccb);
+
+/**
+ * @fn dp_tx_handoff_pkt_cleanup
+ *
+ * @brief Free anything still sitting on the handoff rings and release them.
+ *
+ * @param fastrg_ccb
+ *      FastRG control block pointer
+ * @return
+ *      void
+ */
+void dp_tx_handoff_pkt_cleanup(FastRG_t *fastrg_ccb);
+
+static __always_inline BOOL is_tx_queue_valid(FastRG_t *fastrg_ccb, U16 port_id, U16 queue_id)
+{
+    return port_id < PORT_AMOUNT && queue_id < fastrg_ccb->tx_queue_count[port_id];
+}
+
+/* Sum specific TX queue's counters across all lcores into *out. */
+static __always_inline void fastrg_sum_tx_queue_stats(
+    FastRG_t *fastrg_ccb, U16 port_id, U16 queue_id, struct tx_queue_stats *out)
+{
+    out->full_packets = 0; out->short_bursts = 0; out->handoff_dropped = 0;
+    if (unlikely(!is_tx_queue_valid(fastrg_ccb, port_id, queue_id)))
+        return;
+    unsigned int lcore;
+    RTE_LCORE_FOREACH(lcore) {
+        struct tx_queue_stats *row = __atomic_load_n(
+            &fastrg_ccb->tx_queue_stats[lcore][port_id], __ATOMIC_ACQUIRE);
+        if (row == NULL)
+            continue;
+        out->full_packets += __atomic_load_n(&row[queue_id].full_packets, __ATOMIC_RELAXED);
+        out->short_bursts += __atomic_load_n(&row[queue_id].short_bursts, __ATOMIC_RELAXED);
+        out->handoff_dropped += __atomic_load_n(&row[queue_id].handoff_dropped, __ATOMIC_RELAXED);
+    }
+}
+
+static inline const char *tx_descriptor_status_name(int status)
+{
+    switch (status) {
+    case RTE_ETH_TX_DESC_FULL:   return "FULL";
+    case RTE_ETH_TX_DESC_DONE:   return "DONE";
+    case RTE_ETH_TX_DESC_UNAVAIL:return "UNAVAIL";
+    default:                     return "ERR";
+    }
+}
+
+/* Count while handoff ring is full, per lcore, per port, per queue */
+static __always_inline void count_tx_handoff_drop(FastRG_t *fastrg_ccb, 
+    U16 port_id, U16 queue_id)
+{
+    unsigned int lcore_id = rte_lcore_id();
+
+    if (unlikely(!is_tx_queue_valid(fastrg_ccb, port_id, queue_id) ||
+            lcore_id == LCORE_ID_ANY))
+        return;
+    struct tx_queue_stats *row = fastrg_ccb->tx_queue_stats[lcore_id][port_id];
+    if (likely(row != NULL))
+        row[queue_id].handoff_dropped += 1;
+}
+
+/**
+ * @fn count_tx_queue_refused
+ *
+ * @brief Record a TX burst the queue would not take in full, and describe the
+ *        queue's descriptors only at the first time it happens on that queue.
+ *
+ * @param fastrg_ccb
+ *      FastRG control block pointer
+ * @param port_id
+ *      Port the burst was sent on
+ * @param queue_id
+ *      TX queue the burst was sent on
+ * @param offered
+ *      Packets handed to rte_eth_tx_burst
+ * @param accepted
+ *      Packets it took
+ *
+ * @return void
+ */
+static inline void count_tx_queue_refused(FastRG_t *fastrg_ccb, U16 port_id, U16 queue_id,
+                            U16 offered, U16 accepted)
+{
+    static const U16 probe_offsets[] = {0, 32, 64, 128, 256, TX_RING_SIZE - 1};
+    unsigned int lcore_id = rte_lcore_id();
+
+    if (unlikely(!is_tx_queue_valid(fastrg_ccb, port_id, queue_id) ||
+            lcore_id == LCORE_ID_ANY))
+        return;
+
+    struct tx_queue_stats *row = fastrg_ccb->tx_queue_stats[lcore_id][port_id];
+    if (unlikely(row == NULL))
+        return;
+    row[queue_id].full_packets += (uint64_t)(offered - accepted);
+    row[queue_id].short_bursts += 1;
+
+    U8 *logged = fastrg_ccb->tx_full_logged_flag[port_id];
+    if (unlikely(logged == NULL) ||
+        __atomic_exchange_n(&logged[queue_id], 1, __ATOMIC_RELAXED))
+        return;
+
+    char probe[256];
+    int used = 0;
+    for(unsigned int i=0; i<RTE_DIM(probe_offsets); i++) {
+        U16 off = probe_offsets[i];
+        int status = rte_eth_tx_descriptor_status(port_id, queue_id, off);
+        int n = snprintf(probe + used, sizeof(probe) - used, "%s%u=%s",
+            i ? " " : "", off, tx_descriptor_status_name(status));
+        if (n < 0 || (size_t)(used + n) >= sizeof(probe))
+            break;
+        used += n;
+    }
+    FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+        "TX shortfall port %u queue %u lcore %u: offered %u accepted %u; descriptors %s",
+        port_id, queue_id, lcore_id, offered, accepted, probe);
+}
+
+
+/**
+ * @fn send_pkt_to_other_lcore
+ *
+ * @brief Hand one packet to the lcore that owns a TX queue.
+ *
+ * Enqueues only — it never transmits. Lcores that own the queue send the
+ * packet themselves, normally by putting it in the batch they are already
+ * building.
+ *
+ * @param fastrg_ccb
+ *      FastRG control block pointer
+ * @param port_id
+ *      Port the queue belongs to
+ * @param queue_id
+ *      TX queue whose owner should send the packet
+ * @param pkt
+ *      Packet to hand over; still the caller's to free when this returns ERROR
+ * @return
+ *      SUCCESS once the owner has it, ERROR when the queue has no ring or the
+ *      ring is full
+ */
+static __always_inline STATUS send_pkt_to_other_lcore(FastRG_t *fastrg_ccb, U16 port_id,
+    U16 queue_id, struct rte_mbuf *pkt)
+{
+    if (unlikely(!is_tx_queue_valid(fastrg_ccb, port_id, queue_id)))
+        return ERROR;
+
+    struct rte_ring *ring = fastrg_ccb->tx_handoff_ring[port_id][queue_id];
+    if (unlikely(ring == NULL || rte_ring_enqueue(ring, pkt) != 0)) {
+        count_tx_handoff_drop(fastrg_ccb, port_id, queue_id);
+        return ERROR;
+    }
     return SUCCESS;
 }
 

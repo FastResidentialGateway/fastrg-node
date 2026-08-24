@@ -43,6 +43,10 @@ phase38_summary() {
     printf "${YELLOW}Skip: %d${NC}\n" "$skip_count"
     printf "\n"
 
+    # How long the run and each of its phases took. Printed before the RESULT
+    # line so that line stays the last thing on screen.
+    e2e_print_phase_timings
+
     if [[ $fail_count -gt 0 ]]; then
         bold "  RESULT: ${RED}FAILED${NC} (${fail_count} step(s) failed)"
         return 1
