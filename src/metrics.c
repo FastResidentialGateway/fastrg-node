@@ -24,6 +24,7 @@
 
 #include "config_snapshot.h"
 #include "fastrg.h"
+#include "dp.h"
 #include "pppd/pppd.h"
 #include "pppd/header.h"
 #include "dhcpd/dhcpd.h"
@@ -422,6 +423,41 @@ int metrics_build(lighthttp_buf_t *out, const char **content_type, void *arg)
             uint64_t v = *(uint64_t *)((char *)&unknown_user[p] + uu_metrics[m].off);
             lighthttp_buf_appendf(out, "%s{node_uuid=\"%s\",nic_index=\"%d\"} %" PRIu64 "\n",
                 uu_metrics[m].name, uuid, p, v);
+        }
+    }
+
+    /* ---- TX queue shortfalls ---- */
+    /* Emitted per (port, queue) because a ring that stops draining shows up on
+     * one queue while its neighbours keep running; a port-wide total hides
+     * exactly that. */
+    static const struct { const char *name; const char *help; size_t off; } txq_metrics[] = {
+        {
+            "fastrg_node_tx_queue_full_total",
+            "Packets rte_eth_tx_burst refused, per TX queue.",
+            offsetof(struct tx_queue_stats, full_packets)
+        },
+        {
+            "fastrg_node_tx_queue_burst_short_total",
+            "Bursts rte_eth_tx_burst did not take in full, per TX queue.",
+            offsetof(struct tx_queue_stats, short_bursts)
+        },
+        {
+            "fastrg_node_tx_handoff_dropped_total",
+            "Packets dropped because the owning lcore's handoff ring was full.",
+            offsetof(struct tx_queue_stats, handoff_dropped)
+        },
+        };
+    for(size_t m=0; m<sizeof(txq_metrics)/sizeof(txq_metrics[0]); m++) {
+        emit_header(out, txq_metrics[m].name, "gauge", txq_metrics[m].help);
+        for(int p=0; p<PORT_AMOUNT; p++) {
+            for(U16 q=0; q<fastrg_ccb->tx_queue_count[p]; q++) {
+                struct tx_queue_stats sum;
+                fastrg_sum_tx_queue_stats(fastrg_ccb, p, q, &sum);
+                lighthttp_buf_appendf(out,
+                    "%s{node_uuid=\"%s\",nic_index=\"%d\",queue=\"%u\"} %" PRIu64 "\n",
+                    txq_metrics[m].name, uuid, p, (unsigned)q,
+                    *(uint64_t *)((char *)&sum + txq_metrics[m].off));
+            }
         }
     }
 

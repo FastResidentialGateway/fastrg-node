@@ -285,6 +285,150 @@ static void test_send2cp(FastRG_t *fastrg_ccb)
     fastrg_rcu_persistent[lcore_id] = old_persistent;
 }
 
+/* Two lcores writing one TX queue corrupt its ring, so the layout must never
+ * hand the same queue to two senders. Checked across every data-queue count
+ * the build allows. */
+static void test_get_tx_queue_id_for_sender(void)
+{
+    int clash_at = -1, gap_at = -1;
+
+    printf("\nTesting get_tx_queue_id_for_sender:\n");
+
+    TEST_ASSERT(get_tx_queue_count(2) == 5,
+        "queue count is the data queues plus three", "expected 5 for N=2");
+
+    for(U16 n=1; n<=MAX_DATA_QUEUES; n++) {
+        for(U16 port=0; port<PORT_AMOUNT; port++) {
+            /* owner[q] = the sender+index holding queue q, -1 while free.
+             * Sized for the largest layout the build allows. */
+            const U16 queue_max = get_tx_queue_count(MAX_DATA_QUEUES);
+            int owner_sender[queue_max];
+            int owner_index[queue_max];
+            for(U16 q=0; q<queue_max; q++) {
+                owner_sender[q] = -1;
+                owner_index[q] = -1;
+            }
+            for(int sender=0; sender<=FASTRG_TX_SENDER_WAN_CTRL/* last one in enum */; sender++) {
+                for(U16 index=0; index<MAX_DATA_QUEUES; index++) {
+                    U16 q = get_tx_queue_id_for_sender((fastrg_tx_sender_t)sender, index, port, n);
+                    if (q == FASTRG_TX_QUEUE_NONE)
+                        continue;
+                    if (q >= get_tx_queue_count(n)) {
+                        gap_at = n;
+                        continue;
+                    }
+                    if (owner_sender[q] != -1 &&
+                        (owner_sender[q] != sender || owner_index[q] != (int)index))
+                        clash_at = n;
+                    owner_sender[q] = sender;
+                    owner_index[q] = (int)index;
+                }
+            }
+            /* Every queue the port was given has exactly one sender. */
+            for(U16 q=0; q<get_tx_queue_count(n); q++)
+                if (owner_sender[q] == -1)
+                    gap_at = n;
+        }
+    }
+    TEST_ASSERT(clash_at == -1, "no TX queue has two senders",
+        "two senders collide at N=%d", clash_at);
+    TEST_ASSERT(gap_at == -1, "every TX queue has a sender and stays in range",
+        "layout leaves a hole or overruns at N=%d", gap_at);
+
+    /* The pairing that matters: a reader never owns a queue on the port it
+     * reads, so its replies there have to be handed over. */
+    TEST_ASSERT(get_tx_queue_id_for_sender(FASTRG_TX_SENDER_LAN_DATA, 0, LAN_PORT, 2)
+            == FASTRG_TX_QUEUE_NONE,
+        "a LAN reader owns no LAN queue", "it must hand LAN-bound packets over");
+    TEST_ASSERT(get_tx_queue_id_for_sender(FASTRG_TX_SENDER_WAN_DATA, 0, WAN_PORT, 2)
+            == FASTRG_TX_QUEUE_NONE,
+        "a WAN reader owns no WAN queue", "it must hand WAN-bound packets over");
+    TEST_ASSERT(get_tx_queue_id_for_sender(FASTRG_TX_SENDER_WAN_DATA, 1, LAN_PORT, 2) == 2,
+        "the second WAN reader owns LAN queue 2", "expected queue 2");
+
+    /* Each poller owns a queue on both ports: replies on the port it polls,
+     * forwarding on the other one. */
+    TEST_ASSERT(get_tx_queue_id_for_sender(FASTRG_TX_SENDER_LAN_CTRL, 0, LAN_PORT, 2) == 3,
+        "the LAN poller replies on LAN queue N+1", "expected queue 3");
+    TEST_ASSERT(get_tx_queue_id_for_sender(FASTRG_TX_SENDER_LAN_CTRL, 0, WAN_PORT, 2) == 4,
+        "the LAN poller forwards on WAN queue N+2", "expected queue 4");
+    TEST_ASSERT(get_tx_queue_id_for_sender(FASTRG_TX_SENDER_WAN_CTRL, 0, WAN_PORT, 2) == 3,
+        "the WAN poller replies on WAN queue N+1", "expected queue 3");
+    TEST_ASSERT(get_tx_queue_id_for_sender(FASTRG_TX_SENDER_WAN_CTRL, 0, LAN_PORT, 2) == 4,
+        "the WAN poller forwards on LAN queue N+2", "expected queue 4");
+    TEST_ASSERT(get_tx_queue_id_for_sender(FASTRG_TX_SENDER_LAN_CTRL, 1, LAN_PORT, 2)
+            == FASTRG_TX_QUEUE_NONE,
+        "a poller has only index 0", "expected no queue for index 1");
+
+    /* Start-up resolves the control queues once, from the LAN port, and uses
+     * the answer for both ports. That holds only while the two ports place
+     * those queues at the same index. */
+    int self_at = -1, opposite_at = -1, ctrl_thread_at = -1;
+    for(U16 n=1; n<=MAX_DATA_QUEUES; n++) {
+        if (get_tx_queue_id_for_sender(FASTRG_TX_SENDER_LAN_CTRL, 0, LAN_PORT, n) !=
+            get_tx_queue_id_for_sender(FASTRG_TX_SENDER_WAN_CTRL, 0, WAN_PORT, n))
+            self_at = n;
+        if (get_tx_queue_id_for_sender(FASTRG_TX_SENDER_WAN_CTRL, 0, LAN_PORT, n) !=
+            get_tx_queue_id_for_sender(FASTRG_TX_SENDER_LAN_CTRL, 0, WAN_PORT, n))
+            opposite_at = n;
+        if (get_tx_queue_id_for_sender(FASTRG_TX_SENDER_CTRL_THREAD, 0, LAN_PORT, n) !=
+            get_tx_queue_id_for_sender(FASTRG_TX_SENDER_CTRL_THREAD, 0, WAN_PORT, n))
+            ctrl_thread_at = n;
+    }
+    TEST_ASSERT(self_at == -1, "a poller replies on the same queue id on either port",
+        "the two ports disagree at N=%d", self_at);
+    TEST_ASSERT(opposite_at == -1, "a poller forwards on the same queue id on either port",
+        "the two ports disagree at N=%d", opposite_at);
+    TEST_ASSERT(ctrl_thread_at == -1, "the control thread uses the same queue id on either port",
+        "the two ports disagree at N=%d", ctrl_thread_at);
+}
+
+
+/* The owner folds handed-over packets into the burst it was already sending,
+ * so it must respect the batch it is given. */
+static void test_check_pkt_from_other_lcore(void)
+{
+    struct rte_ring *ring = rte_ring_lookup("tx_merge_test");
+    struct rte_mbuf *batch[4];
+    struct rte_mbuf slots[4];
+    U16 len;
+
+    printf("\nTesting check_pkt_from_other_lcore:\n");
+    if (ring == NULL)
+        ring = rte_ring_create("tx_merge_test", 8, (int)rte_socket_id(),
+            RING_F_SC_DEQ | RING_F_EXACT_SZ);
+    TEST_ASSERT(ring != NULL, "handover fixture ring", "rte_ring_create failed");
+    if (ring == NULL)
+        return;
+
+    memset(batch, 0, sizeof(batch));
+    TEST_ASSERT(check_pkt_from_other_lcore(NULL, batch, 1, 4) == 1,
+        "no ring leaves the batch alone", "batch length changed");
+    TEST_ASSERT(check_pkt_from_other_lcore(ring, batch, 1, 4) == 1,
+        "an empty ring leaves the batch alone", "batch length changed");
+
+    for(int i=0; i<4; i++)
+        rte_ring_enqueue(ring, &slots[i]);
+
+    /* Two already in the batch, capacity four: exactly two may come over. */
+    len = check_pkt_from_other_lcore(ring, batch, 2, 4);
+    TEST_ASSERT(len == 4, "the batch fills to capacity", "expected 4, got %u", len);
+    TEST_ASSERT(batch[2] == &slots[0] && batch[3] == &slots[1],
+        "handed-over packets keep their order", "wrong packets merged");
+    TEST_ASSERT(rte_ring_count(ring) == 2,
+        "what does not fit stays on the ring for the next pass",
+        "ring should still hold 2");
+
+    /* A full batch takes nothing, and nothing is lost. */
+    len = check_pkt_from_other_lcore(ring, batch, 4, 4);
+    TEST_ASSERT(len == 4, "a full batch takes nothing", "batch length changed");
+    TEST_ASSERT(rte_ring_count(ring) == 2, "a full batch leaves the ring untouched",
+        "ring lost entries");
+
+    while (rte_ring_dequeue(ring, (void **)&batch[0]) == 0)
+        ;
+}
+
 void test_dp(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 {
     printf("\n");
@@ -299,6 +443,8 @@ void test_dp(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_parse_l2_hdr(fastrg_ccb);
     test_is_iptv_pkt_need_drop(fastrg_ccb);
     test_send2cp(fastrg_ccb);
+    test_get_tx_queue_id_for_sender();
+    test_check_pkt_from_other_lcore();
 
     printf("\nDP Pure Logic Test Summary: %d/%d passed\n", pass_count, test_count);
     *total_tests += test_count;
