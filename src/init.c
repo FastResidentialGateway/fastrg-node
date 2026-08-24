@@ -318,6 +318,7 @@ void cleanup_mem()
 
 void cleanup_ring(FastRG_t *fastrg_ccb)
 {
+    dp_tx_handoff_pkt_cleanup(fastrg_ccb);
     if (fastrg_ccb->free_mail_ring != NULL) {
         void *mail_slot;
         while (rte_ring_dequeue(fastrg_ccb->free_mail_ring, &mail_slot) == 0)
@@ -686,6 +687,13 @@ STATUS sys_init(FastRG_t *fastrg_ccb, struct fastrg_config *fastrg_cfg)
     ret = init_port(fastrg_ccb, fastrg_cfg);
     if (ret != 0)
         goto err;
+
+    /* After the ports exist, so the queue count the owners are recorded
+     * against is the one the NIC actually got. */
+    if (dp_tx_handoff_pkt_init(fastrg_ccb) != SUCCESS) {
+        ret = ERROR;
+        goto err;
+    }
 
     if (fastrg_compute_max_user_count(fastrg_ccb) != SUCCESS) {
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,

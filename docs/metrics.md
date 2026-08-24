@@ -131,6 +131,36 @@ Labels: `node_uuid`, `nic_index`. Traffic that did not map to a known subscriber
 | `fastrg_node_unknown_user_dropped_packets_total` | gauge |
 | `fastrg_node_unknown_user_dropped_bytes_total` | gauge |
 
+### TX queue shortfalls
+
+Labels: `node_uuid`, `nic_index`, `queue`.
+
+A shortfall is `rte_eth_tx_burst()` taking fewer packets than it was offered;
+the remainder are dropped and also show up in the per-subscriber drop counters.
+Those say how many were lost, these say on which queue — a ring that stops
+draining raises one queue while its neighbours stay flat, which a port-wide
+total would hide.
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `fastrg_node_tx_queue_full_total` | gauge | Packets the queue refused. |
+| `fastrg_node_tx_queue_burst_short_total` | gauge | Bursts in which it refused at least one. |
+| `fastrg_node_tx_handoff_dropped_total` | gauge | Packets dropped because the owning lcore's handoff ring was full. |
+
+Each TX queue has exactly one lcore allowed to write it. An lcore that needs to
+send on someone else's queue posts the packet to that queue's handoff ring, and
+the owner merges the ring into its next burst. The ring is bounded, so a slow
+owner cannot back-pressure the lcore handing the packet over; when it is full
+the packet is dropped and counted in `fastrg_node_tx_handoff_dropped_total`.
+
+The first shortfall on each queue also writes one INFO line to the node log
+with the port, queue, lcore, offered/accepted counts and the state of six
+descriptors spread across the ring (`FULL`/`DONE`/`UNAVAIL`). Later shortfalls
+on that queue only advance the counters.
+
+Every queue index up to the build's maximum is published, so a queue that never
+drops reads 0 rather than being absent.
+
 ## 5. PPPoE sessions
 
 ### Phase tallies — labels: `node_uuid`

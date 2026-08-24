@@ -240,6 +240,135 @@ _p25_ping_loss() {
         's/.* ([0-9]+([.][0-9]+)?)% packet loss.*/\1/p' | tail -1 || true
 }
 
+# Where a sustained-flow packet went missing. One snapshot covers both
+# directions: each step reads it once before its flow and again only when it
+# fails, so a passing step prints nothing extra. Names carry the place they
+# were read from; a source that cannot be reached contributes nothing, and the
+# evidence then says so instead of printing a wrong delta.
+
+# WAN->LAN receiver side. LAN_FLAP_NIC on LAN_FLAP_HOST is the PF the node's
+# LAN port sends into: a frame arriving there with a bad CRC is discarded by
+# the MAC before any host sees it, which looks like loss no node counter can
+# account for.
+_p25_pf_rx_counters() {
+    ssh_lan_flap "ethtool -S ${LAN_FLAP_NIC} 2>/dev/null | awk -F: '
+        \$1 ~ /rx_errors|rx_crc_errors|rx_missed_errors|rx_no_buffer_count/ {
+            gsub(/[ \t]/, \"\", \$1); gsub(/[ \t]/, \"\", \$2);
+            printf \"pf_%s=%s \", \$1, \$2
+        }'" 2>/dev/null || true
+}
+
+# Losses that happen after the frame is safely inside the LAN host: socket
+# receive overruns and interface RX drops.
+_p25_lan_rx_counters() {
+    ssh_lan "sed -n '/^Udp:/{n;s/^Udp: //p}' /proc/net/snmp | \
+            awk '{ printf \"lan_udp_in_errors=%s lan_udp_rcvbuf_errors=%s \", \$3, \$5 }'
+        ip -s -s link show ${LAN_PEER_VLAN} 2>/dev/null | \
+            awk '/RX: *bytes/ { getline; printf \"lan_vlan_rx_dropped=%s lan_vlan_rx_missed=%s \", \$4, \$5; exit }'
+        ip -s -s link show ${LAN_PEER_NIC} 2>/dev/null | \
+            awk '/RX: *bytes/ { getline; printf \"lan_peer_rx_dropped=%s lan_peer_rx_missed=%s \", \$4, \$5; exit }'" \
+        2>/dev/null || true
+}
+
+# LAN->WAN receiver side: the iperf3 server's own socket and the NIC it
+# listens on.
+_p25_wan_rx_counters() {
+    ssh_wan "sed -n '/^Udp:/{n;s/^Udp: //p}' /proc/net/snmp | \
+            awk '{ printf \"wan_udp_in_errors=%s wan_udp_rcvbuf_errors=%s \", \$3, \$5 }'
+        for _f in rx_errors rx_dropped rx_missed_errors rx_crc_errors; do
+            _v=\$(cat /sys/class/net/${WAN_NIC}/statistics/\$_f 2>/dev/null) || continue
+            printf 'wan_nic_%s=%s ' \"\$_f\" \"\$_v\"
+        done" 2>/dev/null || true
+}
+
+# The node's own view of both ports: wire-level RX errors from the NIC, plus
+# the packets it dropped itself once they were inside.
+_p25_node_rx_counters() {
+    local _body
+
+    # protobuf JSON leaves zero-valued fields out, so port 0 arrives with no
+    # port_id at all and an untouched counter with no value.
+    fastrg_grpc get_system_xstats 2>/dev/null | jq -r '
+        .nic_xstats[]? |
+        (if ((.port_id // 0) | tonumber) == 0 then "lan" else "wan" end) as $side |
+        .xstats[]? |
+        select(.name | test("^(rx_errors|rx_crc_errors|rx_missed_errors)$")) |
+        "node_\($side)_\(.name)=\(.value // 0)"' 2>/dev/null | tr '\n' ' ' || true
+
+    _body=$(e2e_metrics_body) || true
+    [[ -n "$_body" ]] || return 0
+    printf 'node_user_dropped_lan=%s node_user_dropped_wan=%s ' \
+        "$(e2e_metric_value "$_body" fastrg_node_per_user_dropped_packets_total nic_index=0 user_id=${USER_ID})" \
+        "$(e2e_metric_value "$_body" fastrg_node_per_user_dropped_packets_total nic_index=1 user_id=${USER_ID})"
+    printf 'node_unknown_dropped_lan=%s node_unknown_dropped_wan=%s ' \
+        "$(e2e_metric_value "$_body" fastrg_node_unknown_user_dropped_packets_total nic_index=0)" \
+        "$(e2e_metric_value "$_body" fastrg_node_unknown_user_dropped_packets_total nic_index=1)"
+}
+
+# The hop beyond the node on the WAN side, from the BRAS's own periodic
+# statistics line.
+_p25_bras_counters() {
+    ssh_bras "tail -200 /var/log/dpdk-bras.log 2>/dev/null | grep 'DP: stats:' | tail -1" 2>/dev/null | \
+        sed -nE 's/.*drop=([0-9]+) \(txfull=([0-9]+).*/bras_drop=\1 bras_txfull=\2 /p' || true
+}
+
+_p25_loss_counters() {
+    printf '%s%s%s%s%s' \
+        "$(_p25_pf_rx_counters)" "$(_p25_lan_rx_counters)" "$(_p25_wan_rx_counters)" \
+        "$(_p25_node_rx_counters)" "$(_p25_bras_counters)"
+}
+
+# One group's counters out of two snapshots, as "name +delta". Only names that
+# both readings carry are printed, so a source that answered once and not the
+# other time reads as missing instead of as a huge jump.
+_p25_counter_delta() {
+    awk -v before="$1" -v after="$2" -v prefix="$3" 'BEGIN {
+        split(before, _b, " ");
+        for (i in _b) { split(_b[i], _kv, "="); base[_kv[1]] = _kv[2] }
+        n = split(after, _a, " ");
+        for (i = 1; i <= n; i++) {
+            split(_a[i], _kv, "=");
+            if (index(_kv[1], prefix) != 1 || !(_kv[1] in base)) continue;
+            printf "%s%s %+d", (shown++ ? ", " : ""), _kv[1], _kv[2] - base[_kv[1]];
+        }
+    }'
+}
+
+# Printed only on a FAIL. Answers "which counter on the way to the receiver
+# grew by roughly the number of packets iperf3 says it never got".
+_p25_loss_evidence() {
+    local _label="$1" _before="$2" _json="$3"
+    local _after _group _where _delta _report
+
+    _after=$(_p25_loss_counters)
+    for _group in pf lan wan node bras; do
+        case "$_group" in
+            pf)   _where="${LAN_FLAP_HOST}:${LAN_FLAP_NIC}" ;;
+            lan)  _where="${LAN_HOST}" ;;
+            wan)  _where="${WAN_HOST}:${WAN_NIC}" ;;
+            node) _where="${FASTRG_NODE}" ;;
+            bras) _where="${BRAS_HOST}" ;;
+        esac
+        _delta=$(_p25_counter_delta "$_before" "$_after" "${_group}_")
+        if [[ -n "$_delta" ]]; then
+            info "  ${_label} evidence: ${_where} ${_delta}"
+        else
+            info "  ${_label} evidence: ${_where} counters unavailable"
+        fi
+    done
+
+    # out_of_order is reported per stream, not in the summary, so a plain
+    # .end.sum read would always print null and hide reordering.
+    _report=$(printf '%s\n' "$_json" | jq -c '{
+        lost_packets: .end.sum.lost_packets,
+        packets: .end.sum.packets,
+        lost_percent: .end.sum.lost_percent,
+        jitter_ms: .end.sum.jitter_ms,
+        out_of_order: (.end.sum.out_of_order // .end.streams[0].udp.out_of_order)
+    }' 2>/dev/null || true)
+    info "  ${_label} evidence: iperf3 report ${_report:-unparsable}"
+}
+
 phase25_udp_icmp_traffic() {
     bold "═══════════════════════════════════════════════════════"
     bold " Phase 25 — Sustained UDP / ICMP Traffic (Steps 104-106b)"
@@ -251,6 +380,7 @@ phase25_udp_icmp_traffic() {
     local _ping_out="" _ping_retry_out="" _ping_loss="" _entries_delta=""
     local _entries_seq="" _entries_seq_file="" _entries_seq_pid=""
     local _traffic_before="" _traffic_after=""
+    local _loss_base=""
 
     _P25_METRICS_PORT=$(ssh_node \
         "grep 'MetricsListenPort' /etc/fastrg/config.cfg 2>/dev/null" | \
@@ -271,6 +401,7 @@ phase25_udp_icmp_traffic() {
     _entries_base=$(_p25_fetch_metric "fastrg_node_per_user_nat_entries_used")
     _alloc_base=$(_p25_fetch_metric "fastrg_node_per_user_nat_alloc_fail_total")
     _traffic_before=$(e2e_metrics_body)
+    _loss_base=$(_p25_loss_counters)
     if [[ $_server_ready -eq 1 ]]; then
         if _iperf_out=$(ssh_lan \
             "iperf3 -u -c ${WAN_IP} -p ${_P25_IPERF_PORT} -t 20 -b 50M -J" 2>&1); then
@@ -302,11 +433,13 @@ phase25_udp_icmp_traffic() {
     else
         fail "Step 104: sustained UDP LAN→WAN" \
             "server=${_server_ready} rc=${_iperf_rc} stopped=${_client_stopped}; loss=${_lost:-NA}% bytes=${_bytes:-NA}; entries=${_entries_base:-NA}->${_entries_after:-NA}; alloc_fail=${_alloc_base:-NA}->${_alloc_after:-NA}${_P25_TRAFFIC_ISSUE:+; traffic counters: ${_P25_TRAFFIC_ISSUE}}; output='$(_p25_snippet "$_iperf_out")'"
+        _p25_loss_evidence "Step 104" "$_loss_base" "$_iperf_out"
     fi
 
     info "Step 105: running 20s reverse UDP WAN→LAN flow at 50 Mbps..."
     _alloc_base=$(_p25_fetch_metric "fastrg_node_per_user_nat_alloc_fail_total")
     _traffic_before=$(e2e_metrics_body)
+    _loss_base=$(_p25_loss_counters)
     if [[ $_server_ready -eq 1 ]]; then
         if _iperf_out=$(ssh_lan \
             "iperf3 -u -c ${WAN_IP} -p ${_P25_IPERF_PORT} -t 20 -b 50M -R -J" 2>&1); then
@@ -337,6 +470,7 @@ phase25_udp_icmp_traffic() {
     else
         fail "Step 105: sustained reverse UDP WAN→LAN" \
             "server=${_server_ready}/${_server_stopped} rc=${_iperf_rc} stopped=${_client_stopped}; loss=${_lost:-NA}% bytes=${_bytes:-NA}; alloc_fail=${_alloc_base:-NA}->${_alloc_after:-NA}${_P25_TRAFFIC_ISSUE:+; traffic counters: ${_P25_TRAFFIC_ISSUE}}; output='$(_p25_snippet "$_iperf_out")'"
+        _p25_loss_evidence "Step 105" "$_loss_base" "$_iperf_out"
     fi
 
     # What this step is for: the ICMP ident mapping must stay alive for longer

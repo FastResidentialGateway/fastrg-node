@@ -118,25 +118,26 @@ static void test_arp_pending_queue(void)
     U32 ip_a = htonl(0x0A010203);
     U32 ip_b = htonl(0x0A010204);
 
-    TEST_ASSERT(arp_pending_enqueue(NULL, &q, NULL, ip_a) == ERROR,
+    TEST_ASSERT(arp_pending_enqueue(NULL, &q, NULL, ip_a, 0) == ERROR,
         "enqueue rejects NULL mempool", "");
-    TEST_ASSERT(arp_pending_enqueue(mp, NULL, NULL, ip_a) == ERROR,
+    TEST_ASSERT(arp_pending_enqueue(mp, NULL, NULL, ip_a, 0) == ERROR,
         "enqueue rejects NULL queue", "");
 
     /* queue 2 packets waiting on ip_a, 1 on ip_b */
     struct rte_mbuf *m1 = make_test_mbuf(), *m2 = make_test_mbuf(), *m3 = make_test_mbuf();
     TEST_ASSERT(m1 != NULL && m2 != NULL && m3 != NULL, "test mbufs allocated", "");
-    TEST_ASSERT(arp_pending_enqueue(mp, &q, m1, ip_a) == SUCCESS &&
-                arp_pending_enqueue(mp, &q, m2, ip_a) == SUCCESS &&
-                arp_pending_enqueue(mp, &q, m3, ip_b) == SUCCESS,
+    TEST_ASSERT(arp_pending_enqueue(mp, &q, m1, ip_a, 0) == SUCCESS &&
+                arp_pending_enqueue(mp, &q, m2, ip_a, 0) == SUCCESS &&
+                arp_pending_enqueue(mp, &q, m3, ip_b, 0) == SUCCESS,
         "three packets enqueued", "");
     TEST_ASSERT(rte_ring_count(q.ring) == 3, "ring holds 3 entries",
         "got %u", rte_ring_count(q.ring));
 
     /* resolve ip_a → both its packets drain with dst MAC filled; ip_b stays */
     struct rte_mbuf *tx_pkts[8] = {0};
+    U16 tx_queues[8] = {0};
     U16 tx_count = 0;
-    arp_pending_drain(mp, &q, ip_a, &mac_a, tx_pkts, &tx_count, 8);
+    arp_pending_drain(mp, &q, ip_a, &mac_a, tx_pkts, tx_queues, &tx_count, 8);
     TEST_ASSERT(tx_count == 2, "drain releases both ip_a packets",
         "expected 2, got %u", tx_count);
     BOOL macs_ok = TRUE;
@@ -152,11 +153,11 @@ static void test_arp_pending_queue(void)
 
     /* tx_max cap: matching entries beyond the cap are re-enqueued, not lost */
     struct rte_mbuf *m4 = make_test_mbuf(), *m5 = make_test_mbuf();
-    arp_pending_enqueue(mp, &q, m4, ip_a);
-    arp_pending_enqueue(mp, &q, m5, ip_a);
+    arp_pending_enqueue(mp, &q, m4, ip_a, 0);
+    arp_pending_enqueue(mp, &q, m5, ip_a, 0);
     tx_count = 0;
     memset(tx_pkts, 0, sizeof(tx_pkts));
-    arp_pending_drain(mp, &q, ip_a, &mac_a, tx_pkts, &tx_count, 1);
+    arp_pending_drain(mp, &q, ip_a, &mac_a, tx_pkts, tx_queues, &tx_count, 1);
     TEST_ASSERT(tx_count == 1, "drain honors tx_max cap", "got %u", tx_count);
     TEST_ASSERT(rte_ring_count(q.ring) == 2,
         "capped match re-enqueued alongside ip_b entry", "got %u", rte_ring_count(q.ring));
@@ -178,7 +179,7 @@ static void test_arp_pending_queue(void)
     BOOL fill_ok = TRUE;
     for (unsigned i = 0; i < cap; i++) {
         struct rte_mbuf *m = make_test_mbuf();
-        if (m == NULL || arp_pending_enqueue(mp, &q, m, htonl(0x0A010000 + i)) != SUCCESS)
+        if (m == NULL || arp_pending_enqueue(mp, &q, m, htonl(0x0A010000 + i), 0) != SUCCESS)
             fill_ok = FALSE;
     }
     TEST_ASSERT(fill_ok == TRUE, "ring filled to capacity", "cap=%u", cap);
@@ -186,18 +187,18 @@ static void test_arp_pending_queue(void)
         "got %u", rte_ring_count(q.ring));
 
     struct rte_mbuf *m_new = make_test_mbuf();
-    TEST_ASSERT(arp_pending_enqueue(mp, &q, m_new, ip_b) == SUCCESS,
+    TEST_ASSERT(arp_pending_enqueue(mp, &q, m_new, ip_b, 0) == SUCCESS,
         "enqueue into full ring still succeeds (drop-oldest)", "");
     TEST_ASSERT(rte_ring_count(q.ring) == cap, "ring still at capacity",
         "got %u", rte_ring_count(q.ring));
     /* oldest entry (ip 10.1.0.0) was dropped: draining it yields nothing */
     tx_count = 0;
-    arp_pending_drain(mp, &q, htonl(0x0A010000), &mac_a, tx_pkts, &tx_count, 8);
+    arp_pending_drain(mp, &q, htonl(0x0A010000), &mac_a, tx_pkts, tx_queues, &tx_count, 8);
     TEST_ASSERT(tx_count == 0, "oldest entry was dropped on overflow",
         "got %u", tx_count);
     /* the newest entry survived */
     tx_count = 0;
-    arp_pending_drain(mp, &q, ip_b, &mac_b, tx_pkts, &tx_count, 8);
+    arp_pending_drain(mp, &q, ip_b, &mac_b, tx_pkts, tx_queues, &tx_count, 8);
     TEST_ASSERT(tx_count == 1, "newest entry survived overflow", "got %u", tx_count);
     rte_pktmbuf_free(tx_pkts[0]);
 
@@ -281,7 +282,7 @@ static void test_send_arp_request_tx_result(FastRG_t *fastrg_ccb)
     mock_tx_result = 0;
     mock_tx_mbuf = NULL;
     STATUS status = send_arp_request(&fastrg_ccb->nic_info.hsi_lan_mac,
-        htonl(0x0A010101), htonl(0x0A010203), 3, 0);
+        htonl(0x0A010101), htonl(0x0A010203), 3, 0, direct_pool[LAN_PORT]);
     TEST_ASSERT(status == ERROR, "TX rejection returns ERROR", "got %d", status);
     TEST_ASSERT(mock_tx_mbuf != NULL, "TX rejection path reaches tx_burst", "");
     TEST_ASSERT(rte_mempool_avail_count(mac_test_pool) == avail_before,
@@ -291,7 +292,7 @@ static void test_send_arp_request_tx_result(FastRG_t *fastrg_ccb)
     mock_tx_result = 1;
     mock_tx_mbuf = NULL;
     status = send_arp_request(&fastrg_ccb->nic_info.hsi_lan_mac,
-        htonl(0x0A010101), htonl(0x0A010203), 3, 0);
+        htonl(0x0A010101), htonl(0x0A010203), 3, 0, direct_pool[LAN_PORT]);
     TEST_ASSERT(status == SUCCESS, "successful TX returns SUCCESS", "got %d", status);
     TEST_ASSERT(mock_tx_mbuf != NULL, "successful TX hands mbuf to tx_burst", "");
     if (mock_tx_mbuf != NULL)

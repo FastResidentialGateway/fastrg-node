@@ -857,15 +857,24 @@ int fastrg_start(int argc, char **argv)
             num_dq, num_dq, num_dq);
         for(U16 i=0; i<num_dq; i++) {
             U16 queue_id = i + 1;  /* RSS queues start at 1 */
+            /* The TX queue each reader owns comes from the layout table, so
+             * the launcher and the senders can never disagree. */
+            U16 wan_tx_q = get_tx_queue_id_for_sender(FASTRG_TX_SENDER_WAN_DATA, i, LAN_PORT, num_dq);
+            U16 lan_tx_q = get_tx_queue_id_for_sender(FASTRG_TX_SENDER_LAN_DATA, i, WAN_PORT, num_dq);
+            if (wan_tx_q == FASTRG_TX_QUEUE_NONE || lan_tx_q == FASTRG_TX_QUEUE_NONE) {
+                FastRG_LOG(ERR, fastrg_ccb.fp, NULL, NULL,
+                    "Data queue %u has no TX queue in the layout", i);
+                goto err;
+            }
             wan_data_args[i].fastrg_ccb = &fastrg_ccb;
             wan_data_args[i].rx_queue_id = queue_id;
-            wan_data_args[i].tx_queue_id = queue_id;
+            wan_data_args[i].tx_queue_id = wan_tx_q;
             rte_eal_remote_launch((lcore_function_t *)wan_data_rx,
                 (void *)&wan_data_args[i], fastrg_ccb.lcore.wan_data_threads[i]);
 
             lan_data_args[i].fastrg_ccb = &fastrg_ccb;
             lan_data_args[i].rx_queue_id = queue_id;
-            lan_data_args[i].tx_queue_id = queue_id;
+            lan_data_args[i].tx_queue_id = lan_tx_q;
             rte_eal_remote_launch((lcore_function_t *)lan_data_rx,
                 (void *)&lan_data_args[i], fastrg_ccb.lcore.lan_data_threads[i]);
         }
@@ -891,17 +900,25 @@ int fastrg_start(int argc, char **argv)
         FastRG_LOG(INFO, fastrg_ccb.fp, NULL, NULL,
             "Launching %u wan_dist_worker + %u lan_dist_worker threads", num_dq, num_dq);
         for(U16 i=0; i<num_dq; i++) {
+            /* Workers own the same queues the RSS readers would. */
+            U16 wan_tx_q = get_tx_queue_id_for_sender(FASTRG_TX_SENDER_WAN_DATA, i, LAN_PORT, num_dq);
+            U16 lan_tx_q = get_tx_queue_id_for_sender(FASTRG_TX_SENDER_LAN_DATA, i, WAN_PORT, num_dq);
+            if (wan_tx_q == FASTRG_TX_QUEUE_NONE || lan_tx_q == FASTRG_TX_QUEUE_NONE) {
+                FastRG_LOG(ERR, fastrg_ccb.fp, NULL, NULL,
+                    "Worker %u has no TX queue in the layout", i);
+                goto err;
+            }
             wan_worker_args[i].fastrg_ccb = &fastrg_ccb;
             wan_worker_args[i].dist = fastrg_ccb.wan_dist;
             wan_worker_args[i].worker_id = i;
-            wan_worker_args[i].tx_queue_id = i + 1;
+            wan_worker_args[i].tx_queue_id = wan_tx_q;
             rte_eal_remote_launch((lcore_function_t *)wan_dist_worker,
                 (void *)&wan_worker_args[i], fastrg_ccb.lcore.wan_data_threads[i]);
 
             lan_worker_args[i].fastrg_ccb = &fastrg_ccb;
             lan_worker_args[i].dist = fastrg_ccb.lan_dist;
             lan_worker_args[i].worker_id = i;
-            lan_worker_args[i].tx_queue_id = i + 1;
+            lan_worker_args[i].tx_queue_id = lan_tx_q;
             rte_eal_remote_launch((lcore_function_t *)lan_dist_worker,
                 (void *)&lan_worker_args[i], fastrg_ccb.lcore.lan_data_threads[i]);
         }

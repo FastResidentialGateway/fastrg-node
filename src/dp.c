@@ -40,9 +40,206 @@
 
 #define RX_RING_SIZE 1024
 
-#define TX_RING_SIZE 512
-
 #define BURST_SIZE 32
+
+U16 get_tx_queue_count(U16 data_queues)
+{
+    return (U16)(data_queues + 3);
+}
+
+U16 get_tx_queue_id_for_sender(fastrg_tx_sender_t sender, U16 index, U16 port_id, U16 data_queues)
+{
+    if (port_id >= PORT_AMOUNT)
+        return FASTRG_TX_QUEUE_NONE;
+
+    switch (sender) {
+    case FASTRG_TX_SENDER_CTRL_THREAD:
+        /* One control thread per node, so only index 0 exists. */
+        return (index == 0) ? 0 : FASTRG_TX_QUEUE_NONE;
+    case FASTRG_TX_SENDER_WAN_DATA:
+        /* Reads WAN, so it transmits the decapsulated traffic on LAN. */
+        if (index >= data_queues || port_id != LAN_PORT)
+            return FASTRG_TX_QUEUE_NONE;
+        return (U16)(index + 1);
+    case FASTRG_TX_SENDER_LAN_DATA:
+        /* Reads LAN, so it transmits the encapsulated traffic on WAN. */
+        if (index >= data_queues || port_id != WAN_PORT)
+            return FASTRG_TX_QUEUE_NONE;
+        return (U16)(index + 1);
+    case FASTRG_TX_SENDER_LAN_CTRL:
+        /* For DP LAN side control pkts, 
+        data_queues + 1 is for send back to LAN, 
+        data_queues + 2 is for send to WAN */
+        if (index != 0)
+            return FASTRG_TX_QUEUE_NONE;
+        return (port_id == LAN_PORT) ? (U16)(data_queues + 1)
+                                     : (U16)(data_queues + 2);
+    case FASTRG_TX_SENDER_WAN_CTRL:
+        /* For DP WAN side control pkts, 
+        data_queues + 1 is for send back to WAN, 
+        data_queues + 2 is for send to LAN */
+        if (index != 0)
+            return FASTRG_TX_QUEUE_NONE;
+        return (port_id == WAN_PORT) ? (U16)(data_queues + 1)
+                                     : (U16)(data_queues + 2);
+    default:
+        return FASTRG_TX_QUEUE_NONE;
+    }
+}
+
+U16 check_pkt_from_other_lcore(struct rte_ring *ring, struct rte_mbuf **batch,
+    U16 batch_len, U16 batch_max)
+{
+    if (unlikely(ring == NULL || batch == NULL || batch_len >= batch_max))
+        return batch_len;
+
+    unsigned int room = (unsigned int)(batch_max - batch_len);
+    unsigned int taken = rte_ring_dequeue_burst(ring, (void **)&batch[batch_len],
+        room, NULL);
+
+    return (U16)(batch_len + taken);
+}
+
+/**
+ * @fn dp_resolve_ctrl_tx_queue_id
+ * 
+ * @brief Record the TX queue id the control paths send on.
+ * 
+ * @param fastrg_ccb
+ *      FastRG control block
+ * @return
+ *      SUCCESS, or ERROR when the layout has no queue for a control sender
+ */
+static STATUS dp_resolve_ctrl_tx_queue_id(FastRG_t *fastrg_ccb)
+{
+    const U16 num_dq = fastrg_ccb->lcore.num_data_queues;
+    U16 port;
+
+    for(port=0; port<PORT_AMOUNT; port++) {
+        fastrg_ccb->dp_ctrl_txq_self[port] = get_tx_queue_id_for_sender(
+            (port == LAN_PORT) ? FASTRG_TX_SENDER_LAN_CTRL : FASTRG_TX_SENDER_WAN_CTRL,
+            0, port, num_dq);
+        fastrg_ccb->dp_ctrl_txq_opposite[port] = get_tx_queue_id_for_sender(
+            (port == LAN_PORT) ? FASTRG_TX_SENDER_WAN_CTRL : FASTRG_TX_SENDER_LAN_CTRL,
+            0, port, num_dq);
+        if (fastrg_ccb->dp_ctrl_txq_self[port] == FASTRG_TX_QUEUE_NONE ||
+            fastrg_ccb->dp_ctrl_txq_opposite[port] == FASTRG_TX_QUEUE_NONE) {
+            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+                "Port %u has no data core control TX queue in the layout", port);
+            return ERROR;
+        }
+
+        fastrg_ccb->dp_ctrl_txq_cp[port] =
+            get_tx_queue_id_for_sender(FASTRG_TX_SENDER_CTRL_THREAD, 0, port, num_dq);
+        if (fastrg_ccb->dp_ctrl_txq_cp[port] == FASTRG_TX_QUEUE_NONE) {
+            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+                "Port %u has no control thread TX queue in the layout", port);
+            return ERROR;
+        }
+    }
+
+    return SUCCESS;
+}
+
+STATUS dp_tx_handoff_pkt_init(FastRG_t *fastrg_ccb)
+{
+    const U16 n = fastrg_ccb->lcore.num_data_queues;
+    char name[RTE_RING_NAMESIZE];
+    unsigned int lcore;
+    U16 port, q;
+
+    /* Both ports control queue id are configured by now, so the data queue 
+    count here is the final one every queue id is derived from. Data queue 
+    id are configured in fastrg_start(). */
+    if (dp_resolve_ctrl_tx_queue_id(fastrg_ccb) != SUCCESS)
+        return ERROR;
+
+    for(port=0; port<PORT_AMOUNT; port++) {
+        const U16 count = fastrg_ccb->tx_queue_count[port];
+
+        if (count == 0) {
+            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+                "Port %u has no TX queue count recorded", port);
+            return ERROR;
+        }
+        fastrg_ccb->tx_handoff_ring[port] =
+            fastrg_calloc(struct rte_ring *, count, sizeof(struct rte_ring *), RTE_CACHE_LINE_SIZE);
+        fastrg_ccb->tx_full_logged_flag[port] =
+            fastrg_calloc(U8, count, sizeof(U8), RTE_CACHE_LINE_SIZE);
+        if (fastrg_ccb->tx_handoff_ring[port] == NULL ||
+            fastrg_ccb->tx_full_logged_flag[port] == NULL) {
+            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+                "Cannot allocate TX queue tables for port %u", port);
+            return ERROR;
+        }
+
+        /* Counters are per lcore so writers never share a cache line. */
+        RTE_LCORE_FOREACH(lcore) {
+            struct tx_queue_stats *row = fastrg_calloc(struct tx_queue_stats, count,
+                sizeof(struct tx_queue_stats), RTE_CACHE_LINE_SIZE);
+            if (row == NULL) {
+                FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+                    "Cannot allocate TX queue counters for lcore %u port %u", lcore, port);
+                return ERROR;
+            }
+            __atomic_store_n(&fastrg_ccb->tx_queue_stats[lcore][port], row, __ATOMIC_RELEASE);
+        }
+    }
+
+    /* Only the data queues need one: they are the queues another lcore sends
+     * on. No one handof packets to control thread(queue 0) */
+    for(port=0; port<PORT_AMOUNT; port++)
+        for(q=1; q<=n; q++) {
+            snprintf(name, sizeof(name), "tx_handoff_%u_%u", port, q);
+            fastrg_ccb->tx_handoff_ring[port][q] = rte_ring_lookup(name);
+            if (fastrg_ccb->tx_handoff_ring[port][q] != NULL)
+                continue;
+            fastrg_ccb->tx_handoff_ring[port][q] = rte_ring_create(name,
+                TX_HANDOFF_RING_SIZE, (int)rte_socket_id(),
+                RING_F_SC_DEQ | RING_F_EXACT_SZ);
+            if (fastrg_ccb->tx_handoff_ring[port][q] == NULL) {
+                FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+                    "Cannot create TX handoff ring for port %u queue %u: %s",
+                    port, q, rte_strerror(rte_errno));
+                return ERROR;
+            }
+        }
+
+    return SUCCESS;
+}
+
+void dp_tx_handoff_pkt_cleanup(FastRG_t *fastrg_ccb)
+{
+    struct rte_mbuf *pkt;
+    unsigned int lcore;
+    U16 port, q;
+
+    for(port=0; port<PORT_AMOUNT; port++) {
+        if (fastrg_ccb->tx_handoff_ring[port] != NULL) {
+            for(q=0; q<fastrg_ccb->tx_queue_count[port]; q++) {
+                struct rte_ring *ring = fastrg_ccb->tx_handoff_ring[port][q];
+                if (ring == NULL)
+                    continue;
+                while (rte_ring_dequeue(ring, (void **)&pkt) == 0)
+                    rte_pktmbuf_free(pkt);
+                rte_ring_free(ring);
+            }
+            fastrg_mfree(fastrg_ccb->tx_handoff_ring[port]);
+            fastrg_ccb->tx_handoff_ring[port] = NULL;
+        }
+        if (fastrg_ccb->tx_full_logged_flag[port] != NULL) {
+            fastrg_mfree(fastrg_ccb->tx_full_logged_flag[port]);
+            fastrg_ccb->tx_full_logged_flag[port] = NULL;
+        }
+        RTE_LCORE_FOREACH(lcore) {
+            struct tx_queue_stats *row = fastrg_ccb->tx_queue_stats[lcore][port];
+            if (row == NULL)
+                continue;
+            __atomic_store_n(&fastrg_ccb->tx_queue_stats[lcore][port], NULL, __ATOMIC_RELEASE);
+            fastrg_mfree(row);
+        }
+    }
+}
 
 #define PREFETCH_OFFSET 4
 
@@ -91,21 +288,17 @@ STATUS PORT_INIT(FastRG_t *fastrg_ccb, U16 port)
         return ERROR;
     }
 
-    /* i40e does not support RTE_ETH_TX_OFFLOAD_MT_LOCKFREE, so each TX queue
-     * has exactly one lcore owner:
-     *   queue 0    : ctrl_thread
-     *   queues 1..N: data lcores / distributor workers
-     *   queue N+1  : this port's queue-0 poller lcore (inline replies)
-     *   queue N+2  : the opposite port's queue-0 poller lcore
-     *                (cross-port forwarding)
+    /* One lcore per TX queue — the layout and the rule for sending on someone
+     * else's queue are in dp.h, next to get_tx_queue_id_for_sender(). The queue count
+     * stays N+3 whatever the lcore count is, because a VF may offer as few as
+     * four TX queues.
      *
-     * DP_MODE_RSS uses N+1 RX queues and N+3 TX queues. DP_MODE_DISTRIBUTOR
-     * uses one RX queue and N+3 TX queues. In distributor mode, clamp the
-     * worker count to the NIC's TX queue capability while preserving all
-     * dedicated control queues. */
+     * DP_MODE_RSS uses N+1 RX queues, DP_MODE_DISTRIBUTOR one; both use N+3 TX
+     * queues. In distributor mode, clamp the worker count to the NIC's TX
+     * queue capability while preserving all dedicated control queues. */
     if (fastrg_ccb->datapath_mode == DP_MODE_RSS) {
         rx_rings = fastrg_calc_queue_count(rte_lcore_count());
-        tx_rings = rx_rings + 2;
+        tx_rings = get_tx_queue_count((U16)(rx_rings - 1));
         if (tx_rings > dev_info.max_tx_queues) {
             FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
                 "Port %u supports only %u TX queue(s); RSS mode needs %u",
@@ -114,7 +307,7 @@ STATUS PORT_INIT(FastRG_t *fastrg_ccb, U16 port)
         }
     } else {
         rx_rings = 1;
-        U16 want_tx = fastrg_ccb->lcore.num_data_queues + 3;
+        U16 want_tx = get_tx_queue_count(fastrg_ccb->lcore.num_data_queues);
         if (want_tx > dev_info.max_tx_queues) {
             if (dev_info.max_tx_queues < 4) {
                 FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
@@ -127,12 +320,14 @@ STATUS PORT_INIT(FastRG_t *fastrg_ccb, U16 port)
                 "Port %u max_tx_queues=%u: reducing distributor workers from %u to %u",
                 port, dev_info.max_tx_queues, fastrg_ccb->lcore.num_data_queues, new_n);
             fastrg_ccb->lcore.num_data_queues = new_n;
-            want_tx = new_n + 3;
+            want_tx = get_tx_queue_count(new_n);
         }
         tx_rings = want_tx;
     }
-    fastrg_ccb->dp_ctrl_txq_self = fastrg_ccb->lcore.num_data_queues + 1;
-    fastrg_ccb->dp_ctrl_txq_opposite = fastrg_ccb->lcore.num_data_queues + 2;
+    if (port >= PORT_AMOUNT) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Port %u is out of range", port);
+        return ERROR;
+    }
 
     if (dev_info.tx_offload_capa & RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE)
         port_conf.txmode.offloads |= RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE;
@@ -148,6 +343,8 @@ STATUS PORT_INIT(FastRG_t *fastrg_ccb, U16 port)
         port_conf.rx_adv_conf.rss_conf.rss_hf =
             rss_hf & dev_info.flow_type_rss_offloads;
     }
+
+    fastrg_ccb->tx_queue_count[port] = tx_rings;
 
     retval = rte_eth_dev_configure(port, rx_rings, tx_rings, &port_conf);
     if (retval != 0) {
@@ -312,7 +509,7 @@ int wan_ctrl_rx(void *arg)
     U16                  pppoe_len = sizeof(pppoe_header_t) + sizeof(ppp_payload_t);
     FastRG_t             *fastrg_ccb = (FastRG_t *)arg;
     const U16            rx_q = 0;  /* always queue 0 */
-    const U16            tx_q = fastrg_ccb->dp_ctrl_txq_opposite;  /* cross-port poller queue on LAN */
+    const U16            tx_q = fastrg_ccb->dp_ctrl_txq_opposite[LAN_PORT];  /* this WAN dp forwarding onto LAN */
 
     rte_thread_t thread_id = rte_thread_self();
     rte_thread_set_name(thread_id, "fastrg_wan_ctrl");
@@ -437,6 +634,7 @@ int wan_ctrl_rx(void *arg)
         if (likely(total_tx > 0)) {
             U16 nb_tx = rte_eth_tx_burst(LAN_PORT, tx_q, pkt, total_tx);
             if (unlikely(nb_tx < total_tx)) {
+                count_tx_queue_refused(fastrg_ccb, LAN_PORT, tx_q, total_tx, nb_tx);
                 for(U16 buf=nb_tx; buf<total_tx; buf++) {
                     mbuf_priv_t *mbuf_priv = rte_mbuf_to_priv(pkt[buf]);
                     U16 ccb_id = mbuf_priv->ccb_id;
@@ -466,6 +664,7 @@ int wan_data_rx(void *arg)
     FastRG_t             *fastrg_ccb = rx_arg->fastrg_ccb;
     const U16            rx_q = rx_arg->rx_queue_id;
     const U16            tx_q = rx_arg->tx_queue_id;
+    struct rte_ring      *handoff_ring = fastrg_ccb->tx_handoff_ring[LAN_PORT][tx_q];
     struct rte_mbuf      *single_pkt;
     uint64_t             total_tx = 0;
     struct rte_ether_hdr *eth_hdr, tmp_eth_hdr;
@@ -592,9 +791,12 @@ int wan_data_rx(void *arg)
                 single_pkt = single_pkt->next;
             }
         }
+        /* In case there are packets to hand off */
+        total_tx = check_pkt_from_other_lcore(handoff_ring, pkt, (U16)total_tx, BURST_SIZE);
         if (likely(total_tx > 0)) {
             U16 nb_tx = rte_eth_tx_burst(LAN_PORT, tx_q, pkt, total_tx);
             if (unlikely(nb_tx < total_tx)) {
+                count_tx_queue_refused(fastrg_ccb, LAN_PORT, tx_q, total_tx, nb_tx);
                 for(U16 buf=nb_tx; buf<total_tx; buf++) {
                     mbuf_priv_t *mbuf_priv = rte_mbuf_to_priv(pkt[buf]);
                     U16 ccb_id = mbuf_priv->ccb_id;
@@ -638,9 +840,9 @@ int lan_ctrl_rx(void *arg)
 {
     FastRG_t             *fastrg_ccb = (FastRG_t *)arg;
     const U16            rx_q = 0;  /* always queue 0 */
-    const U16            lan_tx_q = fastrg_ccb->dp_ctrl_txq_self;  /* own-port inline reply queue */
-    const U16            wan_tx_q = fastrg_ccb->dp_ctrl_txq_opposite;  /* cross-port poller queue */
-    struct rte_mbuf      *single_pkt;
+    const U16            lan_tx_q = fastrg_ccb->dp_ctrl_txq_self[LAN_PORT];  /* this LAN dp replying on LAN */
+    const U16            wan_tx_q = fastrg_ccb->dp_ctrl_txq_opposite[WAN_PORT];  /* this LAN dp forwarding onto WAN */
+    struct rte_mbuf      *single_pkt, *ipv6_reply;
     uint64_t             total_wan_tx = 0;
     struct rte_ether_hdr *eth_hdr;
     vlan_header_t        *vlan_header;
@@ -702,24 +904,28 @@ int lan_ctrl_rx(void *arg)
                     arphdr->arp_opcode = rte_cpu_to_be_16(RTE_ARP_OP_REPLY);
                     count_tx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                     count_rx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
-                    if (rte_eth_tx_burst(LAN_PORT, lan_tx_q, &single_pkt, 1) == 0)
+                    if (rte_eth_tx_burst(LAN_PORT, lan_tx_q, &single_pkt, 1) == 0) {
+                        count_tx_queue_refused(fastrg_ccb, LAN_PORT, lan_tx_q, 1, 0);
                         drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
+                    }
                 } else if (arphdr->arp_opcode == rte_cpu_to_be_16(RTE_ARP_OP_REPLY) &&
                         arphdr->arp_data.arp_tip == dhcp_server_ip) {
                     /* ARP reply to us → drain pending queue */
                     count_rx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                     struct rte_mbuf *drain_pkts[ARP_PENDING_QUEUE_SIZE];
+                    U16 drain_queues[ARP_PENDING_QUEUE_SIZE];
                     U16 drain_count = 0;
                     arp_pending_drain(fastrg_ccb->arp_pending_mp,
                         &ppp_ccb_arp->arp_pq, arphdr->arp_data.arp_sip,
                         &arphdr->arp_data.arp_sha,
-                        drain_pkts, &drain_count, ARP_PENDING_QUEUE_SIZE);
-                    if (drain_count > 0) {
-                        U16 nb_tx = rte_eth_tx_burst(LAN_PORT, lan_tx_q,
-                            drain_pkts, drain_count);
-                        for(U16 d=0; d<nb_tx; d++)
+                        drain_pkts, drain_queues, &drain_count, ARP_PENDING_QUEUE_SIZE);
+                    /* Each packet goes back out the queue it was heading for,
+                     * which belongs to the data lcore that queued it. */
+                    for(U16 d=0; d<drain_count; d++) {
+                        if (likely(send_pkt_to_other_lcore(fastrg_ccb, LAN_PORT,
+                                drain_queues[d], drain_pkts[d]) == SUCCESS))
                             count_tx_packet(fastrg_ccb, drain_pkts[d], LAN_PORT, ccb_id);
-                        for(U16 d=nb_tx; d<drain_count; d++)
+                        else
                             drop_packet(fastrg_ccb, drain_pkts[d], LAN_PORT, ccb_id);
                     }
                     rte_pktmbuf_free(single_pkt);
@@ -727,8 +933,10 @@ int lan_ctrl_rx(void *arg)
                     /* ARP to other → forward to WAN */
                     count_rx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                     count_tx_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
-                    if (rte_eth_tx_burst(WAN_PORT, wan_tx_q, &single_pkt, 1) == 0)
+                    if (rte_eth_tx_burst(WAN_PORT, wan_tx_q, &single_pkt, 1) == 0) {
+                        count_tx_queue_refused(fastrg_ccb, WAN_PORT, wan_tx_q, 1, 0);
                         drop_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
+                    }
                 }
                 continue;
             }
@@ -757,8 +965,14 @@ int lan_ctrl_rx(void *arg)
                     wan_pkt[total_wan_tx++] = single_pkt;
                     break;
                 case IPV6_LAN_TOO_BIG:
-                    ipv6_send_packet_too_big(fastrg_ccb, ppp_ccb_ipv6, single_pkt,
-                        ccb_id, eth_hdr, vlan_header, ip6, lan_tx_q);
+                    ipv6_reply = build_ipv6_packet_too_big_reply(fastrg_ccb, ppp_ccb_ipv6,
+                        single_pkt, ccb_id, eth_hdr, vlan_header, ip6,
+                        direct_pool[LAN_PORT]);
+                    if (ipv6_reply != NULL &&
+                        unlikely(rte_eth_tx_burst(LAN_PORT, lan_tx_q, &ipv6_reply, 1) == 0)) {
+                        count_tx_queue_refused(fastrg_ccb, LAN_PORT, lan_tx_q, 1, 0);
+                        drop_packet(fastrg_ccb, ipv6_reply, LAN_PORT, ccb_id);
+                    }
                     break;
                 case IPV6_LAN_FORWARD:
                     ipv6_firewall_lan_to_wan_encap(fastrg_ccb, ppp_ccb_ipv6, single_pkt, ccb_id);
@@ -816,12 +1030,16 @@ int lan_ctrl_rx(void *arg)
                             cksum = (cksum & 0xffff) + (cksum >> 16);
                             cksum = (cksum & 0xffff) + (cksum >> 16);
                             icmphdr->icmp_cksum = ~cksum;
-                            if (rte_eth_tx_burst(LAN_PORT, lan_tx_q, &single_pkt, 1) == 0)
+                            if (rte_eth_tx_burst(LAN_PORT, lan_tx_q, &single_pkt, 1) == 0) {
+                                count_tx_queue_refused(fastrg_ccb, LAN_PORT, lan_tx_q, 1, 0);
                                 drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
+                            }
                         } else {
                             /* ICMP to other host in subnet → forward on LAN */
-                            if (rte_eth_tx_burst(LAN_PORT, lan_tx_q, &single_pkt, 1) == 0)
+                            if (rte_eth_tx_burst(LAN_PORT, lan_tx_q, &single_pkt, 1) == 0) {
+                                count_tx_queue_refused(fastrg_ccb, LAN_PORT, lan_tx_q, 1, 0);
                                 drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
+                            }
                         }
                     } else {
                         drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
@@ -874,6 +1092,7 @@ int lan_ctrl_rx(void *arg)
         if (likely(total_wan_tx > 0)) {
             U16 nb_tx = rte_eth_tx_burst(WAN_PORT, wan_tx_q, wan_pkt, total_wan_tx);
             if (unlikely(nb_tx < total_wan_tx)) {
+                count_tx_queue_refused(fastrg_ccb, WAN_PORT, wan_tx_q, total_wan_tx, nb_tx);
                 for(U16 buf=nb_tx; buf<total_wan_tx; buf++) {
                     mbuf_priv_t *mbuf_priv = rte_mbuf_to_priv(wan_pkt[buf]);
                     U16 ccb_id = mbuf_priv->ccb_id;
@@ -905,7 +1124,8 @@ int lan_data_rx(void *arg)
     FastRG_t             *fastrg_ccb = rx_arg->fastrg_ccb;
     const U16            rx_q = rx_arg->rx_queue_id;
     const U16            tx_q = rx_arg->tx_queue_id; /* TX queue on both WAN and LAN */
-    struct rte_mbuf      *single_pkt;
+    struct rte_ring      *handoff_ring = fastrg_ccb->tx_handoff_ring[WAN_PORT][tx_q];
+    struct rte_mbuf      *single_pkt, *ipv6_reply;
     uint64_t             total_wan_tx = 0;
     struct rte_ether_hdr *eth_hdr;
     vlan_header_t        *vlan_header;
@@ -967,8 +1187,13 @@ int lan_data_rx(void *arg)
                     wan_pkt[total_wan_tx++] = single_pkt;
                     break;
                 case IPV6_LAN_TOO_BIG:
-                    ipv6_send_packet_too_big(fastrg_ccb, ppp_ccb_ipv6, single_pkt,
-                        ccb_id, eth_hdr, vlan_header, ip6, tx_q);
+                    ipv6_reply = build_ipv6_packet_too_big_reply(fastrg_ccb, ppp_ccb_ipv6,
+                        single_pkt, ccb_id, eth_hdr, vlan_header, ip6,
+                        direct_pool[WAN_PORT]);
+                    if (ipv6_reply != NULL &&
+                        unlikely(send_pkt_to_other_lcore(fastrg_ccb, LAN_PORT, tx_q,
+                            ipv6_reply) == ERROR))
+                        drop_packet(fastrg_ccb, ipv6_reply, LAN_PORT, ccb_id);
                     break;
                 case IPV6_LAN_FORWARD:
                     ipv6_firewall_lan_to_wan_encap(fastrg_ccb, ppp_ccb_ipv6, single_pkt, ccb_id);
@@ -1101,9 +1326,13 @@ int lan_data_rx(void *arg)
                 drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
             }
         }
+        /* In case there are packets to hand off */
+        total_wan_tx = check_pkt_from_other_lcore(handoff_ring, wan_pkt,
+            (U16)total_wan_tx, BURST_SIZE);
         if (likely(total_wan_tx > 0)) {
             U16 nb_tx = rte_eth_tx_burst(WAN_PORT, tx_q, wan_pkt, total_wan_tx);
             if (unlikely(nb_tx < total_wan_tx)) {
+                count_tx_queue_refused(fastrg_ccb, WAN_PORT, tx_q, total_wan_tx, nb_tx);
                 for(U16 buf=nb_tx; buf<total_wan_tx; buf++) {
                     mbuf_priv_t *mbuf_priv = rte_mbuf_to_priv(wan_pkt[buf]);
                     U16 ccb_id = mbuf_priv->ccb_id;
@@ -1140,7 +1369,7 @@ int wan_dist_rx(void *arg)
     FastRG_t               *fastrg_ccb = (FastRG_t *)arg;
     struct rte_distributor *dist = fastrg_ccb->wan_dist;
     const U16              rx_q = 0;
-    const U16              tx_q = fastrg_ccb->dp_ctrl_txq_opposite;  /* cross-port poller queue on LAN */
+    const U16              tx_q = fastrg_ccb->dp_ctrl_txq_opposite[LAN_PORT];  /* this WAN dp forwarding onto LAN */
     struct rte_mbuf        *single_pkt;
     uint64_t               total_tx = 0;
     struct rte_ether_hdr   *eth_hdr, tmp_eth_hdr;
@@ -1317,6 +1546,7 @@ int wan_dist_rx(void *arg)
         if (likely(total_tx > 0)) {
             U16 nb_tx = rte_eth_tx_burst(LAN_PORT, tx_q, pkt, total_tx);
             if (unlikely(nb_tx < total_tx)) {
+                count_tx_queue_refused(fastrg_ccb, LAN_PORT, tx_q, total_tx, nb_tx);
                 for(U16 buf=nb_tx; buf<total_tx; buf++) {
                     mbuf_priv_t *mbuf_priv = rte_mbuf_to_priv(pkt[buf]);
                     drop_packet(fastrg_ccb, pkt[buf], LAN_PORT, mbuf_priv->ccb_id);
@@ -1427,9 +1657,13 @@ int wan_dist_worker(void *arg)
                 single_pkt = single_pkt->next;
             }
         }
+        /* In case there are packets to hand off */
+        total_tx = check_pkt_from_other_lcore(fastrg_ccb->tx_handoff_ring[LAN_PORT][tx_q],
+            tx_pkt, (U16)total_tx, BURST_SIZE);
         if (likely(total_tx > 0)) {
             U16 nb_tx = rte_eth_tx_burst(LAN_PORT, tx_q, tx_pkt, total_tx);
             if (unlikely(nb_tx < total_tx)) {
+                count_tx_queue_refused(fastrg_ccb, LAN_PORT, tx_q, total_tx, nb_tx);
                 for(U16 buf=nb_tx; buf<total_tx; buf++) {
                     mbuf_priv_t *mbuf_priv = rte_mbuf_to_priv(tx_pkt[buf]);
                     drop_packet(fastrg_ccb, tx_pkt[buf], LAN_PORT, mbuf_priv->ccb_id);
@@ -1464,9 +1698,9 @@ int lan_dist_rx(void *arg)
     FastRG_t               *fastrg_ccb = (FastRG_t *)arg;
     struct rte_distributor *dist = fastrg_ccb->lan_dist;
     const U16              rx_q = 0;
-    const U16              lan_tx_q = fastrg_ccb->dp_ctrl_txq_self;  /* own-port inline reply queue */
-    const U16              wan_tx_q = fastrg_ccb->dp_ctrl_txq_opposite;  /* cross-port poller queue */
-    struct rte_mbuf        *single_pkt;
+    const U16              lan_tx_q = fastrg_ccb->dp_ctrl_txq_self[LAN_PORT];  /* this LAN dp replying on LAN */
+    const U16              wan_tx_q = fastrg_ccb->dp_ctrl_txq_opposite[WAN_PORT];  /* this LAN dp forwarding onto WAN */
+    struct rte_mbuf        *single_pkt, *ipv6_reply;
     uint64_t               total_wan_tx = 0;
     struct rte_ether_hdr   *eth_hdr;
     vlan_header_t          *vlan_header;
@@ -1535,32 +1769,38 @@ int lan_dist_rx(void *arg)
                     arphdr->arp_opcode = rte_cpu_to_be_16(RTE_ARP_OP_REPLY);
                     count_tx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                     count_rx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
-                    if (rte_eth_tx_burst(LAN_PORT, lan_tx_q, &single_pkt, 1) == 0)
+                    if (rte_eth_tx_burst(LAN_PORT, lan_tx_q, &single_pkt, 1) == 0) {
+                        count_tx_queue_refused(fastrg_ccb, LAN_PORT, lan_tx_q, 1, 0);
                         drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
+                    }
                 } else if (arphdr->arp_opcode == rte_cpu_to_be_16(RTE_ARP_OP_REPLY) &&
                         arphdr->arp_data.arp_tip == dhcp_server_ip) {
                     /* ARP reply to us → drain pending queue */
                     count_rx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                     struct rte_mbuf *drain_pkts[ARP_PENDING_QUEUE_SIZE];
+                    U16 drain_queues[ARP_PENDING_QUEUE_SIZE];
                     U16 drain_count = 0;
                     arp_pending_drain(fastrg_ccb->arp_pending_mp,
                         &ppp_ccb->arp_pq, arphdr->arp_data.arp_sip,
                         &arphdr->arp_data.arp_sha,
-                        drain_pkts, &drain_count, ARP_PENDING_QUEUE_SIZE);
-                    if (drain_count > 0) {
-                        U16 nb_tx = rte_eth_tx_burst(LAN_PORT, lan_tx_q,
-                            drain_pkts, drain_count);
-                        for(U16 d=0; d<nb_tx; d++)
+                        drain_pkts, drain_queues, &drain_count, ARP_PENDING_QUEUE_SIZE);
+                    /* Each packet goes back out the queue it was heading for,
+                     * which belongs to the data lcore that queued it. */
+                    for(U16 d=0; d<drain_count; d++) {
+                        if (likely(send_pkt_to_other_lcore(fastrg_ccb, LAN_PORT,
+                                drain_queues[d], drain_pkts[d]) == SUCCESS))
                             count_tx_packet(fastrg_ccb, drain_pkts[d], LAN_PORT, ccb_id);
-                        for(U16 d=nb_tx; d<drain_count; d++)
+                        else
                             drop_packet(fastrg_ccb, drain_pkts[d], LAN_PORT, ccb_id);
                     }
                     rte_pktmbuf_free(single_pkt);
                 } else {
                     count_rx_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                     count_tx_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
-                    if (rte_eth_tx_burst(WAN_PORT, wan_tx_q, &single_pkt, 1) == 0)
+                    if (rte_eth_tx_burst(WAN_PORT, wan_tx_q, &single_pkt, 1) == 0) {
+                        count_tx_queue_refused(fastrg_ccb, WAN_PORT, wan_tx_q, 1, 0);
                         drop_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
+                    }
                 }
                 continue;
             }
@@ -1602,8 +1842,14 @@ int lan_dist_rx(void *arg)
                     wan_pkt[total_wan_tx++] = single_pkt;
                     break;
                 case IPV6_LAN_TOO_BIG:
-                    ipv6_send_packet_too_big(fastrg_ccb, ppp_ccb_ipv6, single_pkt,
-                        ccb_id, eth_hdr, vlan_header, ip6, lan_tx_q);
+                    ipv6_reply = build_ipv6_packet_too_big_reply(fastrg_ccb, ppp_ccb_ipv6,
+                        single_pkt, ccb_id, eth_hdr, vlan_header, ip6,
+                        direct_pool[LAN_PORT]);
+                    if (ipv6_reply != NULL &&
+                        unlikely(rte_eth_tx_burst(LAN_PORT, lan_tx_q, &ipv6_reply, 1) == 0)) {
+                        count_tx_queue_refused(fastrg_ccb, LAN_PORT, lan_tx_q, 1, 0);
+                        drop_packet(fastrg_ccb, ipv6_reply, LAN_PORT, ccb_id);
+                    }
                     break;
                 case IPV6_LAN_FORWARD:
                     /* TCP/UDP is fanned out to a worker, which recognizes IPv6
@@ -1656,11 +1902,15 @@ int lan_dist_rx(void *arg)
                             cksum = (cksum & 0xffff) + (cksum >> 16);
                             cksum = (cksum & 0xffff) + (cksum >> 16);
                             icmphdr->icmp_cksum = ~cksum;
-                            if (rte_eth_tx_burst(LAN_PORT, lan_tx_q, &single_pkt, 1) == 0)
+                            if (rte_eth_tx_burst(LAN_PORT, lan_tx_q, &single_pkt, 1) == 0) {
+                                count_tx_queue_refused(fastrg_ccb, LAN_PORT, lan_tx_q, 1, 0);
                                 drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
+                            }
                         } else {
-                            if (rte_eth_tx_burst(LAN_PORT, lan_tx_q, &single_pkt, 1) == 0)
+                            if (rte_eth_tx_burst(LAN_PORT, lan_tx_q, &single_pkt, 1) == 0) {
+                                count_tx_queue_refused(fastrg_ccb, LAN_PORT, lan_tx_q, 1, 0);
                                 drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
+                            }
                         }
                     } else if (ip_hdr->next_proto_id == PROTO_TYPE_UDP) {
                         /* DHCP and DNS on gateway subnet */
@@ -1849,6 +2099,7 @@ int lan_dist_rx(void *arg)
         if (likely(total_wan_tx > 0)) {
             U16 nb_tx = rte_eth_tx_burst(WAN_PORT, wan_tx_q, wan_pkt, total_wan_tx);
             if (unlikely(nb_tx < total_wan_tx)) {
+                count_tx_queue_refused(fastrg_ccb, WAN_PORT, wan_tx_q, total_wan_tx, nb_tx);
                 for(U16 buf=nb_tx; buf<total_wan_tx; buf++) {
                     mbuf_priv_t *mbuf_priv = rte_mbuf_to_priv(wan_pkt[buf]);
                     drop_packet(fastrg_ccb, wan_pkt[buf], WAN_PORT, mbuf_priv->ccb_id);
@@ -1948,9 +2199,13 @@ int lan_dist_worker(void *arg)
                 single_pkt = single_pkt->next;
             }
         }
+        /* In case there are packets to hand off */
+        total_wan_tx = check_pkt_from_other_lcore(fastrg_ccb->tx_handoff_ring[WAN_PORT][tx_q],
+            wan_pkt, (U16)total_wan_tx, BURST_SIZE);
         if (likely(total_wan_tx > 0)) {
             U16 nb_tx = rte_eth_tx_burst(WAN_PORT, tx_q, wan_pkt, total_wan_tx);
             if (unlikely(nb_tx < total_wan_tx)) {
+                count_tx_queue_refused(fastrg_ccb, WAN_PORT, tx_q, total_wan_tx, nb_tx);
                 for(U16 buf=nb_tx; buf<total_wan_tx; buf++) {
                     mbuf_priv_t *mbuf_priv = rte_mbuf_to_priv(wan_pkt[buf]);
                     drop_packet(fastrg_ccb, wan_pkt[buf], WAN_PORT, mbuf_priv->ccb_id);
@@ -2003,13 +2258,16 @@ void wan_ctrl_tx(FastRG_t *fastrg_ccb, U16 ccb_id, U8 *mu, U16 mulen)
     BOOL rcu_toggle = (lcore_id != LCORE_ID_ANY) && !fastrg_rcu_persistent[lcore_id];
     if (rcu_toggle)
         rte_rcu_qsbr_thread_online(fastrg_ccb->pdump_rcu, lcore_id);
-    U16 nb_tx = rte_eth_tx_burst(WAN_PORT, 0, &pkt, 1);
+    U16 cp_tx_q = fastrg_ccb->dp_ctrl_txq_cp[WAN_PORT];
+    U16 nb_tx = rte_eth_tx_burst(WAN_PORT, cp_tx_q, &pkt, 1);
     if (rcu_toggle) {
         rte_rcu_qsbr_quiescent(fastrg_ccb->pdump_rcu, lcore_id);
         rte_rcu_qsbr_thread_offline(fastrg_ccb->pdump_rcu, lcore_id);
     }
-    if (nb_tx == 0)
+    if (nb_tx == 0) {
+        count_tx_queue_refused(fastrg_ccb, WAN_PORT, cp_tx_q, 1, 0);
         drop_packet(fastrg_ccb, pkt, WAN_PORT, ccb_id);
+    }
 }
 
 void lan_ctrl_tx(FastRG_t *fastrg_ccb, U16 ccb_id, U8 *mu, U16 mulen)
@@ -2044,13 +2302,16 @@ void lan_ctrl_tx(FastRG_t *fastrg_ccb, U16 ccb_id, U8 *mu, U16 mulen)
     BOOL rcu_toggle = (lcore_id != LCORE_ID_ANY) && !fastrg_rcu_persistent[lcore_id];
     if (rcu_toggle)
         rte_rcu_qsbr_thread_online(fastrg_ccb->pdump_rcu, lcore_id);
-    U16 nb_tx = rte_eth_tx_burst(LAN_PORT, 0, &pkt, 1);
+    U16 cp_tx_q = fastrg_ccb->dp_ctrl_txq_cp[LAN_PORT];
+    U16 nb_tx = rte_eth_tx_burst(LAN_PORT, cp_tx_q, &pkt, 1);
     if (rcu_toggle) {
         rte_rcu_qsbr_quiescent(fastrg_ccb->pdump_rcu, lcore_id);
         rte_rcu_qsbr_thread_offline(fastrg_ccb->pdump_rcu, lcore_id);
     }
-    if (nb_tx == 0)
+    if (nb_tx == 0) {
+        count_tx_queue_refused(fastrg_ccb, LAN_PORT, cp_tx_q, 1, 0);
         drop_packet(fastrg_ccb, pkt, LAN_PORT, ccb_id);
+    }
 }
 
 static int lsi_event_callback(U16 port_id, enum rte_eth_event_type type, void *param)

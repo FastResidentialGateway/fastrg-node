@@ -180,7 +180,7 @@ void arp_pending_cleanup_queue(arp_pending_queue_t *q, struct rte_mempool *mp)
 }
 
 STATUS arp_pending_enqueue(struct rte_mempool *mp, arp_pending_queue_t *q,
-    struct rte_mbuf *mbuf, U32 target_ip)
+    struct rte_mbuf *mbuf, U32 target_ip, U16 tx_queue)
 {
     if (unlikely(mp == NULL || q == NULL || q->ring == NULL))
         return ERROR;
@@ -191,6 +191,7 @@ STATUS arp_pending_enqueue(struct rte_mempool *mp, arp_pending_queue_t *q,
 
     entry->mbuf      = mbuf;
     entry->target_ip = target_ip;
+    entry->tx_queue  = tx_queue;
 
     /* Try enqueue; if ring full, drop oldest and retry */
     if (rte_ring_enqueue(q->ring, entry) != 0) {
@@ -214,7 +215,7 @@ STATUS arp_pending_enqueue(struct rte_mempool *mp, arp_pending_queue_t *q,
 
 void arp_pending_drain(struct rte_mempool *mp, arp_pending_queue_t *q,
     U32 resolved_ip, const struct rte_ether_addr *mac,
-    struct rte_mbuf **tx_pkts, U16 *tx_count, U16 tx_max)
+    struct rte_mbuf **tx_pkts, U16 tx_queues[], U16 *tx_count, U16 tx_max)
 {
     if (unlikely(mp == NULL || q == NULL || q->ring == NULL))
         return;
@@ -234,6 +235,7 @@ void arp_pending_drain(struct rte_mempool *mp, arp_pending_queue_t *q,
             struct rte_ether_hdr *eth = rte_pktmbuf_mtod(e->mbuf,
                 struct rte_ether_hdr *);
             rte_ether_addr_copy(mac, &eth->dst_addr);
+            tx_queues[*tx_count] = e->tx_queue;
             tx_pkts[(*tx_count)++] = e->mbuf;
             rte_mempool_put(mp, e);
         } else {
@@ -303,9 +305,8 @@ U16 encode_arp_request(U8 *buf, const struct rte_ether_addr *src_mac, U32 src_ip
 }
 
 STATUS send_arp_request(const struct rte_ether_addr *src_mac, U32 src_ip,
-    U32 target_ip, U16 vlan_id, U16 tx_q)
+    U32 target_ip, U16 vlan_id, U16 tx_q, struct rte_mempool *pool)
 {
-    struct rte_mempool *pool = direct_pool[LAN_PORT];
     if (unlikely(pool == NULL))
         return ERROR;
 

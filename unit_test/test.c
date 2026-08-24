@@ -25,7 +25,7 @@ void free_ccb(FastRG_t *ccb)
 
 FastRG_t *init_ccb(int user_count)
 {
-    FastRG_t *ccb = fastrg_malloc(FastRG_t, user_count * sizeof(FastRG_t), 0);
+    FastRG_t *ccb = fastrg_calloc(FastRG_t, user_count, sizeof(FastRG_t), 0);
     if (ccb == NULL) {
         puts("Failed to allocate memory for FastRG CCB");
         return NULL;
