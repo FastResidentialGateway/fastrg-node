@@ -30,6 +30,7 @@ Commands:
     set_subscriber_count <count>                            - SetSubscriberCount → JSON
     set_snat_config <user_id> <eport> <dip> <iport>         - SetSnatConfig → JSON
     remove_snat_config <user_id> <eport>                    - RemoveSnatConfig → JSON
+    republish_pppoe_status                                  - RepublishPPPoEStatus → JSON
 
 Requirements:
     - python3 (stdlib only)
@@ -410,6 +411,16 @@ def get_user_drop_count(node_addr, user_id, port_idx=1):
     return {"dropped_packets": 0}
 
 
+def republish_pppoe_status(node_addr):
+    """Ask the node to re-emit every subscriber's current PPPoE state to Kafka.
+
+    Returns the reply as-is (event_count is always present thanks to
+    -emit-defaults), so a missing field stays visible instead of turning into a
+    silent zero.
+    """
+    return _grpcurl(node_addr, 'RepublishPPPoEStatus')
+
+
 def pdump_start(node_addr, dir_val, subscriber, filter_expr='', size_mb=0):
     data = {'direction': int(dir_val), 'subscriber': int(subscriber)}
     if filter_expr:
@@ -585,6 +596,8 @@ def main():
                 sys.exit(1)
             port_idx = int(opts.args[1]) if len(opts.args) > 1 else 1
             result = get_user_drop_count(opts.node, int(opts.args[0]), port_idx)
+        elif opts.command == "republish_pppoe_status":
+            result = republish_pppoe_status(opts.node)
         elif opts.command == "pdump_start":
             # args: dir subscriber [filter_expr [size_mb]]
             if len(opts.args) < 2:

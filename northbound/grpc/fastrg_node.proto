@@ -47,6 +47,7 @@ service FastrgService {
   rpc SetTcpConntrack(SetTcpConntrackRequest) returns(SetTcpConntrackReply) {}
   rpc PdumpStart(PdumpRequest) returns(PdumpReply) {}
   rpc PdumpStop(PdumpRequest) returns(PdumpReply) {}
+  rpc RepublishPPPoEStatus(google.protobuf.Empty) returns(RepublishPPPoEStatusReply) {}
 }
 
 message ConfigRequest {
@@ -348,4 +349,10 @@ message PdumpRequest {
 message PdumpReply {
   string status = 1;
   string pcap_file = 2;  // active capture file path (start only)
+}
+
+// RepublishPPPoEStatusReply reports how many PPPoE state events the node
+// emitted to Kafka, one per configured subscriber.
+message RepublishPPPoEStatusReply {
+  uint32 event_count = 1;
 }

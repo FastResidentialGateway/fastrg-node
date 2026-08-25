@@ -631,6 +631,146 @@ static void test_ipv6_report_strings_no_dns(void)
         "address is still reported when DNS is absent", "got %s", addr);
 }
 
+/* ---- PPPoE state report built from the control block ---- */
+
+/* Put the fixture in the data phase with a full IPv4 + IPv6 session, which is
+ * what every "connected" report is built from. */
+static void state_report_ccb_connected(void)
+{
+    pppd_ccb_reset();
+    test_ppp_ccb.phase = DATA_PHASE;
+    test_ppp_ccb.hsi_ipv4 = htonl(0x0a000002);    /* 10.0.0.2 */
+    test_ppp_ccb.hsi_ipv4_gw = htonl(0x0a000001); /* 10.0.0.1 */
+    memcpy(test_ppp_ccb.ipv6cp_local_iid, test_local_iid,
+        sizeof(test_local_iid));
+    memcpy(test_ppp_ccb.hsi_ipv6_pd_prefix, test_pd_prefix,
+        sizeof(test_pd_prefix));
+    test_ppp_ccb.hsi_ipv6_pd_plen = 56;
+    memcpy(test_ppp_ccb.hsi_ipv6_dns[0], test_dns1, sizeof(test_dns1));
+    memcpy(test_ppp_ccb.hsi_ipv6_dns[1], test_dns2, sizeof(test_dns2));
+    test_ppp_ccb.ipv6_enabled = TRUE;
+    test_ppp_ccb.ipv6cp_up = TRUE;
+    test_ppp_ccb.dhcp6_pd_ready = TRUE;
+    pppd_ipv6_dp_gate_update(&test_ppp_ccb);
+}
+
+static void test_state_report_connected_with_ipv6(void)
+{
+    ppp_state_report_t report;
+
+    printf("\nTesting ppp_build_state_report in the data phase with IPv6:\n");
+    printf("=========================================\n\n");
+
+    state_report_ccb_connected();
+    ppp_build_state_report(&test_ppp_ccb, &report);
+
+    TEST_ASSERT(report.phase == PPP_REPORT_CONNECTED,
+        "a data-phase session reports the connected phase", "got %d",
+        (int)report.phase);
+    TEST_ASSERT(strcmp(report.user_id, "1") == 0,
+        "the subscriber id is reported as a decimal string", "got %s",
+        report.user_id);
+    TEST_ASSERT(strcmp(report.ipv4, "10.0.0.2") == 0,
+        "the assigned IPv4 address is reported", "got %s", report.ipv4);
+    TEST_ASSERT(strcmp(report.ipv4_gw, "10.0.0.1") == 0,
+        "the IPv4 gateway is reported", "got %s", report.ipv4_gw);
+    TEST_ASSERT(strcmp(report.ipv6_addr, "fe80::11:22ff:fe33:4455") == 0,
+        "the WAN IPv6 address is reported", "got %s", report.ipv6_addr);
+    TEST_ASSERT(strcmp(report.ipv6_pd_prefix, "2001:db8:ab00::/56") == 0,
+        "the delegated prefix is reported", "got %s", report.ipv6_pd_prefix);
+    TEST_ASSERT(strcmp(report.ipv6_dns,
+            "2001:4860:4860::8888,2606:4700:4700::1111") == 0,
+        "the IPv6 DNS servers are reported", "got %s", report.ipv6_dns);
+}
+
+static void test_state_report_connected_ipv6_gate_closed(void)
+{
+    ppp_state_report_t report;
+
+    printf("\nTesting ppp_build_state_report with the IPv6 gate closed:\n");
+    printf("=========================================\n\n");
+
+    state_report_ccb_connected();
+    /* A lease being renewed closes the gate while the lease fields still hold
+     * the previous values. */
+    test_ppp_ccb.dhcp6_pd_ready = FALSE;
+    pppd_ipv6_dp_gate_update(&test_ppp_ccb);
+    ppp_build_state_report(&test_ppp_ccb, &report);
+
+    TEST_ASSERT(report.phase == PPP_REPORT_CONNECTED,
+        "IPv4 stays connected while IPv6 is unavailable", "got %d",
+        (int)report.phase);
+    TEST_ASSERT(strcmp(report.ipv4, "10.0.0.2") == 0,
+        "the IPv4 address is still reported", "got %s", report.ipv4);
+    TEST_ASSERT(report.ipv6_addr[0] == '\0' &&
+            report.ipv6_pd_prefix[0] == '\0' && report.ipv6_dns[0] == '\0',
+        "a closed IPv6 gate reports no IPv6 fields",
+        "got %s / %s / %s", report.ipv6_addr, report.ipv6_pd_prefix,
+        report.ipv6_dns);
+}
+
+static void test_state_report_disconnected(void)
+{
+    ppp_state_report_t report;
+
+    printf("\nTesting ppp_build_state_report after a session ended:\n");
+    printf("=========================================\n\n");
+
+    state_report_ccb_connected();
+    test_ppp_ccb.phase = END_PHASE;
+    ppp_build_state_report(&test_ppp_ccb, &report);
+
+    TEST_ASSERT(report.phase == PPP_REPORT_DISCONNECTED,
+        "a subscriber with no session reports the disconnected phase",
+        "got %d", (int)report.phase);
+    TEST_ASSERT(report.ipv4[0] == '\0' && report.ipv4_gw[0] == '\0',
+        "no IPv4 address is reported without a session",
+        "got %s / %s", report.ipv4, report.ipv4_gw);
+    TEST_ASSERT(report.ipv6_addr[0] == '\0' &&
+            report.ipv6_pd_prefix[0] == '\0' && report.ipv6_dns[0] == '\0',
+        "no IPv6 fields are reported without a session",
+        "got %s / %s / %s", report.ipv6_addr, report.ipv6_pd_prefix,
+        report.ipv6_dns);
+}
+
+static void test_state_report_not_configured(void)
+{
+    ppp_state_report_t report;
+
+    printf("\nTesting ppp_build_state_report for an unconfigured subscriber:\n");
+    printf("=========================================\n\n");
+
+    pppd_ccb_reset();
+    test_ppp_ccb.phase = NOT_CONFIGURED;
+    test_ppp_ccb.user_num = 7;
+    ppp_build_state_report(&test_ppp_ccb, &report);
+
+    TEST_ASSERT(report.phase == PPP_REPORT_DISCONNECTED,
+        "an unconfigured subscriber reports the disconnected phase",
+        "got %d", (int)report.phase);
+    TEST_ASSERT(strcmp(report.user_id, "7") == 0,
+        "the subscriber id follows user_num", "got %s", report.user_id);
+}
+
+static void test_state_report_negotiating(void)
+{
+    ppp_state_report_t report;
+
+    printf("\nTesting ppp_build_state_report while the session is negotiating:\n");
+    printf("=========================================\n\n");
+
+    state_report_ccb_connected();
+    test_ppp_ccb.phase = IPCP_PHASE;
+    ppp_build_state_report(&test_ppp_ccb, &report);
+
+    TEST_ASSERT(report.phase == PPP_REPORT_CONNECTING,
+        "a session still negotiating reports the connecting phase", "got %d",
+        (int)report.phase);
+    TEST_ASSERT(report.ipv4[0] == '\0' && report.ipv6_addr[0] == '\0',
+        "no addresses are reported before the session carries data",
+        "got %s / %s", report.ipv4, report.ipv6_addr);
+}
+
 void test_pppd(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 {
     printf("\n");
@@ -678,6 +818,12 @@ void test_pppd(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_ipv6_report_strings_full_lease();
     test_ipv6_report_strings_single_dns();
     test_ipv6_report_strings_no_dns();
+
+    test_state_report_connected_with_ipv6();
+    test_state_report_connected_ipv6_gate_closed();
+    test_state_report_disconnected();
+    test_state_report_not_configured();
+    test_state_report_negotiating();
 
     /* Leave no armed timer behind, and restore the shared ccb slot other
      * suites expect to find untouched. */

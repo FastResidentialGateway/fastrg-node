@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # ---------------------------------------------------------------------------
-# Phase 23 — etcd HSI Sweep Reconcile (Steps 98-100)
+# Phase 23 — etcd HSI Sweep Reconcile (Steps 99-101)
 #
 # Block the node's path to etcd, remove a synthetic subscriber through the
 # controller while the watch is offline, then verify the periodic reconcile
@@ -108,7 +108,7 @@ _cleanup_phase23_hsi_sweep() {
 
 phase23_hsi_sweep() {
     bold "═══════════════════════════════════════════════════════"
-    bold " Phase 23 — etcd HSI Sweep Reconcile (Steps 98-100)"
+    bold " Phase 23 — etcd HSI Sweep Reconcile (Steps 99-101)"
     bold "═══════════════════════════════════════════════════════"
 
     local _step95_ok=1 _step96_ok=1 _step97_ok=1
@@ -148,7 +148,7 @@ phase23_hsi_sweep() {
     fi
 
     if [[ $_step95_ok -eq 1 ]]; then
-        info "Step 98: expanding to 3 subscribers and applying synthetic user 3 (VLAN 210)..."
+        info "Step 99: expanding to 3 subscribers and applying synthetic user 3 (VLAN 210)..."
         _count_reply=$(fastrg_grpc set_subscriber_count 3 2>/dev/null || true)
         if [[ -z "$(printf '%s' "$_count_reply" | jq -r '.status // empty' 2>/dev/null || true)" ]]; then
             _step95_ok=0
@@ -197,7 +197,7 @@ phase23_hsi_sweep() {
 
     # The blocked window contains exactly one write: controller remove_config 3.
     if [[ $_step95_ok -eq 1 ]]; then
-        info "Step 98: blocking node->etcd (${_P23_ETCD_HOST}:${_P23_ETCD_PORT}) and waiting for watchdog offline detection..."
+        info "Step 99: blocking node->etcd (${_P23_ETCD_HOST}:${_P23_ETCD_PORT}) and waiting for watchdog offline detection..."
         if ! _p23_block_etcd; then
             _step95_ok=0
             _issue95="failed to install node->etcd iptables REJECT rule"
@@ -216,7 +216,7 @@ phase23_hsi_sweep() {
     fi
 
     if [[ $_step95_ok -eq 1 ]]; then
-        info "Step 98: deleting user 3 through the controller while the node watch is offline..."
+        info "Step 99: deleting user 3 through the controller while the node watch is offline..."
         _remove_reply=$(fastrg_grpc remove_config 3 2>/dev/null || true)
         if [[ -z "$(printf '%s' "$_remove_reply" | jq -r '.status // empty' 2>/dev/null || true)" ]]; then
             _step95_ok=0
@@ -239,13 +239,13 @@ phase23_hsi_sweep() {
     fi
 
     if [[ $_step95_ok -eq 1 ]]; then
-        pass "Step 98: establish stale HSI subscriber" \
+        pass "Step 99: establish stale HSI subscriber" \
             "etcd hsi/3 absent while node still lists user 3 with vlan=210"
     else
-        fail "Step 98: establish stale HSI subscriber" "$_issue95"
+        fail "Step 99: establish stale HSI subscriber" "$_issue95"
     fi
 
-    # Restore connectivity at the phase boundary even when Step 98 failed.
+    # Restore connectivity at the phase boundary even when Step 99 failed.
     _sweep_log_before=$(_p23_log_count "Reconcile sweep: user 3 active locally but absent from etcd")
     _p23_unblock_etcd
 
@@ -253,7 +253,7 @@ phase23_hsi_sweep() {
         _step96_ok=0
         _issue96="stale-state prerequisite failed"
     else
-        info "Step 99: waiting up to 180s for reconcile sweep to remove stale user 3..."
+        info "Step 100: waiting up to 180s for reconcile sweep to remove stale user 3..."
         for _i in $(seq 1 90); do
             _local_vlan=$(_p23_hsi_field 3 vlan_id)
             if [[ -z "$_local_vlan" || "$_local_vlan" == "0" ]]; then
@@ -272,10 +272,10 @@ phase23_hsi_sweep() {
     fi
 
     if [[ $_step96_ok -eq 1 ]]; then
-        pass "Step 99: reconcile sweep removes stale subscriber" \
+        pass "Step 100: reconcile sweep removes stale subscriber" \
             "user 3 removed locally and reconcile sweep log observed"
     else
-        fail "Step 99: reconcile sweep removes stale subscriber" "$_issue96"
+        fail "Step 100: reconcile sweep removes stale subscriber" "$_issue96"
     fi
 
     # Verify the canonical fixture before and after restoring subscriber count.
@@ -284,7 +284,7 @@ phase23_hsi_sweep() {
     [[ "$_status1" != "Data phase" ]] && _issue97="${_issue97} user1_status='${_status1:-empty}'"
     [[ "$_status2" != "Data phase" ]] && _issue97="${_issue97} user2_status='${_status2:-empty}'"
 
-    info "Step 100: restoring canonical subscriber count and verifying HSI keys..."
+    info "Step 101: restoring canonical subscriber count and verifying HSI keys..."
     if ! _p23_restore_count; then
         _issue97="${_issue97} subscriber_count_restore_failed"
     fi
@@ -304,10 +304,10 @@ phase23_hsi_sweep() {
     [[ -n "$_issue97" ]] && _step97_ok=0
 
     if [[ $_step97_ok -eq 1 ]]; then
-        pass "Step 100: preserve and restore canonical fixture" \
+        pass "Step 101: preserve and restore canonical fixture" \
             "users 1/2 remain in Data phase; etcd/local count=2; HSI keys=1,2"
     else
-        fail "Step 100: preserve and restore canonical fixture" "${_issue97# }"
+        fail "Step 101: preserve and restore canonical fixture" "${_issue97# }"
     fi
 
     _cleanup_phase23_hsi_sweep
