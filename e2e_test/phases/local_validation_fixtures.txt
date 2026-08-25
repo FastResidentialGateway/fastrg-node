@@ -352,6 +352,73 @@ fastrg_node_snapshot_persist_ok{node_uuid="u1"} 0
 # expect-status: 1
 ---
 
+==== fixture: pppoe_expected_phase_connected
+# expect-output: connected
+# expect-status: 0
+---
+Data phase
+==== fixture: pppoe_expected_phase_connecting
+# expect-output: connecting
+# expect-status: 0
+---
+IPCP phase
+==== fixture: pppoe_expected_phase_disconnected
+# expect-output: disconnected
+# expect-status: 0
+---
+not configured
+==== fixture: pppoe_expected_phase_empty_input
+# expect-output:
+# expect-status: 1
+---
+
+==== fixture: pppoe_expected_phase_unknown_status
+# expect-output:
+# expect-status: 1
+---
+unknown status
+==== fixture: pppoe_row_fresh_empty_input
+# args: 2026-08-24T05:00:00Z connected
+# expect-output: err
+# expect-status: 1
+---
+
+==== fixture: pppoe_row_fresh_first_row
+# args: - connected
+# expect-output: ok
+# expect-status: 0
+---
+{"node_uuid":"u1","user_id":"1","phase":"connected","updated_at":"2026-08-24T05:00:10.5Z"}
+==== fixture: pppoe_row_fresh_good
+# args: 2026-08-24T05:00:00Z connected
+# expect-output: ok
+# expect-status: 0
+---
+{"node_uuid":"u1","user_id":"1","phase":"connected","event_time":"2026-08-24T05:00:09Z","updated_at":"2026-08-24T05:00:10.5Z"}
+==== fixture: pppoe_row_fresh_no_row
+# args: 2026-08-24T05:00:00Z connected
+# expect-output: err
+# expect-status: 1
+---
+{"error":"No PPPoE status recorded for this user"}
+==== fixture: pppoe_row_fresh_stale
+# args: 2026-08-24T05:00:10.5Z connected
+# expect-output: stale
+# expect-status: 1
+---
+{"node_uuid":"u1","user_id":"1","phase":"connected","event_time":"2026-08-24T05:00:09Z","updated_at":"2026-08-24T05:00:10.5Z"}
+==== fixture: pppoe_row_fresh_unmapped_node_phase
+# args: 2026-08-24T05:00:00Z
+# expect-output: err
+# expect-status: 1
+---
+{"node_uuid":"u1","user_id":"1","phase":"connected","updated_at":"2026-08-24T05:00:10.5Z"}
+==== fixture: pppoe_row_fresh_wrong_phase
+# args: 2026-08-24T05:00:00Z connected
+# expect-output: phase
+# expect-status: 1
+---
+{"node_uuid":"u1","user_id":"1","phase":"disconnected","updated_at":"2026-08-24T05:00:10.5Z"}
 ==== fixture: registration_grpc_port_field_missing
 # expect-output:
 ---
@@ -372,6 +439,31 @@ fastrg_node_snapshot_persist_ok{node_uuid="u1"} 0
 # expect-output: 50051
 ---
 {"node_uuid":"u1","grpc_port":"50051","status":"online"}
+==== fixture: republish_event_count_empty_input
+# expect-output:
+# expect-status: 1
+---
+
+==== fixture: republish_event_count_error_reply
+# expect-output:
+# expect-status: 1
+---
+{"error":"Failed to dial target host \"192.168.10.201:50052\": connection refused"}
+==== fixture: republish_event_count_field_missing
+# expect-output:
+# expect-status: 1
+---
+{}
+==== fixture: republish_event_count_good
+# expect-output: 2
+# expect-status: 0
+---
+{"event_count":2}
+==== fixture: republish_event_count_legitimate_zero
+# expect-output: 0
+# expect-status: 0
+---
+{"event_count":0}
 ==== fixture: spi_stats_fields_empty_input
 # args: 2
 # expect-status: 1

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # ---------------------------------------------------------------------------
-# Phase 27 — NIC link flap / LSC handling (Steps 112-114)
+# Phase 27 — NIC link flap / LSC handling (Steps 113-115)
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
@@ -29,7 +29,7 @@ set -euo pipefail
 # up and 0 while it is down — the down side is already required by
 # _p27_wait_link_down.
 _P27_LINK_SPEED_MBPS=10000
-# Hold time of the second, deliberately short WAN flap in Step 112. Measured
+# Hold time of the second, deliberately short WAN flap in Step 113. Measured
 # on this bench: 0.1s of host-side down yields exactly one down/up pair on the
 # node (10/10 runs), well inside the 0.5s polling interval that the pair is
 # meant to slip past.
@@ -40,10 +40,10 @@ _P27_LAN_VLAN="vlan3"
 # the address and the default route gone together while it does. Measured once
 # on this bench: teardown at link+4.3s, rebuild complete at link+8.7s. A ping
 # issued inside that gap prints "Network is unreachable" and never puts a
-# packet on the wire, so it says nothing about the data plane Step 114 tests.
+# packet on the wire, so it says nothing about the data plane Step 115 tests.
 #
 # Where the three limits come from:
-#   window 25s — the gap can only be observed once Step 114 starts pinging,
+#   window 25s — the gap can only be observed once Step 115 starts pinging,
 #     which lands somewhere between a few seconds and ~15s after the link
 #     returns depending on how long the checks in between take. 8.7s of gap
 #     plus that spread plus margin is 25s. An unreachable ping later than this
@@ -496,7 +496,7 @@ _p27_lan_path_snapshot() {
     printf '%s' "${_state:-addr=? route=?}"
 }
 
-# The session-teardown lines Step 114 asserts on, over the log this run has
+# The session-teardown lines Step 115 asserts on, over the log this run has
 # produced so far. The probe loop repeats this check because a teardown
 # settles the outcome: once the node has dropped the session, nothing the LAN
 # host does to its own vlan will bring the path back.
@@ -518,7 +518,7 @@ _p27_retries_phrase() {
     fi
 }
 
-# The Step 114 probe: one unscored ping to absorb the ARP the flaps cleared,
+# The Step 115 probe: one unscored ping to absorb the ARP the flaps cleared,
 # then the scored one. The pair is repeated only while the single thing in the
 # way is the LAN host rebuilding its vlan — see the _P27_NM_GAP_* notes above
 # for what that is and where the limits come from.
@@ -629,7 +629,7 @@ _cleanup_phase27_link_flap() {
 
 phase27_link_flap() {
     bold "═══════════════════════════════════════════════════════"
-    bold " Phase 27 — NIC Link Flap / LSC Handling (Steps 112-114)"
+    bold " Phase 27 — NIC Link Flap / LSC Handling (Steps 113-115)"
     bold "═══════════════════════════════════════════════════════"
 
     local _step110_ok=1 _step111_ok=1 _step112_ok=1
@@ -658,7 +658,7 @@ phase27_link_flap() {
 
     _cleanup_phase27_link_flap || true
 
-    # Step 112 — WAN LSC down/up, speed cache, flap count, and current-run logs.
+    # Step 113 — WAN LSC down/up, speed cache, flap count, and current-run logs.
     _wan_flap_base=$(_p27_read_metric fastrg_nic_link_flaps_total 1 || true)
     _wan_up_base=$(_p27_read_metric fastrg_nic_link_up 1 || true)
     _wan_log_baseline=$(_p27_log_line_count "$_P27_LOG_PATH")
@@ -710,7 +710,7 @@ phase27_link_flap() {
         _issue110="${_issue110:+${_issue110}; }sustained: flap=${_wan_flap_base}->${_wan_flap_after} delta=${_wan_delta}; down_log=${_down_log} up_log=${_up_log}; log='$(_p27_log_snippet "$_P27_LOG_PATH" "$_wan_log_baseline")'"
     fi
 
-    # Second part of Step 112 — a flap shorter than the polling interval.
+    # Second part of Step 113 — a flap shorter than the polling interval.
     #
     # The node counts link transitions in the LSC callback, so a toggle the
     # 0.5s polling can never sample must still show up afterwards: the counter
@@ -752,18 +752,18 @@ phase27_link_flap() {
                 _issue110="${_issue110:+${_issue110}; }fast-flap: ${_P27_FLASH_HOLD_SEC}s toggle gave flap=${_flash_base}->${_flash_after} delta=${_flash_delta} (expected exactly 2); down_log=${_flash_down_log} up_log=${_flash_up_log}; log='$(_p27_log_snippet "$_P27_LOG_PATH" "$_flash_log_baseline")'"
             fi
         fi
-        # Step 113 checks that port 1 stays put while port 0 flaps, and uses
+        # Step 114 checks that port 1 stays put while port 0 flaps, and uses
         # this counter as its baseline. It is read here unconditionally
         # because a flash command that reports failure can still have flapped
         # the link: carrying the pre-flash number forward would then fail
-        # Step 113 for a transition Step 112 has already reported, turning one
+        # Step 114 for a transition Step 113 has already reported, turning one
         # fault into two. Only a valid number overwrites, so a failed read
         # leaves the previous baseline in place.
         #
         # The wait matters as much as the read. The paths that report a
         # failure above skip the recovery wait, so without this the counter
         # can be sampled between the down and the up — one short of where it
-        # settles, which lands Step 113 in the same false failure by a
+        # settles, which lands Step 114 in the same false failure by a
         # different route.
         _p27_wait_link_up 1 20 || true
         _flash_final=$(_p27_read_metric fastrg_nic_link_flaps_total 1 || true)
@@ -773,21 +773,21 @@ phase27_link_flap() {
     fi
 
     if [[ $_step110_ok -eq 1 ]]; then
-        pass "Step 112: WAN LSC event and flap counter" \
+        pass "Step 113: WAN LSC event and flap counter" \
             "sustained: port 1 link 1→0→1, speed 0→${_P27_LINK_SPEED_MBPS} Mbps, flap ${_wan_flap_base}→${_wan_flap_sustained} (+${_wan_delta}, even), current-run down/up logs present; fast-flap: ${_P27_FLASH_HOLD_SEC}s toggle counted ${_flash_base}→${_flash_after} (+${_flash_delta}) with down/up logs, link back at ${_P27_OBS_SPEED} Mbps"
     else
-        fail "Step 112: WAN LSC event and flap counter" "$_issue110"
+        fail "Step 113: WAN LSC event and flap counter" "$_issue110"
     fi
 
     # Let the WAN events settle before independently flapping the LAN peer.
     sleep 2
 
-    # Step 113 — LAN flap: full down/up observation and per-port isolation.
+    # Step 114 — LAN flap: full down/up observation and per-port isolation.
     #
     # The flap is driven on the host-side PF: the peer only holds a VF, and
     # nothing inside the guest can drop the physical signal the node
     # observes — the PF's admin state controls the link. This mirrors the
-    # WAN mechanism of Step 112.
+    # WAN mechanism of Step 113.
     _lan_flap_base=$(_p27_read_metric fastrg_nic_link_flaps_total 0 || true)
     _lan_up_base=$(_p27_read_metric fastrg_nic_link_up 0 || true)
     _lan_log_baseline=$(_p27_log_line_count "$_P27_LOG_PATH")
@@ -818,7 +818,7 @@ phase27_link_flap() {
             _step111_ok=0
             _issue111="${_issue111:+${_issue111}; }failed to set LAN PF ${LAN_FLAP_NIC} up"
         fi
-        # Start of the clock the LAN host's vlan rebuild hangs off. Step 114
+        # Start of the clock the LAN host's vlan rebuild hangs off. Step 115
         # measures against it to tell that rebuild apart from a path that is
         # down for its own reasons.
         _lan_restored_at=$SECONDS
@@ -876,13 +876,13 @@ phase27_link_flap() {
     fi
 
     if [[ $_step111_ok -eq 1 ]]; then
-        pass "Step 113: LAN flap and per-port isolation" \
+        pass "Step 114: LAN flap and per-port isolation" \
             "port 0 link 1→0 in ${_lan_down_elapsed}s →1 in ${_lan_up_elapsed}s, speed 0→${_P27_OBS_SPEED} Mbps, flap ${_lan_flap_base}→${_lan_flap_after} (+2); ${LAN_PEER_NIC} carries and ${_P27_LAN_VLAN} has IPv4; port 1 remained ${_wan_after_lan}"
     else
-        fail "Step 113: LAN flap and per-port isolation" "$_issue111"
+        fail "Step 114: LAN flap and per-port isolation" "$_issue111"
     fi
 
-    # Step 114 — the sub-10s WAN outage must not run link_disconnect or drop data.
+    # Step 115 — the sub-10s WAN outage must not run link_disconnect or drop data.
     #
     # The flaps above clear the peer's ARP entry for the LAN side, so the first
     # packet after them is consumed by address resolution rather than lost by
@@ -917,10 +917,10 @@ phase27_link_flap() {
 
     if [[ $_step112_ok -eq 1 ]]; then
         _p27_needs_session_recovery=0
-        pass "Step 114: preserve session across short WAN flap" \
+        pass "Step 115: preserve session across short WAN flap" \
             "${WAN_IP} reachable with 0% packet loss; no automatic session teardown; ${_P27_PATH_RECOVERY_DETAIL}${_P27_PROBE_NOTE}"
     else
-        fail "Step 114: preserve session across short WAN flap" "$_issue112"
+        fail "Step 115: preserve session across short WAN flap" "$_issue112"
     fi
 
     _cleanup_phase27_link_flap || true

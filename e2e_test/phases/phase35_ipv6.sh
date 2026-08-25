@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # ---------------------------------------------------------------------------
-# Phase 35 — HSI IPv6 end to end (Steps 141-150)
+# Phase 35 — HSI IPv6 end to end (Steps 142-151)
 #
 # Turns IPv6 on for the primary subscriber, redials so IPV6CP and DHCPv6-PD
 # run, then checks the whole path: the LAN host builds a SLAAC address inside
@@ -40,7 +40,7 @@ _p35_cleanup_capture_wrong_interface() {
 
 case_validation_register ra_capture_wrong_interface phase35_ipv6 \
     _p35_inject_capture_wrong_interface _p35_cleanup_capture_wrong_interface \
-    'Step 149:'
+    'Step 150:'
 
 # Bench state to undo, and the values read from the node.
 _P35_IPV6_SET=0
@@ -226,13 +226,13 @@ phase35_ipv6() {
     local _uid="" _phase=""
 
     bold "═══════════════════════════════════════════════════════"
-    bold " Phase 35 — HSI IPv6 End to End (Steps 141-150)"
+    bold " Phase 35 — HSI IPv6 End to End (Steps 142-151)"
     bold "═══════════════════════════════════════════════════════"
 
     # ------------------------------------------------------------------
-    # Step 141 — enable ipv6_enable through the controller
+    # Step 142 — enable ipv6_enable through the controller
     # ------------------------------------------------------------------
-    info "Step 141: enabling ipv6_enable for user ${USER_ID} via the controller..."
+    info "Step 142: enabling ipv6_enable for user ${USER_ID} via the controller..."
     _P35_IPV6_SET=1
     fastrg_grpc set_ipv6 "${USER_ID}" true >/dev/null 2>&1 || true
 
@@ -245,17 +245,17 @@ phase35_ipv6() {
     done
 
     if [[ "$_flag" == "true" ]]; then
-        pass "Step 141: enable IPv6 for the subscriber" \
+        pass "Step 142: enable IPv6 for the subscriber" \
             "etcd configs/${NODE_UUID}/hsi/${USER_ID} carries ipv6_enable=true"
     else
-        fail "Step 141: enable IPv6 for the subscriber" \
+        fail "Step 142: enable IPv6 for the subscriber" \
             "etcd ipv6_enable='${_flag:-missing}'; value=$(printf '%s' "$_etcd_val" | jq -c '.config' 2>/dev/null | cut -c 1-200 || true)"
     fi
 
     # ------------------------------------------------------------------
-    # Step 142 — redial so IPV6CP and DHCPv6-PD run
+    # Step 143 — redial so IPV6CP and DHCPv6-PD run
     # ------------------------------------------------------------------
-    info "Step 142: redialling user ${USER_ID} and waiting for the delegated prefix..."
+    info "Step 143: redialling user ${USER_ID} and waiting for the delegated prefix..."
     _issue=""
     if ! _p35_redial "${USER_ID}"; then
         _issue="redial failed: ${_P35_REDIAL_STAGE}"
@@ -279,19 +279,19 @@ phase35_ipv6() {
     fi
 
     if [[ -z "$_issue" ]]; then
-        pass "Step 142: IPV6CP and DHCPv6-PD come up" \
+        pass "Step 143: IPV6CP and DHCPv6-PD come up" \
             "delegated prefix ${_P35_PD_PREFIX}, link-local ${_P35_V6_ADDR}, DNS ${_P35_V6_DNS_JOINED:-none}"
     else
         _hsi_dump=$(fastrg_grpc get_hsi_info 2>/dev/null | \
             jq -c ".hsi_infos[]? | select(.user_id == ${USER_ID})" 2>/dev/null | cut -c 1-300 || true)
-        fail "Step 142: IPV6CP and DHCPv6-PD come up" \
+        fail "Step 143: IPV6CP and DHCPv6-PD come up" \
             "${_issue}; hsi=${_hsi_dump:-unavailable}; node log: $(_p35_node_ipv6_log)"
     fi
 
     # ------------------------------------------------------------------
-    # Step 143 — give the WAN host an IPv6 address and a return route
+    # Step 144 — give the WAN host an IPv6 address and a return route
     # ------------------------------------------------------------------
-    info "Step 143: provisioning IPv6 on the WAN host ${WAN_HOST} (${WAN_NIC})..."
+    info "Step 144: provisioning IPv6 on the WAN host ${WAN_HOST} (${WAN_NIC})..."
     _issue=""
     _P35_WAN_SYSCTL_SAVED=$(ssh_wan "sysctl -n net.ipv6.conf.${WAN_NIC}.disable_ipv6" \
         2>/dev/null | tr -d '[:space:]' || true)
@@ -319,16 +319,16 @@ phase35_ipv6() {
     [[ -n "$_route_line" ]] || _issue="${_issue:+${_issue}; }no return route for ${_P35_PD_ROUTE} via ${_P35_WAN6_GW}"
 
     if [[ -z "$_issue" ]]; then
-        pass "Step 143: WAN host IPv6 provisioning" \
+        pass "Step 144: WAN host IPv6 provisioning" \
             "${WAN_NIC} has ${_P35_WAN6_HOST_ADDR}/${_P35_WAN6_PLEN} and a return route for ${_P35_PD_ROUTE}"
     else
-        fail "Step 143: WAN host IPv6 provisioning" "$_issue"
+        fail "Step 144: WAN host IPv6 provisioning" "$_issue"
     fi
 
     # ------------------------------------------------------------------
-    # Step 144 — LAN host builds a SLAAC address inside the delegated prefix
+    # Step 145 — LAN host builds a SLAAC address inside the delegated prefix
     # ------------------------------------------------------------------
-    info "Step 144: enabling IPv6 on ${LAN_HOST} ${_P35_LAN_VLAN} and waiting for SLAAC..."
+    info "Step 145: enabling IPv6 on ${LAN_HOST} ${_P35_LAN_VLAN} and waiting for SLAAC..."
     _issue=""
     _P35_LAN_SYSCTL_SAVED=$(ssh_lan "sysctl -n net.ipv6.conf.${_P35_LAN_VLAN}.disable_ipv6" \
         2>/dev/null | tr -d '[:space:]' || true)
@@ -372,17 +372,17 @@ print(lan64)' "$_P35_PD_PREFIX" ${_lan_addrs} 2>/dev/null || true)
         _issue="${_issue:+${_issue}; }RA installed no default route on ${_P35_LAN_VLAN}"
 
     if [[ -z "$_issue" ]]; then
-        pass "Step 144: LAN host SLAAC from the delegated prefix" \
+        pass "Step 145: LAN host SLAAC from the delegated prefix" \
             "${_lan_addr_count} global address(es) in ${_lan64}, default route via RA present"
     else
-        fail "Step 144: LAN host SLAAC from the delegated prefix" \
+        fail "Step 145: LAN host SLAAC from the delegated prefix" \
             "${_issue}; addr='$(ssh_lan "ip -6 -o addr show dev ${_P35_LAN_VLAN}" 2>/dev/null | tr '\n' ' ' | cut -c 1-300 || true)'; route='$(printf '%s' "$_lan_default" | tr '\n' ' ' | cut -c 1-200 || true)'"
     fi
 
     # ------------------------------------------------------------------
-    # Step 145 — ping6 LAN → WAN through the node and the BRAS
+    # Step 146 — ping6 LAN → WAN through the node and the BRAS
     # ------------------------------------------------------------------
-    info "Step 145: ping6 ${_P35_WAN6_HOST_ADDR} from the LAN host..."
+    info "Step 146: ping6 ${_P35_WAN6_HOST_ADDR} from the LAN host..."
     _ok=0
     _ping_out=""
     # The BRAS backs its upstream neighbor discovery off to one probe per 10s
@@ -399,19 +399,19 @@ print(lan64)' "$_P35_PD_PREFIX" ${_lan_addrs} 2>/dev/null || true)
     done
 
     if [[ $_ok -eq 1 ]]; then
-        pass "Step 145: ping6 LAN→WAN" "${_P35_WAN6_HOST_ADDR} reachable, 0% packet loss"
+        pass "Step 146: ping6 LAN→WAN" "${_P35_WAN6_HOST_ADDR} reachable, 0% packet loss"
     else
         _loss=$(printf '%s' "$_ping_out" | grep -oE '[0-9]+(\.[0-9]+)?% packet loss' | head -1 || true)
         _gw_ping=$(ssh_lan "ping -6 -c 2 -W 2 ${_P35_WAN6_GW} 2>&1" 2>/dev/null | \
             grep -oE '[0-9]+(\.[0-9]+)?% packet loss' | head -1 || true)
-        fail "Step 145: ping6 LAN→WAN" \
+        fail "Step 146: ping6 LAN→WAN" \
             "${_P35_WAN6_HOST_ADDR} - ${_loss:-no response}; BRAS ${_P35_WAN6_GW} - ${_gw_ping:-no response}; route: $(ssh_lan "ip -6 route get ${_P35_WAN6_HOST_ADDR}" 2>/dev/null | tr '\n' ' ' | cut -c 1-200 || true)"
     fi
 
     # ------------------------------------------------------------------
-    # Step 146 — iperf3 over IPv6
+    # Step 147 — iperf3 over IPv6
     # ------------------------------------------------------------------
-    info "Step 146: iperf3 -6 (LAN→WAN, port ${SRV_PORT})..."
+    info "Step 147: iperf3 -6 (LAN→WAN, port ${SRV_PORT})..."
     ssh_wan "pkill -f 'iperf3 -s' 2>/dev/null || true" >/dev/null 2>&1 || true
     sleep 1
     ssh_wan "iperf3 -s -B ${_P35_WAN6_HOST_ADDR} -p ${SRV_PORT} -D --forceflush >/dev/null 2>&1 || true" \
@@ -431,24 +431,24 @@ print(lan64)' "$_P35_PD_PREFIX" ${_lan_addrs} 2>/dev/null || true)
     ssh_wan "pkill -f 'iperf3 -s' 2>/dev/null || true" >/dev/null 2>&1 || true
 
     if [[ -z "$_iperf_out" ]]; then
-        fail "Step 146: iperf3 -6 LAN→WAN" "no output from the iperf3 client"
+        fail "Step 147: iperf3 -6 LAN→WAN" "no output from the iperf3 client"
     else
         _bps=$(printf '%s' "$_iperf_out" | jq -r '.end.sum_received.bits_per_second // 0' \
             2>/dev/null || echo "0")
         _bps_int=$(printf '%.0f' "${_bps}" 2>/dev/null || echo "0")
         if [[ "$_bps_int" -gt 0 ]]; then
             _mbps=$(awk "BEGIN {printf \"%.2f\", ${_bps_int} / 1000000}")
-            pass "Step 146: iperf3 -6 LAN→WAN" "received ${_mbps} Mbps over IPv6"
+            pass "Step 147: iperf3 -6 LAN→WAN" "received ${_mbps} Mbps over IPv6"
         else
             _iperf_err=$(printf '%s' "$_iperf_out" | jq -r '.error // empty' 2>/dev/null || true)
-            fail "Step 146: iperf3 -6 LAN→WAN" "bits_per_second=0${_iperf_err:+; error: $_iperf_err}"
+            fail "Step 147: iperf3 -6 LAN→WAN" "bits_per_second=0${_iperf_err:+; error: $_iperf_err}"
         fi
     fi
 
     # ------------------------------------------------------------------
-    # Step 147 — the controller DB reports the same IPv6 state as the node
+    # Step 148 — the controller DB reports the same IPv6 state as the node
     # ------------------------------------------------------------------
-    info "Step 147: comparing controller DB IPv6 columns with the node's gRPC report..."
+    info "Step 148: comparing controller DB IPv6 columns with the node's gRPC report..."
     _ok=0
     _row_seen=0
     for _i in $(seq 1 12); do
@@ -470,23 +470,23 @@ print(lan64)' "$_P35_PD_PREFIX" ${_lan_addrs} 2>/dev/null || true)
     done
 
     if [[ $_ok -eq 1 ]]; then
-        pass "Step 147: northbound IPv6 report matches the node" \
+        pass "Step 148: northbound IPv6 report matches the node" \
             "controller DB and node gRPC both report ${_db_prefix}, ${_db_addr}, DNS ${_db_dns}"
     else
         # The raw row and the node's own IPv6 log tell "the row never arrived"
         # apart from "the row is there but the columns are empty".
-        info "  Step 147 diagnostic — last ctrl_pppoe_status row:"
+        info "  Step 148 diagnostic — last ctrl_pppoe_status row:"
         printf '%s\n' "${_row:-<empty>}"
-        info "  Step 147 diagnostic — node IPv6 log:"
+        info "  Step 148 diagnostic — node IPv6 log:"
         _p35_node_ipv6_log
-        fail "Step 147: northbound IPv6 report matches the node" \
+        fail "Step 148: northbound IPv6 report matches the node" \
             "node: prefix='${_P35_PD_PREFIX}' addr='${_P35_V6_ADDR}' dns='${_P35_V6_DNS_JOINED}'; DB: row_seen=${_row_seen} prefix='${_db_prefix:-missing}' addr='${_db_addr:-missing}' dns='${_db_dns:-missing}'"
     fi
 
     # ------------------------------------------------------------------
-    # Step 148 — disabling IPv6 takes effect without a redial
+    # Step 149 — disabling IPv6 takes effect without a redial
     # ------------------------------------------------------------------
-    info "Step 148: switching ipv6_enable back off for user ${USER_ID}..."
+    info "Step 149: switching ipv6_enable back off for user ${USER_ID}..."
     _issue=""
     fastrg_grpc set_ipv6 "${USER_ID}" false >/dev/null 2>&1 || true
     _disable_at=$SECONDS
@@ -514,14 +514,14 @@ print(lan64)' "$_P35_PD_PREFIX" ${_lan_addrs} 2>/dev/null || true)
     fi
 
     if [[ -z "$_issue" ]]; then
-        pass "Step 148: disable takes effect live" \
+        pass "Step 149: disable takes effect live" \
             "gRPC IPv6 fields cleared and IPv6 forwarding stopped without a redial"
     else
-        fail "Step 148: disable takes effect live" "$_issue"
+        fail "Step 149: disable takes effect live" "$_issue"
     fi
 
     # ------------------------------------------------------------------
-    # Step 149 — no Router Advertisements after the disable
+    # Step 150 — no Router Advertisements after the disable
     # ------------------------------------------------------------------
     # The RA timer stops at its next tick, one interval away at most, so let a
     # full interval pass before opening the silent window.
@@ -529,29 +529,29 @@ print(lan64)' "$_P35_PD_PREFIX" ${_lan_addrs} 2>/dev/null || true)
     if (( _elapsed < 35 )); then
         sleep $(( 35 - _elapsed ))
     fi
-    info "Step 149: watching ${_P35_LAN_VLAN} for Router Advertisements for 40s..."
+    info "Step 150: watching ${_P35_LAN_VLAN} for Router Advertisements for 40s..."
     _ra_window=$(_p35_ra_window 40)
     _ra_control="${_ra_window%% *}"
     _ra_count="${_ra_window##* }"
 
     if [[ "$_ra_window" == "err" ]]; then
-        fail "Step 149: RAs stop after disable" \
+        fail "Step 150: RAs stop after disable" \
             "tcpdump did not start on ${_P35_LAN_VLAN}; the silent window proves nothing"
     elif ! [[ "$_ra_control" =~ ^[1-9] ]]; then
-        fail "Step 149: RAs stop after disable" \
+        fail "Step 150: RAs stop after disable" \
             "no neighbour solicitation in the capture (control='${_ra_control:-missing}'); the capture saw nothing at all"
     elif [[ "$_ra_count" == "0" ]]; then
-        pass "Step 149: RAs stop after disable" \
+        pass "Step 150: RAs stop after disable" \
             "capture saw ${_ra_control} control packet(s) and no Router Advertisement on ${_P35_LAN_VLAN} in a 40s window"
     else
-        fail "Step 149: RAs stop after disable" \
+        fail "Step 150: RAs stop after disable" \
             "${_ra_count} Router Advertisement(s) still sent on ${_P35_LAN_VLAN}"
     fi
 
     # ------------------------------------------------------------------
-    # Step 150 — put the bench back and confirm the IPv4 fixture is healthy
+    # Step 151 — put the bench back and confirm the IPv4 fixture is healthy
     # ------------------------------------------------------------------
-    info "Step 150: restoring the bench and rechecking the canonical fixture..."
+    info "Step 151: restoring the bench and rechecking the canonical fixture..."
     _issue=""
     # Guest first: switching IPv6 off there drops the SLAAC address and the RA
     # default route with it.
@@ -597,10 +597,10 @@ print(lan64)' "$_P35_PD_PREFIX" ${_lan_addrs} 2>/dev/null || true)
         _issue="${_issue:+${_issue}; }ctrl_pppoe_status returned no row for user ${USER_ID}; cleared IPv6 fields prove nothing"
 
     if [[ -z "$_issue" ]]; then
-        pass "Step 150: fixture restored" \
+        pass "Step 151: fixture restored" \
             "IPv4-only sessions healthy for users ${SUB_IDS[*]}, ${WAN_IP} reachable, IPv6 state cleared end to end"
     else
-        fail "Step 150: fixture restored" "$_issue"
+        fail "Step 151: fixture restored" "$_issue"
     fi
 
     return 0

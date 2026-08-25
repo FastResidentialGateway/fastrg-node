@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # ---------------------------------------------------------------------------
-# Phase 33 — Graceful shutdown keeps the node visible (Steps 136-137)
+# Phase 33 — Graceful shutdown keeps the node visible (Steps 137-138)
 #
 # A graceful stop reports shutdown to the controller instead of unregistering,
 # so nodes/<uuid> survives with status=inactive and the node stays on the
@@ -63,11 +63,11 @@ _p33_evidence_line() {
 
     _body=$(printf '%s' "$_body" | tr '\n' '|' | tail -c 2000 || true)
     [[ -n "${_body//[|[:space:]]/}" ]] || _body=""
-    info "  Step 136 evidence: ${_label}: ${_body:-unavailable}"
+    info "  Step 137 evidence: ${_label}: ${_body:-unavailable}"
 }
 
-# Printed only after Step 136 has already failed, and only from inside Step 136
-# so it still runs before Step 137 cold-starts the node and truncates the logs.
+# Printed only after Step 137 has already failed, and only from inside Step 137
+# so it still runs before Step 138 cold-starts the node and truncates the logs.
 # Answers "did the node die, did it say why, and was the machine short of
 # memory when it happened".
 _p33_failure_evidence() {
@@ -205,7 +205,7 @@ phase33_shutdown_inactive() {
     local _i
 
     bold "═══════════════════════════════════════════════════════"
-    bold " Phase 33 — Shutdown Keeps Node Visible (Steps 136-137)"
+    bold " Phase 33 — Shutdown Keeps Node Visible (Steps 137-138)"
     bold "═══════════════════════════════════════════════════════"
 
     _config_log_path=$(ssh_node "grep 'LogPath' /etc/fastrg/config.cfg 2>/dev/null" || true)
@@ -213,13 +213,13 @@ phase33_shutdown_inactive() {
     [[ -n "$_P33_LOG_PATH" ]] || _P33_LOG_PATH=/var/log/fastrg/fastrg.log
 
     # ------------------------------------------------------------------
-    # Step 136 — SIGTERM the node, then verify the controller still lists it
+    # Step 137 — SIGTERM the node, then verify the controller still lists it
     # as inactive with the self-reported shutdown reason.
     # ------------------------------------------------------------------
-    info "Step 136: stopping fastrg gracefully and checking the controller record..."
+    info "Step 137: stopping fastrg gracefully and checking the controller record..."
 
     if [[ "$(_p33_process_state)" != "running" ]]; then
-        fail "Step 136: graceful stop marks node inactive" "fastrg not running before shutdown"
+        fail "Step 137: graceful stop marks node inactive" "fastrg not running before shutdown"
     else
         _log_baseline=$(_p33_log_line_count "$_P33_LOG_PATH")
         info "  log baseline: ${_log_baseline} lines in ${_P33_LOG_PATH}"
@@ -239,7 +239,7 @@ phase33_shutdown_inactive() {
         [[ $_stopped -eq 1 ]] || _issue135="${_issue135} fastrg_still_running_after_30s"
 
         # fastrg.log is truncated on every start, so this must be read before
-        # Step 137 cold-starts the node.
+        # Step 138 cold-starts the node.
         if ! _p33_wait_for_new_log "$_P33_LOG_PATH" "$_log_baseline" \
             "Reported shutdown to controller" 5; then
             _issue135="${_issue135} report_log_missing; log='$(_p33_log_snippet "$_P33_LOG_PATH" "$_log_baseline")'"
@@ -262,19 +262,19 @@ phase33_shutdown_inactive() {
             _issue135="${_issue135} controller_state='${_entry:-error}'"
 
         if [[ -z "$_issue135" ]]; then
-            pass "Step 136: graceful stop marks node inactive" \
+            pass "Step 137: graceful stop marks node inactive" \
                 "node still listed after SIGTERM (exited in ${_shutdown_seconds}s): status=${_status}, inactive_reason=${_reason}; shutdown report logged"
         else
-            fail "Step 136: graceful stop marks node inactive" "${_issue135# }"
+            fail "Step 137: graceful stop marks node inactive" "${_issue135# }"
             _p33_failure_evidence
         fi
     fi
 
     # ------------------------------------------------------------------
-    # Step 137 — Cold start: both subscribers return to Data phase and the
+    # Step 138 — Cold start: both subscribers return to Data phase and the
     # controller record flips back to active.
     # ------------------------------------------------------------------
-    info "Step 137: cold-starting fastrg and waiting up to 150s for both users..."
+    info "Step 138: cold-starting fastrg and waiting up to 150s for both users..."
 
     if ssh_node "nohup ${_FASTRG_START_CMD} >/var/log/fastrg.log 2>&1 &" >/dev/null 2>&1; then
         _relaunched=1
@@ -319,10 +319,10 @@ phase33_shutdown_inactive() {
 
     if [[ -z "$_issue136" ]]; then
         _P33_RESTART_NEEDED=0
-        pass "Step 137: cold start restores active" \
+        pass "Step 138: cold start restores active" \
             "users 1/2 back in Data phase; controller status=${_status}, inactive_reason=${_reason}"
     else
-        fail "Step 137: cold start restores active" "${_issue136# }"
+        fail "Step 138: cold start restores active" "${_issue136# }"
     fi
 
     return 0
