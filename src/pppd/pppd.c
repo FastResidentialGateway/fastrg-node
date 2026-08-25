@@ -111,6 +111,87 @@ void pppd_ipv6_report_strings(const ppp_ccb_t *ppp_ccb, char *addr_str,
     }
 }
 
+void ppp_build_state_report(const ppp_ccb_t *ppp_ccb, ppp_state_report_t *report)
+{
+    if (ppp_ccb == NULL || report == NULL)
+        return;
+
+    memset(report, 0, sizeof(*report));
+    snprintf(report->user_id, sizeof(report->user_id), "%u", ppp_ccb->user_num);
+
+    switch (ppp_ccb->phase) {
+        case DATA_PHASE:
+            report->phase = PPP_REPORT_CONNECTED;
+            break;
+        case PPPOE_PHASE:
+        case LCP_PHASE:
+        case AUTH_PHASE:
+        case IPCP_PHASE:
+            report->phase = PPP_REPORT_CONNECTING;
+            break;
+        default:
+            /* END_PHASE and NOT_CONFIGURED: no session, so no addresses. */
+            report->phase = PPP_REPORT_DISCONNECTED;
+            break;
+    }
+    if (report->phase != PPP_REPORT_CONNECTED)
+        return;
+
+    struct in_addr ip = { .s_addr = ppp_ccb->hsi_ipv4 };
+    struct in_addr gw = { .s_addr = ppp_ccb->hsi_ipv4_gw };
+    inet_ntop(AF_INET, &ip, report->ipv4, sizeof(report->ipv4));
+    inet_ntop(AF_INET, &gw, report->ipv4_gw, sizeof(report->ipv4_gw));
+
+    /* IPv6 off, IPV6CP down, or a lease being renewed leave report fields 
+     * empty, which every consumer reads as "not reported". */
+    if (pppd_ipv6_dp_gate_open(ppp_ccb) == TRUE)
+        pppd_ipv6_report_strings(ppp_ccb, report->ipv6_addr,
+            sizeof(report->ipv6_addr), report->ipv6_pd_prefix,
+            sizeof(report->ipv6_pd_prefix), report->ipv6_dns,
+            sizeof(report->ipv6_dns));
+}
+
+static kafka_pppoe_phase_t report_phase_to_kafka(ppp_report_phase_t phase)
+{
+    switch (phase) {
+        case PPP_REPORT_CONNECTED:
+            return KAFKA_PPPOE_CONNECTED;
+        case PPP_REPORT_CONNECTING:
+            return KAFKA_PPPOE_CONNECTING;
+        default:
+            return KAFKA_PPPOE_DISCONNECTED;
+    }
+}
+
+/* Sending is deliberately not exported: the controller must only ever see
+ * reports this file built, so callers go through ppp_report_connection_status()
+ * and cannot hand over a report they assembled themselves. */
+static STATUS ppp_send_state_report(ppp_ccb_t *ppp_ccb,
+    const ppp_state_report_t *report)
+{
+    if (ppp_ccb == NULL || report == NULL ||
+            ppp_ccb->fastrg_ccb->is_standalone == TRUE)
+        return ERROR;
+
+    /* An empty field means "nothing to report": pass NULL so the controller
+     * stores a NULL column rather than an empty string. */
+    kafka_report_pppoe_state(report->user_id, report_phase_to_kafka(report->phase),
+        report->ipv4[0] != '\0' ? report->ipv4 : NULL,
+        report->ipv4_gw[0] != '\0' ? report->ipv4_gw : NULL, NULL,
+        report->ipv6_addr[0] != '\0' ? report->ipv6_addr : NULL,
+        report->ipv6_pd_prefix[0] != '\0' ? report->ipv6_pd_prefix : NULL,
+        report->ipv6_dns[0] != '\0' ? report->ipv6_dns : NULL);
+    return SUCCESS;
+}
+
+STATUS ppp_report_connection_status(ppp_ccb_t *ppp_ccb)
+{
+    ppp_state_report_t report;
+
+    ppp_build_state_report(ppp_ccb, &report);
+    return ppp_send_state_report(ppp_ccb, &report);
+}
+
 void PPP_bye_timer_cb(__attribute__((unused)) struct rte_timer *tim,
     ppp_ccb_t *ppp_ccb)
 {

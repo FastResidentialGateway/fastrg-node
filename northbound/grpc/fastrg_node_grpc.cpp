@@ -1622,3 +1622,26 @@ grpc::Status FastRGNodeServiceImpl::PdumpStop(::grpc::ServerContext* context, co
     response->set_status("capture stopped");
     return grpc::Status::OK;
 }
+
+grpc::Status FastRGNodeServiceImpl::RepublishPPPoEStatus(::grpc::ServerContext* context, const ::google::protobuf::Empty* request, ::fastrgnodeservice::RepublishPPPoEStatusReply* response)
+{
+    (void)context;
+    (void)request;
+    uint32_t event_count = 0;
+
+    for(int i=0; i<fastrg_ccb->user_count; i++) {
+        ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, i);
+        /* The CCB pointer array is RCU-protected and a slot may be transiently
+         * NULL while a config change (re)allocates it. Skip such a slot instead
+         * of reporting it as disconnected, which would overwrite a live row at
+         * the controller with a state we never actually read. */
+        if (ppp_ccb == NULL)
+            continue;
+        if (ppp_report_connection_status(ppp_ccb) == SUCCESS)
+            event_count++;
+    }
+
+    cout << "RepublishPPPoEStatus called, produced " << event_count << " events" << endl;
+    response->set_event_count(event_count);
+    return grpc::Status::OK;
+}

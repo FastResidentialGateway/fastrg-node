@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # ---------------------------------------------------------------------------
-# Phase 26 — Controller Heartbeat / Re-registration (Steps 107-111)
+# Phase 26 — Controller Heartbeat / Re-registration (Steps 108-112)
 # ---------------------------------------------------------------------------
 
 # The gRPC port a registered node record advertises; empty when the field is
@@ -196,7 +196,7 @@ _cleanup_phase26_heartbeat_reregister() {
 
 phase26_heartbeat_reregister() {
     bold "═══════════════════════════════════════════════════════"
-    bold " Phase 26 — Controller Heartbeat / Re-registration (Steps 107-110)"
+    bold " Phase 26 — Controller Heartbeat / Re-registration (Steps 108-111)"
     bold "═══════════════════════════════════════════════════════"
 
     local _step104_ok=1 _step105_ok=1 _step106_ok=1 _step107_ok=1
@@ -213,7 +213,7 @@ phase26_heartbeat_reregister() {
 
     _log_baseline=$(_p26_log_line_count "$_P26_LOG_PATH")
     _stdout_baseline=$(_p26_log_line_count "$_P26_STDOUT_LOG")
-    info "Step 107 log baselines: FastRG_LOG=${_log_baseline}, stdout=${_stdout_baseline}"
+    info "Step 108 log baselines: FastRG_LOG=${_log_baseline}, stdout=${_stdout_baseline}"
     _cleanup_phase26_heartbeat_reregister || true
 
     if ! ssh_node "command -v iptables >/dev/null 2>&1" 2>/dev/null; then
@@ -230,7 +230,7 @@ phase26_heartbeat_reregister() {
     fi
 
     if [[ $_step104_ok -eq 1 ]]; then
-        info "Step 107: blocking node->controller heartbeat for 50s..."
+        info "Step 108: blocking node->controller heartbeat for 50s..."
         sleep 50
         if ! _p26_wait_for_new_log "$_P26_LOG_PATH" "$_log_baseline" \
             "Failed to send heartbeat" 1; then
@@ -243,13 +243,13 @@ phase26_heartbeat_reregister() {
     fi
 
     if [[ $_step104_ok -eq 1 ]]; then
-        pass "Step 107: tolerate controller heartbeat interruption" \
+        pass "Step 108: tolerate controller heartbeat interruption" \
             "tcp-reset block produced heartbeat failure log; fastrg remained alive"
     else
-        fail "Step 107: tolerate controller heartbeat interruption" "$_issue104"
+        fail "Step 108: tolerate controller heartbeat interruption" "$_issue104"
     fi
 
-    info "Step 108: verifying LAN→WAN data plane while controller gRPC remains blocked..."
+    info "Step 109: verifying LAN→WAN data plane while controller gRPC remains blocked..."
     if [[ ${_p26_iptables_blocked:-0} -ne 1 ]]; then
         _step105_ok=0
         _issue105="controller heartbeat block prerequisite failed"
@@ -265,10 +265,10 @@ phase26_heartbeat_reregister() {
     fi
 
     if [[ $_step105_ok -eq 1 ]]; then
-        pass "Step 108: preserve data plane during heartbeat outage" \
+        pass "Step 109: preserve data plane during heartbeat outage" \
             "${WAN_IP} reachable with 0% packet loss while controller gRPC was blocked"
     else
-        fail "Step 108: preserve data plane during heartbeat outage" "$_issue105"
+        fail "Step 109: preserve data plane during heartbeat outage" "$_issue105"
     fi
 
     _recovery_baseline=$(_p26_log_line_count "$_P26_LOG_PATH")
@@ -281,7 +281,7 @@ phase26_heartbeat_reregister() {
         # (up to ~120s between attempts), so recovery lands when the next
         # 30s heartbeat tick follows the backoff expiry. 150s covers that
         # worst case; the poll passes as soon as the heartbeat succeeds.
-        info "Step 109: controller path restored; polling up to 150s for heartbeat recovery..."
+        info "Step 110: controller path restored; polling up to 150s for heartbeat recovery..."
         if ! _p26_wait_for_new_log "$_P26_LOG_PATH" "$_recovery_baseline" \
             "Heartbeat sent successfully" 150; then
             _step106_ok=0
@@ -291,16 +291,16 @@ phase26_heartbeat_reregister() {
 
     if [[ $_step106_ok -eq 1 ]]; then
         _p26_needs_recovery=0
-        pass "Step 109: resume heartbeat after controller recovery" \
+        pass "Step 110: resume heartbeat after controller recovery" \
             "current-run heartbeat success log observed after removing tcp-reset block"
     else
-        fail "Step 109: resume heartbeat after controller recovery" "$_issue106"
+        fail "Step 110: resume heartbeat after controller recovery" "$_issue106"
     fi
 
     # Synchronize immediately after a heartbeat so the unregister disappearance
     # can be observed before the next 30-second heartbeat re-registers the node.
     _final_heartbeat_baseline=$(_p26_log_line_count "$_P26_LOG_PATH")
-    info "Step 110: synchronizing with a fresh heartbeat before unregister..."
+    info "Step 111: synchronizing with a fresh heartbeat before unregister..."
     if ! _p26_wait_for_new_log "$_P26_LOG_PATH" "$_final_heartbeat_baseline" \
         "Heartbeat sent successfully" 40; then
         _step107_ok=0
@@ -323,7 +323,7 @@ phase26_heartbeat_reregister() {
     fi
 
     if [[ $_step107_ok -eq 1 ]]; then
-        info "Step 110: waiting 50s for heartbeat-triggered re-registration..."
+        info "Step 111: waiting 50s for heartbeat-triggered re-registration..."
         sleep 50
         if ! _p26_wait_for_new_log "$_P26_STDOUT_LOG" "$_reregister_log_baseline" \
             "attempting to re-register" 1; then
@@ -344,7 +344,7 @@ phase26_heartbeat_reregister() {
 
     if [[ $_step107_ok -eq 1 ]]; then
         _final_heartbeat_baseline=$(_p26_log_line_count "$_P26_LOG_PATH")
-        info "Step 110: waiting one more heartbeat cycle to verify steady state..."
+        info "Step 111: waiting one more heartbeat cycle to verify steady state..."
         sleep 35
         if ! _p26_wait_for_new_log "$_P26_LOG_PATH" "$_final_heartbeat_baseline" \
             "Heartbeat sent successfully" 1; then
@@ -355,29 +355,29 @@ phase26_heartbeat_reregister() {
 
     if [[ $_step107_ok -eq 1 ]]; then
         _p26_needs_recovery=0
-        pass "Step 110: re-register after controller forgets node" \
+        pass "Step 111: re-register after controller forgets node" \
             "REST record disappeared and returned; re-register logs and following heartbeat observed"
     else
-        fail "Step 110: re-register after controller forgets node" "$_issue107"
+        fail "Step 111: re-register after controller forgets node" "$_issue107"
     fi
 
     # ------------------------------------------------------------------
-    # Step 111 — the node told the controller which gRPC port to dial
+    # Step 112 — the node told the controller which gRPC port to dial
     # ------------------------------------------------------------------
     # Read-only: it only reads the node record the registration above wrote, so
     # it leaves no state behind. It also makes "the controller on this bench is
     # too old to store the port" fail loudly here instead of silently dialling
     # the default forever.
-    info "Step 111: checking the registered node record carries grpc_port..."
+    info "Step 112: checking the registered node record carries grpc_port..."
     local _node_record="" _grpc_port=""
     _node_record=$(etcdctl_get_value "nodes/${NODE_UUID}" 2>/dev/null || true)
     _grpc_port=$(e2e_registration_grpc_port "$_node_record")
 
     if [[ "$_grpc_port" == "${FASTRG_GRPC_PORT}" ]]; then
-        pass "Step 111: node reports its gRPC port at registration" \
+        pass "Step 112: node reports its gRPC port at registration" \
             "nodes/${NODE_UUID} carries grpc_port=${_grpc_port}"
     else
-        fail "Step 111: node reports its gRPC port at registration" \
+        fail "Step 112: node reports its gRPC port at registration" \
             "expected grpc_port=${FASTRG_GRPC_PORT}, got '${_grpc_port:-missing}'; record=$(printf '%s' "$_node_record" | tr '\n' ' ' | cut -c 1-300 || true)"
     fi
 

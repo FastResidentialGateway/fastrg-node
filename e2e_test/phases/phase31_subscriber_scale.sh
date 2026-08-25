@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # ---------------------------------------------------------------------------
-# Phase 31 — Subscriber slot scale boundary (Steps 125-128)
+# Phase 31 — Subscriber slot scale boundary (Steps 126-129)
 #
 # The capacity is read from fastrg_node_max_user_count after startup. The node
 # computes it from the hugepage heap using the measured 175 MiB per-subscriber
@@ -87,7 +87,7 @@ phase31_subscriber_scale() {
     local _stable_local="" _stable_etcd="" _uid="" _phase="" _ping_out="" _loss=""
 
     bold "═══════════════════════════════════════════════════════"
-    bold " Phase 31 — Subscriber Slot Scale Boundary (Steps 125-128)"
+    bold " Phase 31 — Subscriber Slot Scale Boundary (Steps 126-129)"
     bold "═══════════════════════════════════════════════════════"
 
     _body=$(e2e_metrics_body)
@@ -95,10 +95,10 @@ phase31_subscriber_scale() {
 
     if [[ ! "$_max" =~ ^[0-9]+$ || "$_max" -lt 2 ]]; then
         _issue123="cannot read a valid node capacity from fastrg_node_max_user_count: ${_max:-empty}"
-        fail "Step 125: expand subscriber slots to node capacity" "$_issue123"
-        fail "Step 126: node rejects count beyond capacity" "precondition failed: $_issue123"
-        fail "Step 127: shrink subscriber slots to canonical count" "precondition failed: $_issue123"
-        fail "Step 128: data plane healthy after resize" "precondition failed: $_issue123"
+        fail "Step 126: expand subscriber slots to node capacity" "$_issue123"
+        fail "Step 127: node rejects count beyond capacity" "precondition failed: $_issue123"
+        fail "Step 128: shrink subscriber slots to canonical count" "precondition failed: $_issue123"
+        fail "Step 129: data plane healthy after resize" "precondition failed: $_issue123"
         _cleanup_phase31_subscriber_scale
         return 0
     fi
@@ -142,10 +142,10 @@ phase31_subscriber_scale() {
     fi
 
     if [[ -z "$_issue123" ]]; then
-        pass "Step 125: expand subscriber slots to node capacity" \
+        pass "Step 126: expand subscriber slots to node capacity" \
             "max=${_max}; local/etcd stable; ppp_ccb_pool avail ${_before_avail}->${_at_max_avail}, in_use ${_before_in_use}->${_at_max_in_use}; node responsive"
     else
-        fail "Step 125: expand subscriber slots to node capacity" "$_issue123"
+        fail "Step 126: expand subscriber slots to node capacity" "$_issue123"
     fi
 
     # The node validates its computed capacity on the etcd apply path:
@@ -191,10 +191,10 @@ phase31_subscriber_scale() {
     fi
 
     if [[ -z "$_issue124" ]]; then
-        pass "Step 126: node rejects count beyond capacity" \
+        pass "Step 127: node rejects count beyond capacity" \
             "node capacity=${_max}: etcd holds ${_over} (drift visible, controller-side validation pending), node held local=${_max}, ppp_ccb_pool in_use=${_over_in_use} unchanged; node responsive"
     else
-        fail "Step 126: node rejects count beyond capacity" "$_issue124"
+        fail "Step 127: node rejects count beyond capacity" "$_issue124"
     fi
 
     _reply=$(fastrg_grpc set_subscriber_count 2 2>/dev/null || true)
@@ -218,10 +218,10 @@ phase31_subscriber_scale() {
     fi
 
     if [[ -z "$_issue125" ]]; then
-        pass "Step 127: shrink subscriber slots to canonical count" \
+        pass "Step 128: shrink subscriber slots to canonical count" \
             "local/etcd=2; RCU resize returned; CCB pool intentionally retained at avail/in_use=${_shrink_avail}/${_shrink_in_use}; node responsive"
     else
-        fail "Step 127: shrink subscriber slots to canonical count" "$_issue125"
+        fail "Step 128: shrink subscriber slots to canonical count" "$_issue125"
     fi
 
     for _uid in 1 2; do
@@ -243,10 +243,10 @@ phase31_subscriber_scale() {
     fi
 
     if [[ -z "$_issue126" ]]; then
-        pass "Step 128: data plane healthy after resize" \
+        pass "Step 129: data plane healthy after resize" \
             "canonical users 1/2 remain in Data phase; ${WAN_IP} reachable with 0% packet loss"
     else
-        fail "Step 128: data plane healthy after resize" "$_issue126"
+        fail "Step 129: data plane healthy after resize" "$_issue126"
     fi
 
     _cleanup_phase31_subscriber_scale

@@ -418,6 +418,63 @@ static __always_inline BOOL pppd_ipv6_dp_gate_open(const ppp_ccb_t *ppp_ccb)
     return TRUE;
 }
 
+typedef enum {
+    PPP_REPORT_CONNECTED = 1,
+    PPP_REPORT_CONNECTING,
+    PPP_REPORT_DISCONNECTED
+} ppp_report_phase_t;
+
+/** One subscriber's PPPoE state, ready to be reported northbound. A field with
+ *  nothing to report is an empty string. */
+typedef struct {
+    ppp_report_phase_t phase;
+    char user_id[8];
+    char ipv4[INET_ADDRSTRLEN];
+    char ipv4_gw[INET_ADDRSTRLEN];
+    char ipv6_addr[PPPD_IPV6_ADDR_STRLEN];
+    char ipv6_pd_prefix[PPPD_IPV6_PREFIX_STRLEN];
+    char ipv6_dns[PPPD_IPV6_DNS_STRLEN];
+} ppp_state_report_t;
+
+/**
+ * @fn ppp_build_state_report
+ *
+ * @brief fill a state report from the subscriber's current control block: the
+ *      PPPoE phase, and for a session carrying data the assigned IPv4 address
+ *      and gateway plus the IPv6 address, delegated prefix and DNS servers.
+ *      Reads the IPv6 fields only while the IPv6 is enabled.
+ *
+ * @param ppp_ccb
+ *      PPP control block pointer
+ * @param report
+ *      receives the report; every field is written
+ *
+ * @return
+ *      void
+ */
+void ppp_build_state_report(const ppp_ccb_t *ppp_ccb, ppp_state_report_t *report);
+
+/**
+ * @fn ppp_report_connection_status
+ *
+ * @brief report the subscriber's current PPPoE state to the controller over
+ *      Kafka: build the report from the control block, then send it. The
+ *      controller overwrites its whole row per event, so the event always
+ *      carries the complete state rather than a partial one.
+ *
+ *      Call it from the control plane whenever the reportable state changes,
+ *      and from the northbound path to restate what the subscriber looks like
+ *      right now.
+ *
+ * @param ppp_ccb
+ *      PPP control block pointer
+ *
+ * @return
+ *      SUCCESS when the event was handed to the Kafka producer, ERROR in
+ *      standalone mode (no controller to report to) or on a bad argument
+ */
+STATUS ppp_report_connection_status(ppp_ccb_t *ppp_ccb);
+
 void   exit_ppp(ppp_ccb_t *ppp_ccb);
 
 /**
