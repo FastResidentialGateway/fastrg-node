@@ -477,7 +477,7 @@ STATUS dhcp6_process_message(ppp_ccb_t *ppp_ccb, const U8 *dhcp, U16 len)
      * next disconnect or successful lease corrects anyway. */
     if ((was_ready == FALSE || lease_changed == TRUE) &&
             ppp_ccb->phase == DATA_PHASE)
-        ppp_report_connected(ppp_ccb);
+        ppp_report_connection_status(ppp_ccb);
     return SUCCESS;
 }
 
