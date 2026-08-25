@@ -2,13 +2,13 @@
 # shellcheck shell=bash
 # ---------------------------------------------------------------------------
 # Phase 25 — Sustained UDP / ICMP traffic across NAT timeout, plus RSS
-# queue-distribution check (Steps 104-106b)
+# queue-distribution check (Steps 105-107b)
 # ---------------------------------------------------------------------------
 
 _P25_IPERF_PORT=5902
 _P25_METRICS_PORT=""
 
-# RSS distribution probe (Step 106b)
+# RSS distribution probe (Step 107b)
 _P25_RSS_ECHO_PORT=5903
 _P25_RSS_FLOWS=16
 _P25_RSS_PKTS_PER_FLOW=20
@@ -371,7 +371,7 @@ _p25_loss_evidence() {
 
 phase25_udp_icmp_traffic() {
     bold "═══════════════════════════════════════════════════════"
-    bold " Phase 25 — Sustained UDP / ICMP Traffic (Steps 104-106b)"
+    bold " Phase 25 — Sustained UDP / ICMP Traffic (Steps 105-107b)"
     bold "═══════════════════════════════════════════════════════"
 
     local _i _server_ready=0
@@ -397,7 +397,7 @@ phase25_udp_icmp_traffic() {
         sleep 1
     done
 
-    info "Step 104: running 20s UDP LAN→WAN flow at 50 Mbps..."
+    info "Step 105: running 20s UDP LAN→WAN flow at 50 Mbps..."
     _entries_base=$(_p25_fetch_metric "fastrg_node_per_user_nat_entries_used")
     _alloc_base=$(_p25_fetch_metric "fastrg_node_per_user_nat_alloc_fail_total")
     _traffic_before=$(e2e_metrics_body)
@@ -428,15 +428,15 @@ phase25_udp_icmp_traffic() {
        _p25_is_uint "$_alloc_base" && [[ "$_alloc_after" == "$_alloc_base" ]] && \
        (( _entries_after - _entries_base <= 3 )) && \
        [[ -z "$_P25_TRAFFIC_ISSUE" ]]; then
-        pass "Step 104: sustained UDP LAN→WAN" \
+        pass "Step 105: sustained UDP LAN→WAN" \
             "loss=${_lost}%, bytes=${_bytes}, entries delta=$(( _entries_after - _entries_base )), alloc_fail delta=0; per-subscriber/session/NIC counters advanced in the LAN→WAN direction"
     else
-        fail "Step 104: sustained UDP LAN→WAN" \
+        fail "Step 105: sustained UDP LAN→WAN" \
             "server=${_server_ready} rc=${_iperf_rc} stopped=${_client_stopped}; loss=${_lost:-NA}% bytes=${_bytes:-NA}; entries=${_entries_base:-NA}->${_entries_after:-NA}; alloc_fail=${_alloc_base:-NA}->${_alloc_after:-NA}${_P25_TRAFFIC_ISSUE:+; traffic counters: ${_P25_TRAFFIC_ISSUE}}; output='$(_p25_snippet "$_iperf_out")'"
-        _p25_loss_evidence "Step 104" "$_loss_base" "$_iperf_out"
+        _p25_loss_evidence "Step 105" "$_loss_base" "$_iperf_out"
     fi
 
-    info "Step 105: running 20s reverse UDP WAN→LAN flow at 50 Mbps..."
+    info "Step 106: running 20s reverse UDP WAN→LAN flow at 50 Mbps..."
     _alloc_base=$(_p25_fetch_metric "fastrg_node_per_user_nat_alloc_fail_total")
     _traffic_before=$(e2e_metrics_body)
     _loss_base=$(_p25_loss_counters)
@@ -465,12 +465,12 @@ phase25_udp_icmp_traffic() {
        _p25_udp_result_ok "$_lost" "$_bytes" && \
        _p25_is_uint "$_alloc_base" && [[ "$_alloc_after" == "$_alloc_base" ]] && \
        [[ -z "$_P25_TRAFFIC_ISSUE" ]]; then
-        pass "Step 105: sustained reverse UDP WAN→LAN" \
+        pass "Step 106: sustained reverse UDP WAN→LAN" \
             "loss=${_lost}%, bytes=${_bytes}, alloc_fail delta=0; full 20s reverse flow completed; per-subscriber/session/NIC counters advanced in the WAN→LAN direction"
     else
-        fail "Step 105: sustained reverse UDP WAN→LAN" \
+        fail "Step 106: sustained reverse UDP WAN→LAN" \
             "server=${_server_ready}/${_server_stopped} rc=${_iperf_rc} stopped=${_client_stopped}; loss=${_lost:-NA}% bytes=${_bytes:-NA}; alloc_fail=${_alloc_base:-NA}->${_alloc_after:-NA}${_P25_TRAFFIC_ISSUE:+; traffic counters: ${_P25_TRAFFIC_ISSUE}}; output='$(_p25_snippet "$_iperf_out")'"
-        _p25_loss_evidence "Step 105" "$_loss_base" "$_iperf_out"
+        _p25_loss_evidence "Step 106" "$_loss_base" "$_iperf_out"
     fi
 
     # What this step is for: the ICMP ident mapping must stay alive for longer
@@ -486,7 +486,7 @@ phase25_udp_icmp_traffic() {
     # tracks the environment as much as the mapping. The per-second sequence
     # is kept because a future surprise is much easier to read with the shape
     # of the count than with two endpoints.
-    info "Step 106: running approximately 15s of ICMP echo traffic..."
+    info "Step 107: running approximately 15s of ICMP echo traffic..."
     _entries_base=$(_p25_fetch_metric "fastrg_node_per_user_nat_entries_used")
     _entries_seq_file=$(mktemp) || _entries_seq_file=""
     if [[ -n "$_entries_seq_file" ]]; then
@@ -508,7 +508,7 @@ phase25_udp_icmp_traffic() {
     fi
     _ping_loss=$(_p25_ping_loss "$_ping_out")
     if ! _p25_loss_is_zero "$_ping_loss"; then
-        info "Step 106: first ping reported ${_ping_loss:-unparseable}% loss; retrying once..."
+        info "Step 107: first ping reported ${_ping_loss:-unparseable}% loss; retrying once..."
         _ping_retry_out=$(ssh_lan "ping -c 150 -i 0.1 -W 2 ${WAN_IP}" 2>&1 || true)
         _ping_loss=$(_p25_ping_loss "$_ping_retry_out")
     fi
@@ -517,15 +517,15 @@ phase25_udp_icmp_traffic() {
         _entries_delta=$(( _entries_after - _entries_base ))
     fi
     if _p25_loss_is_zero "$_ping_loss"; then
-        pass "Step 106: sustained ICMP echo" \
+        pass "Step 107: sustained ICMP echo" \
             "loss=${_ping_loss}% over 150 packets in ~15s; ident mapping survived beyond 10s; recorded only: nat entries ${_entries_base:-NA}->${_entries_after:-NA} (delta ${_entries_delta:-NA}), during the ping: ${_entries_seq:-unavailable}"
     else
-        fail "Step 106: sustained ICMP echo" \
+        fail "Step 107: sustained ICMP echo" \
             "loss=${_ping_loss:-NA}%; recorded only: nat entries ${_entries_base:-NA}->${_entries_after:-NA} (delta ${_entries_delta:-NA}), during the ping: ${_entries_seq:-unavailable}; first='$(_p25_snippet "$_ping_out")' retry='$(_p25_snippet "$_ping_retry_out")'"
     fi
 
     # ------------------------------------------------------------------
-    # Step 106b — RSS spreads PPPoE session traffic across the data lcores.
+    # Step 107b — RSS spreads PPPoE session traffic across the data lcores.
     #
     # Each data lcore polls exactly one RSS queue, so the per-lcore traffic
     # rows expose the per-queue distribution. A WAN-side UDP echo server
@@ -541,7 +541,7 @@ phase25_udp_icmp_traffic() {
     # A collapse to a single queue or to queue 0 — the silent RSS/DDP
     # degradation this step exists for — fails both.
     # ------------------------------------------------------------------
-    info "Step 106b: probing RSS distribution with ${_P25_RSS_FLOWS} UDP echo flows..."
+    info "Step 107b: probing RSS distribution with ${_P25_RSS_FLOWS} UDP echo flows..."
     local _rss_issue="" _rss_before="" _rss_after="" _rss_client_out=""
     local _wd_lcores="" _wc_lcores="" _wd_count=0 _wd_hit=0 _wd_sum=0 _wc_delta=0
     local _lid="" _delta="" _flows_ok="" _replies="" _echo_ready=0
@@ -677,10 +677,10 @@ PY" 2>&1 || true)
 
     _p25_stop_echo_server || true
     if [[ -z "$_rss_issue" ]]; then
-        pass "Step 106b: RSS queue distribution" \
+        pass "Step 107b: RSS queue distribution" \
             "${_wd_hit}/${_wd_count} wan_data lcores took rx (deltas sum=${_wd_sum}); wan_ctrl delta=${_wc_delta}; flows_with_reply=${_flows_ok}/${_P25_RSS_FLOWS}"
     else
-        fail "Step 106b: RSS queue distribution" "$_rss_issue"
+        fail "Step 107b: RSS queue distribution" "$_rss_issue"
     fi
 
     _cleanup_phase25_udp_icmp_traffic

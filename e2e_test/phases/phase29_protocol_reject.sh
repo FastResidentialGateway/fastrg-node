@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # ---------------------------------------------------------------------------
-# Phase 29 — Unsupported NCP Protocol-Reject and baseline restore (Steps 118-120)
+# Phase 29 — Unsupported NCP Protocol-Reject and baseline restore (Steps 119-121)
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
@@ -174,7 +174,7 @@ phase29_protocol_reject() {
     local _issue116="" _issue117="" _issue118="" _ping_out="" _ping_loss=""
 
     bold "═══════════════════════════════════════════════════════"
-    bold " Phase 29 — IPV6CP/MPLSCP Protocol-Reject (Steps 118-120)"
+    bold " Phase 29 — IPV6CP/MPLSCP Protocol-Reject (Steps 119-121)"
     bold "═══════════════════════════════════════════════════════"
 
     _config_log_path=$(ssh_node "grep 'LogPath' /etc/fastrg/config.cfg 2>/dev/null" || true)
@@ -221,10 +221,10 @@ phase29_protocol_reject() {
     fi
 
     if [[ $_step116_ok -eq 1 ]]; then
-        pass "Step 118: reject injected IPV6CP and MPLSCP" \
+        pass "Step 119: reject injected IPV6CP and MPLSCP" \
             "users ${SUB_IDS[*]} sent both rejects; BRAS stopped both injectors (pre-restart BRAS log baseline=${_bras_log_baseline})"
     else
-        fail "Step 118: reject injected IPV6CP and MPLSCP" "$_issue116"
+        fail "Step 119: reject injected IPV6CP and MPLSCP" "$_issue116"
     fi
 
     _stability_log_baseline=$(_p29_node_log_line_count)
@@ -255,10 +255,10 @@ phase29_protocol_reject() {
     fi
 
     if [[ $_step117_ok -eq 1 ]]; then
-        pass "Step 119: preserve sessions after Protocol-Reject" \
+        pass "Step 120: preserve sessions after Protocol-Reject" \
             "users ${SUB_IDS[*]} remained in Data phase; ${WAN_IP} reachable with 0% loss; no teardown/redial log"
     else
-        fail "Step 119: preserve sessions after Protocol-Reject" "$_issue117"
+        fail "Step 120: preserve sessions after Protocol-Reject" "$_issue117"
     fi
 
     if ! _p29_restart_bras ""; then
@@ -272,10 +272,10 @@ phase29_protocol_reject() {
     fi
 
     if [[ $_step118_ok -eq 1 ]]; then
-        pass "Step 120: restore default BRAS baseline" \
+        pass "Step 121: restore default BRAS baseline" \
             "NCP injection disabled; users ${SUB_IDS[*]} returned to Data phase"
     else
-        fail "Step 120: restore default BRAS baseline" "$_issue118"
+        fail "Step 121: restore default BRAS baseline" "$_issue118"
     fi
 
     _cleanup_phase29_protocol_reject || true

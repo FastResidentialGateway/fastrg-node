@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # ---------------------------------------------------------------------------
-# Phase 11 — Kafka telemetry pipeline (Steps 41-44)
+# Phase 11 — Kafka telemetry pipeline (Steps 41-45)
 #
 # Before the existing Kafka-fed PPPoE assertions, inject one invalid config for
 # a synthetic user and verify both controller stages independently:
@@ -9,9 +9,134 @@
 #   Step 42  rollback worker removes the invalid new-user key from etcd
 #   Step 43  controller DB has a PPPoE status record for USER_ID (Kafka-fed)
 #   Step 44  after a dial, the DB status reflects a connected node phase
+#   Step 45  a republish request re-sends every subscriber's state over Kafka
 # ---------------------------------------------------------------------------
 
 _P11_HEALTH_UID=""
+
+# ---------------------------------------------------------------------------
+# Data judgement for Step 45. Every parsing and comparison rule lives here so
+# the offline validation layer can check it against fixtures.
+# ---------------------------------------------------------------------------
+
+# e2e_republish_event_count REPLY_JSON — how many events the node says it
+# produced. Prints nothing when the reply carries no count, so an error reply
+# can never be read as "zero events, all good".
+e2e_republish_event_count() {
+    local _count
+
+    _count=$(printf '%s' "${1:-}" | \
+        jq -r 'if type == "object" and has("event_count") then .event_count else empty end' \
+        2>/dev/null || true)
+    [[ "$_count" =~ ^[0-9]+$ ]] || return 1
+    printf '%s' "$_count"
+}
+
+# e2e_pppoe_expected_phase NODE_STATUS — the controller phase string that a node
+# HSI status maps to. Prints nothing for a status with no defined mapping, so
+# the caller fails instead of guessing.
+e2e_pppoe_expected_phase() {
+    case "${1:-}" in
+        "Data phase")
+            printf 'connected'
+            ;;
+        "PPPoE phase"|"LCP phase"|"Auth phase"|"IPCP phase")
+            printf 'connecting'
+            ;;
+        "End phase"|"not configured")
+            printf 'disconnected'
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+# e2e_pppoe_row_fresh ROW_JSON BASELINE EXPECTED_PHASE — verdict on one
+# controller pppoe_status row after a republish request:
+#   ok      rewritten after BASELINE and carrying EXPECTED_PHASE
+#   stale   not rewritten, so no event reached the controller
+#   phase   rewritten, but not with the phase the node is in
+#   err     no row, an unreadable field, or no phase to compare against
+# BASELINE is the row's updated_at from before the request, or "-" when there
+# was no row then.
+e2e_pppoe_row_fresh() {
+    local _row="${1:-}" _baseline="${2:-}" _want="${3:-}"
+    local _updated _phase _updated_ns _baseline_ns
+
+    _updated=$(printf '%s' "$_row" | \
+        jq -r 'if type == "object" and has("updated_at") then .updated_at else empty end' \
+        2>/dev/null || true)
+    _phase=$(printf '%s' "$_row" | \
+        jq -r 'if type == "object" and has("phase") then .phase else empty end' \
+        2>/dev/null || true)
+    if [[ -z "$_updated" || -z "$_phase" || -z "$_want" ]]; then
+        printf 'err'
+        return 1
+    fi
+
+    _updated_ns=$(date -u -d "$_updated" +%s%N 2>/dev/null || true)
+    if [[ ! "$_updated_ns" =~ ^[0-9]+$ ]]; then
+        printf 'err'
+        return 1
+    fi
+    if [[ "$_baseline" != "-" ]]; then
+        _baseline_ns=$(date -u -d "$_baseline" +%s%N 2>/dev/null || true)
+        if [[ ! "$_baseline_ns" =~ ^[0-9]+$ ]]; then
+            printf 'err'
+            return 1
+        fi
+        if [[ "$_updated_ns" -le "$_baseline_ns" ]]; then
+            printf 'stale'
+            return 1
+        fi
+    fi
+    if [[ "$_phase" != "$_want" ]]; then
+        printf 'phase'
+        return 1
+    fi
+    printf 'ok'
+}
+
+local_validation_register republish_event_count e2e_republish_event_count \
+    republish_event_count_good republish_event_count_legitimate_zero \
+    republish_event_count_field_missing republish_event_count_error_reply \
+    republish_event_count_empty_input
+local_validation_register pppoe_expected_phase e2e_pppoe_expected_phase \
+    pppoe_expected_phase_connected pppoe_expected_phase_connecting \
+    pppoe_expected_phase_disconnected pppoe_expected_phase_unknown_status \
+    pppoe_expected_phase_empty_input
+local_validation_register pppoe_row_fresh e2e_pppoe_row_fresh \
+    pppoe_row_fresh_good pppoe_row_fresh_first_row pppoe_row_fresh_stale \
+    pppoe_row_fresh_wrong_phase pppoe_row_fresh_no_row \
+    pppoe_row_fresh_unmapped_node_phase pppoe_row_fresh_empty_input
+
+# The node's answer to a republish request, and one subscriber's recorded row.
+# Both are separate functions so a drill can hand Step 45 a wrong answer without
+# touching the gRPC helper every other step uses.
+_p11_republish_reply() {
+    fastrg_grpc republish_pppoe_status
+}
+
+_p11_ctrl_pppoe_row() {
+    fastrg_grpc ctrl_pppoe_status "$1"
+}
+
+# Drill: answer the republish request without ever asking the node, so no event
+# is produced. Step 45 has to notice both the wrong count and the rows that
+# never refresh.
+_p11_inject_republish_not_produced() {
+    sabotage_override_function _p11_republish_reply \
+        'printf "%s" "{\"event_count\": 0}"'
+}
+
+_p11_cleanup_republish_not_produced() {
+    restore_phase_functions phase11_kafka_pipeline.sh
+}
+
+case_validation_register republish_not_produced phase11_kafka_pipeline \
+    _p11_inject_republish_not_produced _p11_cleanup_republish_not_produced \
+    'Step 45:'
 
 # Fetch the controller's Kafka-fed config-apply event records. The controller
 # exposes no consumer-specific health/metrics signal; /api/failed-events is the
@@ -107,7 +232,7 @@ _cleanup_phase11_kafka_pipeline() {
 
 phase11_kafka_pipeline() {
     bold "═══════════════════════════════════════════════════════"
-    bold " Phase 11 — Kafka telemetry pipeline (Steps 41-44)"
+    bold " Phase 11 — Kafka telemetry pipeline (Steps 41-45)"
     bold "═══════════════════════════════════════════════════════"
 
     # ------------------------------------------------------------------
@@ -252,5 +377,75 @@ phase11_kafka_pipeline() {
     else
         fail "Step 44: PPPoE transition via Kafka" \
             "controller DB status did not reflect a session within 60s (last='${_p12_status:-<empty>}'; remote PPPoE server may be slow)"
+    fi
+
+    # ------------------------------------------------------------------
+    # Step 45 — one republish request puts every subscriber's current
+    # state back on the Kafka topic. A subscriber that has had no
+    # transition of its own only gets a fresh controller row if the
+    # republish really produced an event for it, which is what makes the
+    # per-subscriber freshness check the proof here.
+    # ------------------------------------------------------------------
+    local _p11_users _p11_reply _p11_events _p11_uid _p11_row _p11_baseline
+    local _p11_baselines="" _p11_verdict _p11_detail="" _p11_fresh_ok=0
+    local _p11_hsi _p11_status _p11_want
+
+    info "Step 45: asking the node to republish every subscriber's PPPoE state..."
+    _p11_users=$(fastrg_grpc get_system_info 2>/dev/null | \
+        jq -r '.num_users // empty' 2>/dev/null || true)
+    if [[ ! "$_p11_users" =~ ^[0-9]+$ || "$_p11_users" -lt 1 ]]; then
+        fail "Step 45: PPPoE status republish" \
+            "node reported no subscriber count (num_users='${_p11_users:-<empty>}'), so there is nothing to republish"
+        return 0
+    fi
+
+    # Snapshot every row before the request. A subscriber with no row yet is
+    # recorded as "-", so simply having one afterwards counts as fresh.
+    for _p11_uid in $(seq 1 "$_p11_users"); do
+        _p11_baseline=$(_p11_ctrl_pppoe_row "$_p11_uid" | \
+            jq -r 'if type == "object" and has("updated_at") then .updated_at else empty end' \
+            2>/dev/null || true)
+        [[ -z "$_p11_baseline" ]] && _p11_baseline="-"
+        _p11_baselines="${_p11_baselines}${_p11_uid}=${_p11_baseline} "
+    done
+
+    _p11_reply=$(_p11_republish_reply)
+    _p11_events=$(e2e_republish_event_count "$_p11_reply" || true)
+    if [[ "$_p11_events" != "$_p11_users" ]]; then
+        fail "Step 45: PPPoE status republish" \
+            "node reported event_count='${_p11_events:-<none>}' for ${_p11_users} subscriber(s); reply=$(printf '%s' "$_p11_reply" | tr -d '\n')"
+        return 0
+    fi
+
+    # The node is re-read every round, so a session that settles during the
+    # wait is compared against the phase it ends up in, not the one it left.
+    for _i in $(seq 1 12); do
+        _p11_detail=""
+        _p11_fresh_ok=1
+        _p11_hsi=$(fastrg_grpc get_hsi_info 2>/dev/null || true)
+        for _p11_uid in $(seq 1 "$_p11_users"); do
+            _p11_status=$(printf '%s' "$_p11_hsi" | \
+                jq -r --argjson uid "$_p11_uid" \
+                    '.hsi_infos[]? | select(.user_id == $uid) | .status' \
+                2>/dev/null | head -1 || true)
+            _p11_want=$(e2e_pppoe_expected_phase "$_p11_status" || true)
+            _p11_baseline=$(printf '%s' "$_p11_baselines" | tr ' ' '\n' | \
+                sed -n "s/^${_p11_uid}=//p" | head -1 || true)
+            _p11_row=$(_p11_ctrl_pppoe_row "$_p11_uid")
+            _p11_verdict=$(e2e_pppoe_row_fresh "$_p11_row" "${_p11_baseline:--}" "$_p11_want" || true)
+            [[ "$_p11_verdict" != "ok" ]] && _p11_fresh_ok=0
+            _p11_detail="${_p11_detail}user${_p11_uid}:${_p11_verdict}(node='${_p11_status:-<none>}') "
+        done
+        [[ $_p11_fresh_ok -eq 1 ]] && break
+        info "  waiting for republished rows... (${_i}x5s, ${_p11_detail})"
+        sleep 5
+    done
+
+    if [[ $_p11_fresh_ok -eq 1 ]]; then
+        pass "Step 45: PPPoE status republish" \
+            "node produced ${_p11_events} event(s); every controller row was rewritten with the node's current phase (${_p11_detail})"
+    else
+        fail "Step 45: PPPoE status republish" \
+            "node produced ${_p11_events} event(s) but the controller rows did not all refresh within 60s (${_p11_detail})"
     fi
 }
