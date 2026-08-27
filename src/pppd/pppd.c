@@ -192,6 +192,22 @@ STATUS ppp_report_connection_status(ppp_ccb_t *ppp_ccb)
     return ppp_send_state_report(ppp_ccb, &report);
 }
 
+U32 ppp_report_all_connection_status(FastRG_t *fastrg_ccb)
+{
+    U32 event_count = 0;
+
+    if (fastrg_ccb == NULL)
+        return 0;
+
+    for(int i=0; i<fastrg_ccb->user_count; i++) {
+        ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, i);
+        if (ppp_report_connection_status(ppp_ccb) == SUCCESS)
+            event_count++;
+    }
+
+    return event_count;
+}
+
 void PPP_bye_timer_cb(__attribute__((unused)) struct rte_timer *tim,
     ppp_ccb_t *ppp_ccb)
 {

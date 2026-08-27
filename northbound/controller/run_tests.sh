@@ -294,6 +294,23 @@ else
     TEST_FAILED=1
 fi
 
+# Test 6: Kafka producer pure functions — WAL serialization and event payload
+# builders (no broker, no WAL file, no etcd needed)
+echo ""
+echo "🔧 Test 6: Kafka producer unit tests"
+if [ -f "./test/test_kafka_producer_units" ]; then
+    ./test/test_kafka_producer_units
+    if [ $? -ne 0 ]; then
+        echo "❌ Kafka producer unit tests failed."
+        TEST_FAILED=1
+    else
+        echo "✅ Kafka producer unit tests completed!"
+    fi
+else
+    echo "❌ test_kafka_producer_units executable not found."
+    TEST_FAILED=1
+fi
+
 echo ""
 echo "✅ All tests completed!"
 exit "$TEST_FAILED"

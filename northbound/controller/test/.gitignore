@@ -1,3 +1,4 @@
 test_controller
 test_controller_server
 test_etcd_client
+test_kafka_producer_units

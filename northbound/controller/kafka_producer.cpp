@@ -1,4 +1,5 @@
 #include "kafka_producer.h"
+#include "kafka_producer_wal.h"
 #include "kafka_retry_policy.h"
 #include "etcd_client.h"
 #include "config_snapshot.h"
@@ -15,6 +16,7 @@
 #include <ctime>
 #include <fstream>
 #include <future>
+#include <map>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -44,40 +46,6 @@ bool KafkaRetryPolicy::is_due(std::int64_t now_sec, std::int64_t last_sec,
 
 namespace {
 
-rd_kafka_t       *g_rk = nullptr;
-std::string       g_node_uuid;
-std::atomic<bool> g_ready{false};
-std::atomic<unsigned long> g_dropped{0};   // messages dropped (WAL bound exceeded)
-
-constexpr const char *KAFKA_TOPIC     = "fastrg.node.events";
-// Durable write-ahead log of events not yet confirmed delivered. Survives node
-// restarts; replayed on startup so telemetry is not lost across a crash (slice 15).
-constexpr const char *KAFKA_QUEUE_PATH = "/etc/fastrg/kafka_queue.json";
-// Bound the WAL so a long broker outage cannot grow it without limit.
-constexpr size_t      MAX_WAL_EVENTS   = 100000;
-
-struct PendingEvent {
-    int64_t     seq;       // local monotonic id, used as the per-message opaque
-    std::string payload;   // serialized NodeEvent protobuf bytes
-    // Set when an attempt to hand this event to the broker failed. In memory
-    // only: a restart replays the whole WAL anyway, so persisting it would add
-    // a field to the file format for no gain.
-    bool        delivery_failed = false;
-};
-
-std::mutex                 g_wal_mutex;   // guards g_pending + the WAL file
-std::vector<PendingEvent>  g_pending;     // events appended but not yet confirmed
-std::atomic<int64_t>       g_seq{0};      // last assigned seq
-
-// How often the background poller re-produces events the broker never took.
-// Long enough that a broker outage does not turn into a produce loop.
-constexpr int64_t          RETRY_INTERVAL_SEC = 30;
-
-std::thread                g_poll_thread; // serves delivery reports while idle
-std::atomic<bool>          g_poll_run{false};
-
-int64_t now_unix() { return (int64_t)std::time(nullptr); }
-
 std::string to_hex(const std::string &in) {
     static const char *h = "0123456789abcdef";
     std::string out;
@@ -104,10 +72,12 @@ bool from_hex(const std::string &in, std::string &out) {
     return true;
 }
 
-// Persist the whole pending set atomically (tmp + rename). Caller holds g_wal_mutex.
-void persist_wal_locked() {
+}  // namespace
+
+std::string kafka_wal_serialize(const std::vector<KafkaWalEvent> &events) {
     Json::Value arr(Json::arrayValue);
-    for (const auto &e : g_pending) {
+    for (const auto &e : events) {
+        if (!e.persistent) continue;
         Json::Value j;
         j["seq"]     = (Json::Int64)e.seq;
         j["payload"] = to_hex(e.payload);
@@ -115,7 +85,144 @@ void persist_wal_locked() {
     }
     Json::StreamWriterBuilder w;
     w["indentation"] = "";
-    std::string data = Json::writeString(w, arr);
+    return Json::writeString(w, arr);
+}
+
+bool kafka_wal_parse(const std::string &data, std::vector<KafkaWalEvent> &out) {
+    out.clear();
+    if (data.empty()) return true;   // no file, or an empty one: an empty WAL
+
+    Json::Value arr;
+    Json::Reader reader;
+    if (!reader.parse(data, arr) || !arr.isArray()) return false;
+
+    for (const auto &j : arr) {
+        if (!j.isMember("seq") || !j.isMember("payload")) continue;
+        // A corrupt file can hold anything; only entries shaped like the
+        // format are recovered, the rest are dropped rather than thrown on.
+        if (!j["seq"].isIntegral() || !j["payload"].isString()) continue;
+        KafkaWalEvent e;
+        e.seq = j["seq"].asInt64();
+        if (!from_hex(j["payload"].asString(), e.payload)) continue;
+        e.persistent = true;   // it came out of the file, so it belongs there
+        out.push_back(std::move(e));
+    }
+    return true;
+}
+
+void kafka_build_hsi_config_apply_result(ev::ConfigApplyResult *out,
+    const char *action, BOOL success, const char *err_code, const char *err_msg,
+    const char *applied_resource_version, BOOL republished,
+    int64_t applied_mod_revision) {
+    if (out == nullptr)
+        return;
+
+    out->Clear();
+    if (action != NULL) out->set_action(action);
+    out->set_success(success == TRUE);
+    if (err_code != NULL) out->set_error_code(err_code);
+    if (err_msg != NULL)  out->set_error_message(err_msg);
+    if (applied_resource_version != NULL)
+        out->set_applied_resource_version(applied_resource_version);
+    out->set_republished(republished == TRUE);
+    /* Set on failures too: a failure then names the exact version that failed 
+    to apply. */
+    out->set_applied_mod_revision(applied_mod_revision);
+}
+
+namespace {
+
+rd_kafka_t       *g_rk = nullptr;
+std::string       g_node_uuid;
+std::atomic<bool> g_ready{false};
+std::atomic<unsigned long> g_dropped{0};   // messages dropped (WAL bound exceeded)
+
+constexpr const char *KAFKA_TOPIC     = "fastrg.node.events";
+// Durable write-ahead log of events not yet confirmed delivered. Survives node
+// restarts; replayed on startup so telemetry is not lost across a crash.
+constexpr const char *KAFKA_QUEUE_PATH = "/etc/fastrg/kafka_queue.json";
+// Bound the WAL so a long broker outage cannot grow it without limit.
+constexpr size_t      MAX_WAL_EVENTS   = 100000;
+
+std::mutex                 g_wal_mutex;   // guards g_pending
+std::vector<KafkaWalEvent> g_pending;     // events appended but not yet confirmed
+std::atomic<int64_t>       g_seq{0};      // last assigned seq
+
+// WAL files written since start, reported on every write. Only runtime errors
+// reach the disk, so a burst of state events must leave this untouched.
+std::atomic<unsigned long> g_wal_writes{0};
+// Guards the WAL file and its temp path. Deliberately separate from
+// g_wal_mutex: the disk write must not hold the lock that producers and
+// delivery reports contend on. Lock order is always this one first, then
+// g_wal_mutex for the snapshot; nothing takes them the other way round.
+std::mutex                 g_wal_file_mutex;
+
+// How often the background poller re-produces events the broker never took.
+// Long enough that a broker outage does not turn into a produce loop.
+constexpr int64_t          RETRY_INTERVAL_SEC = 30;
+
+std::thread                g_poll_thread; // serves delivery reports while idle
+std::atomic<bool>          g_poll_run{false};
+
+// Which snapshot entry an offline-edit event speaks for. The entry stays dirty
+// until the broker confirms the event, so a report lost on the way is sent
+// again after a reconnect or a restart instead of disappearing.
+struct OfflineEditAck {
+    snapshot_kind_t kind;
+    std::string     user_id;
+    uint64_t        edit_seq;   // guards against clearing a newer edit
+};
+
+std::mutex                             g_offline_ack_mutex;
+std::map<int64_t, OfflineEditAck>      g_offline_acks;   // event seq -> entry
+
+// Remember that this event, once delivered, clears that snapshot entry.
+void register_offline_ack(int64_t seq, snapshot_kind_t kind, const char *user_id,
+                          uint64_t edit_seq) {
+    if (seq <= 0 || user_id == nullptr) return;
+    std::lock_guard<std::mutex> lk(g_offline_ack_mutex);
+    g_offline_acks[seq] = OfflineEditAck{kind, std::string(user_id), edit_seq};
+}
+
+// Hand back the binding for a delivered event, if it had one. Called with no
+// lock held: clearing the entry writes the snapshot file.
+bool take_offline_ack(int64_t seq, OfflineEditAck &out) {
+    std::lock_guard<std::mutex> lk(g_offline_ack_mutex);
+    auto it = g_offline_acks.find(seq);
+    if (it == g_offline_acks.end()) return false;
+    out = it->second;
+    g_offline_acks.erase(it);
+    return true;
+}
+
+// Drop a binding whose event will never be delivered (the WAL bound evicted
+// it), so the map cannot outgrow the buffer it tracks. The entry stays dirty
+// and is reported again on the next tick.
+void forget_offline_ack(int64_t seq) {
+    std::lock_guard<std::mutex> lk(g_offline_ack_mutex);
+    g_offline_acks.erase(seq);
+}
+
+int64_t now_unix() { return (int64_t)std::time(nullptr); }
+
+// Write the durable subset out atomically (tmp + rename). Called whenever that
+// subset changes -- a runtime error produced, or one of them confirmed
+// delivered -- so the file is never behind by more than the call in progress.
+//
+// The JSON is built under g_wal_mutex and the file written outside it, so
+// producers and delivery reports never wait on disk I/O. g_wal_file_mutex is
+// held across both, which keeps two writers from interleaving and leaving the
+// older snapshot on disk. The caller must not already hold g_wal_mutex.
+void persist_wal() {
+    std::lock_guard<std::mutex> flk(g_wal_file_mutex);
+
+    std::string data;
+    size_t      count = 0;
+    std::unique_lock<std::mutex> lk(g_wal_mutex);
+    data = kafka_wal_serialize(g_pending);
+    for (const auto &e : g_pending)
+        if (e.persistent) count++;
+    lk.unlock();   /* release before the disk write */
 
     std::string tmp = std::string(KAFKA_QUEUE_PATH) + ".tmp";
     std::ofstream ofs(tmp, std::ios::trunc | std::ios::binary);
@@ -126,36 +233,34 @@ void persist_wal_locked() {
     ofs << data;
     ofs.flush();
     ofs.close();
-    if (std::rename(tmp.c_str(), KAFKA_QUEUE_PATH) != 0)
+    if (std::rename(tmp.c_str(), KAFKA_QUEUE_PATH) != 0) {
         std::fprintf(stderr, "[kafka] failed to rename WAL to %s\n", KAFKA_QUEUE_PATH);
+        return;
+    }
+    std::fprintf(stderr, "[kafka] WAL written (%zu event(s), %lu write(s) since start)\n",
+        count, ++g_wal_writes);
 }
 
 // Load the WAL into g_pending and restore the seq counter. Called once at init.
 void load_wal() {
-    std::lock_guard<std::mutex> lk(g_wal_mutex);
-    g_pending.clear();
+    std::string data;
     std::ifstream ifs(KAFKA_QUEUE_PATH, std::ios::binary);
-    if (!ifs) return;                         // no file = empty
-    std::stringstream buf;
-    buf << ifs.rdbuf();
-    std::string data = buf.str();
-    if (data.empty()) return;
+    if (ifs) {                                // no file = empty WAL
+        std::stringstream buf;
+        buf << ifs.rdbuf();
+        data = buf.str();
+    }
 
-    Json::Value arr;
-    Json::Reader reader;
-    if (!reader.parse(data, arr) || !arr.isArray()) {
+    std::vector<KafkaWalEvent> events;
+    if (!kafka_wal_parse(data, events))
         std::fprintf(stderr, "[kafka] corrupt WAL %s, ignoring\n", KAFKA_QUEUE_PATH);
-        return;
-    }
+
     int64_t maxseq = 0;
-    for (const auto &j : arr) {
-        if (!j.isMember("seq") || !j.isMember("payload")) continue;
-        PendingEvent e;
-        e.seq = j["seq"].asInt64();
-        if (!from_hex(j["payload"].asString(), e.payload)) continue;
+    for (const auto &e : events)
         if (e.seq > maxseq) maxseq = e.seq;
-        g_pending.push_back(std::move(e));
-    }
+
+    std::lock_guard<std::mutex> lk(g_wal_mutex);
+    g_pending = std::move(events);
     g_seq.store(maxseq);
 }
 
@@ -169,11 +274,25 @@ void mark_delivery_failed(int64_t seq) {
     }
 }
 
+// Drop a confirmed event and report whether it was durable. The lock stays
+// entirely inside this call.
+bool take_delivered(int64_t seq) {
+    std::lock_guard<std::mutex> lk(g_wal_mutex);
+    for (auto it = g_pending.begin(); it != g_pending.end(); ++it) {
+        if (it->seq == seq) {
+            bool was_durable = it->persistent;
+            g_pending.erase(it);
+            return was_durable;
+        }
+    }
+    return false;
+}
+
 // Re-produce every buffered event after (re)start. Called once at init, after the
 // producer is ready. Does not re-persist (entries are already in the WAL); a
 // delivery report removes each one as it is confirmed.
 void replay_pending() {
-    std::vector<PendingEvent> snap;
+    std::vector<KafkaWalEvent> snap;
     {
         std::lock_guard<std::mutex> lk(g_wal_mutex);
         snap = g_pending;
@@ -201,9 +320,10 @@ void replay_pending() {
     rd_kafka_poll(g_rk, 0);
 }
 
-// Delivery-report callback (runs on rd_kafka_poll / flush). On success, drop the
-// confirmed event from the WAL; on failure keep it and arm its retry flag, so
-// the background poller produces it again without waiting for a restart.
+// Delivery-report callback (runs on rd_kafka_poll / flush). On success, drop
+// the confirmed event from the pending set; on failure keep it and arm its
+// retry flag, so the background poller produces it again without waiting for a
+// restart.
 void dr_msg_cb(rd_kafka_t *, const rd_kafka_message_t *rkmessage, void *) {
     int64_t seq = (int64_t)(intptr_t)rkmessage->_private;
     if (rkmessage->err) {
@@ -213,41 +333,62 @@ void dr_msg_cb(rd_kafka_t *, const rd_kafka_message_t *rkmessage, void *) {
         return;   // the background poller retries it
     }
     if (seq <= 0) return;
-    std::lock_guard<std::mutex> lk(g_wal_mutex);
-    for (auto it = g_pending.begin(); it != g_pending.end(); ++it) {
-        if (it->seq == seq) {
-            g_pending.erase(it);
-            persist_wal_locked();
-            break;
-        }
-    }
+
+    bool was_durable = take_delivered(seq);
+
+    if (was_durable)
+        persist_wal();
+
+    OfflineEditAck ack;
+    if (take_offline_ack(seq, ack))
+        config_snapshot_clear_dirty(ack.kind, ack.user_id.c_str(), ack.edit_seq);
 }
 
-// Serialize a NodeEvent, append it to the durable WAL, then produce it. Never
-// blocks the data/control plane. Undelivered events persist across restarts.
-void produce_event(const ev::NodeEvent &evt) {
+// Serialize a NodeEvent, buffer it, then produce it. Never blocks the
+// data/control plane. A runtime error also goes to disk before this returns,
+// because nothing can reconstruct it afterwards; every other type is buffered
+// in memory only and is recoverable by asking the node to republish. Returns
+// the event's seq, or 0 when nothing was produced.
+int64_t produce_event(const ev::NodeEvent &evt) {
     if (!g_ready.load() || g_rk == nullptr)
-        return;
+        return 0;
 
     std::string payload;
     if (!evt.SerializeToString(&payload)) {
         std::fprintf(stderr, "[kafka] failed to serialize NodeEvent\n");
-        return;
+        return 0;
     }
 
+    bool durable = (evt.payload_case() == ev::NodeEvent::kRuntimeError);
+
     int64_t seq = ++g_seq;
+    int64_t evicted = 0;
+    bool    evicted_durable = false;
     {
         std::lock_guard<std::mutex> lk(g_wal_mutex);
-        g_pending.push_back({seq, payload});
-        // Bound the WAL: drop the oldest if we exceed the cap (telemetry tolerates loss).
+        KafkaWalEvent e;
+        e.seq        = seq;
+        e.payload    = payload;
+        e.persistent = durable;
+        g_pending.push_back(std::move(e));
+        // Bound the buffer: drop the oldest if we exceed the cap (telemetry tolerates loss).
         if (g_pending.size() > MAX_WAL_EVENTS) {
+            evicted         = g_pending.front().seq;
+            evicted_durable = g_pending.front().persistent;
             g_pending.erase(g_pending.begin());
             unsigned long n = ++g_dropped;
             if ((n & (n - 1)) == 0)
                 std::fprintf(stderr, "[kafka] WAL full, dropped oldest; total dropped=%lu\n", n);
         }
-        persist_wal_locked();
     }
+    // An evicted event will never be confirmed, so its offline-edit binding
+    // would sit in the map forever. Dropping it leaves the entry dirty, which
+    // is what makes the next report tick pick the edit up again.
+    if (evicted != 0)
+        forget_offline_ack(evicted);
+
+    if (durable || evicted_durable)
+        persist_wal();
 
     rd_kafka_resp_err_t err = rd_kafka_producev(
         g_rk,
@@ -268,6 +409,7 @@ void produce_event(const ev::NodeEvent &evt) {
 
     // Serve delivery reports without blocking.
     rd_kafka_poll(g_rk, 0);
+    return seq;
 }
 
 // Hand the failed events back to the broker. The flag is cleared before the
@@ -275,7 +417,7 @@ void produce_event(const ev::NodeEvent &evt) {
 // report when the broker refuses it, or the enqueue below when it never gets
 // that far -- so the event stays in the WAL until it is confirmed.
 void retry_failed_deliveries() {
-    std::vector<PendingEvent> batch;
+    std::vector<KafkaWalEvent> batch;
     {
         std::lock_guard<std::mutex> lk(g_wal_mutex);
         std::vector<unsigned char> flags(g_pending.size());
@@ -316,9 +458,9 @@ void retry_failed_deliveries() {
 }
 
 // Background poller: serve delivery reports continuously so that confirmations
-// (and WAL pruning) happen even when no new events are being produced, and
-// retry what the broker never took so an outage does not strand events until
-// the next restart.
+// (and the WAL pruning and dirty-flag clearing they carry) happen even when no
+// new events are being produced, and retry what the broker never took so an
+// outage does not strand events until the next restart.
 void poll_loop() {
     int64_t last_retry = now_unix();
     while (g_poll_run.load()) {
@@ -469,37 +611,34 @@ void kafka_report_pppoe_state(const char *user_id, kafka_pppoe_phase_t phase,
     produce_event(evt);
 }
 
-void kafka_report_config_apply(const char *user_id, const char *action,
+void kafka_report_hsi_config_apply(const char *user_id, const char *action,
     BOOL success, const char *err_code, const char *err_msg,
-    const char *applied_resource_version) {
+    const char *applied_resource_version, BOOL republished,
+    int64_t applied_mod_revision) {
     if (!g_ready.load())
         return;
 
     ev::NodeEvent evt;
     fill_envelope(&evt, user_id,
         success == TRUE ? ev::EVENT_TYPE_CONFIG_APPLY_OK : ev::EVENT_TYPE_CONFIG_APPLY_FAIL);
-    ev::ConfigApplyResult *c = evt.mutable_config_apply_result();
-    if (action != NULL) c->set_action(action);
-    c->set_success(success == TRUE);
-    if (err_code != NULL) c->set_error_code(err_code);
-    if (err_msg != NULL)  c->set_error_message(err_msg);
-    if (applied_resource_version != NULL)
-        c->set_applied_resource_version(applied_resource_version);
+    kafka_build_hsi_config_apply_result(evt.mutable_config_apply_result(), action, 
+        success, err_code, err_msg, applied_resource_version, republished,
+        applied_mod_revision);
     produce_event(evt);
 }
 
-void kafka_report_config_offline_edit(kafka_offline_edit_kind_t kind,
+int64_t kafka_report_config_offline_edit(kafka_offline_edit_kind_t kind,
     const char *user_id, const char *config_json, const char *resource_version,
     int64_t edited_at, const char *edit_summary) {
     if (!g_ready.load() || !config_json)
-        return;
+        return 0;
 
     ev::OfflineEditKind pkind;
     switch (kind) {
         case KAFKA_OFFLINE_EDIT_HSI:   pkind = ev::OFFLINE_EDIT_KIND_HSI_CONFIG; break;
         case KAFKA_OFFLINE_EDIT_DNS:   pkind = ev::OFFLINE_EDIT_KIND_DNS_RECORDS; break;
         case KAFKA_OFFLINE_EDIT_COUNT: pkind = ev::OFFLINE_EDIT_KIND_SUBSCRIBER_COUNT; break;
-        default: return;
+        default: return 0;
     }
 
     ev::NodeEvent evt;
@@ -510,21 +649,21 @@ void kafka_report_config_offline_edit(kafka_offline_edit_kind_t kind,
     o->set_edited_at(edited_at);
     if (edit_summary) o->set_edit_summary(edit_summary);
     o->set_kind(pkind);
-    produce_event(evt);
+    return produce_event(evt);
 }
 
-void kafka_report_config_offline_delete(kafka_offline_edit_kind_t kind,
+int64_t kafka_report_config_offline_delete(kafka_offline_edit_kind_t kind,
     const char *user_id, const char *resource_version, int64_t edited_at,
     const char *edit_summary) {
     if (!g_ready.load())
-        return;
+        return 0;
 
     ev::OfflineEditKind pkind;
     switch (kind) {
         case KAFKA_OFFLINE_EDIT_HSI:   pkind = ev::OFFLINE_EDIT_KIND_HSI_CONFIG; break;
         case KAFKA_OFFLINE_EDIT_DNS:   pkind = ev::OFFLINE_EDIT_KIND_DNS_RECORDS; break;
         case KAFKA_OFFLINE_EDIT_COUNT: pkind = ev::OFFLINE_EDIT_KIND_SUBSCRIBER_COUNT; break;
-        default: return;
+        default: return 0;
     }
 
     ev::NodeEvent evt;
@@ -536,7 +675,7 @@ void kafka_report_config_offline_delete(kafka_offline_edit_kind_t kind,
     o->set_edited_at(edited_at);
     if (edit_summary) o->set_edit_summary(edit_summary);
     o->set_kind(pkind);
-    produce_event(evt);
+    return produce_event(evt);
 }
 
 namespace {
@@ -591,9 +730,10 @@ void offline_report_cb(snapshot_kind_t kind, const char *user_id,
             free(current);
             return;
         }
-        kafka_report_config_offline_delete(kkind, user_id,
-            resource_version, edited_at, edit_summary);
-        config_snapshot_clear_dirty(kind, user_id, edit_seq);
+        // The entry stays dirty until the broker confirms the tombstone; the
+        // delivery report is what clears it.
+        register_offline_ack(kafka_report_config_offline_delete(kkind, user_id,
+            resource_version, edited_at, edit_summary), kind, user_id, edit_seq);
         std::fprintf(stderr, "[kafka] offline delete reported for %s (last rv=%s)\n",
             key.c_str(), resource_version ? resource_version : "");
         free(current);
@@ -610,10 +750,11 @@ void offline_report_cb(snapshot_kind_t kind, const char *user_id,
     }
 
     // Key absent in etcd is still reported; the controller's arbitration
-    // discards edits whose key was deleted.
-    kafka_report_config_offline_edit(kkind, user_id, value_json,
-        resource_version, edited_at, edit_summary);
-    config_snapshot_clear_dirty(kind, user_id, edit_seq);
+    // discards edits whose key was deleted. The entry stays dirty until the
+    // broker confirms the event, so a report lost in flight is sent again
+    // rather than vanishing with the process.
+    register_offline_ack(kafka_report_config_offline_edit(kkind, user_id, value_json,
+        resource_version, edited_at, edit_summary), kind, user_id, edit_seq);
     std::fprintf(stderr, "[kafka] offline edit reported for %s (rv=%s)\n",
         key.c_str(), resource_version ? resource_version : "");
     free(current);

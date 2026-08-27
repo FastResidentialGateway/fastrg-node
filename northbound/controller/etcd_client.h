@@ -9,6 +9,9 @@
 extern "C" {
 #endif
 
+/* Inside the extern "C" block: the header has no linkage guard of its own. */
+#include "../../src/etcd_event.h"
+
 typedef enum {
     ETCD_SUCCESS = 0,
     ETCD_ERROR = -1,
@@ -19,66 +22,20 @@ typedef enum {
     ETCD_CAS_CONFLICT = -6      // Compare-And-Swap exhausted retries (concurrent writer won)
 } etcd_status_t;
 
-typedef enum {
-    HSI_ACTION_CREATE = 1,
-    HSI_ACTION_UPDATE = 2,
-    HSI_ACTION_DELETE = 3
-} etcd_action_type_t;
-
-/* PPPoE desired connection state, stored in the HSI config object as
- * config.desire_status. Only the CLI/controller change it (connect/disconnect).
- * The node reconciles the live PPPoE session toward this value. */
-#define DESIRE_STATUS_CONNECT    "connect"
-#define DESIRE_STATUS_DISCONNECT "disconnect"
-
 #define ETCD_RETRY_BASE_TIME 1 // in second
-
-// SNAT port-mapping entry for etcd config
-typedef struct {
-    U16 eport;           // external port (host byte order)
-    char dip[32];        // destination LAN IP string
-    U16 dport;           // destination/internal port (host byte order)
-} port_mapping_t;
-
-// HSI config structure matching Go's HSIConfig
-typedef struct {
-    char user_id[64];
-    char vlan_id[16];
-    char account_name[256];
-    char password[256];
-    char dhcp_addr_pool[64];
-    char dhcp_subnet[32];
-    char dhcp_gateway[32];
-    BOOL dns_proxy_enable;      /* per-subscriber DNS proxy enable; defaults to TRUE when absent in etcd */
-    BOOL tcp_conntrack_enable;  /* per-subscriber TCP SPI enable; defaults to TRUE when absent in etcd */
-    BOOL ipv6_enable;           /* per-subscriber IPv6 enable; defaults to FALSE when absent in etcd */
-    char desire_status[16];     /* "connect"/"disconnect"; empty = disconnect. Only CLI/controller set it. */
-    port_mapping_t *port_mappings;  // heap-allocated; use hsi_config_free_port_mappings() to free
-    int port_mapping_count;
-} hsi_config_t;
-
-// Free heap-allocated port_mappings inside an hsi_config_t
-static inline void hsi_config_free_port_mappings(hsi_config_t *cfg) {
-    if (cfg && cfg->port_mappings) {
-        free(cfg->port_mappings);
-        cfg->port_mappings = NULL;
-        cfg->port_mapping_count = 0;
-    }
-}
-
-// User count config structure for dynamic scaling
-typedef struct {
-    int user_count;         // New user count to scale to
-} user_count_config_t;
 
 // Full HSI config structure including metadata.
 // PPPoE desired state lives in config.desire_status; observed/actual status is
 // reported to the controller via Kafka (no longer stored in etcd metadata).
+// resource_version is the controller-stamped version inside the JSON;
+// mod_revision is etcd's own ModRevision for the key this value was read from,
+// which is what the node quotes when it reports the config it applied.
 typedef struct {
     hsi_config_t config;
     char updated_by[64];
     char updated_at[32];
     char resource_version[64];
+    int64_t mod_revision;
 } hsi_config_full_t;
 
 // Callback function types
@@ -95,67 +52,11 @@ typedef STATUS (*user_count_changed_callback_t)(const char *node_id,
 // The callback should write local HSI configs and subscriber count to etcd if they don't exist
 typedef void (*sync_request_callback_t)(const char *node_id, void *user_data);
 
-// DNS static record structure for etcd
-typedef struct {
-    char domain[256];
-    char ip[32];
-    U32 ttl;
-} dns_record_config_t;
-
 // DNS record callback type
 // path: configs/{nodeId}/{subscriberId}/dns/{domain}
 typedef STATUS (*dns_record_callback_t)(const char *node_id, const char *user_id,
     const dns_record_config_t *record, etcd_action_type_t action,
     int64_t revision, void *user_data);
-
-/* ---- Asynchronous etcd event delivery -----------------------------------
- * etcd watcher threads parse + self-event-filter, then hand a heap-allocated
- * etcd_event_t to the control-plane loop (fastrg_loop) via the etcd_event_q
- * ring. fastrg_loop is the single thread that applies changes to CCBs, so the
- * apply path needs no locking.
- */
-typedef enum {
-    ETCD_EVENT_HSI = 1,        /* HSI config create/update/delete         */
-    ETCD_EVENT_USER_COUNT,     /* subscriber-count change                 */
-    ETCD_EVENT_DNS_RECORD,     /* DNS static record create/update/delete  */
-    ETCD_EVENT_HSI_SWEEP       /* reconcile: keep ccb_ids present in etcd       */
-} etcd_event_kind_t;
-
-typedef struct etcd_event {
-    etcd_event_kind_t  kind;
-    etcd_action_type_t action;          /* CREATE/UPDATE/DELETE; unused for sweep */
-    int64_t            revision;
-    BOOL               from_reconcile;  /* TRUE: periodic reconcile; FALSE: live watch event */
-    char               node_id[64];
-    char               user_id[64];
-    union {
-        struct {
-            hsi_config_t config;        /* config.port_mappings is heap-owned by this event */
-            BOOL         desire_connect;/* derived from config.desire_status == "connect" */
-            char         resource_version[24]; /* metadata.resourceVersion of the watched
-                                                * value; empty when absent/unparsable. Used
-                                                * for ConfigApplyResult.applied_resource_version. */
-        } hsi;
-        user_count_config_t user_count;
-        dns_record_config_t dns_record;
-        struct {
-            int *present_ccb_ids;       /* heap-owned: ccb_ids that exist in etcd */
-            int  count;
-        } sweep;
-    } event_data;
-} etcd_event_t;
-
-/* Free an etcd_event_t and any heap payload it owns. */
-static inline void etcd_event_free(etcd_event_t *ev) {
-    if (!ev)
-        return;
-    if (ev->kind == ETCD_EVENT_HSI) {
-        hsi_config_free_port_mappings(&ev->event_data.hsi.config);
-    } else if (ev->kind == ETCD_EVENT_HSI_SWEEP) {
-        free(ev->event_data.sweep.present_ccb_ids);
-    }
-    free(ev);
-}
 
 /* Initialize etcd client */
 etcd_status_t etcd_client_init(const char *etcd_endpoints, void* user_data);
@@ -267,7 +168,8 @@ etcd_status_t etcd_client_delete_hsi_config(const char *node_id,
  * @param user_id
  *        User identifier
  * @param output
- *        Output structure to receive the config and status
+ *        Output structure to receive the config, its metadata and the key's
+ *        etcd ModRevision
  * @return
  *        ETCD_SUCCESS or error code
  */

@@ -31,6 +31,7 @@ Commands:
     set_snat_config <user_id> <eport> <dip> <iport>         - SetSnatConfig → JSON
     remove_snat_config <user_id> <eport>                    - RemoveSnatConfig → JSON
     republish_pppoe_status                                  - RepublishPPPoEStatus → JSON
+    republish_config_status                                 - RepublishConfigStatus → JSON
 
 Requirements:
     - python3 (stdlib only)
@@ -421,6 +422,18 @@ def republish_pppoe_status(node_addr):
     return _grpcurl(node_addr, 'RepublishPPPoEStatus')
 
 
+def republish_config_status(node_addr):
+    """Ask the node to re-report every subscriber's config-apply state to Kafka.
+
+    A subscriber whose local state already matches etcd is confirmed as-is; one
+    that differs is re-applied first and the result of that apply is reported.
+    Returns the reply as-is (event_count is always present thanks to
+    -emit-defaults), so a missing field stays visible instead of turning into a
+    silent zero.
+    """
+    return _grpcurl(node_addr, 'RepublishConfigStatus')
+
+
 def pdump_start(node_addr, dir_val, subscriber, filter_expr='', size_mb=0):
     data = {'direction': int(dir_val), 'subscriber': int(subscriber)}
     if filter_expr:
@@ -598,6 +611,8 @@ def main():
             result = get_user_drop_count(opts.node, int(opts.args[0]), port_idx)
         elif opts.command == "republish_pppoe_status":
             result = republish_pppoe_status(opts.node)
+        elif opts.command == "republish_config_status":
+            result = republish_config_status(opts.node)
         elif opts.command == "pdump_start":
             # args: dir subscriber [filter_expr [size_mb]]
             if len(opts.args) < 2:

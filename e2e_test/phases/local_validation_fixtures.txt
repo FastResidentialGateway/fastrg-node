@@ -439,6 +439,36 @@ unknown status
 # expect-output: 50051
 ---
 {"node_uuid":"u1","grpc_port":"50051","status":"online"}
+==== fixture: config_republish_count_ok_good
+# args: 2
+# expect-output: ok
+# expect-status: 0
+---
+2
+==== fixture: config_republish_count_ok_short
+# args: 2
+# expect-output: short
+# expect-status: 1
+---
+1
+==== fixture: config_republish_count_ok_over
+# args: 2
+# expect-output: over
+# expect-status: 1
+---
+3
+==== fixture: config_republish_count_ok_not_a_number
+# args: 2
+# expect-output: err
+# expect-status: 1
+---
+x
+==== fixture: config_republish_count_ok_empty_input
+# args: 2
+# expect-output: err
+# expect-status: 1
+---
+
 ==== fixture: republish_event_count_empty_input
 # expect-output:
 # expect-status: 1
