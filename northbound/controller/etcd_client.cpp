@@ -575,14 +575,6 @@ public:
         reconnect_cv_.notify_all();
     }
 
-    // Allocate a zeroed etcd_event_t of the given kind.
-    static etcd_event_t *alloc_etcd_event(etcd_event_kind_t kind) {
-        etcd_event_t *ev = (etcd_event_t *)calloc(1, sizeof(etcd_event_t));
-        if (ev)
-            ev->kind = kind;
-        return ev;
-    }
-
     // Heap copy of a std::string (caller owns; NULL on OOM).
     static char *dup_string(const std::string& s) {
         char *p = (char *)malloc(s.size() + 1);
@@ -686,8 +678,10 @@ public:
                     if (ccb_id >= 0)
                         present_ccb_ids.push_back(ccb_id);
 
+                    /* Use value(i).modified_index() to ensure each subscriber's 
+                    revision is unique. */
                     ingest_hsi_value(node_id, user_id, &value, HSI_ACTION_UPDATE,
-                        hsi_response.index(), TRUE);
+                        hsi_response.value(i).modified_index(), TRUE);
                 }
             }
             FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
@@ -696,7 +690,7 @@ public:
             // Step 3b-sweep: hand the loop the set of ccb_ids present in etcd so
             // it can remove subscribers active locally but no longer in etcd.
             if (hsi_response.error_code() == 0) {
-                etcd_event_t *sweep = alloc_etcd_event(ETCD_EVENT_HSI_SWEEP);
+                etcd_event_t *sweep = fastrg_alloc_etcd_event(ETCD_EVENT_HSI_SWEEP);
                 if (sweep) {
                     sweep->from_reconcile = TRUE;
                     sweep->event_data.sweep.count = (int)present_ccb_ids.size();
@@ -741,7 +735,7 @@ public:
                                 dns_record_config_t rec;
                                 if (!parse_dns_record_from_json(entry, &rec))
                                     continue;
-                                etcd_event_t *ev = alloc_etcd_event(ETCD_EVENT_DNS_RECORD);
+                                etcd_event_t *ev = fastrg_alloc_etcd_event(ETCD_EVENT_DNS_RECORD);
                                 if (!ev)
                                     continue;
                                 ev->action = HSI_ACTION_CREATE;
@@ -989,6 +983,10 @@ public:
             }
 
             std::string value = get_response.value().as_string();
+
+            /* ModRevision lives in etcd's own per kv entry metadata, not part 
+            of the stored key-value */
+            output->mod_revision = get_response.value().modified_index();
 
             // Parse JSON
             Json::Value root;
@@ -1604,7 +1602,7 @@ private:
         BOOL from_reconcile) {
         config_snapshot_watch_update(SNAPSHOT_KIND_HSI, user_id.c_str(),
             value ? value->c_str() : NULL);
-        etcd_event_t *ev = alloc_etcd_event(ETCD_EVENT_HSI);
+        etcd_event_t *ev = fastrg_alloc_etcd_event(ETCD_EVENT_HSI);
         if (!ev)
             return ERROR;
         ev->action = action;
@@ -1641,7 +1639,7 @@ private:
         // placeholder user_id "0" (no subscriber dimension).
         config_snapshot_watch_update(SNAPSHOT_KIND_COUNT, "0",
             value ? value->c_str() : NULL);
-        etcd_event_t *ev = alloc_etcd_event(ETCD_EVENT_USER_COUNT);
+        etcd_event_t *ev = fastrg_alloc_etcd_event(ETCD_EVENT_USER_COUNT);
         if (!ev)
             return ERROR;
         ev->action = action;
@@ -1803,7 +1801,7 @@ private:
                         dns_record_config_t rec;
                         if (!parse_dns_record_from_json(entry, &rec))
                             continue;
-                        etcd_event_t *ev = alloc_etcd_event(ETCD_EVENT_DNS_RECORD);
+                        etcd_event_t *ev = fastrg_alloc_etcd_event(ETCD_EVENT_DNS_RECORD);
                         if (!ev)
                             continue;
                         ev->action = action;
@@ -1840,7 +1838,7 @@ private:
                     for (const Json::Value& entry : records) {
                         if (!entry.isMember("domain"))
                             continue;
-                        etcd_event_t *ev = alloc_etcd_event(ETCD_EVENT_DNS_RECORD);
+                        etcd_event_t *ev = fastrg_alloc_etcd_event(ETCD_EVENT_DNS_RECORD);
                         if (!ev)
                             continue;
                         ev->action = HSI_ACTION_DELETE;

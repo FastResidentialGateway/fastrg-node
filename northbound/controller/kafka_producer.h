@@ -2,16 +2,23 @@
 #define _KAFKA_PRODUCER_H_
 
 /*
- * Node -> controller telemetry over Kafka (point 5/6).
+ * Node -> controller telemetry over Kafka.
  *
  * Reports config-apply results, PPPoE state transitions and runtime errors to
  * topic "fastrg.node.events" (partition key = node_uuid).
  *
- * Non-blocking: produce never blocks the data/control plane. Events are written
- * to a durable on-disk WAL (/etc/fastrg/kafka_queue.json) before being produced
- * and removed once delivery is confirmed, so undelivered events survive a node
- * restart and are replayed on the next kafka_producer_init() (slice 15). Only a
- * full WAL (long outage) drops the oldest, counted (telemetry tolerates loss).
+ * Non-blocking: produce never blocks the data/control plane. Every event is
+ * buffered in memory until delivery is confirmed, and retried meanwhile.
+ *
+ * Only runtime errors are also written to disk (/etc/fastrg/kafka_queue.json),
+ * synchronously, before the reporting call returns. They are the one kind of
+ * event nothing can reconstruct once the process is gone. The other kinds are
+ * deliberately memory-only, because each has a way to be asked for again: PPPoE
+ * state and config-apply state through their republish RPCs, and an offline edit
+ * through its snapshot dirty flag, which is cleared only once Kafka confirms the
+ * report. So a crash costs no information, and a burst of state events costs no
+ * disk writes at all. Only a full buffer (long outage) drops the oldest,
+ * counted (telemetry tolerates loss).
  *
  * All kafka_report_* functions are no-ops until kafka_producer_init() succeeds,
  * so call sites can invoke them unconditionally.
@@ -92,7 +99,7 @@ void kafka_report_pppoe_state(const char *user_id, kafka_pppoe_phase_t phase,
     const char *hsi_ipv6_dns);
 
 /**
- * @fn kafka_report_config_apply
+ * @fn kafka_report_hsi_config_apply
  *
  * @brief report the result of applying an HSI config
  * @param user_id
@@ -108,12 +115,22 @@ void kafka_report_pppoe_state(const char *user_id, kafka_pppoe_phase_t phase,
  * @param applied_resource_version
  *      metadata.resourceVersion of the config this apply targeted (may be
  *      NULL/empty; the controller falls back to its transitional guard)
+ * @param republished
+ *      TRUE when the event only restates a config the node was already
+ *      running, in answer to a republish request; FALSE when the node just
+ *      made the change. The controller skips the audit record for the former
+ *      so a republish sweep cannot flood the audit trail
+ * @param applied_mod_revision
+ *      etcd ModRevision of the exact config value this apply targeted. 0 means 
+ *      unknown and controller needs to infer one from whatever etcd holds when 
+ *      the event arrives.
  * @return
  *      void
  */
-void kafka_report_config_apply(const char *user_id, const char *action,
+void kafka_report_hsi_config_apply(const char *user_id, const char *action,
     BOOL success, const char *err_code, const char *err_msg,
-    const char *applied_resource_version);
+    const char *applied_resource_version, BOOL republished,
+    int64_t applied_mod_revision);
 
 /* Kinds mirroring OfflineEditKind in kafka-events.proto. */
 typedef enum {
@@ -141,9 +158,10 @@ typedef enum {
  * @param edit_summary
  *      accumulated human-readable summary of the edits (may be empty)
  * @return
- *      void
+ *      the event's local sequence id, or 0 when nothing was produced; the
+ *      caller uses it to clear the snapshot entry once Kafka confirms delivery
  */
-void kafka_report_config_offline_edit(kafka_offline_edit_kind_t kind,
+int64_t kafka_report_config_offline_edit(kafka_offline_edit_kind_t kind,
     const char *user_id, const char *config_json, const char *resource_version,
     int64_t edited_at, const char *edit_summary);
 
@@ -163,9 +181,10 @@ void kafka_report_config_offline_edit(kafka_offline_edit_kind_t kind,
  * @param edit_summary
  *      accumulated human-readable summary of the edits (may be empty)
  * @return
- *      void
+ *      the event's local sequence id, or 0 when nothing was produced; the
+ *      caller uses it to clear the snapshot entry once Kafka confirms delivery
  */
-void kafka_report_config_offline_delete(kafka_offline_edit_kind_t kind,
+int64_t kafka_report_config_offline_delete(kafka_offline_edit_kind_t kind,
     const char *user_id, const char *resource_version, int64_t edited_at,
     const char *edit_summary);
 
@@ -179,9 +198,13 @@ void kafka_report_config_offline_delete(kafka_offline_edit_kind_t kind,
  *        mirror writes clear the dirty flag and would silently swallow a 
  *        pending proposal (report-before-mirror)
  * @return
- *      TRUE when every dirty entry was handled; FALSE when etcd is
+ *      TRUE when every dirty entry was reported; FALSE when etcd is
  *      unreachable or some entry is still pending (transient read failure)
- *      and will be retried on the next etcd watchdog tick
+ *      and will be retried on the next etcd watchdog tick. A reported entry
+ *      stays dirty until Kafka confirms it, so an unconfirmed report is sent
+ *      again on a later tick -- the arbitration on the controller is
+ *      idempotent, and the edit sequence stops a stale confirmation from
+ *      clearing a newer edit
  */
 BOOL kafka_report_offline_edits(void);
 

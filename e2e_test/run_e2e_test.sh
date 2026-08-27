@@ -930,7 +930,8 @@ source "${_E2E_PHASES_DIR}/phase34_wan_long_outage.sh"
 source "${_E2E_PHASES_DIR}/phase35_ipv6.sh"
 source "${_E2E_PHASES_DIR}/phase36_nat_capacity.sh"
 source "${_E2E_PHASES_DIR}/phase37_ipv6_firewall.sh"
-source "${_E2E_PHASES_DIR}/phase38_summary.sh"
+source "${_E2E_PHASES_DIR}/phase38_config_republish.sh"
+source "${_E2E_PHASES_DIR}/phase39_summary.sh"
 
 # ---------------------------------------------------------------------------
 # Phase table, progress display and phase-duration history
@@ -980,7 +981,8 @@ E2E_PHASES=(
     phase35_ipv6
     phase36_nat_capacity
     phase37_ipv6_firewall
-    phase38_summary
+    phase38_config_republish
+    phase39_summary
 )
 
 # Both are index-aligned with E2E_PHASES: how long each phase took in this run,

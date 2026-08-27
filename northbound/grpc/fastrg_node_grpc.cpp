@@ -1016,13 +1016,6 @@ grpc::Status FastRGNodeServiceImpl::GetFastrgHsiInfo(::grpc::ServerContext* cont
         HsiInfo *hsi_info = response->add_hsi_infos();
         ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, i);
         hsi_info->set_user_id(i + 1);
-        /* The CCB pointer array is RCU-protected and a slot may be transiently
-         * NULL while a config change (re)allocates it. Reading through a NULL
-         * pointer here crashes the gRPC worker, so skip empty slots. */
-        if (ppp_ccb == NULL) {
-            hsi_info->set_status("not configured");
-            continue;
-        }
         hsi_info->set_vlan_id(rte_atomic16_read(&ppp_ccb->vlan_id));
         /* PPPoE credential read side: this runs on the gRPC thread while a config
          * update (ctrl thread, or another gRPC call) may free+realloc the
@@ -1627,21 +1620,26 @@ grpc::Status FastRGNodeServiceImpl::RepublishPPPoEStatus(::grpc::ServerContext* 
 {
     (void)context;
     (void)request;
-    uint32_t event_count = 0;
 
-    for(int i=0; i<fastrg_ccb->user_count; i++) {
-        ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, i);
-        /* The CCB pointer array is RCU-protected and a slot may be transiently
-         * NULL while a config change (re)allocates it. Skip such a slot instead
-         * of reporting it as disconnected, which would overwrite a live row at
-         * the controller with a state we never actually read. */
-        if (ppp_ccb == NULL)
-            continue;
-        if (ppp_report_connection_status(ppp_ccb) == SUCCESS)
-            event_count++;
-    }
+    uint32_t event_count = ppp_report_all_connection_status(fastrg_ccb);
 
     cout << "RepublishPPPoEStatus called, produced " << event_count << " events" << endl;
+    response->set_event_count(event_count);
+    return grpc::Status::OK;
+}
+
+grpc::Status FastRGNodeServiceImpl::RepublishConfigStatus(::grpc::ServerContext* context, const ::google::protobuf::Empty* request, ::fastrgnodeservice::RepublishConfigStatusReply* response)
+{
+    (void)context;
+    (void)request;
+    U32 event_count = 0;
+
+    if (etcd_integration_republish_config_status(fastrg_ccb, &event_count) != SUCCESS) {
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
+            "config status republish needs etcd (SDN mode) to be reachable");
+    }
+
+    cout << "RepublishConfigStatus called, FastRG Node is processing report(s) of " << event_count << " subscriber(s)" << endl;
     response->set_event_count(event_count);
     return grpc::Status::OK;
 }
