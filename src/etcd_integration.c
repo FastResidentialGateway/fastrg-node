@@ -467,6 +467,68 @@ STATUS hsi_config_changed_callback(const char *node_id, const char *user_id,
     return ret;
 }
 
+STATUS etcd_integration_republish_config_status(FastRG_t *fastrg_ccb, U32 *out_event_count)
+{
+    U32 count = 0;
+
+    if (fastrg_ccb == NULL || out_event_count == NULL)
+        return ERROR;
+    if (fastrg_ccb->is_standalone == TRUE || etcd_client_is_connected() == 0)
+        return ERROR;
+
+    for(U16 ccb_id=0; ccb_id<fastrg_ccb->user_count; ccb_id++) {
+        char              user_id[16];
+        hsi_config_full_t full;
+        etcd_status_t     st;
+        etcd_event_t     *ev;
+
+        snprintf(user_id, sizeof(user_id), "%d", ccb_id + 1);
+
+        memset(&full, 0, sizeof(full));
+        st = etcd_client_get_hsi_config(fastrg_ccb->node_uuid, user_id, &full);
+        if (st != ETCD_SUCCESS)
+            continue;   /* unconfigured, or a transient read the caller retries */
+
+        ev = fastrg_alloc_etcd_event(ETCD_EVENT_HSI);
+        if (ev == NULL) {
+            hsi_config_free_port_mappings(&full.config);
+            continue;
+        }
+        ev->action         = HSI_ACTION_UPDATE;
+        ev->revision       = full.mod_revision;
+        ev->from_reconcile = FALSE;
+        ev->from_republish = TRUE;
+        strncpy(ev->node_id, fastrg_ccb->node_uuid, sizeof(ev->node_id) - 1);
+        strncpy(ev->user_id, user_id, sizeof(ev->user_id) - 1);
+        /* Hands the port_mappings allocation to the event; the loop frees it. */
+        ev->event_data.hsi.config         = full.config;
+        ev->event_data.hsi.desire_connect =
+            (strcmp(full.config.desire_status, "connect") == 0) ? TRUE : FALSE;
+        /* The event carries a shorter field than the etcd read does, so the
+         * precision bounds the copy and leaves it NUL-terminated. */
+        snprintf(ev->event_data.hsi.resource_version,
+            sizeof(ev->event_data.hsi.resource_version), "%.*s",
+            (int)(sizeof(ev->event_data.hsi.resource_version) - 1),
+            full.resource_version);
+
+        if (fastrg_ccb->etcd_event_q == NULL || 
+                rte_ring_enqueue(fastrg_ccb->etcd_event_q, ev) != 0) {
+            /* Dropping one is safe: the controller's confirmation loop asks
+             * again when the row it is waiting for does not arrive. */
+            FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
+                "Config status republish: etcd_event_q full, skipping user %s", user_id);
+            etcd_event_free(ev);
+            continue;
+        }
+        count++;
+    }
+
+    FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+        "Config status republish queued %u subscriber(s) for re-check", count);
+    *out_event_count = count;
+    return SUCCESS;
+}
+
 STATUS user_count_changed_callback(const char *node_id, 
     const user_count_config_t *config, etcd_action_type_t action,
     int64_t revision, void *user_data)
@@ -645,6 +707,22 @@ void etcd_event_dispatch(FastRG_t *fastrg_ccb, etcd_event_t *ev)
             const hsi_config_t *cfg =
                 (ev->action == HSI_ACTION_DELETE) ? NULL : &ev->event_data.hsi.config;
 
+            /* A republish only has to restate what the node is running. When
+             * local state already matches there is nothing to change, so say so
+             * and stop: the republished flag lets the consumer refresh its
+             * current-config view without recording a transition that never
+             * happened. A mismatch falls through to the apply below and is
+             * reported as the real change it turns out to be -- reporting a
+             * plain mismatch as a failure would make the controller roll back
+             * the config it just pushed, since a config still being applied
+             * looks exactly the same from here. */
+            if (ev->from_republish && cfg != NULL &&
+                    hsi_config_matches_local(ev->user_id, cfg, fastrg_ccb)) {
+                kafka_report_hsi_config_apply(ev->user_id, "update", TRUE, NULL, NULL,
+                    ev->event_data.hsi.resource_version, TRUE, ev->revision);
+                break;
+            }
+
             /* Reconcile events skip re-applying configs whose local state already
              * matches, but still reconcile the PPPoE session toward desire_status
              * so a dropped session is re-dialed (or a stale one torn down). */
@@ -662,22 +740,26 @@ void etcd_event_dispatch(FastRG_t *fastrg_ccb, etcd_event_t *ev)
             STATUS ret = hsi_config_changed_callback(ev->node_id, ev->user_id, cfg,
                 ev->action, ev->revision, fastrg_ccb);
 
-            /* Report the apply result to the controller via Kafka for live watch
-             * events only (reconcile/startup-load re-applies would be noise). The
-             * etcd failed_events/ namespace is removed. */
-            if (ev->from_reconcile == FALSE) {
-                const char *action_str = (ev->action == HSI_ACTION_CREATE) ? "create"
-                                       : (ev->action == HSI_ACTION_DELETE) ? "delete" : "update";
-                if (ret == SUCCESS) {
-                    kafka_report_config_apply(ev->user_id, action_str, TRUE, NULL, NULL,
-                        ev->event_data.hsi.resource_version);
-                } else {
-                    FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
-                        "HSI %s apply failed for user %s (reported via Kafka)", action_str, ev->user_id);
-                    kafka_report_config_apply(ev->user_id, action_str, FALSE,
-                        "apply_failed", "node failed to apply HSI config",
-                        ev->event_data.hsi.resource_version);
-                }
+            /* Report the apply result to the controller via Kafka. Reaching here
+             * means the config was really applied: a reconcile whose local state
+             * already matched returned above without touching anything, so this
+             * reports state changes only and never repeats itself while nothing
+             * moves. Reporting reconcile re-applies matters because they are the
+             * only thing that revisits a config the boot-time load applied — that
+             * path delivers through direct callbacks and never reaches here, so
+             * without this a config the node failed to apply at boot would stay
+             * unreported. The etcd failed_events/ namespace is removed. */
+            const char *action_str = (ev->action == HSI_ACTION_CREATE) ? "create"
+                                   : (ev->action == HSI_ACTION_DELETE) ? "delete" : "update";
+            if (ret == SUCCESS) {
+                kafka_report_hsi_config_apply(ev->user_id, action_str, TRUE, NULL, NULL,
+                    ev->event_data.hsi.resource_version, FALSE, ev->revision);
+            } else {
+                FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+                    "HSI %s apply failed for user %s (reported via Kafka)", action_str, ev->user_id);
+                kafka_report_hsi_config_apply(ev->user_id, action_str, FALSE,
+                    "apply_failed", "node failed to apply HSI config",
+                    ev->event_data.hsi.resource_version, FALSE, ev->revision);
             }
             break;
         }

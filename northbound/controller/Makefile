@@ -54,8 +54,10 @@ TEST_ETCD_SRC = $(TEST_DIR)/test_etcd_client.cpp
 TEST_ETCD_CAS_SRC = $(TEST_DIR)/test_etcd_cas.cpp
 TEST_KAFKA_RETRY = $(TEST_DIR)/test_kafka_retry
 TEST_KAFKA_RETRY_SRC = $(TEST_DIR)/test_kafka_retry.cpp
+TEST_KAFKA_UNITS = $(TEST_DIR)/test_kafka_producer_units
+TEST_KAFKA_UNITS_SRC = $(TEST_DIR)/test_kafka_producer_units.cpp
 
-.PHONY: all clean test test-client test-server test-etcd test-etcd-cas test-kafka-retry run-tests
+.PHONY: all clean test test-client test-server test-etcd test-etcd-cas test-kafka-retry test-kafka-units run-tests
 
 all: $(OBJECTS)
 
@@ -87,11 +89,11 @@ $(EVENTS_PROTO_SRC) $(EVENTS_PROTO_HDR): $(EVENTS_PROTO_FILE)
 	$(PROTOC) -I $(dir $(EVENTS_PROTO_FILE)) --cpp_out=$(PROTOS_PATH) $(EVENTS_PROTO_FILE)
 
 # Compile Kafka producer
-kafka_producer.o: kafka_producer.cpp kafka_producer.h kafka_retry_policy.h $(EVENTS_PROTO_HDR)
+kafka_producer.o: kafka_producer.cpp kafka_producer.h kafka_retry_policy.h kafka_producer_wal.h $(EVENTS_PROTO_HDR)
 	$(CXX) $(CXXFLAGS) -c kafka_producer.cpp -o kafka_producer.o
 
 # Test targets
-test: test-client test-server test-etcd test-etcd-cas test-kafka-retry
+test: test-client test-server test-etcd test-etcd-cas test-kafka-retry test-kafka-units
 	@echo "✅ All controller tests built successfully"
 	@echo "Usage:"
 	@echo "  ./$(TEST_CLIENT)         - Run controller client test"
@@ -120,8 +122,16 @@ test-etcd-cas: $(TEST_ETCD_CAS)
 test-kafka-retry: $(TEST_KAFKA_RETRY)
 	@echo "✅ Kafka retry policy test built: $(TEST_KAFKA_RETRY)"
 
+test-kafka-units: $(TEST_KAFKA_UNITS)
+	@echo "✅ Kafka producer unit tests built: $(TEST_KAFKA_UNITS)"
+
 $(TEST_KAFKA_RETRY): $(TEST_KAFKA_RETRY_SRC) kafka_retry_policy.h etcd_client.o config_snapshot.o kafka_producer.o $(EVENTS_PROTO_OBJ)
 	$(CXX) $(CXXFLAGS) -I. -o $(TEST_KAFKA_RETRY) $(TEST_KAFKA_RETRY_SRC) etcd_client.o \
+		config_snapshot.o kafka_producer.o $(EVENTS_PROTO_OBJ) ../../src/dbg.o \
+		$(LDFLAGS) -laddress_sorting -lpthread
+
+$(TEST_KAFKA_UNITS): $(TEST_KAFKA_UNITS_SRC) kafka_producer_wal.h $(EVENTS_PROTO_HDR) etcd_client.o config_snapshot.o kafka_producer.o $(EVENTS_PROTO_OBJ)
+	$(CXX) $(CXXFLAGS) -I. -o $(TEST_KAFKA_UNITS) $(TEST_KAFKA_UNITS_SRC) etcd_client.o \
 		config_snapshot.o kafka_producer.o $(EVENTS_PROTO_OBJ) ../../src/dbg.o \
 		$(LDFLAGS) -laddress_sorting -lpthread
 
@@ -145,4 +155,4 @@ $(TEST_ETCD_CAS): $(TEST_ETCD_CAS_SRC) etcd_client.o config_snapshot.o kafka_pro
 
 clean:
 	rm -f $(OBJECTS) $(PROTO_SOURCES) $(PROTO_HEADERS) $(EVENTS_PROTO_SRC) $(EVENTS_PROTO_HDR)
-	rm -f $(TEST_CLIENT) $(TEST_SERVER) $(TEST_ETCD) $(TEST_ETCD_CAS) $(TEST_KAFKA_RETRY)
+	rm -f $(TEST_CLIENT) $(TEST_SERVER) $(TEST_ETCD) $(TEST_ETCD_CAS) $(TEST_KAFKA_RETRY) $(TEST_KAFKA_UNITS)

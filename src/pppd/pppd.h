@@ -475,6 +475,21 @@ void ppp_build_state_report(const ppp_ccb_t *ppp_ccb, ppp_state_report_t *report
  */
 STATUS ppp_report_connection_status(ppp_ccb_t *ppp_ccb);
 
+/**
+ * @fn ppp_report_all_connection_status
+ *
+ * @brief report every configured subscriber's current PPPoE state to the
+ *      controller, one event each.
+ *
+ * @param fastrg_ccb
+ *      FastRG control block pointer
+ *
+ * @return
+ *      how many events were handed to the Kafka producer; 0 in standalone
+ *      mode or on a bad argument
+ */
+U32 ppp_report_all_connection_status(FastRG_t *fastrg_ccb);
+
 void   exit_ppp(ppp_ccb_t *ppp_ccb);
 
 /**
