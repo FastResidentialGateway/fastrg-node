@@ -4,6 +4,7 @@
 #include <grpc/grpc.h>
 
 #include <common.h>
+#include <ip_codec.h>
 
 #include <rte_eal.h>
 #include <rte_ethdev.h>
@@ -20,6 +21,7 @@
 #include <rte_distributor.h>
 #include <rte_errno.h>
 
+#include "etcd_event.h"
 #include "pppd/fsm.h"
 #include "dp.h"
 #include "dbg.h"
@@ -28,7 +30,6 @@
 #include "dhcpd/dhcpd.h"
 #include "dnsd/dnsd.h"
 #include "nd6/nd6.h"
-#include <ip_codec.h>
 #include "config.h"
 #include "controller.h"
 #include "etcd_integration.h"
@@ -462,50 +463,6 @@ STATUS northbound(FastRG_t *fastrg_ccb)
         return ERROR;
     }
 
-    BOOL is_standalone = FALSE;
-    // Register this node with the controller, if fails, switch to standalone mode
-    if (controller_register_this_node(fastrg_ccb) != 0) {
-        FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL, "Node registration with controller failed");
-        controller_cleanup(fastrg_ccb);
-        is_standalone = TRUE;
-    }
-
-    /* Need to set standalone mode before etcd integration */
-    fastrg_ccb->is_standalone = is_standalone;
-
-    if (is_standalone == FALSE) {
-        /* Start the Kafka telemetry producer (config-apply / PPPoE state / errors).
-         * Empty KafkaBrokers disables it; report_* calls then no-op. */
-        if (fastrg_ccb->kafka_brokers && fastrg_ccb->kafka_brokers[0] != '\0') {
-            if (kafka_producer_init(fastrg_ccb->kafka_brokers, fastrg_ccb->node_uuid) != SUCCESS)
-                FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
-                    "Kafka producer init failed; telemetry disabled");
-        }
-
-        /* Load the persisted config snapshot (SDN-only subsystem: the etcd
-         * watch/load paths mirror into it, offline edits accumulate on it and
-         * a degraded boot operates from it). MUST precede etcd integration —
-         * the load path mirrors etcd values into the snapshot. */
-        if (config_snapshot_init() != SUCCESS) {
-            FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
-                "Config snapshot file unreadable; starting with an empty snapshot");
-        }
-
-        // Initialize and start etcd integration
-        if (etcd_integration_init(fastrg_ccb) == ERROR) {
-            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Etcd integration initialization failed");
-            controller_cleanup(fastrg_ccb);
-            return ERROR;
-        }
-
-        if (etcd_integration_start(fastrg_ccb) == ERROR) {
-            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Etcd integration start failed");
-            etcd_integration_cleanup(fastrg_ccb);
-            controller_cleanup(fastrg_ccb);
-            return ERROR;
-        }
-    }
-
     unlink(fastrg_ccb->unix_sock_path);
 
     fastrg_ccb->metrics_thread_started = FALSE;
@@ -549,6 +506,55 @@ STATUS northbound(FastRG_t *fastrg_ccb)
         fastrg_stop_northbound_threads(fastrg_ccb);
         return ERROR;
     }
+
+    BOOL is_standalone = FALSE;
+    // Register this node with the controller, if fails, switch to standalone mode
+    if (controller_register_this_node(fastrg_ccb) != 0) {
+        FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL, "Node registration with controller failed");
+        controller_cleanup(fastrg_ccb);
+        is_standalone = TRUE;
+    }
+
+    /* Need to set standalone mode before etcd integration */
+    fastrg_ccb->is_standalone = is_standalone;
+
+    if (is_standalone == FALSE) {
+        /* Start the Kafka telemetry producer (config-apply / PPPoE state / errors).
+         * Empty KafkaBrokers disables it; report_* calls then no-op. */
+        if (fastrg_ccb->kafka_brokers && fastrg_ccb->kafka_brokers[0] != '\0') {
+            if (kafka_producer_init(fastrg_ccb->kafka_brokers, fastrg_ccb->node_uuid) != SUCCESS)
+                FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
+                    "Kafka producer init failed; telemetry disabled");
+        }
+
+        /* Load the persisted config snapshot (SDN-only subsystem: the etcd
+         * watch/load paths mirror into it, offline edits accumulate on it and
+         * a degraded boot operates from it). MUST precede etcd integration —
+         * the load path mirrors etcd values into the snapshot. */
+        if (config_snapshot_init() != SUCCESS) {
+            FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
+                "Config snapshot file unreadable; starting with an empty snapshot");
+        }
+
+        // Initialize and start etcd integration
+        if (etcd_integration_init(fastrg_ccb) == ERROR) {
+            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Etcd integration initialization failed");
+            controller_cleanup(fastrg_ccb);
+            return ERROR;
+        }
+
+        if (etcd_integration_start(fastrg_ccb) == ERROR) {
+            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Etcd integration start failed");
+            etcd_integration_cleanup(fastrg_ccb);
+            controller_cleanup(fastrg_ccb);
+            return ERROR;
+        }
+
+        U32 startup_events = ppp_report_all_connection_status(fastrg_ccb);
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "Startup PPPoE state self-report produced %u event(s)", startup_events);
+    }
+
     return SUCCESS;
 }
 

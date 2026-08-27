@@ -37,6 +37,7 @@ class FastRGNodeServiceImpl final : public fastrgnodeservice::FastrgService::Ser
     ::grpc::Status PdumpStart(::grpc::ServerContext* context, const ::fastrgnodeservice::PdumpRequest* request, ::fastrgnodeservice::PdumpReply* response) override;
     ::grpc::Status PdumpStop(::grpc::ServerContext* context, const ::fastrgnodeservice::PdumpRequest* request, ::fastrgnodeservice::PdumpReply* response) override;
     ::grpc::Status RepublishPPPoEStatus(::grpc::ServerContext* context, const ::google::protobuf::Empty* request, ::fastrgnodeservice::RepublishPPPoEStatusReply* response) override;
+    ::grpc::Status RepublishConfigStatus(::grpc::ServerContext* context, const ::google::protobuf::Empty* request, ::fastrgnodeservice::RepublishConfigStatusReply* response) override;
 
     private:
     FastRG_t* fastrg_ccb;

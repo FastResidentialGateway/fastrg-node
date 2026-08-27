@@ -48,6 +48,7 @@ service FastrgService {
   rpc PdumpStart(PdumpRequest) returns(PdumpReply) {}
   rpc PdumpStop(PdumpRequest) returns(PdumpReply) {}
   rpc RepublishPPPoEStatus(google.protobuf.Empty) returns(RepublishPPPoEStatusReply) {}
+  rpc RepublishConfigStatus(google.protobuf.Empty) returns(RepublishConfigStatusReply) {}
 }
 
 message ConfigRequest {
@@ -354,5 +355,14 @@ message PdumpReply {
 // RepublishPPPoEStatusReply reports how many PPPoE state events the node
 // emitted to Kafka, one per configured subscriber.
 message RepublishPPPoEStatusReply {
+  uint32 event_count = 1;
+}
+
+// RepublishConfigStatusReply reports how many subscribers's status the node is 
+// reporting. The node reads etcd for each subscriber, and compares the etcd 
+// config with its own config to determine if a CONFIG_APPLY_OK event should be 
+// emitted to Kafka. The node will try to reapply the config if it is different 
+// from the local config and trigger normal kafka report path. 
+message RepublishConfigStatusReply {
   uint32 event_count = 1;
 }

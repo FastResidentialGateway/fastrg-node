@@ -190,6 +190,27 @@ BOOL dns_record_matches_local(const char *user_id,
 void etcd_event_dispatch(FastRG_t *fastrg_ccb, etcd_event_t *ev);
 
 /**
+ * @fn etcd_integration_republish_config_status
+ *
+ * @brief
+ *      Reads each user's config from etcd and queues it on etcd_event_q; the
+ *      control-plane loop then compares it against local state and either
+ *      confirms the match or re-applies and reports the result.
+ * 
+ *      Contoller will trigger this function to re-reports every subscriber's 
+ *      config-apply status, so an event the controller missed does not leave 
+ *      its view stale until that user's next config change.
+ * @param fastrg_ccb
+ *      FastRG context
+ * @param out_event_count
+ *      receives how many subscribers were queued; the reports themselves are
+ *      emitted afterwards, so a reply does not mean they have been sent yet
+ * @return
+ *      SUCCESS, or ERROR when the node is standalone or etcd is unreachable
+ */
+STATUS etcd_integration_republish_config_status(FastRG_t *fastrg_ccb, U32 *out_event_count);
+
+/**
  * @fn parse_user_id
  *
  * @brief
