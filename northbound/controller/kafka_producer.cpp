@@ -110,7 +110,7 @@ bool kafka_wal_parse(const std::string &data, std::vector<KafkaWalEvent> &out) {
     return true;
 }
 
-void kafka_build_hsi_config_apply_result(ev::ConfigApplyResult *out,
+void kafka_build_config_apply_result(ev::ConfigApplyResult *out,
     const char *action, BOOL success, const char *err_code, const char *err_msg,
     const char *applied_resource_version, BOOL republished,
     int64_t applied_mod_revision) {
@@ -611,7 +611,7 @@ void kafka_report_pppoe_state(const char *user_id, kafka_pppoe_phase_t phase,
     produce_event(evt);
 }
 
-void kafka_report_hsi_config_apply(const char *user_id, const char *action,
+void kafka_report_config_apply_result(const char *user_id, const char *action,
     BOOL success, const char *err_code, const char *err_msg,
     const char *applied_resource_version, BOOL republished,
     int64_t applied_mod_revision) {
@@ -621,7 +621,7 @@ void kafka_report_hsi_config_apply(const char *user_id, const char *action,
     ev::NodeEvent evt;
     fill_envelope(&evt, user_id,
         success == TRUE ? ev::EVENT_TYPE_CONFIG_APPLY_OK : ev::EVENT_TYPE_CONFIG_APPLY_FAIL);
-    kafka_build_hsi_config_apply_result(evt.mutable_config_apply_result(), action, 
+    kafka_build_config_apply_result(evt.mutable_config_apply_result(), action, 
         success, err_code, err_msg, applied_resource_version, republished,
         applied_mod_revision);
     produce_event(evt);

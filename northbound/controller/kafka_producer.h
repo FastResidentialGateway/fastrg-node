@@ -99,9 +99,9 @@ void kafka_report_pppoe_state(const char *user_id, kafka_pppoe_phase_t phase,
     const char *hsi_ipv6_dns);
 
 /**
- * @fn kafka_report_hsi_config_apply
+ * @fn kafka_report_config_apply_result
  *
- * @brief report the result of applying an HSI config
+ * @brief report the result of applying a subscriber config
  * @param user_id
  *      subscriber id string
  * @param action
@@ -127,7 +127,7 @@ void kafka_report_pppoe_state(const char *user_id, kafka_pppoe_phase_t phase,
  * @return
  *      void
  */
-void kafka_report_hsi_config_apply(const char *user_id, const char *action,
+void kafka_report_config_apply_result(const char *user_id, const char *action,
     BOOL success, const char *err_code, const char *err_msg,
     const char *applied_resource_version, BOOL republished,
     int64_t applied_mod_revision);

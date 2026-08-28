@@ -244,7 +244,7 @@ static void test_kafka_wal_serialize_at_scale(void)
 static void test_config_apply_carries_the_applied_revision(void)
 {
     ev::ConfigApplyResult c;
-    kafka_build_hsi_config_apply_result(&c, "update", TRUE, NULL, NULL, "48", FALSE, 4812);
+    kafka_build_config_apply_result(&c, "update", TRUE, NULL, NULL, "48", FALSE, 4812);
 
     check(c.applied_mod_revision() == 4812,
         "a successful apply reports the revision it applied",
@@ -259,7 +259,7 @@ static void test_config_apply_carries_the_applied_revision(void)
 static void test_config_apply_carries_the_revision_on_failure(void)
 {
     ev::ConfigApplyResult c;
-    kafka_build_hsi_config_apply_result(&c, "create", FALSE, "apply_failed",
+    kafka_build_config_apply_result(&c, "create", FALSE, "apply_failed",
         "node failed to apply HSI config", "56", FALSE, 5601);
 
     check(c.applied_mod_revision() == 5601,
@@ -274,7 +274,7 @@ static void test_config_apply_carries_the_revision_on_failure(void)
 static void test_republish_confirmation_carries_the_revision(void)
 {
     ev::ConfigApplyResult c;
-    kafka_build_hsi_config_apply_result(&c, "update", TRUE, NULL, NULL, "48", TRUE, 4812);
+    kafka_build_config_apply_result(&c, "update", TRUE, NULL, NULL, "48", TRUE, 4812);
 
     check(c.republished() && c.applied_mod_revision() == 4812,
         "a republish confirmation names the version it confirms",
@@ -286,7 +286,7 @@ static void test_republish_confirmation_carries_the_revision(void)
 static void test_unknown_revision_is_zero(void)
 {
     ev::ConfigApplyResult c;
-    kafka_build_hsi_config_apply_result(&c, "delete", TRUE, NULL, NULL, NULL, FALSE, 0);
+    kafka_build_config_apply_result(&c, "delete", TRUE, NULL, NULL, NULL, FALSE, 0);
 
     check(c.applied_mod_revision() == 0,
         "an unknown revision reports as 0", c.DebugString().c_str());
@@ -300,7 +300,7 @@ static void test_large_revision_is_not_truncated(void)
 {
     const int64_t big = 9007199254740993LL;   /* 2^53 + 1 */
     ev::ConfigApplyResult c;
-    kafka_build_hsi_config_apply_result(&c, "update", TRUE, NULL, NULL, "1", FALSE, big);
+    kafka_build_config_apply_result(&c, "update", TRUE, NULL, NULL, "1", FALSE, big);
 
     check(c.applied_mod_revision() == big,
         "a revision past 2^53 survives intact",
@@ -312,8 +312,8 @@ static void test_large_revision_is_not_truncated(void)
 static void test_builder_leaves_nothing_from_an_earlier_call(void)
 {
     ev::ConfigApplyResult c;
-    kafka_build_hsi_config_apply_result(&c, "update", FALSE, "apply_failed", "boom", "48", TRUE, 4812);
-    kafka_build_hsi_config_apply_result(&c, "update", TRUE, NULL, NULL, NULL, FALSE, 5601);
+    kafka_build_config_apply_result(&c, "update", FALSE, "apply_failed", "boom", "48", TRUE, 4812);
+    kafka_build_config_apply_result(&c, "update", TRUE, NULL, NULL, NULL, FALSE, 5601);
 
     check(c.applied_mod_revision() == 5601 && c.error_code().empty() &&
           c.error_message().empty() && c.applied_resource_version().empty() &&
@@ -326,7 +326,7 @@ static void test_builder_leaves_nothing_from_an_earlier_call(void)
 static void test_revision_survives_the_wire(void)
 {
     ev::ConfigApplyResult c;
-    kafka_build_hsi_config_apply_result(&c, "update", TRUE, NULL, NULL, "48", TRUE, 4812);
+    kafka_build_config_apply_result(&c, "update", TRUE, NULL, NULL, "48", TRUE, 4812);
 
     std::string bytes;
     check(c.SerializeToString(&bytes), "the payload serializes", "SerializeToString failed");
