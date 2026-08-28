@@ -931,7 +931,8 @@ source "${_E2E_PHASES_DIR}/phase35_ipv6.sh"
 source "${_E2E_PHASES_DIR}/phase36_nat_capacity.sh"
 source "${_E2E_PHASES_DIR}/phase37_ipv6_firewall.sh"
 source "${_E2E_PHASES_DIR}/phase38_config_republish.sh"
-source "${_E2E_PHASES_DIR}/phase39_summary.sh"
+source "${_E2E_PHASES_DIR}/phase39_wal_durability.sh"
+source "${_E2E_PHASES_DIR}/phase40_summary.sh"
 
 # ---------------------------------------------------------------------------
 # Phase table, progress display and phase-duration history
@@ -982,7 +983,8 @@ E2E_PHASES=(
     phase36_nat_capacity
     phase37_ipv6_firewall
     phase38_config_republish
-    phase39_summary
+    phase39_wal_durability
+    phase40_summary
 )
 
 # Both are index-aligned with E2E_PHASES: how long each phase took in this run,
@@ -1285,6 +1287,7 @@ cleanup_fastrg() {
     _cleanup_phase35_ipv6 2>/dev/null || true
     _cleanup_phase36_nat_capacity 2>/dev/null || true
     _cleanup_phase37_ipv6_firewall 2>/dev/null || true
+    _cleanup_phase39_wal_durability 2>/dev/null || true
 
     # Best-effort: remove new subscriber config if the test left it in etcd
     _cleanup_new_subscriber_config 2>/dev/null || true

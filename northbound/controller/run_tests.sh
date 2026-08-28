@@ -298,8 +298,8 @@ fi
 # builders (no broker, no WAL file, no etcd needed)
 echo ""
 echo "🔧 Test 6: Kafka producer unit tests"
-if [ -f "./test/test_kafka_producer_units" ]; then
-    ./test/test_kafka_producer_units
+if [ -f "./test/test_kafka_producer" ]; then
+    ./test/test_kafka_producer
     if [ $? -ne 0 ]; then
         echo "❌ Kafka producer unit tests failed."
         TEST_FAILED=1
@@ -307,7 +307,7 @@ if [ -f "./test/test_kafka_producer_units" ]; then
         echo "✅ Kafka producer unit tests completed!"
     fi
 else
-    echo "❌ test_kafka_producer_units executable not found."
+    echo "❌ test_kafka_producer executable not found."
     TEST_FAILED=1
 fi
 
