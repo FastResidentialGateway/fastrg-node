@@ -27,7 +27,7 @@ static BOOL table_entry_matches(port_fwd_entry_t *table, U16 eport,
         return FALSE;
     dip_be = rte_cpu_to_be_32((a << 24) | (b << 16) | (c << 8) | d);
 
-    return (e->dip == dip_be && e->iport == dport) ? TRUE : FALSE;
+    return (e->dip == dip_be && rte_be_to_cpu_16(e->iport) == dport) ? TRUE : FALSE;
 }
 
 /* -----------------------------------------------------------------------

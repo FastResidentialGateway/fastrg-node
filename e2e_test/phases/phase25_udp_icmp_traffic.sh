@@ -8,6 +8,19 @@
 _P25_IPERF_PORT=5902
 _P25_METRICS_PORT=""
 
+# Step 107's ICMP echo run: 150 packets 0.1s apart, and the moment inside that
+# run at which the live NAT table is read. 12s is past the 10s idle timeout, so
+# whatever the dump reports there is a mapping the ping has kept alive.
+_P25_PING_COUNT=150
+_P25_PING_INTERVAL=0.1
+_P25_NAT_DUMP_AT=12
+
+# Filled in by _p25_icmp_attempt: the ping output plus the two NAT table reads
+# that belong to that same attempt.
+_P25_PING_OUT=""
+_P25_NAT_DUMP_DURING=""
+_P25_NAT_DUMP_AFTER=""
+
 # RSS distribution probe (Step 107b)
 _P25_RSS_ECHO_PORT=5903
 _P25_RSS_FLOWS=16
@@ -240,6 +253,94 @@ _p25_ping_loss() {
         's/.* ([0-9]+([.][0-9]+)?)% packet loss.*/\1/p' | tail -1 || true
 }
 
+# The NAT identifier of the one live ICMP mapping toward DST_IP in a
+# GetNatEntries reply (proto 1 is IPPROTO_ICMP). Filtering on the type and the
+# destination is what keeps the subscriber's background UDP and DNS flows out
+# of the answer. Prints one of:
+#   <nat_port>  exactly one such mapping, and this is its translated identifier
+#   none        a readable reply that holds no ICMP mapping toward DST_IP
+#   multi       more than one, so no single mapping can be pointed at
+#   err         not a readable reply, or no destination was given
+# Only the identifier case returns 0.
+e2e_icmp_nat_ident() {
+    local _json="${1:-}" _dst_ip="${2:-}" _idents="" _count=0 _ident=""
+
+    [[ -n "$_json" && -n "$_dst_ip" ]] || { printf 'err'; return 1; }
+    _idents=$(printf '%s' "$_json" | jq -r --arg ip "$_dst_ip" '
+        if (.entries | type) != "array" then error("not a GetNatEntries reply")
+        else .entries[] | select(.proto == 1 and .dst_ip == $ip) | .nat_port
+        end' 2>/dev/null) || { printf 'err'; return 1; }
+
+    _count=$(printf '%s\n' "$_idents" | grep -c . || true)
+    [[ "$_count" == "0" ]] && { printf 'none'; return 1; }
+    [[ "$_count" == "1" ]] || { printf 'multi'; return 1; }
+
+    _ident="$_idents" # one match, so the captured output is that single value
+    e2e_is_uint "$_ident" || { printf 'err'; return 1; }
+    printf '%s' "$_ident"
+    return 0
+}
+
+local_validation_register icmp_nat_ident e2e_icmp_nat_ident \
+    icmp_nat_ident_good icmp_nat_ident_background_only \
+    icmp_nat_ident_other_destination icmp_nat_ident_two_matches \
+    icmp_nat_ident_no_destination icmp_nat_ident_empty_input \
+    icmp_nat_ident_unreadable icmp_nat_ident_missing_nat_port
+
+# The subscriber's live NAT table, as GetNatEntries reports it. Kept apart from
+# the reading of it so a drill can spoil the artifact without touching how it
+# is judged.
+_p25_get_nat_entries() {
+    fastrg_grpc get_nat_entries "$USER_ID"
+}
+
+# One ICMP echo run plus the two NAT table reads that belong to it: one taken
+# _P25_NAT_DUMP_AT seconds in, one right after the run. Both reads are redone
+# on a retry, so the pair always describes the attempt whose loss figure is
+# the one being judged.
+_p25_icmp_attempt() {
+    local _dump_file="" _dump_pid=""
+
+    _P25_PING_OUT=""
+    _P25_NAT_DUMP_DURING=""
+    _P25_NAT_DUMP_AFTER=""
+
+    _dump_file=$(mktemp) || _dump_file=""
+    if [[ -n "$_dump_file" ]]; then
+        ( sleep "$_P25_NAT_DUMP_AT"; _p25_get_nat_entries >"$_dump_file" 2>/dev/null ) &
+        _dump_pid=$!
+    fi
+    _P25_PING_OUT=$(ssh_lan \
+        "ping -c ${_P25_PING_COUNT} -i ${_P25_PING_INTERVAL} -W 2 ${WAN_IP}" 2>&1 || true)
+    if [[ -n "$_dump_pid" ]]; then
+        wait "$_dump_pid" 2>/dev/null || true
+    fi
+    if [[ -n "$_dump_file" ]]; then
+        _P25_NAT_DUMP_DURING=$(cat "$_dump_file" 2>/dev/null || true)
+        rm -f "$_dump_file"
+    fi
+    _P25_NAT_DUMP_AFTER=$(_p25_get_nat_entries)
+}
+
+# Drill: drop every ICMP row from the NAT table reads. The reply stays a valid
+# GetNatEntries answer and the ping still comes back clean, so only an
+# assertion that really looks for the ping's own mapping can tell the
+# difference.
+_p25_inject_nat_dump_without_icmp() {
+    sabotage_copy_function _p25_get_nat_entries _p25_get_nat_entries_real
+    sabotage_override_function _p25_get_nat_entries \
+        '_p25_get_nat_entries_real | jq -c "if (.entries | type) == \"array\"
+             then .entries |= map(select(.proto != 1)) else . end" 2>/dev/null || true'
+}
+
+_p25_cleanup_nat_dump_without_icmp() {
+    restore_phase_functions phase25_udp_icmp_traffic.sh
+}
+
+case_validation_register icmp_nat_entry_missing phase25_udp_icmp_traffic \
+    _p25_inject_nat_dump_without_icmp _p25_cleanup_nat_dump_without_icmp \
+    'Step 107:'
+
 # Where a sustained-flow packet went missing. One snapshot covers both
 # directions: each step reads it once before its flow and again only when it
 # fails, so a passing step prints nothing extra. Names carry the place they
@@ -378,6 +479,7 @@ phase25_udp_icmp_traffic() {
     local _entries_base="" _entries_after="" _alloc_base="" _alloc_after=""
     local _iperf_out="" _iperf_rc=0 _parsed="" _lost="" _bytes="" _client_stopped=0
     local _ping_out="" _ping_retry_out="" _ping_loss="" _entries_delta=""
+    local _ident_during="" _ident_after="" _icmp_issue=""
     local _entries_seq="" _entries_seq_file="" _entries_seq_pid=""
     local _traffic_before="" _traffic_after=""
     local _loss_base=""
@@ -474,10 +576,18 @@ phase25_udp_icmp_traffic() {
     fi
 
     # What this step is for: the ICMP ident mapping must stay alive for longer
-    # than ten seconds. 150 packets spread over about fifteen seconds all
-    # returning is that property demonstrated directly — if the mapping were
-    # recycled or its translation broken part way through, the replies stop
-    # coming back and the loss figure says so.
+    # than ten seconds. Two things say so here.
+    #
+    # 150 packets spread over about fifteen seconds all returning shows it from
+    # the outside — if the mapping were recycled or its translation broken part
+    # way through, the replies stop coming back and the loss figure says so.
+    #
+    # The NAT table itself says so from the inside: read once past the 10s
+    # timeout and again after the run, it must hold exactly one ICMP mapping
+    # toward the WAN peer both times, carrying the same translated identifier.
+    # Selecting on type and destination is what makes this immune to the
+    # subscriber's background traffic, which is why the plain entry count below
+    # was never assertable.
     #
     # The subscriber's live NAT entry count is recorded alongside, not
     # asserted. It answers to anything that puts a flow through this
@@ -497,7 +607,8 @@ phase25_udp_icmp_traffic() {
           done ) >/dev/null 2>&1 &
         _entries_seq_pid=$!
     fi
-    _ping_out=$(ssh_lan "ping -c 150 -i 0.1 -W 2 ${WAN_IP}" 2>&1 || true)
+    _p25_icmp_attempt
+    _ping_out="$_P25_PING_OUT"
     if [[ -n "${_entries_seq_pid}" ]]; then
         kill "$_entries_seq_pid" 2>/dev/null || true
         wait "$_entries_seq_pid" 2>/dev/null || true
@@ -509,19 +620,31 @@ phase25_udp_icmp_traffic() {
     _ping_loss=$(_p25_ping_loss "$_ping_out")
     if ! _p25_loss_is_zero "$_ping_loss"; then
         info "Step 107: first ping reported ${_ping_loss:-unparseable}% loss; retrying once..."
-        _ping_retry_out=$(ssh_lan "ping -c 150 -i 0.1 -W 2 ${WAN_IP}" 2>&1 || true)
+        _p25_icmp_attempt
+        _ping_retry_out="$_P25_PING_OUT"
         _ping_loss=$(_p25_ping_loss "$_ping_retry_out")
+    fi
+    _ident_during=$(e2e_icmp_nat_ident "$_P25_NAT_DUMP_DURING" "$WAN_IP") || \
+        _icmp_issue="read ${_P25_NAT_DUMP_AT}s into the ping: ${_ident_during}"
+    _ident_after=$(e2e_icmp_nat_ident "$_P25_NAT_DUMP_AFTER" "$WAN_IP") || \
+        _icmp_issue="${_icmp_issue:+${_icmp_issue}; }read after the ping: ${_ident_after}"
+    if [[ -z "$_icmp_issue" && "$_ident_during" != "$_ident_after" ]]; then
+        _icmp_issue="identifier changed from ${_ident_during} to ${_ident_after} — the mapping was recycled mid-run"
     fi
     _entries_after=$(_p25_fetch_metric "fastrg_node_per_user_nat_entries_used")
     if _p25_is_uint "$_entries_base" && _p25_is_uint "$_entries_after"; then
         _entries_delta=$(( _entries_after - _entries_base ))
     fi
-    if _p25_loss_is_zero "$_ping_loss"; then
+    if _p25_loss_is_zero "$_ping_loss" && [[ -z "$_icmp_issue" ]]; then
         pass "Step 107: sustained ICMP echo" \
-            "loss=${_ping_loss}% over 150 packets in ~15s; ident mapping survived beyond 10s; recorded only: nat entries ${_entries_base:-NA}->${_entries_after:-NA} (delta ${_entries_delta:-NA}), during the ping: ${_entries_seq:-unavailable}"
+            "loss=${_ping_loss}% over ${_P25_PING_COUNT} packets in ~15s; one ICMP mapping to ${WAN_IP} with identifier ${_ident_during}, live both ${_P25_NAT_DUMP_AT}s into the ping and after it, so it survived the 10s idle timeout; recorded only: nat entries ${_entries_base:-NA}->${_entries_after:-NA} (delta ${_entries_delta:-NA}), during the ping: ${_entries_seq:-unavailable}"
     else
         fail "Step 107: sustained ICMP echo" \
-            "loss=${_ping_loss:-NA}%; recorded only: nat entries ${_entries_base:-NA}->${_entries_after:-NA} (delta ${_entries_delta:-NA}), during the ping: ${_entries_seq:-unavailable}; first='$(_p25_snippet "$_ping_out")' retry='$(_p25_snippet "$_ping_retry_out")'"
+            "loss=${_ping_loss:-NA}%${_icmp_issue:+; ICMP mapping to ${WAN_IP}: ${_icmp_issue}}; recorded only: nat entries ${_entries_base:-NA}->${_entries_after:-NA} (delta ${_entries_delta:-NA}), during the ping: ${_entries_seq:-unavailable}; first='$(_p25_snippet "$_ping_out")' retry='$(_p25_snippet "$_ping_retry_out")'"
+        if [[ -n "$_icmp_issue" ]]; then
+            info "  Step 107 evidence: NAT read during the ping: $(_p25_snippet "${_P25_NAT_DUMP_DURING:-unavailable}")"
+            info "  Step 107 evidence: NAT read after the ping: $(_p25_snippet "${_P25_NAT_DUMP_AFTER:-unavailable}")"
+        fi
     fi
 
     # ------------------------------------------------------------------

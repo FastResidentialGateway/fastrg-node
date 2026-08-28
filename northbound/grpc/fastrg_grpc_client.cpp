@@ -236,6 +236,54 @@ void fastrg_grpc_get_port_fwd_info(U16 user_id) {
     }
 }
 
+static std::string nat_proto_name(U32 proto) {
+    switch (proto) {
+        case IPPROTO_TCP:  return "TCP";
+        case IPPROTO_UDP:  return "UDP";
+        case IPPROTO_ICMP: return "ICMP";
+        default:           return std::to_string(proto);
+    }
+}
+
+void fastrg_grpc_get_nat_entries(U16 user_id) {
+    std::cout << "grpc client getting nat sessions" << std::endl;
+    NatEntriesRequest request;
+    NatEntriesReply reply;
+    request.set_user_id(user_id);
+    ClientContext context;
+    Status status = fastrg_client->stub_->GetNatEntries(&context, request, &reply);
+    if (status.ok()) {
+        std::cout << "NAT sessions for User " << reply.user_id()
+                  << " (" << reply.entries_size() << " entries):" << std::endl;
+        if (reply.entries_size() == 0) {
+            std::cout << "  (no entries)" << std::endl;
+        } else {
+            std::cout << "  " << std::left
+                      << std::setw(8)  << "Proto"
+                      << std::setw(24) << "LAN Source"
+                      << std::setw(24) << "WAN Destination"
+                      << std::setw(12) << "NAT Port"
+                      << std::setw(12) << "TCP State"
+                      << std::endl;
+            std::cout << "  " << std::string(80, '-') << std::endl;
+            for(int i=0; i<reply.entries_size(); i++) {
+                const NatEntryInfo& entry = reply.entries(i);
+                std::cout << "  " << std::left
+                          << std::setw(8)  << nat_proto_name(entry.proto())
+                          << std::setw(24) << (entry.src_ip() + ":" + std::to_string(entry.src_port()))
+                          << std::setw(24) << (entry.dst_ip() + ":" + std::to_string(entry.dst_port()))
+                          << std::setw(12) << entry.nat_port()
+                          << std::setw(12) << entry.tcp_state()
+                          << std::endl;
+            }
+        }
+    } else {
+        std::cout << "grpc client get nat sessions failed: " << std::endl;
+        std::cout << "  Error code: " << status.error_code() << std::endl;
+        std::cout << "  Error message: " << status.error_message() << std::endl;
+    }
+}
+
 void fastrg_grpc_get_arp_table(U16 user_id, U32 max_count) {
     ArpTableRequest request;
     ArpTableReply reply;

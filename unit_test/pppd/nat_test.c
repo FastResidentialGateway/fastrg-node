@@ -88,7 +88,7 @@ static void test_learning_basic(void)
     U16 src_port = rte_cpu_to_be_16(40000), dst_port = rte_cpu_to_be_16(443);
     addr_table_t *entry = NULL;
 
-    U16 nat_port = nat_learning_port_reuse(&test_ccb, &eth, src_ip, dst_ip,
+    U16 nat_port = nat_learning_port_reuse(&test_ccb, &eth, IPPROTO_TCP, src_ip, dst_ip,
         src_port, dst_port, &entry);
     TEST_ASSERT(nat_port != 0, "learning returns a nat_port", NULL);
     TEST_ASSERT(entry != NULL, "learning returns the entry via out param", NULL);
@@ -113,12 +113,12 @@ static void test_learning_same_flow_refresh(void)
     U16 src_port = rte_cpu_to_be_16(50000), dst_port = rte_cpu_to_be_16(80);
     addr_table_t *e1 = NULL, *e2 = NULL;
 
-    U16 p1 = nat_learning_port_reuse(&test_ccb, &eth, src_ip, dst_ip, src_port, dst_port, &e1);
+    U16 p1 = nat_learning_port_reuse(&test_ccb, &eth, IPPROTO_TCP, src_ip, dst_ip, src_port, dst_port, &e1);
     /* Wind back past the 1s coalescing threshold so the refresh must fire */
     nat_expire_set(e1->expire_slot,
         __atomic_load_n(e1->expire_slot, __ATOMIC_RELAXED) - 2 * fastrg_get_cycles_in_sec());
     U64 before = __atomic_load_n(e1->expire_slot, __ATOMIC_RELAXED);
-    U16 p2 = nat_learning_port_reuse(&test_ccb, &eth, src_ip, dst_ip, src_port, dst_port, &e2);
+    U16 p2 = nat_learning_port_reuse(&test_ccb, &eth, IPPROTO_TCP, src_ip, dst_ip, src_port, dst_port, &e2);
 
     TEST_ASSERT(p1 == p2, "same flow gets the same nat_port", NULL);
     TEST_ASSERT(e1 == e2, "same flow maps to the same entry", NULL);
@@ -141,9 +141,9 @@ static void test_learning_port_reuse_different_dst(void)
 
     /* Same source → same initial candidate port; different destinations →
      * different rev keys → both flows keep the SAME nat_port. */
-    U16 pa = nat_learning_port_reuse(&test_ccb, &eth, src_ip,
+    U16 pa = nat_learning_port_reuse(&test_ccb, &eth, IPPROTO_TCP, src_ip,
         rte_cpu_to_be_32(0x08080808), src_port, rte_cpu_to_be_16(443), &ea);
-    U16 pb = nat_learning_port_reuse(&test_ccb, &eth, src_ip,
+    U16 pb = nat_learning_port_reuse(&test_ccb, &eth, IPPROTO_TCP, src_ip,
         rte_cpu_to_be_32(0x08080404), src_port, rte_cpu_to_be_16(443), &eb);
 
     TEST_ASSERT(pa != 0 && pb != 0, "both learnings succeed", NULL);
@@ -164,7 +164,7 @@ static void test_learning_conflict(void)
     U16 sp1 = rte_cpu_to_be_16(52000);
     addr_table_t *e1 = NULL, *e2 = NULL;
 
-    U16 p1 = nat_learning_port_reuse(&test_ccb, &eth, src1, dst_ip, sp1, dst_port, &e1);
+    U16 p1 = nat_learning_port_reuse(&test_ccb, &eth, IPPROTO_TCP, src1, dst_ip, sp1, dst_port, &e1);
 
     /* Find a different source that hashes to the same initial candidate port
      * → forces the (nat_port, dst) conflict path. */
@@ -178,7 +178,7 @@ static void test_learning_conflict(void)
     }
     TEST_ASSERT(sp2 != 0, "found colliding source port for conflict test", NULL);
 
-    U16 p2 = nat_learning_port_reuse(&test_ccb, &eth, src2, dst_ip, sp2, dst_port, &e2);
+    U16 p2 = nat_learning_port_reuse(&test_ccb, &eth, IPPROTO_TCP, src2, dst_ip, sp2, dst_port, &e2);
     TEST_ASSERT(p2 != 0 && p2 != p1,
         "conflicting source gets a different nat_port",
         "p1=%u p2=%u", rte_be_to_cpu_16(p1), rte_be_to_cpu_16(p2));
@@ -197,7 +197,7 @@ static void test_reverse_lookup(void)
     U16 src_port = rte_cpu_to_be_16(53000), dst_port = rte_cpu_to_be_16(443);
     addr_table_t *learned = NULL;
 
-    U16 nat_port = nat_learning_port_reuse(&test_ccb, &eth, src_ip, dst_ip,
+    U16 nat_port = nat_learning_port_reuse(&test_ccb, &eth, IPPROTO_TCP, src_ip, dst_ip,
         src_port, dst_port, &learned);
 
     /* Hit: WAN reply (dst_port of pkt = nat_port, remote = dst of flow) */
@@ -223,7 +223,7 @@ static void test_reverse_expired_is_miss(void)
     U16 src_port = rte_cpu_to_be_16(54000), dst_port = rte_cpu_to_be_16(443);
     addr_table_t *learned = NULL;
 
-    U16 nat_port = nat_learning_port_reuse(&test_ccb, &eth, src_ip, dst_ip,
+    U16 nat_port = nat_learning_port_reuse(&test_ccb, &eth, IPPROTO_TCP, src_ip, dst_ip,
         src_port, dst_port, &learned);
     nat_expire_set(learned->expire_slot, 1); /* long past */
 
@@ -253,7 +253,7 @@ static void test_port_fwd_reserved_skipped(void)
         rte_cpu_to_be_32(0xC0A80002), 8080);
 
     addr_table_t *entry = NULL;
-    U16 nat_port = nat_learning_port_reuse(&test_ccb, &eth, src_ip, dst_ip,
+    U16 nat_port = nat_learning_port_reuse(&test_ccb, &eth, IPPROTO_TCP, src_ip, dst_ip,
         src_port, dst_port, &entry);
     TEST_ASSERT(nat_port != 0 && nat_port != initial,
         "reserved candidate skipped, next port allocated", NULL);
@@ -272,7 +272,7 @@ static void test_all_ports_reserved_returns_zero(void)
     for (U32 p = 0; p < PORT_FWD_TABLE_SIZE; p++)
         rte_atomic16_set(&test_ccb.port_fwd_table[p].is_active, 1);
 
-    U16 nat_port = nat_learning_port_reuse(&test_ccb, &eth,
+    U16 nat_port = nat_learning_port_reuse(&test_ccb, &eth, IPPROTO_TCP,
         rte_cpu_to_be_32(0xC0A8006C), rte_cpu_to_be_32(0x08080808),
         rte_cpu_to_be_16(56000), rte_cpu_to_be_16(443), NULL);
     TEST_ASSERT(nat_port == 0, "learning returns 0 when every port is reserved", NULL);
@@ -291,7 +291,7 @@ static void test_gc_scan_reclaims_zombies(void)
     U16 ports[5];
 
     for (int i = 0; i < 5; i++) {
-        ports[i] = nat_learning_port_reuse(&test_ccb, &eth,
+        ports[i] = nat_learning_port_reuse(&test_ccb, &eth, IPPROTO_TCP,
             rte_cpu_to_be_32(0xC0A80100 + i), dst_ip,
             rte_cpu_to_be_16(57000 + i), dst_port, &entries[i]);
         nat_expire_set(entries[i]->expire_slot, 1); /* zombie: expired, never queried */
@@ -318,7 +318,7 @@ static void test_gc_tick_drains_deferred_slots(void)
     struct rte_ether_hdr eth = {0};
     addr_table_t *entry = NULL;
 
-    nat_learning_port_reuse(&test_ccb, &eth,
+    nat_learning_port_reuse(&test_ccb, &eth, IPPROTO_TCP,
         rte_cpu_to_be_32(0xC0A80110), rte_cpu_to_be_32(0x08080808),
         rte_cpu_to_be_16(57100), rte_cpu_to_be_16(443), &entry);
     nat_expire_set(entry->expire_slot, 1);
@@ -354,6 +354,10 @@ static void test_udp_tcp_icmp_wrappers(void)
     TEST_ASSERT(up != 0, "UDP wrapper learns", NULL);
     TEST_ASSERT(nat_reverse_lookup(up, ip.dst_addr, udp.dst_port, &test_ccb) != NULL,
         "UDP mapping reachable via reverse lookup", NULL);
+    addr_table_t *ue = nat_reverse_lookup(up, ip.dst_addr, udp.dst_port, &test_ccb);
+    TEST_ASSERT(ue != NULL && ue->proto == IPPROTO_UDP,
+        "UDP wrapper records IPPROTO_UDP on the entry",
+        "proto=%u", ue ? ue->proto : 0);
 
     struct rte_tcp_hdr tcp = {0};
     tcp.src_port = rte_cpu_to_be_16(58001);
@@ -366,12 +370,28 @@ static void test_udp_tcp_icmp_wrappers(void)
     TEST_ASSERT(te != NULL && te->tcp_state == TCP_CONNTRACK_SYN_SENT,
         "TCP conntrack ran on the learned entry (SYN → SYN_SENT)",
         "state=%d", te ? te->tcp_state : -1);
+    TEST_ASSERT(te != NULL && te->proto == IPPROTO_TCP,
+        "TCP wrapper records IPPROTO_TCP on the entry",
+        "proto=%u", te ? te->proto : 0);
 
     struct rte_icmp_hdr icmp = {0};
     icmp.icmp_type = 8; /* echo request */
     icmp.icmp_ident = rte_cpu_to_be_16(0xBEEF);
     U16 ipn = nat_icmp_learning(&test_ccb, &eth, &ip, &icmp);
     TEST_ASSERT(ipn != 0, "ICMP wrapper learns", NULL);
+    addr_table_t *ie = nat_reverse_lookup(ipn, ip.dst_addr, icmp.icmp_type, &test_ccb);
+    TEST_ASSERT(ie != NULL && ie->proto == IPPROTO_ICMP,
+        "ICMP wrapper records IPPROTO_ICMP on the entry",
+        "proto=%u", ie ? ie->proto : 0);
+    /* An ICMP flow parks the identifier in src_port and the ICMP type in
+     * dst_port as a plain number, which is how a dump has to read them. */
+    TEST_ASSERT(ie != NULL && ie->src_port == icmp.icmp_ident &&
+        ie->dst_port == icmp.icmp_type,
+        "ICMP entry holds the echo identifier and the ICMP type", NULL);
+
+    /* Three protocols, three distinct entries — the field tells them apart. */
+    TEST_ASSERT(ue != te && te != ie && ue != ie,
+        "each protocol got its own entry", NULL);
 }
 
 static void test_evict_clears_forward_key(void)
@@ -387,7 +407,7 @@ static void test_evict_clears_forward_key(void)
     U16 sp1 = rte_cpu_to_be_16(59000);
     addr_table_t *e1 = NULL, *e2 = NULL, *e3 = NULL;
 
-    U16 p1 = nat_learning_port_reuse(&test_ccb, &eth, src1, dst_ip, sp1, dst_port, &e1);
+    U16 p1 = nat_learning_port_reuse(&test_ccb, &eth, IPPROTO_TCP, src1, dst_ip, sp1, dst_port, &e1);
     nat_expire_set(e1->expire_slot, 1); /* A expires */
 
     /* B collides with A's (nat_port, dst) key → eviction path, B takes A's
@@ -408,14 +428,14 @@ static void test_evict_clears_forward_key(void)
     }
     TEST_ASSERT(sp2 != 0, "found colliding source for evict test", NULL);
 
-    U16 p2 = nat_learning_port_reuse(&test_ccb, &eth, src2, dst_ip, sp2, dst_port, &e2);
+    U16 p2 = nat_learning_port_reuse(&test_ccb, &eth, IPPROTO_TCP, src2, dst_ip, sp2, dst_port, &e2);
     TEST_ASSERT(p2 == p1, "expired entry evicted, its port taken over", NULL);
 
     /* A's flow returns.  If eviction had leaked A's forward key, the fast
      * path would revive A's old entry and A would believe it still owns p1
      * — while inbound p1 now belongs to B (mis-bound NAT).  Correct dual
      * delete forces a forward miss → conflict walk → fresh port. */
-    U16 p3 = nat_learning_port_reuse(&test_ccb, &eth, src1, dst_ip, sp1, dst_port, &e3);
+    U16 p3 = nat_learning_port_reuse(&test_ccb, &eth, IPPROTO_TCP, src1, dst_ip, sp1, dst_port, &e3);
     TEST_ASSERT(p3 != 0 && p3 != p1,
         "returning flow re-learns on a fresh port, not the stolen one",
         "p1=%u p3=%u", rte_be_to_cpu_16(p1), rte_be_to_cpu_16(p3));
@@ -441,7 +461,7 @@ static void test_gc_clears_forward_key(void)
     U16 src_port = rte_cpu_to_be_16(60000), dst_port = rte_cpu_to_be_16(443);
     addr_table_t *e1 = NULL, *e2 = NULL;
 
-    U16 p1 = nat_learning_port_reuse(&test_ccb, &eth, src_ip, dst_ip,
+    U16 p1 = nat_learning_port_reuse(&test_ccb, &eth, IPPROTO_TCP, src_ip, dst_ip,
         src_port, dst_port, &e1);
     nat_expire_set(e1->expire_slot, 1); /* zombie */
     TEST_ASSERT(nat_gc_scan_by_ccb(&test_ccb, MAX_NAT_ENTRIES) == 1,
@@ -451,7 +471,7 @@ static void test_gc_clears_forward_key(void)
      * leaked forward key would fast-path into the dead slot and skip
      * re-inserting the reverse key — inbound would blackhole.  Correct
      * dual delete forces a full re-learn that restores reverse reachability. */
-    U16 p2 = nat_learning_port_reuse(&test_ccb, &eth, src_ip, dst_ip,
+    U16 p2 = nat_learning_port_reuse(&test_ccb, &eth, IPPROTO_TCP, src_ip, dst_ip,
         src_port, dst_port, &e2);
     TEST_ASSERT(p2 != 0, "flow re-learns after gc", NULL);
     addr_table_t *rv = nat_reverse_lookup(p2, dst_ip, dst_port, &test_ccb);
@@ -474,18 +494,18 @@ static void test_expire_refresh_coalescing(void)
     U16 src_port = rte_cpu_to_be_16(61000), dst_port = rte_cpu_to_be_16(443);
     addr_table_t *e1 = NULL;
 
-    nat_learning_port_reuse(&test_ccb, &eth, src_ip, dst_ip, src_port, dst_port, &e1);
+    nat_learning_port_reuse(&test_ccb, &eth, IPPROTO_TCP, src_ip, dst_ip, src_port, dst_port, &e1);
     U64 stored = __atomic_load_n(e1->expire_slot, __ATOMIC_RELAXED);
 
     /* Immediate re-learning: deadline moved by microseconds only → the
      * coalescing guard must skip the store */
-    nat_learning_port_reuse(&test_ccb, &eth, src_ip, dst_ip, src_port, dst_port, NULL);
+    nat_learning_port_reuse(&test_ccb, &eth, IPPROTO_TCP, src_ip, dst_ip, src_port, dst_port, NULL);
     TEST_ASSERT(__atomic_load_n(e1->expire_slot, __ATOMIC_RELAXED) == stored,
         "same-flow refresh within threshold coalesces (no store)", NULL);
 
     /* Drift the deadline back 2s → refresh must fire */
     nat_expire_set(e1->expire_slot, stored - 2 * fastrg_get_cycles_in_sec());
-    nat_learning_port_reuse(&test_ccb, &eth, src_ip, dst_ip, src_port, dst_port, NULL);
+    nat_learning_port_reuse(&test_ccb, &eth, IPPROTO_TCP, src_ip, dst_ip, src_port, dst_port, NULL);
     TEST_ASSERT(__atomic_load_n(e1->expire_slot, __ATOMIC_RELAXED) > stored - fastrg_get_cycles_in_sec(),
         "stale deadline refreshed past the threshold", NULL);
 }
@@ -504,7 +524,7 @@ static void test_stats_counters(void)
     /* Every port reserved → learning fails and accounts one ENOSPC */
     for (U32 p = 0; p < PORT_FWD_TABLE_SIZE; p++)
         rte_atomic16_set(&test_ccb.port_fwd_table[p].is_active, 1);
-    U16 nat_port = nat_learning_port_reuse(&test_ccb, &eth,
+    U16 nat_port = nat_learning_port_reuse(&test_ccb, &eth, IPPROTO_TCP,
         rte_cpu_to_be_32(0xC0A80072), rte_cpu_to_be_32(0x08080808),
         rte_cpu_to_be_16(62000), rte_cpu_to_be_16(443), NULL);
     TEST_ASSERT(nat_port == 0 && test_ccb.nat_enospc == 1,
@@ -514,7 +534,7 @@ static void test_stats_counters(void)
 
     /* One zombie reclaimed by GC → accounted */
     addr_table_t *e1 = NULL;
-    nat_learning_port_reuse(&test_ccb, &eth,
+    nat_learning_port_reuse(&test_ccb, &eth, IPPROTO_TCP,
         rte_cpu_to_be_32(0xC0A80072), rte_cpu_to_be_32(0x08080808),
         rte_cpu_to_be_16(62000), rte_cpu_to_be_16(443), &e1);
     nat_expire_set(e1->expire_slot, 1);
@@ -537,7 +557,7 @@ static void test_pool_dry_enospc(void)
 
     /* One real flow A, then expire it — gives the emergency GC inside
      * nat_slot_alloc something to find. */
-    U16 pa = nat_learning_port_reuse(&test_ccb, &eth,
+    U16 pa = nat_learning_port_reuse(&test_ccb, &eth, IPPROTO_TCP,
         rte_cpu_to_be_32(0xC0A80080), dst_ip, rte_cpu_to_be_16(40100), dst_port, &ea);
     TEST_ASSERT(pa != 0, "flow A learned", NULL);
     nat_expire_set(ea->expire_slot, 1);
@@ -557,7 +577,7 @@ static void test_pool_dry_enospc(void)
      * this thread hasn't quiesced through yet — so learning must fail and
      * account one enospc. */
     U64 enospc_before = test_ccb.nat_enospc;
-    U16 pb = nat_learning_port_reuse(&test_ccb, &eth,
+    U16 pb = nat_learning_port_reuse(&test_ccb, &eth, IPPROTO_TCP,
         rte_cpu_to_be_32(0xC0A80081), dst_ip, rte_cpu_to_be_16(40101), dst_port, NULL);
     TEST_ASSERT(pb == 0, "learning fails when the pool is dry", NULL);
     TEST_ASSERT(test_ccb.nat_enospc == enospc_before + 1,
@@ -573,7 +593,7 @@ static void test_pool_dry_enospc(void)
     nat_quiesce_reclaim();
     TEST_ASSERT(rte_ring_count(test_ccb.nat_free_ring) == 1,
         "A's slot back in the free ring after RCU reclaim", NULL);
-    pb = nat_learning_port_reuse(&test_ccb, &eth,
+    pb = nat_learning_port_reuse(&test_ccb, &eth, IPPROTO_TCP,
         rte_cpu_to_be_32(0xC0A80081), dst_ip, rte_cpu_to_be_16(40101), dst_port, NULL);
     TEST_ASSERT(pb != 0, "flow B learns after a slot is reclaimed", NULL);
     TEST_ASSERT(test_ccb.nat_enospc == enospc_before + 1,
@@ -640,7 +660,7 @@ static U32 small_fill_flows(struct rte_ether_hdr *eth, U32 n)
 {
     U32 ok = 0;
     for (U32 i = 0; i < n; i++) {
-        if (nat_learning_port_reuse(&small_ccb, eth,
+        if (nat_learning_port_reuse(&small_ccb, eth, IPPROTO_TCP,
                 rte_cpu_to_be_32(0x0A000001), rte_cpu_to_be_32(0x08080000 + i),
                 rte_cpu_to_be_16(40200), rte_cpu_to_be_16(443), NULL) != 0)
             ok++;
@@ -664,7 +684,7 @@ static void test_reverse_hash_full_enospc(void)
     /* 9th flow: every candidate port's reverse add hits ENOSPC; the
      * never-published slot must go straight back to the ring each time,
      * and after the full port wrap the flow fails with one enospc. */
-    U16 p = nat_learning_port_reuse(&small_ccb, &eth,
+    U16 p = nat_learning_port_reuse(&small_ccb, &eth, IPPROTO_TCP,
         rte_cpu_to_be_32(0x0A000001), rte_cpu_to_be_32(0x08080000 + 8),
         rte_cpu_to_be_16(40200), rte_cpu_to_be_16(443), NULL);
     TEST_ASSERT(p == 0, "learning fails when the reverse hash is full", NULL);
@@ -697,7 +717,7 @@ static void test_forward_hash_full_enospc(void)
     /* 9th flow: reverse add succeeds (room left), forward add hits ENOSPC →
      * the reverse key must be unpublished and the flow fails immediately
      * (a different port wouldn't help — the forward key has no port in it). */
-    U16 p = nat_learning_port_reuse(&small_ccb, &eth,
+    U16 p = nat_learning_port_reuse(&small_ccb, &eth, IPPROTO_TCP,
         rte_cpu_to_be_32(0x0A000001), rte_cpu_to_be_32(0x08080000 + 8),
         rte_cpu_to_be_16(40200), rte_cpu_to_be_16(443), NULL);
     TEST_ASSERT(p == 0, "learning fails when the forward hash is full", NULL);
@@ -742,7 +762,8 @@ static void test_port_fwd_lookup_contract(void)
 
     port_fwd_add(test_ccb.port_fwd_table, eport, dip, iport);
     port_fwd_entry_t *entry = port_fwd_lookup_by_eport(test_ccb.port_fwd_table, eport);
-    TEST_ASSERT(entry != NULL && entry->dip == dip && entry->iport == iport,
+    TEST_ASSERT(entry != NULL && entry->dip == dip &&
+        entry->iport == rte_cpu_to_be_16(iport),
         "active port-forward lookup returns published fields", NULL);
     TEST_ASSERT(nat_port_fwd_reverse_lookup(test_ccb.port_fwd_table,
         rte_cpu_to_be_16(eport), &out_dip, &out_iport) == SUCCESS &&
@@ -753,7 +774,7 @@ static void test_port_fwd_lookup_contract(void)
 
     const U32 ignored_dip = rte_cpu_to_be_32(0xC0A8010B);
     port_fwd_add(test_ccb.port_fwd_table, eport, ignored_dip, 9090);
-    TEST_ASSERT(entry->dip == dip && entry->iport == iport,
+    TEST_ASSERT(entry->dip == dip && entry->iport == rte_cpu_to_be_16(iport),
         "adding an active eport does not overwrite its fields", NULL);
 
     TEST_ASSERT(port_fwd_remove(test_ccb.port_fwd_table, eport) == SUCCESS,

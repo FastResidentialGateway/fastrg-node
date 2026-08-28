@@ -63,7 +63,7 @@ struct nd6_table;
  */
 typedef struct port_fwd_entry {
     U32            dip;         /**< destination IP on LAN (network byte order) */
-    U16            iport;       /**< internal port on LAN (host byte order) */
+    U16            iport;       /**< internal port on LAN (network byte order) */
     rte_atomic16_t is_active;   /**< 1 = active, 0 = free */
     rte_atomic64_t hit_count;   /**< number of packets matched by this rule */
 } port_fwd_entry_t;
@@ -72,11 +72,12 @@ typedef struct port_fwd_entry {
  */
 typedef struct addr_table {
     struct rte_ether_addr mac_addr;
-    U32                   src_ip; // original src ip from LAN user (e.g. 192.168.0.100)
-    U32                   dst_ip; // dst ip where LAN user wants to visit (e.g. public ip)
-    U16                   src_port; // original src port from LAN user
-    U16                   dst_port; // dst port where LAN user wants to visit
-    U16                   nat_port;
+    U32                   src_ip; // original src ip from LAN user (e.g. 192.168.0.100), network order
+    U32                   dst_ip; // dst ip where LAN user wants to visit (e.g. public ip), network order
+    U16                   src_port; // original src port from LAN user, network order
+    U16                   dst_port; // dst port where LAN user wants to visit, network order(no order for ICMP type field)
+    U16                   nat_port; // translated port, network order
+    U8                    proto;     // IPPROTO_TCP / IPPROTO_UDP / IPPROTO_ICMP of the learned flow
     U8                    tcp_state; // TCP conntrack state (tcp_conntrack_state_t), 0 = NONE
     U8                    tcp_fin_flags; // bitmask: bit0 = LAN FIN, bit1 = WAN FIN
     rte_atomic16_t        is_fill;   // is this entry filled or not
