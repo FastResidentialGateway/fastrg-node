@@ -526,3 +526,74 @@ x
 # expect-status: 1
 ---
 {"stats":[{"rx_packets":"11","per_user_stats":[]},{"rx_packets":"48210","per_user_stats":[{"user_id":1,"dropped_packets":"5"}]}]}
+==== fixture: wal_durable_count_absent_file
+# expect-output: 0
+# expect-status: 0
+---
+
+==== fixture: wal_durable_count_empty_array
+# expect-output: 0
+# expect-status: 0
+---
+[]
+==== fixture: wal_durable_count_garbage
+# expect-output:
+# expect-status: 1
+---
+this is not json
+==== fixture: wal_durable_count_good
+# expect-output: 2
+# expect-status: 0
+---
+[{"seq":7,"payload":"1a2b0a0a757365725f636f756e741211434f554e545f455843454544535f4d4158"},{"seq":8,"payload":"41"}]
+==== fixture: wal_durable_count_not_an_array
+# expect-output:
+# expect-status: 1
+---
+{"seq":1,"payload":"41"}
+==== fixture: wal_durable_count_odd_payload
+# expect-output:
+# expect-status: 1
+---
+[{"seq":1,"payload":"4"}]
+==== fixture: wal_durable_count_seq_missing
+# expect-output:
+# expect-status: 1
+---
+[{"payload":"41"}]
+==== fixture: wal_holds_error_code_corrupt
+# args: COUNT_EXCEEDS_MAX
+# expect-output: err
+# expect-status: 1
+---
+this is not json
+==== fixture: wal_holds_error_code_empty_wal
+# args: COUNT_EXCEEDS_MAX
+# expect-output: empty
+# expect-status: 1
+---
+[]
+==== fixture: wal_holds_error_code_good
+# args: COUNT_EXCEEDS_MAX
+# expect-output: ok
+# expect-status: 0
+---
+[{"seq":7,"payload":"1a2b0a0a757365725f636f756e741211434f554e545f455843454544535f4d4158"}]
+==== fixture: wal_holds_error_code_no_code
+# args:
+# expect-output: err
+# expect-status: 1
+---
+[{"seq":7,"payload":"1a2b0a0a757365725f636f756e741211434f554e545f455843454544535f4d4158"}]
+==== fixture: wal_holds_error_code_other_code
+# args: COUNT_EXCEEDS_MAX
+# expect-output: absent
+# expect-status: 1
+---
+[{"seq":7,"payload":"1a2b0a0a757365725f636f756e74120e4e41545f5441424c455f46554c4c"}]
+==== fixture: wal_holds_error_code_uppercase_payload
+# args: COUNT_EXCEEDS_MAX
+# expect-output: ok
+# expect-status: 0
+---
+[{"seq":7,"payload":"1A2B0A0A757365725F636F756E741211434F554E545F455843454544535F4D4158"}]

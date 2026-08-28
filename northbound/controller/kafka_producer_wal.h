@@ -71,9 +71,9 @@ std::string kafka_wal_serialize(const std::vector<KafkaWalEvent> &events);
 bool kafka_wal_parse(const std::string &data, std::vector<KafkaWalEvent> &out);
 
 /**
- * @fn kafka_build_hsi_config_apply_result
+ * @fn kafka_build_config_apply_result
  *
- * @brief fill in the ConfigApplyResult payload of an HSI config-apply event
+ * @brief fill in the ConfigApplyResult payload of a config-apply event
  * @param out
  *      payload to fill; every field is written, so a reused message carries
  *      nothing over from an earlier call
@@ -94,7 +94,7 @@ bool kafka_wal_parse(const std::string &data, std::vector<KafkaWalEvent> &out);
  * @return
  *      void
  */
-void kafka_build_hsi_config_apply_result(fastrg::events::v1::ConfigApplyResult *out,
+void kafka_build_config_apply_result(fastrg::events::v1::ConfigApplyResult *out,
     const char *action, BOOL success, const char *err_code, const char *err_msg,
     const char *applied_resource_version, BOOL republished,
     int64_t applied_mod_revision);
