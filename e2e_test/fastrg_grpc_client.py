@@ -12,6 +12,7 @@ Commands:
     get_system_stats                                        - GetFastrgSystemStats → JSON
     get_user_drop_count <user_id> [port_idx]               - GetFastrgSystemStats, WAN dropped_packets for user
     get_port_fwd_info <user_id>                             - GetPortFwdInfo    → JSON
+    get_nat_entries <user_id>                               - GetNatEntries     → JSON
     get_dns_static <user_id>                                - GetDnsStaticRecords → JSON
     get_dns_cache <user_id>                                 - GetDnsCache → JSON
     flush_dns_cache <user_id>                               - FlushDnsCache → JSON
@@ -215,6 +216,14 @@ def get_system_stats(node_addr):
 
 def get_port_fwd_info(node_addr, user_id):
     resp = _grpcurl(node_addr, 'GetPortFwdInfo', {'user_id': user_id})
+    return {
+        "user_id": resp.get('user_id', user_id),
+        "entries": resp.get('entries', []),
+    }
+
+
+def get_nat_entries(node_addr, user_id):
+    resp = _grpcurl(node_addr, 'GetNatEntries', {'user_id': user_id})
     return {
         "user_id": resp.get('user_id', user_id),
         "entries": resp.get('entries', []),
@@ -473,6 +482,12 @@ def main():
                       file=sys.stderr)
                 sys.exit(1)
             result = get_port_fwd_info(opts.node, int(opts.args[0]))
+        elif opts.command == "get_nat_entries":
+            if not opts.args:
+                print(json.dumps({"error": "get_nat_entries requires <user_id>"}),
+                      file=sys.stderr)
+                sys.exit(1)
+            result = get_nat_entries(opts.node, int(opts.args[0]))
         elif opts.command == "get_dns_static":
             if not opts.args:
                 print(json.dumps({"error": "get_dns_static requires <user_id>"}),

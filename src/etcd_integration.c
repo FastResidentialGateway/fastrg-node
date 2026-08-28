@@ -268,10 +268,10 @@ BOOL hsi_config_matches_local(const char *user_id,
         }
         /* Pairs with port_fwd_add() before comparing the published fields. */
         rte_atomic_thread_fence(rte_memory_order_acquire);
-        if (e->iport != pm->dport) {
+        if (rte_be_to_cpu_16(e->iport) != pm->dport) {
             FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
                 "Sync match[%s]: port_fwd[%u] iport mismatch local=%u etcd=%u",
-                user_id, pm->eport, e->iport, pm->dport);
+                user_id, pm->eport, rte_be_to_cpu_16(e->iport), pm->dport);
             return FALSE;
         }
         U32 etcd_dip;

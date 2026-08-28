@@ -506,6 +506,8 @@ static inline int nat_entry_same_flow(addr_table_t *entry, U16 nat_port,
  *      Subscriber control block (owns pool, rev hash, free-list, port-fwd table)
  * @param eth_hdr
  *      Pointer to Ethernet header (for copying MAC address)
+ * @param proto
+ *      IPPROTO_TCP / IPPROTO_UDP / IPPROTO_ICMP of the flow being learned
  * @param src_ip
  *      Source IP in network byte order
  * @param dst_ip
@@ -522,7 +524,7 @@ static inline int nat_entry_same_flow(addr_table_t *entry, U16 nat_port,
  *      Allocated nat_port in network byte order, or 0 if all ports exhausted
  */
 static inline U16 nat_learning_port_reuse(ppp_ccb_t *ppp_ccb, struct rte_ether_hdr *eth_hdr,
-    U32 src_ip, U32 dst_ip, U16 src_port, U16 dst_port, addr_table_t **out_entry)
+    U8 proto, U32 src_ip, U32 dst_ip, U16 src_port, U16 dst_port, addr_table_t **out_entry)
 {
     nat_forward_key_t fkey = { .src_ip = src_ip, .dst_ip = dst_ip,
         .src_port = src_port, .dst_port = dst_port };
@@ -546,6 +548,8 @@ static inline U16 nat_learning_port_reuse(ppp_ccb_t *ppp_ccb, struct rte_ether_h
     do {
         U32 nat_port_host = rte_be_to_cpu_16(nat_port);
         void *data;
+        nat_reverse_key_t key;
+        addr_table_t *entry;
 
         /* This check consumes only is_active, not dip/iport, so it needs no
          * acquire pairing. Ordering cannot remove the add/remove race: a stale
@@ -553,7 +557,9 @@ static inline U16 nat_learning_port_reuse(ppp_ccb_t *ppp_ccb, struct rte_ether_h
         if (rte_atomic16_read(&ppp_ccb->port_fwd_table[nat_port_host].is_active) == 1)
             goto next_nat_port;
 
-        nat_reverse_key_t key = { .dst_ip = dst_ip, .nat_port = nat_port, .dst_port = dst_port };
+        key.dst_ip = dst_ip;
+        key.nat_port = nat_port;
+        key.dst_port = dst_port;
 
         /* Lock-free fast path: existing mapping for this (port, dst)? */
         if (rte_hash_lookup_data(ppp_ccb->nat_reverse_hash, &key, &data) >= 0) {
@@ -608,13 +614,14 @@ static inline U16 nat_learning_port_reuse(ppp_ccb_t *ppp_ccb, struct rte_ether_h
             return 0; /* pool exhausted by live flows */
         }
 
-        addr_table_t *entry = &ppp_ccb->addr_table[idx];
+        entry = &ppp_ccb->addr_table[idx];
         rte_ether_addr_copy(&eth_hdr->src_addr, &entry->mac_addr);
         entry->src_ip = src_ip;
         entry->dst_ip = dst_ip;
         entry->src_port = src_port;
         entry->dst_port = dst_port;
         entry->nat_port = nat_port;
+        entry->proto = proto;
         entry->tcp_state = TCP_CONNTRACK_NONE;
         entry->tcp_fin_flags = 0;
         entry->max_seq_end_lan = 0;
@@ -729,7 +736,7 @@ static inline addr_table_t *nat_reverse_lookup(U16 nat_port, U32 remote_ip, U16 
 static inline U16 nat_icmp_learning(ppp_ccb_t *ppp_ccb, struct rte_ether_hdr *eth_hdr,
     struct rte_ipv4_hdr *ip_hdr, struct rte_icmp_hdr *icmphdr)
 {
-    return nat_learning_port_reuse(ppp_ccb, eth_hdr,
+    return nat_learning_port_reuse(ppp_ccb, eth_hdr, IPPROTO_ICMP,
         ip_hdr->src_addr, ip_hdr->dst_addr,
         icmphdr->icmp_ident, icmphdr->icmp_type, NULL);
 }
@@ -753,7 +760,7 @@ static inline U16 nat_icmp_learning(ppp_ccb_t *ppp_ccb, struct rte_ether_hdr *et
 static inline U16 nat_udp_learning(ppp_ccb_t *ppp_ccb, struct rte_ether_hdr *eth_hdr,
     struct rte_ipv4_hdr *ip_hdr, struct rte_udp_hdr *udphdr)
 {
-    return nat_learning_port_reuse(ppp_ccb, eth_hdr,
+    return nat_learning_port_reuse(ppp_ccb, eth_hdr, IPPROTO_UDP,
         ip_hdr->src_addr, ip_hdr->dst_addr,
         udphdr->src_port, udphdr->dst_port, NULL);
 }
@@ -778,7 +785,7 @@ static inline U16 nat_tcp_learning(ppp_ccb_t *ppp_ccb, struct rte_ether_hdr *eth
     struct rte_ipv4_hdr *ip_hdr, struct rte_tcp_hdr *tcphdr)
 {
     addr_table_t *entry = NULL;
-    U16 nat_port = nat_learning_port_reuse(ppp_ccb, eth_hdr,
+    U16 nat_port = nat_learning_port_reuse(ppp_ccb, eth_hdr, IPPROTO_TCP,
         ip_hdr->src_addr, ip_hdr->dst_addr,
         tcphdr->src_port, tcphdr->dst_port, &entry);
 
@@ -854,7 +861,7 @@ static inline void port_fwd_add(port_fwd_entry_t table[],
     if (rte_atomic16_read(&entry->is_active) == 1)
         return; /* Already active, do not overwrite to avoid disrupting existing flow */
     entry->dip = dip;
-    entry->iport = iport;
+    entry->iport = rte_cpu_to_be_16(iport);
     rte_atomic64_set(&entry->hit_count, 0);
     rte_atomic_thread_fence(rte_memory_order_release);
     rte_atomic16_set(&entry->is_active, 1);
@@ -914,7 +921,7 @@ static inline STATUS nat_port_fwd_reverse_lookup(port_fwd_entry_t table[],
     if (entry == NULL)
         return ERROR;
     *out_dip = entry->dip;
-    *out_iport = rte_cpu_to_be_16(entry->iport);
+    *out_iport = entry->iport;
     return SUCCESS;
 }
 

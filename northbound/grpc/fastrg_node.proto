@@ -36,6 +36,7 @@ service FastrgService {
   rpc GetFastrgHsiInfo(google.protobuf.Empty) returns(FastrgHsiInfo) {}
   rpc GetFastrgDhcpInfo(google.protobuf.Empty) returns(FastrgDhcpInfo) {}
   rpc GetPortFwdInfo(PortFwdInfoRequest) returns(PortFwdInfoReply) {}
+  rpc GetNatEntries(NatEntriesRequest) returns(NatEntriesReply) {}
   rpc GetArpTable(ArpTableRequest) returns(ArpTableReply) {}
   rpc GetNodeStatus(google.protobuf.Empty) returns(NodeStatus) {}
   rpc AddDnsRecord(DnsRecordRequest) returns(DnsRecordReply) {}
@@ -240,13 +241,34 @@ message PortFwdInfoRequest {
 message PortFwdEntry {
   uint32 eport = 1;
   string dip = 2;
-  uint32 iport = 3;
+  uint32 iport = 3; // host order
   uint64 hit_count = 4;
 }
 
 message PortFwdInfoReply {
   uint32 user_id = 1;
   repeated PortFwdEntry entries = 2;
+}
+
+message NatEntriesRequest {
+  uint32 user_id = 1;
+}
+
+// One live dynamic NAT mapping. ICMP flows reuse the port fields: src_port
+// carries the echo identifier and dst_port the ICMP type.
+message NatEntryInfo {
+  uint32 proto = 1;     // IPPROTO_* value of the learned flow
+  string src_ip = 2;    // LAN device ip
+  string dst_ip = 3;    // WAN destination ip
+  uint32 src_port = 4;  // TCP/UDP: LAN device source port, ICMP: echo identifier; host order
+  uint32 dst_port = 5;  // TCP/UDP: WAN destination port, ICMP: ICMP type; host order
+  uint32 nat_port = 6;  // translated port, or translated identifier for ICMP; host order
+  uint32 tcp_state = 7; // tcp_conntrack_state_t, 0 = none
+}
+
+message NatEntriesReply {
+  uint32 user_id = 1;
+  repeated NatEntryInfo entries = 2;
 }
 
 message ArpTableRequest {

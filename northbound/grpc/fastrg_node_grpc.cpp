@@ -22,6 +22,7 @@ extern "C"
 #include "../../src/dhcpd/dhcpd.h"
 #include "../../src/northbound.h"
 #include "../../src/pppd/pppd.h"
+#include "../../src/pppd/nat.h"
 #include "../../src/etcd_integration.h"
 #include "../../src/dnsd/dnsd.h"
 #include "../../src/dnsd/dns_cache.h"
@@ -714,9 +715,63 @@ grpc::Status FastRGNodeServiceImpl::GetPortFwdInfo(::grpc::ServerContext* contex
                 std::to_string((dip >> 16) & 0xFF) + "." +
                 std::to_string((dip >> 24) & 0xFF);
             entry->set_dip(dip_str);
-            entry->set_iport(ppp_ccb->port_fwd_table[eport].iport);
+            entry->set_iport(rte_be_to_cpu_16(ppp_ccb->port_fwd_table[eport].iport));
             entry->set_hit_count(rte_atomic64_read(&ppp_ccb->port_fwd_table[eport].hit_count));
         }
+    }
+
+    return grpc::Status::OK;
+}
+
+grpc::Status FastRGNodeServiceImpl::GetNatEntries(::grpc::ServerContext* context, const ::fastrgnodeservice::NatEntriesRequest* request, ::fastrgnodeservice::NatEntriesReply* response)
+{
+    cout << "GetNatEntries called" << endl;
+
+    U16 user_id = request->user_id();
+    U16 ccb_id = user_id - 1;
+
+    if (user_id == 0 || user_id > fastrg_ccb->user_count) {
+        std::string err = "Error! User " + std::to_string(user_id) + " does not exist";
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, err);
+    }
+
+    ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
+    if (!ppp_ccb) {
+        std::string err = "PPPoE session not initialized for user " + std::to_string(user_id);
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, err);
+    }
+    response->set_user_id(user_id);
+
+    for(U32 i=0; i<MAX_NAT_ENTRIES; i++) {
+        addr_table_t *nat_entry = &ppp_ccb->addr_table[i];
+
+        if (rte_atomic16_read(&nat_entry->is_fill) != NAT_ENTRY_READY)
+            continue;
+        /* Pairs with the rte_atomic_thread_fence(rte_memory_order_release) in
+         * nat_learning_port_reuse(): it makes the is_fill check finish before
+         * the fields are read. */
+        rte_atomic_thread_fence(rte_memory_order_acquire);
+
+        char ip_str[INET_ADDRSTRLEN];
+        struct in_addr addr;
+        NatEntryInfo *info = response->add_entries();
+
+        info->set_proto(nat_entry->proto);
+        addr.s_addr = nat_entry->src_ip;
+        inet_ntop(AF_INET, &addr, ip_str, sizeof(ip_str));
+        info->set_src_ip(ip_str);
+        addr.s_addr = nat_entry->dst_ip;
+        inet_ntop(AF_INET, &addr, ip_str, sizeof(ip_str));
+        info->set_dst_ip(ip_str);
+        info->set_src_port(rte_be_to_cpu_16(nat_entry->src_port));
+        /* NAT entry keeps ip/port as network order, so we need to swap byte
+         * order for TCP and UDP entries */
+        info->set_dst_port(nat_entry->proto == IPPROTO_ICMP ?
+            nat_entry->dst_port : rte_be_to_cpu_16(nat_entry->dst_port));
+        info->set_nat_port(rte_be_to_cpu_16(nat_entry->nat_port));
+        info->set_tcp_state(nat_entry->tcp_state);
     }
 
     return grpc::Status::OK;

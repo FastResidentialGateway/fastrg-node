@@ -447,7 +447,8 @@ STATUS reconcile_port_mapping(FastRG_t *fastrg_ccb, int ccb_id,
         } else {
             /* Pairs with port_fwd_add() before comparing the published fields. */
             rte_atomic_thread_fence(rte_memory_order_acquire);
-            if (entry->dip != dip_be || entry->iport != mappings[i].dport) {
+            if (entry->dip != dip_be ||
+                rte_be_to_cpu_16(entry->iport) != mappings[i].dport) {
                 /* Same eport exists but dip/dport has changed — update it */
                 port_fwd_remove(ppp_ccb->port_fwd_table, mappings[i].eport);
                 port_fwd_add(ppp_ccb->port_fwd_table, mappings[i].eport, dip_be, mappings[i].dport);
