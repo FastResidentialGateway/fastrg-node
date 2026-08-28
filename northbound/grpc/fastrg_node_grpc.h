@@ -25,6 +25,7 @@ class FastRGNodeServiceImpl final : public fastrgnodeservice::FastrgService::Ser
     ::grpc::Status GetFastrgHsiInfo(::grpc::ServerContext* context, const ::google::protobuf::Empty* request, ::fastrgnodeservice::FastrgHsiInfo* response) override;
     ::grpc::Status GetFastrgDhcpInfo(::grpc::ServerContext* context, const ::google::protobuf::Empty* request, ::fastrgnodeservice::FastrgDhcpInfo* response) override;
     ::grpc::Status GetPortFwdInfo(::grpc::ServerContext* context, const ::fastrgnodeservice::PortFwdInfoRequest* request, ::fastrgnodeservice::PortFwdInfoReply* response) override;
+    ::grpc::Status GetNatEntries(::grpc::ServerContext* context, const ::fastrgnodeservice::NatEntriesRequest* request, ::fastrgnodeservice::NatEntriesReply* response) override;
     ::grpc::Status GetArpTable(::grpc::ServerContext* context, const ::fastrgnodeservice::ArpTableRequest* request, ::fastrgnodeservice::ArpTableReply* response) override;
     ::grpc::Status GetNodeStatus(::grpc::ServerContext* context, const ::google::protobuf::Empty* request, ::fastrgnodeservice::NodeStatus* response) override;
     ::grpc::Status AddDnsRecord(::grpc::ServerContext* context, const ::fastrgnodeservice::DnsRecordRequest* request, ::fastrgnodeservice::DnsRecordReply* response) override;
