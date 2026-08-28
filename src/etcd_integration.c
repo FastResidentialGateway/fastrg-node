@@ -718,7 +718,7 @@ void etcd_event_dispatch(FastRG_t *fastrg_ccb, etcd_event_t *ev)
              * looks exactly the same from here. */
             if (ev->from_republish && cfg != NULL &&
                     hsi_config_matches_local(ev->user_id, cfg, fastrg_ccb)) {
-                kafka_report_hsi_config_apply(ev->user_id, "update", TRUE, NULL, NULL,
+                kafka_report_config_apply_result(ev->user_id, "update", TRUE, NULL, NULL,
                     ev->event_data.hsi.resource_version, TRUE, ev->revision);
                 break;
             }
@@ -752,12 +752,12 @@ void etcd_event_dispatch(FastRG_t *fastrg_ccb, etcd_event_t *ev)
             const char *action_str = (ev->action == HSI_ACTION_CREATE) ? "create"
                                    : (ev->action == HSI_ACTION_DELETE) ? "delete" : "update";
             if (ret == SUCCESS) {
-                kafka_report_hsi_config_apply(ev->user_id, action_str, TRUE, NULL, NULL,
+                kafka_report_config_apply_result(ev->user_id, action_str, TRUE, NULL, NULL,
                     ev->event_data.hsi.resource_version, FALSE, ev->revision);
             } else {
                 FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
                     "HSI %s apply failed for user %s (reported via Kafka)", action_str, ev->user_id);
-                kafka_report_hsi_config_apply(ev->user_id, action_str, FALSE,
+                kafka_report_config_apply_result(ev->user_id, action_str, FALSE,
                     "apply_failed", "node failed to apply HSI config",
                     ev->event_data.hsi.resource_version, FALSE, ev->revision);
             }
