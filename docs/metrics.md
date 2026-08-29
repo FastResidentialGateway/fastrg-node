@@ -193,6 +193,27 @@ drops reads 0 rather than being absent.
 | `fastrg_node_per_user_nat_alloc_fail_total` | gauge | NAT learning failures: ports exhausted, entry pool dry or hash full. A non-zero rate means new flows are being dropped. Resets on subscriber re-init as well as node restart. |
 | `fastrg_node_per_user_nat_gc_reclaimed_total` | gauge | Expired NAT mappings reclaimed by the amortized data-lcore GC. Resets on subscriber re-init as well as node restart. |
 
+### Per-subscriber IPv6 firewall pool health — labels: `node_uuid`, `user_id`
+
+IPv6 is routed, not NAT translated, so a stateful session table supplies the
+protection NAT gives IPv4 for free: an inbound packet is denied unless it
+answers a session a LAN host opened. Each subscriber owns one, holding up to
+65536 sessions; the five `_total` rows reset on subscriber re-init as well as
+node restart.
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `fastrg_node_per_user_ipv6_firewall_entries_used` | gauge | Live IPv6 firewall sessions held by this subscriber. |
+| `fastrg_node_per_user_ipv6_firewall_alloc_fail_total` | gauge | Sessions that could not be opened: pool dry or hash full. The packet is forwarded anyway, so only its reply is denied. |
+| `fastrg_node_per_user_ipv6_firewall_gc_reclaimed_total` | gauge | Expired sessions removed by the periodic cleanup. |
+| `fastrg_node_per_user_ipv6_firewall_evicted_total` | gauge | Live sessions evicted, least recently used first, to make room for a new one. |
+| `fastrg_node_per_user_ipv6_firewall_icmp6_err_passed_total` | gauge | ICMPv6 error notifications (e.g. "packet too big") from the WAN, original packet is in ipv6 firewall session table. |
+| `fastrg_node_per_user_ipv6_firewall_icmp6_err_dropped_total` | gauge | ICMPv6 error notifications from the WAN, original packet is not in ipv6 firewall session table or is malformed. |
+
+A non-zero eviction rate means the subscriber holds more concurrent sessions
+than the pool fits. Every packet the firewall denies is counted in
+`fastrg_node_per_user_dropped_packets_total` for the WAN port.
+
 ## 6. DHCP
 
 ### Per-subscriber leases — labels: `node_uuid`, `user_id` (emitted only for configured pools)
