@@ -60,7 +60,7 @@ Prometheus also adds `instance` (the scraped `host:port`) and `job` automaticall
 | `fastrg_node_restart_total` | counter | `node_uuid` | Cumulative process start count, persisted across restarts (`/var/lib/fastrg/restart_count`) — crashloop detection. |
 | `fastrg_node_snapshot_persist_ok` | gauge | `node_uuid` | `1` when the last config snapshot persist to disk succeeded (also `1` at boot before any persist happened), `0` while the last persist attempt failed — surfaces disk-full snapshot failures on the dashboard. |
 | `fastrg_node_max_user_count` | gauge | `node_uuid` | Maximum subscriber capacity computed at startup from free hugepage memory after a 512 MiB reserve, using the measured per-subscriber cost. |
-| `fastrg_node_subscriber_cost_bytes` | gauge | `node_uuid` | Hugepage bytes one subscriber costs, measured at startup and averaged over the capacity solved for. |
+| `fastrg_node_subscriber_cost_bytes` | gauge | `node_uuid` | Per subscriber hugepage usage, measured at startup by building one subscriber and adding its share of the memory pools; free hugepage memory divided by this gives max_user_count. |
 
 ```promql
 increase(fastrg_node_restart_total[15m]) > 2      # crashlooping
@@ -136,30 +136,20 @@ Labels: `node_uuid`, `nic_index`. Traffic that did not map to a known subscriber
 Labels: `node_uuid`, `nic_index`, `queue`.
 
 A shortfall is `rte_eth_tx_burst()` taking fewer packets than it was offered;
-the remainder are dropped and also show up in the per-subscriber drop counters.
-Those say how many were lost, these say on which queue — a ring that stops
-draining raises one queue while its neighbours stay flat, which a port-wide
-total would hide.
+the dropped packets are already counted in the per-subscriber dropped packet counters.
+Per-queue stats are needed so that when a single lcore gets stuck, it can be located.
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `fastrg_node_tx_queue_full_total` | gauge | Packets the queue refused. |
-| `fastrg_node_tx_queue_burst_short_total` | gauge | Bursts in which it refused at least one. |
-| `fastrg_node_tx_handoff_dropped_total` | gauge | Packets dropped because the owning lcore's handoff ring was full. |
+| `fastrg_node_tx_queue_full_total` | gauge | Packet count refused by the NIC queue. |
+| `fastrg_node_tx_queue_burst_short_total` | gauge | Count of `rte_eth_tx_burst()` calls that did not send all packets. |
+| `fastrg_node_tx_handoff_dropped_total` | gauge | Packet count dropped during handoff between lcores. |
 
-Each TX queue has exactly one lcore allowed to write it. An lcore that needs to
-send on someone else's queue posts the packet to that queue's handoff ring, and
-the owner merges the ring into its next burst. The ring is bounded, so a slow
-owner cannot back-pressure the lcore handing the packet over; when it is full
-the packet is dropped and counted in `fastrg_node_tx_handoff_dropped_total`.
+A handoff can drop packets when the ring is full; this keeps a slow consumer
+from stalling the producer.
 
-The first shortfall on each queue also writes one INFO line to the node log
-with the port, queue, lcore, offered/accepted counts and the state of six
-descriptors spread across the ring (`FULL`/`DONE`/`UNAVAIL`). Later shortfalls
-on that queue only advance the counters.
-
-Every queue index up to the build's maximum is published, so a queue that never
-drops reads 0 rather than being absent.
+When `rte_eth_tx_burst()` leaves packets unsent, only the first occurrence on
+each queue writes an INFO log line; this avoids log flooding.
 
 ## 5. PPPoE sessions
 
