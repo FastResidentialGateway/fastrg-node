@@ -343,7 +343,8 @@ int metrics_build(lighthttp_buf_t *out, const char **content_type, void *arg)
         uuid, fastrg_ccb->node_start_time);
 
     emit_header(out, "fastrg_node_restart_total", "counter",
-        "Cumulative fastrg process start count, persisted across restarts.");
+        "Cumulative process start count, persisted across restarts "
+        "(/var/lib/fastrg/restart_count) - crashloop detection.");
     lighthttp_buf_appendf(out, "fastrg_node_restart_total{node_uuid=\"%s\"} %" PRIu64 "\n",
         uuid, fastrg_ccb->node_restart_total);
 
@@ -354,13 +355,15 @@ int metrics_build(lighthttp_buf_t *out, const char **content_type, void *arg)
         uuid, config_snapshot_persist_ok() ? 1 : 0);
 
     emit_header(out, "fastrg_node_max_user_count", "gauge",
-        "Maximum subscriber capacity computed from available hugepage memory at startup.");
+        "Maximum subscriber capacity computed at startup from free hugepage memory "
+        "after a 512 MiB reserve, using the measured per-subscriber cost.");
     lighthttp_buf_appendf(out, "fastrg_node_max_user_count{node_uuid=\"%s\"} %u\n",
         uuid, fastrg_ccb->max_user_count);
 
     emit_header(out, "fastrg_node_subscriber_cost_bytes", "gauge",
-        "Hugepage bytes one subscriber costs, measured at startup and averaged "
-        "over the capacity solved for.");
+        "Per subscriber hugepage usage, measured at startup by building one subscriber "
+        "and adding its share of the memory pools; free hugepage memory divided by "
+        "this gives max_user_count.");
     lighthttp_buf_appendf(out, "fastrg_node_subscriber_cost_bytes{node_uuid=\"%s\"} %" PRIu64 "\n",
         uuid, fastrg_ccb->subscriber_cost_bytes);
 
@@ -372,7 +375,7 @@ int metrics_build(lighthttp_buf_t *out, const char **content_type, void *arg)
         {"fastrg_node_tx_bytes_total", "Total transmitted bytes per NIC port.", offsetof(struct rte_eth_stats, obytes)},
         {"fastrg_node_rx_errors_total", "Total receive errors per NIC port.", offsetof(struct rte_eth_stats, ierrors)},
         {"fastrg_node_tx_errors_total", "Total transmit errors per NIC port.", offsetof(struct rte_eth_stats, oerrors)},
-        {"fastrg_node_rx_dropped_total", "RX packets dropped (no mbuf / ring full) per NIC port.", offsetof(struct rte_eth_stats, imissed)},
+        {"fastrg_node_rx_dropped_total", "RX packets dropped - no mbuf / ring full (imissed).", offsetof(struct rte_eth_stats, imissed)},
     };
     for(size_t m=0; m<sizeof(nic_metrics)/sizeof(nic_metrics[0]); m++) {
         emit_header(out, nic_metrics[m].name, "gauge", nic_metrics[m].help);
@@ -430,17 +433,17 @@ int metrics_build(lighthttp_buf_t *out, const char **content_type, void *arg)
     static const struct { const char *name; const char *help; size_t off; } txq_metrics[] = {
         {
             "fastrg_node_tx_queue_full_total",
-            "Packets rte_eth_tx_burst refused, per TX queue.",
+            "Packet count refused by the NIC queue.",
             offsetof(struct tx_queue_stats, full_packets)
         },
         {
             "fastrg_node_tx_queue_burst_short_total",
-            "Bursts rte_eth_tx_burst did not take in full, per TX queue.",
+            "Count of rte_eth_tx_burst() calls that did not send all packets.",
             offsetof(struct tx_queue_stats, short_bursts)
         },
         {
             "fastrg_node_tx_handoff_dropped_total",
-            "Packets dropped because the owning lcore's handoff ring was full.",
+            "Packet count dropped during handoff between lcores.",
             offsetof(struct tx_queue_stats, handoff_dropped)
         },
         };
@@ -495,9 +498,9 @@ int metrics_build(lighthttp_buf_t *out, const char **content_type, void *arg)
 
     /* ---- per-user NAT pool health ---- */
     static const struct row_metric nat_metrics[] = {
-        {"fastrg_node_per_user_nat_entries_used", "Live NAT mappings held by this subscriber (pool fill).", offsetof(struct ppp_row, nat_used)},
-        {"fastrg_node_per_user_nat_alloc_fail_total", "NAT learning failures: ports exhausted, pool dry or hash full.", offsetof(struct ppp_row, nat_enospc)},
-        {"fastrg_node_per_user_nat_gc_reclaimed_total", "Expired NAT mappings reclaimed by the amortized GC.", offsetof(struct ppp_row, nat_gc_reclaimed)},
+        {"fastrg_node_per_user_nat_entries_used", "Live NAT mappings held by this subscriber (pool fill, out of 262144).", offsetof(struct ppp_row, nat_used)},
+        {"fastrg_node_per_user_nat_alloc_fail_total", "NAT learning failures: ports exhausted, entry pool dry or hash full. A non-zero rate means new flows are being dropped. Resets on subscriber re-init as well as node restart.", offsetof(struct ppp_row, nat_enospc)},
+        {"fastrg_node_per_user_nat_gc_reclaimed_total", "Expired NAT mappings reclaimed by the amortized data-lcore GC. Resets on subscriber re-init as well as node restart.", offsetof(struct ppp_row, nat_gc_reclaimed)},
     };
     for(size_t m=0; m<sizeof(nat_metrics)/sizeof(nat_metrics[0]); m++) {
         emit_header(out, nat_metrics[m].name, "gauge", nat_metrics[m].help);
@@ -512,12 +515,12 @@ int metrics_build(lighthttp_buf_t *out, const char **content_type, void *arg)
 
     /* ---- per-user IPv6 firewall pool health ---- */
     static const struct row_metric fw6_metrics[] = {
-        {"fastrg_node_per_user_ipv6_firewall_entries_used", "Live IPv6 firewall sessions held by this subscriber (pool fill).", offsetof(struct ppp_row, fw6_used)},
-        {"fastrg_node_per_user_ipv6_firewall_alloc_fail_total", "IPv6 firewall sessions not opened: pool dry or hash full.", offsetof(struct ppp_row, fw6_enospc)},
-        {"fastrg_node_per_user_ipv6_firewall_gc_reclaimed_total", "Expired IPv6 firewall sessions reclaimed by the amortized GC.", offsetof(struct ppp_row, fw6_gc_reclaimed)},
-        {"fastrg_node_per_user_ipv6_firewall_evicted_total", "Live IPv6 firewall sessions evicted to make room for a new one.", offsetof(struct ppp_row, fw6_evicted)},
-        {"fastrg_node_per_user_ipv6_firewall_icmp6_err_passed_total", "Inbound ICMPv6 error messages matching a live session.", offsetof(struct ppp_row, fw6_icmp6_err_passed)},
-        {"fastrg_node_per_user_ipv6_firewall_icmp6_err_dropped_total", "Inbound ICMPv6 error messages matching no live session.", offsetof(struct ppp_row, fw6_icmp6_err_dropped)},
+        {"fastrg_node_per_user_ipv6_firewall_entries_used", "Live IPv6 firewall sessions held by this subscriber.", offsetof(struct ppp_row, fw6_used)},
+        {"fastrg_node_per_user_ipv6_firewall_alloc_fail_total", "Sessions that could not be opened: pool dry or hash full. The packet is forwarded anyway, so only its reply is denied.", offsetof(struct ppp_row, fw6_enospc)},
+        {"fastrg_node_per_user_ipv6_firewall_gc_reclaimed_total", "Expired sessions removed by the periodic cleanup.", offsetof(struct ppp_row, fw6_gc_reclaimed)},
+        {"fastrg_node_per_user_ipv6_firewall_evicted_total", "Live sessions evicted, least recently used first, to make room for a new one.", offsetof(struct ppp_row, fw6_evicted)},
+        {"fastrg_node_per_user_ipv6_firewall_icmp6_err_passed_total", "ICMPv6 error notifications (e.g. \"packet too big\") from the WAN, original packet is in ipv6 firewall session table.", offsetof(struct ppp_row, fw6_icmp6_err_passed)},
+        {"fastrg_node_per_user_ipv6_firewall_icmp6_err_dropped_total", "ICMPv6 error notifications from the WAN, original packet is not in ipv6 firewall session table or is malformed.", offsetof(struct ppp_row, fw6_icmp6_err_dropped)},
     };
     for(size_t m=0; m<sizeof(fw6_metrics)/sizeof(fw6_metrics[0]); m++) {
         emit_header(out, fw6_metrics[m].name, "gauge", fw6_metrics[m].help);
@@ -551,7 +554,7 @@ int metrics_build(lighthttp_buf_t *out, const char **content_type, void *arg)
     }
 
     /* ---- DHCP server status tallies ---- */
-    emit_header(out, "fastrg_node_total_running_dhcp_server", "gauge", "DHCP servers currently running.");
+    emit_header(out, "fastrg_node_total_running_dhcp_server", "gauge", "DHCP servers running (dhcp_bool == 1).");
     lighthttp_buf_appendf(out, "fastrg_node_total_running_dhcp_server{node_uuid=\"%s\"} %" PRIu64 "\n", uuid, dhcp_running);
     emit_header(out, "fastrg_node_total_stopped_dhcp_server", "gauge", "DHCP servers configured but stopped.");
     lighthttp_buf_appendf(out, "fastrg_node_total_stopped_dhcp_server{node_uuid=\"%s\"} %" PRIu64 "\n", uuid, dhcp_stopped);
@@ -591,8 +594,8 @@ int metrics_build(lighthttp_buf_t *out, const char **content_type, void *arg)
     /* ---- DPDK heap ---- */
     static const struct row_metric heap_metrics[] = {
         {"fastrg_node_heap_total_bytes", "DPDK heap size on hugepages per NUMA socket.", offsetof(struct heap_row, total)},
-        {"fastrg_node_heap_used_bytes", "DPDK heap bytes in use per NUMA socket.", offsetof(struct heap_row, used)},
-        {"fastrg_node_heap_free_bytes", "DPDK heap bytes free per NUMA socket.", offsetof(struct heap_row, free)},
+        {"fastrg_node_heap_used_bytes", "Allocated (in-use) heap bytes.", offsetof(struct heap_row, used)},
+        {"fastrg_node_heap_free_bytes", "Free heap bytes.", offsetof(struct heap_row, free)},
         {"fastrg_node_heap_largest_free_block_bytes", "Largest contiguous free block (fragmentation gauge).", offsetof(struct heap_row, largest)},
     };
     for(size_t m=0; m<sizeof(heap_metrics)/sizeof(heap_metrics[0]); m++) {
@@ -605,21 +608,21 @@ int metrics_build(lighthttp_buf_t *out, const char **content_type, void *arg)
     }
 
     /* ---- DPDK mempool ---- */
-    emit_header(out, "fastrg_node_mempool_size", "gauge", "Total elements in the mempool.");
+    emit_header(out, "fastrg_node_mempool_size", "gauge", "Total element capacity.");
     for(int i=0; i<mpc.n; i++)
         lighthttp_buf_appendf(out, "fastrg_node_mempool_size{node_uuid=\"%s\",pool=\"%s\"} %u\n",
             uuid, esc(mp_rows[i].name, ebuf, sizeof(ebuf)), mp_rows[i].size);
-    emit_header(out, "fastrg_node_mempool_avail_count", "gauge", "Free elements in the mempool.");
+    emit_header(out, "fastrg_node_mempool_avail_count", "gauge", "Free elements.");
     for(int i=0; i<mpc.n; i++)
         lighthttp_buf_appendf(out, "fastrg_node_mempool_avail_count{node_uuid=\"%s\",pool=\"%s\"} %u\n",
             uuid, esc(mp_rows[i].name, ebuf, sizeof(ebuf)), mp_rows[i].avail);
-    emit_header(out, "fastrg_node_mempool_in_use_count", "gauge", "In-use elements in the mempool.");
+    emit_header(out, "fastrg_node_mempool_in_use_count", "gauge", "In-use elements.");
     for(int i=0; i<mpc.n; i++)
         lighthttp_buf_appendf(out, "fastrg_node_mempool_in_use_count{node_uuid=\"%s\",pool=\"%s\"} %u\n",
             uuid, esc(mp_rows[i].name, ebuf, sizeof(ebuf)), mp_rows[i].in_use);
 
     /* ---- hugepage ---- */
-    emit_header(out, "fastrg_node_hugepage_pinned_bytes", "gauge", "Hugepage memory locked by DPDK.");
+    emit_header(out, "fastrg_node_hugepage_pinned_bytes", "gauge", "Total hugepage memory locked by DPDK.");
     lighthttp_buf_appendf(out, "fastrg_node_hugepage_pinned_bytes{node_uuid=\"%s\"} %" PRIu64 "\n", uuid, hugepage_pinned);
 
     /* ---- NIC link state ---- */
@@ -631,7 +634,9 @@ int metrics_build(lighthttp_buf_t *out, const char **content_type, void *arg)
     for(int p=0; p<PORT_AMOUNT; p++)
         lighthttp_buf_appendf(out, "fastrg_nic_link_speed_mbps{node_uuid=\"%s\",port_id=\"%d\"} %u\n",
             uuid, p, __atomic_load_n(&fastrg_ccb->nic_link_speed[p], __ATOMIC_RELAXED));
-    emit_header(out, "fastrg_nic_link_flaps_total", "counter", "Cumulative NIC link up/down transitions.");
+    emit_header(out, "fastrg_nic_link_flaps_total", "counter",
+        "Cumulative link up/down transitions (incremented in the LSI callback, "
+        "so sub-scrape flaps are not lost).");
     for(int p=0; p<PORT_AMOUNT; p++)
         lighthttp_buf_appendf(out, "fastrg_nic_link_flaps_total{node_uuid=\"%s\",port_id=\"%d\"} %" PRIu64 "\n",
             uuid, p, __atomic_load_n(&fastrg_ccb->nic_link_flaps[p], __ATOMIC_RELAXED));

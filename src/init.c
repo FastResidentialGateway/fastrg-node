@@ -682,8 +682,8 @@ STATUS sys_init(FastRG_t *fastrg_ccb, struct fastrg_config *fastrg_cfg)
     if (ret != 0)
         goto err;
 
-    /* Must run after the ports exist: owners are recorded against the queue
-     * count the NIC actually got. */
+    /* Build the "which lcore owns which TX queue" table. Must run after port
+     * setup: the NIC may grant fewer TX queues than requested.  */
     if (dp_tx_handoff_pkt_init(fastrg_ccb) != SUCCESS) {
         ret = ERROR;
         goto err;

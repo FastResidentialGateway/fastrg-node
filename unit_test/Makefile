@@ -26,7 +26,7 @@ LDFLAGS += --coverage -lcpprest
 endif
 
 TARGET = unit-tester
-SRC = $(wildcard *.c) $(wildcard pppd/*.c) $(wildcard dhcpd/*.c) $(wildcard dhcp6/*.c) $(wildcard nd6/*.c) $(wildcard dnsd/*.c) $(wildcard cmdline/*.c)
+SRC = $(wildcard *.c) $(wildcard pppd/*.c) $(wildcard dhcpd/*.c) $(wildcard dhcpd6/*.c) $(wildcard nd6/*.c) $(wildcard dnsd/*.c) $(wildcard cmdline/*.c)
 CLI_TEST_OBJ = ip_pool_range_test_impl.o
 OBJ = $(SRC:.c=.o) $(CLI_TEST_OBJ)
 
@@ -46,7 +46,7 @@ main:
 $(CLI_TEST_OBJ): ../northbound/cmdline/ip_pool_range.c ../northbound/cmdline/ip_pool_range.h
 	$(CC) $(CFLAGS) -c $< -o $@
 $(TARGET): $(OBJ)
-	main_obj="$(OBJ) $(wildcard ../src/pppd/*.o) $(wildcard ../src/dhcpd/*.o) $(wildcard ../src/dhcp6/*.o) $(wildcard ../src/nd6/*.o) $(wildcard ../src/dnsd/*.o) \
+	main_obj="$(OBJ) $(wildcard ../src/pppd/*.o) $(wildcard ../src/dhcpd/*.o) $(wildcard ../src/dhcpd6/*.o) $(wildcard ../src/nd6/*.o) $(wildcard ../src/dnsd/*.o) \
         $(filter-out ../src/main.o, $(wildcard ../src/*.o)) \
         $(filter-out ../northbound/grpc/fastrg_grpc_client.o, $(wildcard ../northbound/grpc/*.o)) \
         $(wildcard ../northbound/controller/*.o) $(wildcard ../northbound/controller/proto/*.o)"; \

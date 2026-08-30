@@ -27,8 +27,8 @@ typedef enum {
 // PPPoE desired state lives in config.desire_status; observed/actual status is
 // reported to the controller via Kafka (no longer stored in etcd metadata).
 // resource_version is the controller-stamped version inside the JSON;
-// mod_revision is etcd's own ModRevision for the key this value was read from,
-// which is used by the node to report to the controller to indicate which version
+// mod_revision is etcd's own ModRevision for the key which this node reads from,
+// and is used by the node to report to the controller to indicate which version
 // the node uses.
 typedef struct {
     hsi_config_t config;

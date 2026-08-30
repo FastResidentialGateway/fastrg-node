@@ -426,8 +426,7 @@ U16 encode_arp_request(U8 *buf, const struct rte_ether_addr *src_mac, U32 src_ip
  * @param tx_q
  *      LAN TX queue id
  * @param pool
- *      Mempool to allocate the request from; must be the pool the target queue
- *      already carries, so one queue never mixes two pools
+ *      Mempool to allocate the request from; each queue should use corresponding pool
  * @return
  *      SUCCESS on success, ERROR on failure
  */

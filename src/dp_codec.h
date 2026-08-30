@@ -135,7 +135,7 @@ static int encaps_udp(FastRG_t *fastrg_ccb, struct rte_mbuf **single_pkt,
         build_icmp_unreach(fastrg_ccb, pkt, ccb_id, eth_hdr, *vlan_header, ip_hdr);
         count_rx_packet(fastrg_ccb, *single_pkt, LAN_PORT, ccb_id);
         count_tx_packet(fastrg_ccb, pkt, LAN_PORT, ccb_id);
-        /* Packet sent via LAN port is belong to wan to lan lcore */
+        /* Packet sent via LAN port is belong to wan->lan lcore */
         if (unlikely(send_pkt_to_other_lcore(fastrg_ccb, LAN_PORT, lan_tx_queue, pkt) == ERROR))
             drop_packet(fastrg_ccb, pkt, LAN_PORT, ccb_id);
         drop_packet(fastrg_ccb, *single_pkt, LAN_PORT, ccb_id);
@@ -244,7 +244,7 @@ static int encaps_tcp(FastRG_t *fastrg_ccb, struct rte_mbuf **single_pkt,
         build_icmp_unreach(fastrg_ccb, pkt, ccb_id, eth_hdr, *vlan_header, ip_hdr);
         count_rx_packet(fastrg_ccb, *single_pkt, LAN_PORT, ccb_id);
         count_tx_packet(fastrg_ccb, pkt, LAN_PORT, ccb_id);
-        /* Packet sent via LAN port is belong to wan to lan lcore */
+        /* Packet sent via LAN port is belong to wan->lan lcore */
         if (unlikely(send_pkt_to_other_lcore(fastrg_ccb, LAN_PORT, lan_tx_queue, pkt) == ERROR))
             drop_packet(fastrg_ccb, pkt, LAN_PORT, ccb_id);
         drop_packet(fastrg_ccb, *single_pkt, LAN_PORT, ccb_id);

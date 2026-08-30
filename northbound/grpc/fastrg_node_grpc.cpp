@@ -1123,11 +1123,9 @@ grpc::Status FastRGNodeServiceImpl::GetFastrgHsiInfo(::grpc::ServerContext* cont
                                    std::to_string(*(((U8 *)&(ppp_ccb->hsi_secondary_dns))+1)) + "." +
                                    std::to_string(*(((U8 *)&(ppp_ccb->hsi_secondary_dns))+2)) + "." +
                                    std::to_string(*(((U8 *)&(ppp_ccb->hsi_secondary_dns))+3)));
-                /* The gate is what makes the IPv6 fields safe to read from this
-                 * worker thread. Closed (IPv6 off, IPV6CP down, or a lease
-                 * being renewed) leaves them empty, which every consumer reads
+                /* When gate is closed, all IPv6 fields stay empty, which every consumer reads
                  * as "not reported". */
-                if (pppd_ipv6_dp_gate_open(ppp_ccb)) {
+                if (pppd_ipv6_dp_gate_open(ppp_ccb) == TRUE) {
                     char v6_addr[PPPD_IPV6_ADDR_STRLEN] = { 0 };
                     char v6_prefix[PPPD_IPV6_PREFIX_STRLEN] = { 0 };
                     char v6_dns[PPPD_IPV6_DNS_STRLEN] = { 0 };
@@ -1135,8 +1133,7 @@ grpc::Status FastRGNodeServiceImpl::GetFastrgHsiInfo(::grpc::ServerContext* cont
                         v6_prefix, sizeof(v6_prefix), v6_dns, sizeof(v6_dns));
                     hsi_info->set_ipv6_addr(v6_addr);
                     hsi_info->set_ipv6_pd_prefix(v6_prefix);
-                    /* One formatter for every northbound path: split its
-                     * comma-separated list back out into repeated entries. */
+
                     std::string dns_list(v6_dns);
                     for (size_t start = 0; start < dns_list.size(); ) {
                         size_t sep = dns_list.find(',', start);
@@ -1660,7 +1657,8 @@ grpc::Status FastRGNodeServiceImpl::SetIpv6(::grpc::ServerContext* context,
     ppp_ccb->ipv6_enabled = enable ? TRUE : FALSE;
     pppd_ipv6_dp_gate_update(ppp_ccb);
 
-    /* SDN mode but etcd down: queue the field write to flush on reconnect. */
+    /* SDN mode but etcd down: record this edit in the offline queue so it is
+    reported to the controller after reconnection. */
     if (etcd_client_is_initialized() && fastrg_ccb && fastrg_ccb->node_uuid) {
         if (!snapshot_field_edit(SNAPSHOT_KIND_HSI,
                 std::to_string(user_id).c_str(), SNAPSHOT_FIELD_KIND_IPV6,

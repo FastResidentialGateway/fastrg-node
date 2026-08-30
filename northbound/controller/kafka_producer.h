@@ -169,7 +169,8 @@ int64_t kafka_report_config_offline_delete(kafka_offline_edit_kind_t kind,
  * @fn kafka_report_offline_edits
  *
  * @brief Run before boot-load/reconcile copies etcd into the snapshot: that
- *        copy clears dirty flags and would silently drop unreported edits.
+ *        copy clears dirty flag in snapshot record and would silently drop 
+ *        unreported edits.
  * @return
  *      TRUE when every dirty entry was reported; FALSE when etcd is
  *      unreachable or an entry is still pending, retried on the next tick.

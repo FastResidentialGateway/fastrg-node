@@ -110,9 +110,6 @@ void *metrics_server_run(void *arg);
  * @fn metrics_server_wait_ready
  * @brief Block until the metrics thread publishes whether its listener came up.
  *
- *        Each metrics thread launch pairs with exactly one wait: the verdict is
- *        consumed here and the latch re-arms for the next launch.
- *
  * @return
  *      0 when the listener is up, -1 when it failed to start
  */

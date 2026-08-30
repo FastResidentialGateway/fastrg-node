@@ -16,7 +16,7 @@ typedef struct FastRG FastRG_t;
 struct fastrg_config {
     char unix_sock_path[256];
     char node_grpc_ip_port[256];
-    U16 node_grpc_port;        /* same port as a number, reported to the controller at registration */
+    U16 node_grpc_port;        /* reported to the controller at registration */
     char log_path[256];
     char controller_address[256];
     char etcd_endpoints[512];
