@@ -463,7 +463,7 @@ STATUS kafka_producer_init(const char *brokers, const char *node_uuid) {
         rd_kafka_conf_destroy(conf);
         return ERROR;
     }
-    // Bound the in-memory queue so an outage cannot grow memory.
+    // Bound the in-memory queue so an outage cannot exceed the memory limit.
     rd_kafka_conf_set(conf, "queue.buffering.max.messages", "100000", errstr, sizeof(errstr));
     rd_kafka_conf_set_dr_msg_cb(conf, dr_msg_cb);
 
@@ -499,13 +499,20 @@ void kafka_producer_cleanup(void) {
     if (!g_rk)
         return;
 
-    /* Purge queued and in-flight messages so flush returns quickly. */
+    /* Cancel all queued and in-flight messages immediately so flush returns
+     * quickly even when the broker is unreachable. */
     rd_kafka_purge(g_rk, RD_KAFKA_PURGE_F_QUEUE |
                          RD_KAFKA_PURGE_F_INFLIGHT |
                          RD_KAFKA_PURGE_F_NON_BLOCKING);
     rd_kafka_flush(g_rk, 1000);
 
-    /* destroy blocks until internal threads exit; wait 2s, then detach. */
+    /* rd_kafka_destroy() blocks until all internal threads exit. Normally that
+     * is immediate, but with the broker unreachable the reconnect-backoff
+     * thread may sleep up to reconnect.backoff.max.ms, so shutdown must not
+     * wait on it forever. Detaching is not free either: a detached thread
+     * racing process exit can crash during teardown. So wait up to 2 seconds
+     * for the fast path and detach only when destroy is actually stuck; the
+     * OS cleans up the leftover handle. */
     rd_kafka_t *rk = g_rk;
     g_rk = nullptr;
     std::packaged_task<void()> destroy_task([rk] { rd_kafka_destroy(rk); });
@@ -715,7 +722,8 @@ extern "C" BOOL kafka_report_offline_edits(void) {
     config_snapshot_foreach_dirty(count_dirty_cb, &dirty);
     if (dirty == 0)
         return TRUE;   // nothing pending
-    // Skip when etcd is unreachable; entries stay dirty for the watchdog.
+    // Skip when etcd is unreachable because we need etcd to compare configs;
+    // entries stay dirty and are reported again after reconnection.
     if (!etcd_client_is_connected())
         return FALSE;
     OfflineReportCtx ctx;
