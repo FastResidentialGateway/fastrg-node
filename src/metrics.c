@@ -427,9 +427,6 @@ int metrics_build(lighthttp_buf_t *out, const char **content_type, void *arg)
     }
 
     /* ---- TX queue shortfalls ---- */
-    /* Emitted per (port, queue) because a ring that stops draining shows up on
-     * one queue while its neighbours keep running; a port-wide total hides
-     * exactly that. */
     static const struct { const char *name; const char *help; size_t off; } txq_metrics[] = {
         {
             "fastrg_node_tx_queue_full_total",

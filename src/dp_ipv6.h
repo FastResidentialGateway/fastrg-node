@@ -3,14 +3,9 @@
 
      IPv6 forwarding helpers shared by every data-plane RX loop.
 
-     Classification is split from packet rewriting so both halves are plain
-     functions a unit test can drive with a hand-built frame: the classifiers
-     only read the packet and return a verdict, the transforms apply that
-     verdict to the mbuf.
-
      Routed forwarding, no NAT66: addresses are never rewritten, so L4
-     checksums stay valid across both directions and IPv6 (which has no
-     header checksum) needs no checksum work for the hop-limit decrement.
+     checksums stay valid and the hop-limit decrement needs no checksum
+     fixup either.
 /\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\*/
 
 #ifndef _DP_IPV6_H_
@@ -212,9 +207,8 @@ static __always_inline ipv6_lan_verdict_t ipv6_lan_classify(
             pkt_len != (U32)IPV6_L2_LEN + sizeof(*ip6) + payload_len))
         return IPV6_LAN_DROP;
 
-    /* Neighbor discovery reaches the control plane whatever the forwarding
-     * gate says: RA replies and neighbor cache learning are what make
-     * forwarding possible in the first place. */
+    /* Neighbor discovery must reach the control plane even when the
+     * forwarding gate is closed. */
     if (ip6->proto == IPPROTO_ICMPV6 && payload_len >= ICMP6_PTB_HDR_LEN) {
         U8 icmp6_type = *((const U8 *)(ip6 + 1));
 
@@ -226,8 +220,6 @@ static __always_inline ipv6_lan_verdict_t ipv6_lan_classify(
     if (!pppd_ipv6_dp_gate_open(ppp_ccb))
         return IPV6_LAN_DROP;
 
-    /* Not addressed to the gateway MAC: forward the frame raw, the same way
-     * the IPv4 paths pass non-gateway traffic straight through. */
     if (unlikely(!rte_is_same_ether_addr(&eth_hdr->dst_addr,
             &fastrg_ccb->nic_info.hsi_lan_mac)))
         return IPV6_LAN_PASSTHROUGH;
@@ -237,9 +229,8 @@ static __always_inline ipv6_lan_verdict_t ipv6_lan_classify(
     if (!ipv6_addr_in_lan_prefix(ppp_ccb, src_ip))
         return IPV6_LAN_DROP;
 
-    /* Destinations that must never leave through the WAN: on-link traffic
-     * (hosts talk to each other directly over L2), and anything without a
-     * routable destination. */
+    /* Destinations that must never leave through the WAN: on-link, and
+     * anything not routable. */
     if (ipv6_addr_is_multicast(dst_ip) || ipv6_addr_is_link_local(dst_ip) ||
             ipv6_addr_in_lan_prefix(ppp_ccb, dst_ip) ||
             ipv6_addr_high64_is_zero(dst_ip))
@@ -287,9 +278,8 @@ static __always_inline ipv6_wan_verdict_t ipv6_wan_classify(ppp_ccb_t *ppp_ccb,
             ip6_len != sizeof(*ip6) + payload_len))
         return IPV6_WAN_DROP;
 
-    /* Only the LAN /64 carries assigned hosts. The rest of the delegated /56
-     * stays unallocated, so those destinations fall through to the drop
-     * below instead of being forwarded or queued to the control plane. */
+    /* Only the LAN /64 carries assigned hosts; the rest of the delegated /56
+     * is unallocated and falls through to the drop below. */
     if (ipv6_addr_in_lan_prefix(ppp_ccb, dst_ip))
         return IPV6_WAN_FORWARD;
 
@@ -377,7 +367,6 @@ static __always_inline U16 ipv6_build_packet_too_big(ppp_ccb_t *ppp_ccb,
  * @brief Build the ICMPv6 Packet Too Big answer to an oversized LAN packet and
  *        free the oversized packet. Mirrors build_icmp_unreach for IPv4.
  *
- *
  * @param fastrg_ccb
  *      FastRG control block
  * @param ppp_ccb
@@ -393,8 +382,8 @@ static __always_inline U16 ipv6_build_packet_too_big(ppp_ccb_t *ppp_ccb,
  * @param ip6
  *      IPv6 header of the oversized packet
  * @param pool
- *      Mempool to build the reply from. The caller passes the pool the queue
- *      it will leave on already carries.
+ *      Mempool to build the reply from; must be the pool of the TX queue the
+ *      reply will leave on
  * @return
  *      Reply packet for the caller to send, or NULL when there is nothing to
  *      send
@@ -404,8 +393,6 @@ static __always_inline struct rte_mbuf *build_ipv6_packet_too_big_reply(FastRG_t
     struct rte_ether_hdr *eth_hdr, vlan_header_t *vlan_hdr,
     struct rte_ipv6_hdr *ip6, struct rte_mempool *pool)
 {
-    /* Reply comes from the pool the other packets on that queue came from:
-     * one queue carries one pool. */
     struct rte_mbuf *reply = rte_pktmbuf_alloc(pool);
     U16 reply_len;
 
@@ -482,13 +469,13 @@ static __always_inline void ipv6_lan_to_wan_encap(FastRG_t *fastrg_ccb,
  * @fn ipv6_wan_to_lan_forward
  *
  * @brief Resolve the LAN host of a PPPoE-encapsulated IPv6 packet, decrement
- *        its hop limit, rewrite the Ethernet header and strip the PPPoE
- *        header. The packet is left untouched unless the result is
- *        IPV6_FWD_OK, so a caller escalating a neighbor miss still holds the
- *        frame exactly as it arrived.
+ *        its hop limit and replace the PPPoE header with an Ethernet header.
  *
- *        The neighbor cache is never written here: the control plane stays
- *        its single writer.
+ *        The packet is untouched unless the result is IPV6_FWD_OK, so the
+ *        caller still holds the frame exactly as it arrived.
+ *
+ *        The neighbor cache is never written here: the control plane is its
+ *        single writer.
  *
  * @param fastrg_ccb
  *      FastRG control block
@@ -547,9 +534,9 @@ static __always_inline ipv6_forward_result_t ipv6_wan_to_lan_forward(
  *
  * @brief Hand an unresolvable WAN->LAN packet to the control plane so it can
  *        solicit the destination, at most once per subscriber per second.
- *        Every other packet in the window (and the loser of the race) is
- *        dropped, so traffic aimed at an unresolved address cannot flood the
- *        control-plane ring. The packet is always consumed.
+ *
+ *        Every other packet in the window, and the loser of the CAS race, is
+ *        dropped. The packet is always consumed.
  *
  * @param fastrg_ccb
  *      FastRG control block
@@ -613,10 +600,7 @@ static __always_inline void ipv6_firewall_lan_to_wan_encap(FastRG_t *fastrg_ccb,
  *        an open session, decapsulate it for the LAN.
  *
  *        A rejected packet is reported as IPV6_FWD_FIREWALL_DROP with the
- *        frame exactly as it arrived, and the caller frees it. Rejecting it
- *        here also means an unsolicited scan of the LAN prefix never reaches
- *        neighbor resolution, so it cannot make this node solicit addresses
- *        nobody asked about.
+ *        frame exactly as it arrived; the caller frees it.
  *
  * @param fastrg_ccb
  *      FastRG control block

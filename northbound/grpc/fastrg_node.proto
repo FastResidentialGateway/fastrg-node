@@ -255,7 +255,7 @@ message NatEntriesRequest {
   uint32 user_id = 1;
 }
 
-// One live dynamic NAT mapping. ICMP flows reuse the port fields: src_port
+// Active NAT entry info. ICMP flows reuse the port fields: src_port
 // carries the echo identifier and dst_port the ICMP type.
 message NatEntryInfo {
   uint32 proto = 1;     // IPPROTO_* value of the learned flow

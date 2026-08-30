@@ -3,15 +3,9 @@
 
      Per-subscriber IPv6 stateful firewall.
 
-     IPv6 is routed, not translated, so nothing stops the internet from
-     addressing a LAN host directly the way NAT does for IPv4. This table
-     supplies that missing protection: inbound traffic is denied unless it
-     belongs to a session a LAN host opened.
-
-     One hash serves both directions. The key is always written LAN side
-     first, so an outbound packet and its reply produce the same key and one
-     insertion covers the flow — unlike NAT, which needs two hashes because it
-     rewrites the port.
+     Inbound traffic is denied unless it belongs to a session a LAN host
+     opened. One hash serves both directions: the key is always written
+     LAN side first, so a packet and its reply produce the same key.
 
   Designed by THE on Aug 15, 2026
 /\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\*/
@@ -37,13 +31,12 @@
 #include "pppd.h"
 #include "tcp_conntrack.h"
 
-/** Idle lifetime of a UDP or ICMPv6 echo session. TCP uses the per-state
- *  conntrack timeouts instead, which the state machine writes on top. */
+/** Idle lifetime of a UDP or ICMPv6 echo session; TCP uses the per-state
+ *  conntrack timeouts instead. */
 #define IPV6_FIREWALL_ENTRY_TIMEOUT_SEC 10
 
-/** Slots examined per amortized GC call. Bounded so the cost stays small on
- *  the RX loop; the per-subscriber cursor persists, so successive calls walk
- *  the whole pool. */
+/** Slots examined per amortized GC call; the per-subscriber cursor persists,
+ *  so successive calls walk the whole pool. */
 #define IPV6_FIREWALL_GC_SCAN_CHUNK 512
 
 #define IPV6_FIREWALL_ENTRY_FREE  0
@@ -63,8 +56,8 @@
 /**
  * @fn icmp6_type_is_error
  *
- * @brief Tell an ICMPv6 error message from an informational one: types 1 to 4
- *        report what happened to a packet, 128 and up are queries and replies.
+ * @brief Tell an ICMPv6 error message (types 1 to 4) from an informational
+ *        one (128 and up).
  *
  * @param type
  *        ICMPv6 type byte
@@ -79,8 +72,7 @@ static __always_inline BOOL icmp6_type_is_error(U8 type)
 /**
  * @fn ipv6_firewall_expiry_cycles
  *
- * @brief Compute the absolute TSC deadline of a new or refreshed session
- *        (now + IPV6_FIREWALL_ENTRY_TIMEOUT_SEC seconds).
+ * @brief Compute the absolute TSC deadline of a new or refreshed session.
  *
  * @return Deadline in CPU cycles
  */
@@ -113,9 +105,9 @@ static __always_inline int ipv6_firewall_entry_is_expired(const ppp_ccb_t *ppp_c
  * @fn ipv6_firewall_key_build
  *
  * @brief Fill a session key from an already normalized LAN-first tuple.
- *        Zeroing first is mandatory, not tidiness: rte_hash compares the raw
- *        key bytes, padding included, so a key built field by field over stack
- *        garbage would hash differently in each direction.
+ *
+ *        rte_hash compares raw key bytes, padding included, so the key must
+ *        be zeroed before any field is written.
  *
  * @param key
  *        [out] Key to fill
@@ -145,13 +137,11 @@ static __always_inline void ipv6_firewall_key_build(ipv6_firewall_key_t *key,
 /**
  * @fn ipv6_firewall_key_from_packet
  *
- * @brief Build the session key of one IPv6 packet. An inbound packet takes its
- *        destination as the LAN side, an outbound one its source, so both
+ * @brief Build the session key of one IPv6 packet, LAN side first, so both
  *        directions of a flow land on the same key.
  *
- *        Trackable protocols are TCP, UDP and the ICMPv6 echo pair, the latter
- *        keyed by its identifier in place of a port. Extension headers are not
- *        walked, so a packet carrying one has no readable L4 tuple here.
+ *        Extension headers are not walked, so a packet carrying one is not
+ *        trackable.
  *
  * @param ip6
  *        IPv6 header
@@ -182,8 +172,7 @@ static __always_inline BOOL ipv6_firewall_key_from_packet(const struct rte_ipv6_
     } else if (ip6->proto == IPPROTO_ICMPV6) {
         if (unlikely(l4_len < ICMP6_PTB_HDR_LEN))
             return FALSE;
-        /* Echo is the only tracked ICMPv6 exchange, and only in its natural
-         * direction: the request leaves the LAN, the reply comes back. */
+        /* Echo is the only tracked ICMPv6 exchange. */
         if (l4[0] != (inbound ? ICMP6_ECHO_REPLY : ICMP6_ECHO_REQUEST))
             return FALSE;
         rte_memcpy(&lan_port, l4 + 4, sizeof(lan_port)); /* echo identifier */
@@ -200,9 +189,7 @@ static __always_inline BOOL ipv6_firewall_key_from_packet(const struct rte_ipv6_
 /**
  * @fn ipv6_firewall_conntrack_view
  *
- * @brief Point a conntrack view at an IPv6 firewall session. The deadline the
- *        state machine writes lives in the subscriber's SoA array, not in the
- *        entry, so the slot index is needed alongside the entry.
+ * @brief Point a conntrack view at an IPv6 firewall session.
  *
  * @param ppp_ccb
  *        Subscriber control block
@@ -234,9 +221,8 @@ static __always_inline tcp_conntrack_view_t ipv6_firewall_conntrack_view(
 /**
  * @fn ipv6_firewall_hash_free_cb
  *
- * @brief RCU defer-queue callback the hash runs once every data-plane reader
- *        has passed a quiescent state after a key deletion: only then can no
- *        reader still hold the entry, so only then may the slot be recycled.
+ * @brief RCU defer-queue callback: recycles the slot once every data-plane
+ *        reader has passed a quiescent state.
  *
  * @param p
  *        ppp_ccb_t of the owning subscriber (rcu cfg key_data_ptr)
@@ -248,8 +234,8 @@ static inline void ipv6_firewall_hash_free_cb(void *p, void *key_data)
     ppp_ccb_t *ppp_ccb = (ppp_ccb_t *)p;
     U32 idx = (U32)(uintptr_t)key_data;
 
-    /* Both SoA stamps go to zero first, which is what marks the slot free to
-     * the GC and the LRU scan; neither then touches the entry cache line. */
+    /* Zeroing both SoA stamps is what marks the slot free to the GC and the
+     * LRU scan. */
     __atomic_store_n(&ppp_ccb->ipv6_firewall_expire_at[idx], 0, __ATOMIC_RELAXED);
     __atomic_store_n(&ppp_ccb->ipv6_firewall_last_used[idx], 0, __ATOMIC_RELAXED);
     rte_atomic16_set(&ppp_ccb->ipv6_firewall_table[idx].is_fill, IPV6_FIREWALL_ENTRY_FREE);
@@ -259,10 +245,10 @@ static inline void ipv6_firewall_hash_free_cb(void *p, void *key_data)
 /**
  * @fn ipv6_firewall_table_reset
  *
- * @brief Flush every session of a subscriber: empty the hash and refill the
- *        free-list with all pool indices. Control-plane only (subscriber
- *        re-init), must not race data-plane traffic for this subscriber —
- *        callers close the IPv6 forwarding gate first.
+ * @brief Flush every session of a subscriber and refill the free-list.
+ *
+ *        Control-plane only: the caller must close the IPv6 forwarding gate
+ *        first, so no data-plane traffic races this subscriber.
  *
  * @param ppp_ccb
  *        Subscriber control block
@@ -271,11 +257,9 @@ static inline void ipv6_firewall_table_reset(ppp_ccb_t *ppp_ccb)
 {
     unsigned int freed, pending, avail;
 
-    /* Drain the defer queue before rebuilding: a deferred free surviving the
-     * reset would fire later and push its (now re-issued) slot index into the
-     * refilled free ring, handing one entry to two sessions.
-     * Terminates: data lcores report quiescent every poll loop even when
-     * idle, and at first init the queue is simply empty. */
+    /* Drain the defer queue first: a deferred free surviving the reset would
+     * push an already re-issued slot index into the refilled free ring.
+     * Data lcores report quiescent every poll loop, so this terminates. */
     do {
         freed = pending = avail = 0;
         rte_hash_rcu_qsbr_dq_reclaim(ppp_ccb->ipv6_firewall_hash, &freed, &pending, &avail);
@@ -321,9 +305,8 @@ static inline void ipv6_firewall_table_destroy(ppp_ccb_t *ppp_ccb)
 /**
  * @fn ipv6_firewall_table_init
  *
- * @brief Create-once (find-existing on re-create, mirroring the NAT naming
- *        rules) the per-subscriber session hash and free-list ring, attach the
- *        shared QSBR RCU for deferred reclaim, and fill the free-list.
+ * @brief Create the per-subscriber session hash and free-list ring, attach
+ *        the shared QSBR RCU for deferred reclaim, and fill the free-list.
  *
  * @param ppp_ccb
  *        Subscriber control block
@@ -386,11 +369,11 @@ static inline STATUS ipv6_firewall_table_init(ppp_ccb_t *ppp_ccb, U16 ccb_id,
 /**
  * @fn ipv6_firewall_gc_scan_by_ccb
  *
- * @brief Amortized garbage collection: scan up to max_slots pool slots from
- *        the per-subscriber cursor and unlink every expired session. Slot
- *        indices flow back to the free-list through the RCU defer-queue
- *        callback once readers are quiescent. Safe from any lcore — the hash
- *        is multi-writer and a duplicate delete just returns ENOENT.
+ * @brief Amortized garbage collection: unlink every expired session in up to
+ *        max_slots pool slots from the per-subscriber cursor.
+ *
+ *        Safe from any lcore: the hash is multi-writer and a duplicate delete
+ *        just returns ENOENT.
  *
  * @param ppp_ccb
  *        Subscriber control block
@@ -410,9 +393,7 @@ static inline U32 ipv6_firewall_gc_scan_by_ccb(ppp_ccb_t *ppp_ccb, U32 max_slots
     for(U32 n=0; n<max_slots; n++) {
         U32 idx = (start + n) % IPV6_FIREWALL_MAX_ENTRIES;
 
-        /* The hot loop reads only the SoA deadline array — 8 slots per cache
-         * line, sequential, prefetcher-friendly; 0 = free slot. Entry lines
-         * are touched only for actual expired hits. */
+        /* Deadline 0 marks a free slot. */
         U64 deadline = __atomic_load_n(&ppp_ccb->ipv6_firewall_expire_at[idx], __ATOMIC_RELAXED);
         if (deadline == 0 || deadline > now)
             continue;
@@ -427,9 +408,8 @@ static inline U32 ipv6_firewall_gc_scan_by_ccb(ppp_ccb_t *ppp_ccb, U32 max_slots
         __atomic_fetch_add(&ppp_ccb->ipv6_firewall_gc_reclaimed, (U64)reclaimed,
             __ATOMIC_RELAXED);
 
-    /* Deleting a few keys does not fill the defer queue, so its automatic
-     * reclaim threshold may never trigger. Drain it on every GC tick so freed
-     * slots actually reach the free ring. */
+    /* The defer queue's automatic reclaim threshold may never be reached, so
+     * drain it on every GC tick. */
     rte_hash_rcu_qsbr_dq_reclaim(ppp_ccb->ipv6_firewall_hash, &freed, &pending, &available);
     return reclaimed;
 }
@@ -437,17 +417,10 @@ static inline U32 ipv6_firewall_gc_scan_by_ccb(ppp_ccb_t *ppp_ccb, U32 max_slots
 /**
  * @fn ipv6_firewall_evict_lru
  *
- * @brief Unlink the session that has gone unused the longest, so a new one can
- *        take its slot. Only the insert path calls this, under the insert
- *        lock, so a subscriber never has two evictors at once.
+ * @brief Unlink the least recently used session so a new one can take its
+ *        slot.
  *
- *        The scan reads the recency array alone, 512 KB sequential, and picks
- *        the smallest non-zero stamp. Stamps keep moving while it runs, so the
- *        victim is the oldest as of the moment it was read — that only decides
- *        which session is dropped, never memory safety: the slot still comes
- *        back through the RCU defer queue like any other deletion. Losing the
- *        key to a concurrent GC delete is equally harmless, the caller simply
- *        finds no free slot this time.
+ *        Caller must hold the subscriber's insert lock.
  *
  * @param ppp_ccb
  *        Subscriber control block
@@ -482,10 +455,8 @@ static inline int ipv6_firewall_evict_lru(ppp_ccb_t *ppp_ccb)
 /**
  * @fn ipv6_firewall_slot_alloc
  *
- * @brief Pop a free pool slot. When the free-list is empty, reclaim expired
- *        sessions first — those cost a live connection nothing — and only then
- *        evict the least recently used live one, so a new connection can
- *        always be opened.
+ * @brief Pop a free pool slot, falling back to expired-session reclaim and
+ *        then LRU eviction.
  *
  * @param ppp_ccb
  *        Subscriber control block
@@ -524,9 +495,10 @@ static inline STATUS ipv6_firewall_slot_alloc(ppp_ccb_t *ppp_ccb, U32 *idx)
 /**
  * @fn ipv6_firewall_lookup
  *
- * @brief Find a session by key, without judging its age. Lock-free; the
- *        acquire fence pairs with the release fence the insert publishes the
- *        entry with, so a hit may read the entry fields right away.
+ * @brief Find a session by key, expired or not.
+ *
+ *        The acquire fence pairs with the release fence in
+ *        ipv6_firewall_insert(), so a hit may read the entry fields.
  *
  * @param ppp_ccb
  *        Subscriber control block
@@ -554,8 +526,7 @@ static __always_inline ipv6_firewall_entry_t *ipv6_firewall_lookup(ppp_ccb_t *pp
  * @fn ipv6_firewall_lookup_live
  *
  * @brief Session lookup for inbound packets: an expired session counts as a
- *        miss and is unlinked on the spot. The WAN side must never revive one,
- *        or a single early packet would hold the door open indefinitely.
+ *        miss and is unlinked on the spot, never revived.
  *
  * @param ppp_ccb
  *        Subscriber control block
@@ -583,11 +554,10 @@ static __always_inline ipv6_firewall_entry_t *ipv6_firewall_lookup_live(ppp_ccb_
 /**
  * @fn ipv6_firewall_mark_used
  *
- * @brief Record traffic on a session: push its idle deadline out and stamp the
- *        LRU recency. Both writes coalesce to at most one per session per
- *        second, so the arrays every data lcore shares stay in the shared
- *        cache state under per-packet load. One second is plenty of resolution
- *        for "used just now" versus "idle for minutes".
+ * @brief Record traffic on a session: push its idle deadline out and stamp
+ *        the LRU recency.
+ *
+ *        Both writes coalesce to at most one per session per second.
  *
  * @param ppp_ccb
  *        Subscriber control block
@@ -608,13 +578,12 @@ static __always_inline void ipv6_firewall_mark_used(ppp_ccb_t *ppp_ccb, U32 idx)
 /**
  * @fn ipv6_firewall_insert
  *
- * @brief Open a new session. Takes the per-subscriber insert lock and
- *        re-checks the hash first, because rte_hash_add_key_data silently
- *        replaces an existing key and would orphan the slot behind it.
+ * @brief Open a new session under the per-subscriber insert lock, re-checking
+ *        the hash because rte_hash_add_key_data silently replaces an existing
+ *        key.
  *
- *        The entry is filled, its deadline and recency stamped, and only then
- *        published: the release fence orders all of that ahead of the READY
- *        flag and the hash insertion that expose it to other lcores.
+ *        The release fence orders the entry writes ahead of the READY flag
+ *        and the hash insertion that expose it to other lcores.
  *
  * @param ppp_ccb
  *        Subscriber control block
@@ -682,19 +651,11 @@ static inline ipv6_firewall_entry_t *ipv6_firewall_insert(ppp_ccb_t *ppp_ccb,
 /**
  * @fn ipv6_firewall_learn
  *
- * @brief Open or renew the session an outbound packet belongs to, so its reply
- *        is allowed back in. Called for every LAN to WAN packet the classifier
- *        decided to forward.
+ * @brief Open or renew the session an outbound packet belongs to, so its
+ *        reply is allowed back in.
  *
- *        The LAN side is trusted, so an expired session is revived rather than
- *        treated as a miss. A packet with no trackable tuple (unknown
- *        protocol, extension header, truncated L4) is still forwarded, it just
- *        gets no session — its reply will be dropped.
- *
- *        When no slot is available the packet also goes out without a session.
- *        The next outbound packet of the flow (a TCP retransmit, the next UDP
- *        datagram) finds the reclaimed slot and opens it, so a connection
- *        costs at most one retry rather than failing.
+ *        A packet that gets no session (untrackable tuple, no slot available)
+ *        is still forwarded, but its reply will be dropped.
  *
  * @param ppp_ccb
  *        Subscriber control block
@@ -711,8 +672,7 @@ static __always_inline void ipv6_firewall_learn(ppp_ccb_t *ppp_ccb,
 
     if (unlikely(ppp_ccb->ipv6_firewall_hash == NULL))
         return;
-    /* TCP needs its whole header here: conntrack reads the data offset, the
-     * flags, the sequence, the ack and the window. */
+    /* conntrack reads the whole TCP header, so require it before learning. */
     if (ip6->proto == IPPROTO_TCP && unlikely(payload_len < sizeof(struct rte_tcp_hdr)))
         return;
     if (ip6->proto == IPPROTO_UDP && unlikely(payload_len < sizeof(struct rte_udp_hdr)))
@@ -735,11 +695,8 @@ static __always_inline void ipv6_firewall_learn(ppp_ccb_t *ppp_ccb,
         U16 hdr_len = (U16)(((tcp->data_off >> 4) & 0x0F) * 4);
         U16 tcp_payload = payload_len > hdr_len ? (U16)(payload_len - hdr_len) : 0;
 
-        /* LAN to WAN is trusted: no sequence validation, just run the state
-         * machine and move the LAN-side baseline so the reply can be checked
-         * against it. A fresh session starts at NONE, so a SYN opens
-         * SYN_SENT and any other first packet enters the MID_STREAM
-         * probation the IPv4 path already uses for flows picked up mid-life. */
+        /* LAN to WAN is trusted: no sequence validation, only the state
+         * machine and the LAN-side baseline the reply is checked against. */
         tcp_conntrack_fsm_view(&view, tcp->tcp_flags, FALSE);
         tcp_conntrack_seq_update_view(&view, tcp, tcp_payload, FALSE);
     }
@@ -749,10 +706,10 @@ static __always_inline void ipv6_firewall_learn(ppp_ccb_t *ppp_ccb,
  * @fn ipv6_firewall_tcp_inbound_pass
  *
  * @brief Stateful inspection of an inbound TCP packet that already matched a
- *        live session. The state and sequence checks always run so tracking
- *        stays current; tcp_conntrack_enabled only decides whether a packet
- *        failing them is dropped or forwarded unenforced. This is the same
- *        split the IPv4 path uses, governed by the same per-subscriber switch.
+ *        live session.
+ *
+ *        The checks always run; tcp_conntrack_enabled only decides whether a
+ *        packet failing them is dropped or forwarded unenforced.
  *
  * @param ppp_ccb
  *        Subscriber control block
@@ -796,19 +753,12 @@ static __always_inline BOOL ipv6_firewall_tcp_inbound_pass(ppp_ccb_t *ppp_ccb,
  *
  * @brief Decide whether an inbound ICMPv6 error message may reach the LAN.
  *
- *        These messages report what happened to a packet a LAN host sent, so
- *        their outer source is a router on the path and can never match a
- *        session. What must match is the packet quoted inside: its source has
- *        to be the host being notified, and its tuple has to name a session
- *        that is still alive. Anything else is forged and gets dropped.
+ *        The outer source is a router on the path, so the match is made on the
+ *        packet quoted inside: its source must be the notified LAN host and
+ *        its tuple must name a session that is still alive.
  *
- *        Letting one through must not refresh the session — an error report is
- *        not traffic and extends nobody's lifetime. Every quoted byte is
+ *        Passing one must not refresh that session, and every quoted byte is
  *        attacker controlled and is only ever read.
- *
- *        Dropping these outright would be the simpler rule and a worse one:
- *        Packet Too Big is how a host learns to shrink its packets, and
- *        without it small packets flow while large ones vanish.
  *
  * @param ppp_ccb
  *        Subscriber control block
@@ -828,11 +778,9 @@ static __always_inline BOOL ipv6_firewall_icmp6_error_pass(ppp_ccb_t *ppp_ccb,
     U16 quoted_l4_len;
     U32 idx = 0;
 
-    /* The error header, the quoted IPv6 header and the first 8 bytes of the
-     * quoted L4 header are the least a sender is required to include. This is
-     * also the only length check on this path: anything shorter, down to a
-     * message that does not even hold a full ICMPv6 header, is rejected and
-     * counted here. */
+    /* Required minimum: error header, quoted IPv6 header and the first 8
+     * bytes of the quoted L4 header. This is the only length check on this
+     * path. */
     if (unlikely(payload_len < ICMP6_PTB_HDR_LEN + sizeof(*quoted) + ICMP6_PTB_HDR_LEN))
         goto drop;
     quoted_l4_len = (U16)(payload_len - ICMP6_PTB_HDR_LEN - sizeof(*quoted));
@@ -858,14 +806,10 @@ drop:
  * @fn ipv6_firewall_inbound_pass
  *
  * @brief Decide whether an inbound IPv6 packet addressed to the LAN may be
- *        forwarded. Default deny: only what answers something a LAN host
- *        started gets through.
+ *        forwarded.
  *
- *        The decision order is fixed:
- *          1. ICMPv6 error messages, validated against the packet they quote
- *          2. an open session (TCP additionally passes stateful inspection)
- *          3. user-defined rules
- *          4. drop
+ *        Default deny: only what answers something a LAN host started gets
+ *        through.
  *
  * @param ppp_ccb
  *        Subscriber control block
@@ -886,11 +830,7 @@ static __always_inline BOOL ipv6_firewall_inbound_pass(ppp_ccb_t *ppp_ccb,
     if (unlikely(ppp_ccb->ipv6_firewall_hash == NULL))
         return FALSE;
 
-    /* One byte is all it takes to tell an ICMPv6 error message apart, and the
-     * length guard has to come first or that byte may not be there to read.
-     * Whether the rest of the message is long enough to check is decided
-     * inside, so a truncated error message is counted as a rejected error
-     * rather than disappearing into the anonymous drop below. */
+    /* The payload_len guard must come before reading the type byte. */
     if (unlikely(ip6->proto == IPPROTO_ICMPV6 && payload_len > 0 &&
             icmp6_type_is_error(l4[0])))
         return ipv6_firewall_icmp6_error_pass(ppp_ccb, ip6, payload_len);

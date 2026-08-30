@@ -2013,10 +2013,8 @@ STATUS decode_ppp(ppp_payload_t *ppp_payload, U16 payload_avail, U16 *event, ppp
         }
     } else if (ppp_payload->ppp_protocol == rte_cpu_to_be_16(MPLSCP_PROTOCOL) ||
         ppp_payload->ppp_protocol == rte_cpu_to_be_16(IPV6CP_PROTOCOL)) {
-        /* Reject MPLSCP unconditionally and IPV6CP when it is disabled for the
-         * subscriber. The LCP Protocol-Reject (RFC 1661 §5.7) stops the peer
-         * from retransmitting an unavailable CP, which could otherwise block
-         * session progress and prevent DisconnectHsi from completing cleanly. */
+        /* IPV6CP only reaches here when disabled for the subscriber; answer
+         * with an LCP Protocol-Reject (RFC 1661 §5.7). */
         U8  reject_buf[ETH_MTU];
         U16 reject_len = 0;
         U16 rejected_proto = rte_be_to_cpu_16(ppp_payload->ppp_protocol);
