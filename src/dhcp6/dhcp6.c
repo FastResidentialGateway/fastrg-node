@@ -120,8 +120,7 @@ void dhcp6_derive_lan_prefix(const U8 pd_prefix[16], U8 pd_plen,
 
 static void dhcp6_clear_lease(ppp_ccb_t *ppp_ccb)
 {
-    /* Publish not-ready before clearing fields that data-plane readers
-     * consume. */
+    /* Publish not-ready before clearing fields data-plane readers consume. */
     ppp_ccb->dhcp6_pd_ready = FALSE;
     pppd_ipv6_dp_gate_update(ppp_ccb);
     ppp_ccb->dhcp6_t1 = 0;
@@ -435,8 +434,7 @@ STATUS dhcp6_process_message(ppp_ccb_t *ppp_ccb, const U8 *dhcp, U16 len)
         return SUCCESS;
     }
 
-    /* Snapshot the lease this reply replaces, for the northbound re-report at
-     * the end of this function. */
+    /* Snapshot for the re-report decision at the end of this function. */
     BOOL was_ready = ppp_ccb->dhcp6_pd_ready;
     BOOL lease_changed = memcmp(ppp_ccb->hsi_ipv6_pd_prefix, response.prefix,
                 sizeof(response.prefix)) != 0 ||
@@ -465,16 +463,9 @@ STATUS dhcp6_process_message(ppp_ccb_t *ppp_ccb, const U8 *dhcp, U16 len)
         "User %" PRIu16 " DHCPv6-PD lease is ready (/%u, T1=%u seconds).",
         ppp_ccb->user_num, ppp_ccb->hsi_ipv6_pd_plen, ppp_ccb->dhcp6_t1);
 
-    /* Delegation finishes after IPCP opens, so the connected event sent back
-     * then carried no IPv6 — re-send it now that the lease exists. A renew
-     * that returns the same prefix and DNS servers sends nothing, keeping one
-     * event per T1 out of the pipeline. Before IPCP opens there is nothing to
-     * re-send: ipcp_layer_up() will pick this lease up itself.
-     *
-     * Losing IPv6 mid-session (IPV6CP down, or a renew with no prefix) closes
-     * the forwarding gate but sends no event: a connected event racing a
-     * teardown is worse than a stale IPv6 row on the controller, which the
-     * next disconnect or successful lease corrects anyway. */
+    /* The connected event sent when IPCP opened carried no IPv6, so re-send
+     * it once the lease is new or changed. Losing IPv6 mid-session sends no
+     * event; the next disconnect or lease corrects the controller. */
     if ((was_ready == FALSE || lease_changed == TRUE) &&
             ppp_ccb->phase == DATA_PHASE)
         ppp_report_connection_status(ppp_ccb);

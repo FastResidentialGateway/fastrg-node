@@ -270,15 +270,12 @@ void dhcp_get_subscriber_real_size(ccb_memory_info_t *out)
         return;
 
     memset(out, 0, sizeof(*out));
-    /* The per-subscriber array of lease pointers, plus this subscriber's slot
-     * in the ccb pointer array. */
     out->plain_bytes_per_sub =
         (uint64_t)DHCP_MAX_POOL_SIZE_PER_USER * sizeof(dhcp_ccb_per_lan_user_t *) +
         sizeof(dhcp_ccb_t *);
     out->n_pools = 2;
     out->pools[0].objs_per_sub = 1;
     out->pools[0].elt_size = sizeof(dhcp_ccb_t);
-    /* Every subscriber reserves a full lease block in the shared pool. */
     out->pools[1].objs_per_sub = DHCP_MAX_POOL_SIZE_PER_USER;
     out->pools[1].elt_size = sizeof(dhcp_ccb_per_lan_user_t);
 }

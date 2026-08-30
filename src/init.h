@@ -45,8 +45,8 @@ void sys_cleanup(FastRG_t *fastrg_ccb);
 
 #ifdef UNIT_TEST
 void fastrg_set_hugepage_free_bytes_for_test(uint64_t free_bytes);
-/* Inject a per-subscriber cost so capacity arithmetic can be exercised without
- * running the probe. Zero restores measuring. */
+/* Inject a per-subscriber cost in place of the probe; zero restores
+ * measuring. */
 void fastrg_set_subscriber_cost_for_test(uint64_t cost_bytes);
 #endif
 
@@ -108,10 +108,7 @@ void *metrics_server_run(void *arg);
 
 /**
  * @fn metrics_server_wait_ready
- * @brief Block until the metrics thread has published whether its listener came
- *        up. The bind happens on that thread, so this is how the startup path
- *        gets to see the verdict and abort on a failure instead of running on
- *        with no way to be scraped.
+ * @brief Block until the metrics thread publishes whether its listener came up.
  *
  *        Each metrics thread launch pairs with exactly one wait: the verdict is
  *        consumed here and the latch re-arms for the next launch.

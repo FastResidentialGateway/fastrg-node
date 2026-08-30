@@ -61,10 +61,8 @@ typedef enum {
 
 /*--------- TRACKED FIELDS ----------*/
 /**
- * @brief The nine fields connection tracking owns, gathered by pointer so the
- *        state machine and the sequence checks work on any table that keeps
- *        them — the IPv4 NAT entry and the IPv6 firewall session both do,
- *        in their own layouts.
+ * @brief Pointers into a table entry's conntrack fields; the pointed-to entry
+ *        must outlive the view.
  */
 typedef struct tcp_conntrack_view {
     U8  *tcp_state;
