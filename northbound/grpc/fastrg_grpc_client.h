@@ -37,6 +37,7 @@ void fastrg_grpc_get_dns_static(U16 user_id);
 void fastrg_grpc_flush_dns_cache(U16 user_id);
 void fastrg_grpc_set_dns_proxy(U16 user_id, bool enable);
 void fastrg_grpc_set_tcp_conntrack(U16 user_id, bool enable);
+void fastrg_grpc_set_ipv6(U16 user_id, bool enable);
 void fastrg_grpc_pdump_start(U16 direction, U16 subscriber, const char *filter, U32 size_mb);
 void fastrg_grpc_pdump_stop(U16 direction, U16 subscriber);
 

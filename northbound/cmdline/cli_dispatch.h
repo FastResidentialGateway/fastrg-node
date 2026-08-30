@@ -32,6 +32,7 @@ void cli_dispatch_snat_set(U16 user_id, U16 eport, char *dip, U16 iport);
 void cli_dispatch_snat_unset(U16 user_id, U16 eport);
 void cli_dispatch_set_dns_proxy(U16 user_id, bool enable);
 void cli_dispatch_set_tcp_conntrack(U16 user_id, bool enable);
+void cli_dispatch_set_ipv6(U16 user_id, bool enable);
 
 /* Fetch the DESIRED config for a user (controller -> etcd). Writes a
  * human-readable summary to buf and returns the source ("controller"/"etcd"/"none"). */

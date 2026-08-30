@@ -899,6 +899,45 @@ static void test_hsi_ipv6_render_round_trip()
     expect_ipv6_round_trip("case 23 false", FALSE);
 }
 
+static void test_field_merge_ipv6()
+{
+    std::cout << "Case 24: field merge flips ipv6_enable" << std::endl;
+
+    // The seed carries no ipv6_enable at all (the legacy shape): the merge must
+    // create the field rather than fail, so an offline toggle works on configs
+    // written before IPv6 existed.
+    std::string enabled = run_merge("case 24 ipv6 on", SNAPSHOT_FIELD_KIND_IPV6,
+        MERGE_SEED_HSI, "true");
+    Json::Value root;
+    expect_true("case 24 enable parses", parse_json(enabled, root));
+    const Json::Value& cfg = root["config"];
+    expect_equal("case 24 ipv6 enabled", true, cfg["ipv6_enable"].asBool());
+    expect_equal("case 24 dns flag preserved", true, cfg["dns_proxy_enable"].asBool());
+    expect_equal("case 24 tcp flag preserved", true, cfg["tcp_conntrack_enable"].asBool());
+    expect_equal("case 24 vlan preserved", std::string("123"), cfg["vlan_id"].asString());
+    expect_equal("case 24 desire_status preserved", std::string("connect"),
+        cfg["desire_status"].asString());
+    expect_equal("case 24 mapping count preserved", 1u, cfg["port-mapping"].size());
+    expect_equal("case 24 metadata preserved", std::string("seed"),
+        root["metadata"]["updatedBy"].asString());
+
+    // Toggling back off must write false, not drop the field.
+    Json::Value root2;
+    expect_true("case 24 disable parses", parse_json(
+        run_merge("case 24 ipv6 off", SNAPSHOT_FIELD_KIND_IPV6,
+            enabled.c_str(), "false"), root2));
+    expect_true("case 24 disabled field exists",
+        root2["config"].isMember("ipv6_enable"));
+    expect_equal("case 24 ipv6 disabled", false,
+        root2["config"]["ipv6_enable"].asBool());
+
+    // HSI kinds require an existing config: absent key must fail.
+    char *out = NULL;
+    expect_equal("case 24 absent config fails", ERROR,
+        config_snapshot_field_merge(SNAPSHOT_FIELD_KIND_IPV6, NULL, "true", &out));
+    free(out);
+}
+
 int main()
 {
     // Point the snapshot at a scratch file so the test never touches the
@@ -932,6 +971,7 @@ int main()
     test_hsi_ipv6_parse_defaults();
     test_hsi_ipv6_parse_explicit_values();
     test_hsi_ipv6_render_round_trip();
+    test_field_merge_ipv6();
 
     config_snapshot_cleanup();
     std::remove(path);
