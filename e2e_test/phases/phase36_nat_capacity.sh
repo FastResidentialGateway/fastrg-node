@@ -85,13 +85,32 @@ _p36_nat_alloc_fail() {
         "user_id=${USER_ID}"
 }
 
-# LAN to WAN ping, anchored so only a literal zero loss field counts.
+# Whether ping's loss figure sits within a ceiling, given ping's own output.
+# The figure is parsed to a number and compared numerically, because a
+# substring match would also accept the "0%" inside "100% packet loss".
+# Output carrying no loss field at all means the run produced no result, which
+# is a failure rather than a zero.
+_p36_ping_loss_ok() {
+    local _out="$1" _max_loss="$2"
+    local _loss
+
+    _loss=$(printf '%s\n' "$_out" | sed -nE \
+        's/.* ([0-9]+([.][0-9]+)?)% packet loss.*/\1/p' | tail -1 || true)
+    _P36_PING_DETAIL="${_loss:+${_loss}% packet loss}"
+    [[ "$_loss" =~ ^[0-9]+([.][0-9]+)?$ ]] || return 1
+    awk -v loss="$_loss" -v max="$_max_loss" 'BEGIN { exit !(loss <= max) }'
+}
+
+# LAN to WAN ping: four probes with no loss tolerated by default. Callers
+# measuring while the bench is under load pass a larger sample and a loss
+# ceiling instead, so a single frame lost on the CRC-damaged LAN path does not
+# read as a regression — a 4-probe all-or-nothing check cannot tell those apart.
 _p36_ping_ok() {
+    local _count="${1:-4}" _max_loss="${2:-0}"
     local _out
 
-    _out=$(ssh_lan "ping -c 4 -W 3 ${WAN_IP} 2>&1" || true)
-    _P36_PING_DETAIL=$(printf '%s' "$_out" | grep -oE '[0-9]+(\.[0-9]+)?% packet loss' | head -1 || true)
-    printf '%s' "$_out" | grep -qE '(^|[ ,])0(\.0+)?% packet loss'
+    _out=$(ssh_lan "ping -c ${_count} -W 3 ${WAN_IP} 2>&1" || true)
+    _p36_ping_loss_ok "$_out" "$_max_loss"
 }
 
 # Best of two 5-second iperf3 runs, in bits per second. Prints 0 and leaves the
@@ -257,8 +276,12 @@ echo \$! >'${_P36_SPRAY_PID}'" >/dev/null 2>&1 || true
     info "Step 154: measuring throughput while the pool stays near capacity..."
     _issue=""
     # A ping needs a fresh ICMP mapping, so this also shows new flows can still
-    # be learned with the pool nearly full.
-    _p36_ping_ok || _issue="LAN→WAN ping ${_P36_PING_DETAIL:-no response} under load"
+    # be learned with the pool nearly full. Sampled deep with a loss ceiling:
+    # this path drops the occasional CRC-corrupted frame whatever the node is
+    # doing, so one lost probe here says nothing about NAT under load.
+    local _ping_count=50 _ping_max_loss=2
+    _p36_ping_ok "$_ping_count" "$_ping_max_loss" || \
+        _issue="LAN→WAN ping ${_P36_PING_DETAIL:-no response} under load"
 
     _bps=$(_p36_iperf_bps)
     _floor=$(( _P36_BASE_BPS / 2 ))
@@ -271,7 +294,7 @@ echo \$! >'${_P36_SPRAY_PID}'" >/dev/null 2>&1 || true
 
     if [[ -z "$_issue" ]]; then
         pass "Step 154: throughput holds up near capacity" \
-            "$(_p36_mbps "$_bps") Mbps of $(_p36_mbps "$_P36_BASE_BPS") Mbps baseline with ${_used} live mappings, ping 0% loss"
+            "$(_p36_mbps "$_bps") Mbps of $(_p36_mbps "$_P36_BASE_BPS") Mbps baseline with ${_used} live mappings, ping ${_P36_PING_DETAIL:-no loss figure} over ${_ping_count} probes (ceiling ${_ping_max_loss}%)"
     else
         fail "Step 154: throughput holds up near capacity" \
             "${_issue}; nat_entries_used='${_used:-missing}'"
@@ -309,3 +332,10 @@ echo \$! >'${_P36_SPRAY_PID}'" >/dev/null 2>&1 || true
     _cleanup_phase36_nat_capacity
     return 0
 }
+
+# Sample-based self-verification of the loss ceiling above; the steps call this
+# same function.
+local_validation_register p36_ping_loss _p36_ping_loss_ok \
+    p36_ping_loss_zero p36_ping_loss_within_ceiling \
+    p36_ping_loss_over_ceiling p36_ping_loss_total_loss \
+    p36_ping_loss_fractional_over p36_ping_loss_no_output
