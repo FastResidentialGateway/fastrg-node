@@ -23,7 +23,7 @@
 #include "../dp.h"
 #include "nat.h"
 #include "fsm.h"
-#include "../dhcp6/dhcp6.h"
+#include "../dhcpd6/dhcpd6.h"
 #include "../dhcpd/dhcpd.h"
 #include "../dnsd/dnsd.h"
 #include "../etcd_integration.h"

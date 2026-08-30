@@ -33,7 +33,7 @@
 #include "../init.h"
 #include "../dp_flow.h"
 #include "../dhcpd/dhcpd.h"
-#include "../dhcp6/dhcp6.h"
+#include "../dhcpd6/dhcpd6.h"
 #include "../nd6/nd6.h"
 #include "../fastrg.h"
 #include "../utils.h"
