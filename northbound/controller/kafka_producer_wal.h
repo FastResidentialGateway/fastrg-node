@@ -11,7 +11,8 @@
 
 #include "proto/kafka-events.pb.h"
 
-/* On-disk WAL: JSON array of {"seq","payload"}, payload hex-encoded. */
+/* On-disk WAL format: JSON array of {"seq","payload"}, payload hex-encoded.
+ * Holds runtime errors only, so entries need no type field. */
 
 /* One buffered event; written to the WAL only when persistent is set. */
 struct KafkaWalEvent {
@@ -65,7 +66,8 @@ bool kafka_wal_parse(const std::string &data, std::vector<KafkaWalEvent> &out);
  *      metadata.resourceVersion of the config this apply targeted (may be NULL)
  * @param republished
  *      TRUE when the controller requested a republish of this subscriber's
- *      config
+ *      config. The controller skips the audit record for restates, so a
+ *      republish sweep cannot flood the audit trail.
  * @param applied_mod_revision
  *      etcd ModRevision of the config value the node applied; 0 means unknown
  * @return

@@ -99,7 +99,8 @@ void kafka_report_pppoe_state(const char *user_id, kafka_pppoe_phase_t phase,
  *      metadata.resourceVersion this apply targeted (may be NULL)
  * @param republished
  *      TRUE when the controller requested a republish of this subscriber's
- *      config
+ *      config. The controller skips the audit record for restates, so a
+ *      republish sweep cannot flood the audit trail.
  * @param applied_mod_revision
  *      etcd ModRevision the apply targeted; 0 means unknown
  * @return
