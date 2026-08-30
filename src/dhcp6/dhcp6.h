@@ -40,7 +40,7 @@ void dhcp6_pd_stop(ppp_ccb_t *ppp_ccb);
 void dhcp6_wan_input(ppp_ccb_t *ppp_ccb, U8 *ipv6_pkt, U16 len);
 void dhcp6_timer_cb(struct rte_timer *tim, void *arg);
 
-/* Codec/test seams used by the production state machine and byte fixtures. */
+/* Codec seams exported for unit tests. */
 STATUS dhcp6_build_packet(ppp_ccb_t *ppp_ccb, U8 msg_type, U8 *buffer,
     U16 *packet_len);
 STATUS dhcp6_process_message(ppp_ccb_t *ppp_ccb, const U8 *dhcp, U16 len);

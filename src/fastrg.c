@@ -470,12 +470,8 @@ STATUS northbound(FastRG_t *fastrg_ccb)
     fastrg_ccb->metrics_server.listen_fd = -1;
     rte_atomic16_set(&fastrg_ccb->metrics_stop_requested, 0);
 
-    /* Start the Prometheus /metrics HTTP server so Prometheus can scrape this
-     * node directly. A listener that never came up leaves the node running with
-     * nothing able to see it, which is how a dead endpoint stays unnoticed, so
-     * the startup path waits for the verdict and gives up on failure. Only the
-     * listener coming up is gated here; a scrape that fails later still just
-     * fails that scrape. */
+    /* Startup is gated on the /metrics listener coming up; a scrape that fails
+     * later is not fatal. */
     if (fastrg_create_pthread("fastrg_metrics",
         metrics_server_run, fastrg_ccb, rte_lcore_id(), &fastrg_ccb->metrics_thread) != SUCCESS) {
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
@@ -562,8 +558,8 @@ void fastrg_stop()
 {
     FastRG_LOG(INFO, fastrg_ccb.fp, NULL, NULL, "FastRG system stopping...");
     rte_eal_mp_wait_lcore();
-    /* Safe here and not earlier: the lcore that services this timer has left
-     * its loop, so the callback cannot be running. */
+    /* Must follow rte_eal_mp_wait_lcore(): only then can the callback no
+     * longer be running. */
     rte_timer_stop(&fastrg_ccb.nd6_age_timer);
     fastrg_stop_northbound_threads(&fastrg_ccb);
     // Cleanup Kafka producer (flush pending telemetry)
@@ -863,8 +859,6 @@ int fastrg_start(int argc, char **argv)
             num_dq, num_dq, num_dq);
         for(U16 i=0; i<num_dq; i++) {
             U16 queue_id = i + 1;  /* RSS queues start at 1 */
-            /* The TX queue each reader owns comes from the layout table, so
-             * the launcher and the senders can never disagree. */
             U16 wan_tx_q = get_tx_queue_id_for_sender(FASTRG_TX_SENDER_WAN_DATA, i, LAN_PORT, num_dq);
             U16 lan_tx_q = get_tx_queue_id_for_sender(FASTRG_TX_SENDER_LAN_DATA, i, WAN_PORT, num_dq);
             if (wan_tx_q == FASTRG_TX_QUEUE_NONE || lan_tx_q == FASTRG_TX_QUEUE_NONE) {
@@ -906,7 +900,6 @@ int fastrg_start(int argc, char **argv)
         FastRG_LOG(INFO, fastrg_ccb.fp, NULL, NULL,
             "Launching %u wan_dist_worker + %u lan_dist_worker threads", num_dq, num_dq);
         for(U16 i=0; i<num_dq; i++) {
-            /* Workers own the same queues the RSS readers would. */
             U16 wan_tx_q = get_tx_queue_id_for_sender(FASTRG_TX_SENDER_WAN_DATA, i, LAN_PORT, num_dq);
             U16 lan_tx_q = get_tx_queue_id_for_sender(FASTRG_TX_SENDER_LAN_DATA, i, WAN_PORT, num_dq);
             if (wan_tx_q == FASTRG_TX_QUEUE_NONE || lan_tx_q == FASTRG_TX_QUEUE_NONE) {
@@ -935,8 +928,8 @@ int fastrg_start(int argc, char **argv)
         goto err;
     }
 
-    /* Periodic IPv6 neighbor cache sweep on the control-plane lcore: it is the
-     * table's only writer, so aging must run where learning runs. */
+    /* Aging must run on the control-plane lcore: it is the nd6 table's only
+     * writer. */
     rte_timer_reset(&fastrg_ccb.nd6_age_timer,
         (U64)ND6_AGE_SCAN_SEC * fastrg_get_cycles_in_sec(), PERIODICAL,
         fastrg_ccb.lcore.ctrl_thread, nd6_age_timer_cb, &fastrg_ccb);

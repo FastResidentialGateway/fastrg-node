@@ -707,15 +707,9 @@ void etcd_event_dispatch(FastRG_t *fastrg_ccb, etcd_event_t *ev)
             const hsi_config_t *cfg =
                 (ev->action == HSI_ACTION_DELETE) ? NULL : &ev->event_data.hsi.config;
 
-            /* A republish only has to restate what the node is running. When
-             * local state already matches there is nothing to change, so say so
-             * and stop: the republished flag lets the consumer refresh its
-             * current-config view without recording a transition that never
-             * happened. A mismatch falls through to the apply below and is
-             * reported as the real change it turns out to be -- reporting a
-             * plain mismatch as a failure would make the controller roll back
-             * the config it just pushed, since a config still being applied
-             * looks exactly the same from here. */
+            /* A republish whose state already matches is confirmed as-is, so
+             * the consumer refreshes its view without recording a transition
+             * that never happened. */
             if (ev->from_republish && cfg != NULL &&
                     hsi_config_matches_local(ev->user_id, cfg, fastrg_ccb)) {
                 kafka_report_config_apply_result(ev->user_id, "update", TRUE, NULL, NULL,
@@ -740,15 +734,8 @@ void etcd_event_dispatch(FastRG_t *fastrg_ccb, etcd_event_t *ev)
             STATUS ret = hsi_config_changed_callback(ev->node_id, ev->user_id, cfg,
                 ev->action, ev->revision, fastrg_ccb);
 
-            /* Report the apply result to the controller via Kafka. Reaching here
-             * means the config was really applied: a reconcile whose local state
-             * already matched returned above without touching anything, so this
-             * reports state changes only and never repeats itself while nothing
-             * moves. Reporting reconcile re-applies matters because they are the
-             * only thing that revisits a config the boot-time load applied — that
-             * path delivers through direct callbacks and never reaches here, so
-             * without this a config the node failed to apply at boot would stay
-             * unreported. The etcd failed_events/ namespace is removed. */
+            /* Reaching here means the config was really applied: matching
+             * reconciles returned above, so this reports state changes only. */
             const char *action_str = (ev->action == HSI_ACTION_CREATE) ? "create"
                                    : (ev->action == HSI_ACTION_DELETE) ? "delete" : "update";
             if (ret == SUCCESS) {

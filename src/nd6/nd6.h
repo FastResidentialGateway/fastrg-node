@@ -15,10 +15,8 @@
 #define ND6_RA_INTERVAL_SEC     30
 #define ND6_PACKET_MAX_LEN      256
 
-/* Aging: an entry idle for ND6_NEIGHBOR_TTL_SEC is probed once with a unicast
- * Neighbor Solicitation; if the following scan still finds it idle the entry
- * is deleted. ND6_AGE_SCAN_SEC is the sweep period, so an unreachable
- * neighbor is reclaimed within TTL + 2 sweeps. */
+/* An entry idle past ND6_NEIGHBOR_TTL_SEC is probed once with a unicast
+ * Neighbor Solicitation, then deleted at the next sweep if still idle. */
 #define ND6_NEIGHBOR_TTL_SEC    300
 #define ND6_AGE_SCAN_SEC        60
 
@@ -38,26 +36,21 @@
 
 typedef struct nd6_table {
     struct rte_hash *hash;        /* key = 16-byte IPv6 address */
-    struct rte_rcu_qsbr *rcu;     /* QSBR driving the hash defer queue; NULL = none */
+    struct rte_rcu_qsbr *rcu;     /* Hash defer queue; NULL = no reclaim */
     U16 generation;               /* RELAXED atomic generation bump */
     U64 learn_fail;
-    /* Aging metadata, indexed by the hash key position. Only ctrl_thread ever
-     * reads or writes these arrays (learn, aging scan and reset all run
-     * there), so they need no atomics; data-plane readers only touch the
-     * hash itself. */
+    /* Aging metadata indexed by hash key position; ctrl_thread is the only
+     * reader and writer, so no atomics are needed. */
     U32 slot_count;               /* number of positions the hash can return */
-    U64 *last_seen;               /* cycle stamp of the last learn per position */
+    U64 *last_seen;               /* cycle stamp of the last learn */
     U8 *probed;                   /* 1 = a unicast NS probe is outstanding */
 } nd6_table_t;
 
 /**
  * @fn nd6_table_alloc
  *
- * @brief Create a subscriber's neighbor cache: a fixed-capacity lock-free
- *        rte_hash plus its aging metadata. The hash is attached to the shared
- *        QSBR variable in deferred-reclaim mode, so a deleted key's slot is
- *        recycled only after every registered data lcore has crossed a
- *        quiescent state.
+ * @brief Create a subscriber's neighbor cache, whose deleted key slots are
+ *        recycled only after every data lcore crosses a quiescent state.
  *
  * @param ccb_id
  *      Subscriber index; makes the rte_hash name unique process-wide
@@ -71,7 +64,7 @@ void nd6_table_free(nd6_table_t *table);
 void nd6_table_reset(nd6_table_t *table);
 
 /**
- * @brief Learn an IPv6-to-MAC mapping. Only ctrl_thread may call this writer.
+ * @brief Learn an IPv6-to-MAC mapping; ctrl_thread is the only allowed caller.
  */
 void nd6_table_learn(nd6_table_t *table, const U8 ipv6[16],
     const struct rte_ether_addr *mac);
@@ -101,10 +94,7 @@ void nd6_lan_input(FastRG_t *fastrg_ccb, U16 ccb_id, U8 *pkt, U16 len);
  * @fn nd6_wan_miss_input
  *
  * @brief Control-plane handler for a WAN->LAN packet whose destination has no
- *        neighbor cache entry. Re-checks the forwarding gate and the
- *        destination prefix, retries the lookup (the address may have been
- *        learned since the data plane escalated) and, when it is still
- *        unresolved, solicits it with a multicast Neighbor Solicitation.
+ *        neighbor cache entry.
  *
  * @param fastrg_ccb
  *      FastRG control block
@@ -125,11 +115,8 @@ void nd6_ra_timer_cb(struct rte_timer *tim, void *arg);
 /**
  * @fn nd6_age_scan_table
  *
- * @brief Sweep one subscriber's neighbor cache: delete entries left over from
- *        an older generation, probe entries idle for longer than
- *        ND6_NEIGHBOR_TTL_SEC, delete the ones that did not answer the
- *        previous probe, then run one deferred-reclaim pass so freed key slots
- *        become allocatable again.
+ * @brief Sweep one subscriber's neighbor cache for stale-generation and idle
+ *        entries.
  *
  * @param ppp_ccb
  *      Subscriber control block (NULL tolerated)
@@ -143,8 +130,8 @@ void nd6_age_scan_table(ppp_ccb_t *ppp_ccb, U64 now);
 /**
  * @fn nd6_age_timer_cb
  *
- * @brief Periodic timer callback that runs nd6_age_scan_table() over every
- *        configured subscriber. Registered on the control-plane lcore.
+ * @brief Periodic timer callback, registered on the control-plane lcore, that
+ *        ages every configured subscriber's neighbor cache.
  *
  * @param tim
  *      Timer being serviced (unused)
@@ -165,9 +152,7 @@ STATUS nd6_build_na(ppp_ccb_t *ppp_ccb, const U8 dst_ip[16],
  * @fn nd6_build_ns
  *
  * @brief Build a Neighbor Solicitation for target, addressed to dst_ip /
- *        dst_mac. Used both for unicast reachability probes (dst = target)
- *        and for address resolution (dst = the target's solicited-node
- *        multicast address).
+ *        dst_mac.
  *
  * @param ppp_ccb
  *      Subscriber control block

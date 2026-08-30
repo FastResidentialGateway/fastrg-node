@@ -37,8 +37,7 @@ struct nd6_table;
  * was a multiple of 4 and hashing quality suffered 4x clustering. */
 #define MAX_NAT_ENTRIES         (TOTAL_SOCK_PORT << 2)
 #define PORT_FWD_TABLE_SIZE     TOTAL_SOCK_PORT  /* direct-indexed by eport (0..65535) */
-/* IPv6 firewall sessions kept per subscriber.  Fully preallocated like every
- * other subscriber resource, so the data plane never allocates. */
+/* IPv6 firewall sessions preallocated per subscriber. */
 #define IPV6_FIREWALL_MAX_ENTRIES     TOTAL_SOCK_PORT
 
 #define PPPoE_CMD_DISABLE       0
@@ -96,13 +95,11 @@ typedef struct addr_table {
 }__rte_cache_aligned addr_table_t;
 
 /**
- * @brief IPv6 firewall session key, always written LAN side first so that the
- *        outbound packet (LAN = source) and its reply (LAN = destination)
- *        produce the very same 40 bytes and share one hash entry.
+ * @brief IPv6 firewall session key, always written LAN side first so both
+ *        directions of a flow share one hash entry.
  *
- *        rte_hash compares raw key bytes, padding included: every builder must
- *        zero the whole struct before filling it, or the two directions hash
- *        differently and replies never match.
+ *        rte_hash compares raw key bytes, padding included, so every builder
+ *        must zero the whole struct before filling it.
  */
 typedef struct ipv6_firewall_key {
     U8  lan_addr[16];    /* subscriber-side address */
@@ -114,12 +111,10 @@ typedef struct ipv6_firewall_key {
 } ipv6_firewall_key_t;
 
 /**
- * @brief One IPv6 firewall session.  Exactly one cache line, so a lookup that
- *        hits touches a single line.
+ * @brief One IPv6 firewall session, exactly one cache line.
  *
  *        The expiry deadline and the LRU recency stamp live in the ppp_ccb
- *        structure-of-arrays instead of here: the GC and the eviction scan walk
- *        those arrays alone and never pull entry lines into cache.
+ *        structure-of-arrays instead of here.
  */
 typedef struct ipv6_firewall_entry {
     ipv6_firewall_key_t  key;             /* also the delete key on GC / eviction */
@@ -127,8 +122,7 @@ typedef struct ipv6_firewall_entry {
     U8             tcp_state;       /* tcp_conntrack_state_t; NONE for non-TCP */
     U8             tcp_fin_flags;   /* TCP_FIN_FLAG_LAN / _WAN bitmask */
     /* TCP seq/ack window tracking (host order), same meaning as the equally
-     * named addr_table_t fields: the baseline tcp_conntrack_seq_valid checks
-     * inbound packets against. */
+     * named addr_table_t fields. */
     U32            max_seq_end_lan; /* highest (seq + payload + SYN/FIN) from LAN */
     U32            max_seq_end_wan; /* same from WAN */
     U32            max_ack_lan;     /* highest ack from LAN */
@@ -258,17 +252,14 @@ typedef struct {
      * by data-plane cores. 1-byte aligned store/load is atomic on x86 (TSO);
      * volatile blocks the compiler from hoisting/caching the load. */
     volatile BOOL         tcp_conntrack_enabled;
-    /* Per-subscriber IPv6 enable. Written by the control plane
-     * (apply_hsi_config() / SetIpv6()), read by IPV6CP negotiation and folded into
-     * ipv6_dp_bool by pppd_ipv6_dp_gate_update(). The 1-byte aligned
-     * store/load follows the same atomicity rule as conntrack. */
+    /* Per-subscriber IPv6 enable, written only by the control plane and
+     * folded into ipv6_dp_bool by pppd_ipv6_dp_gate_update(). Same 1-byte
+     * atomicity rule as tcp_conntrack_enabled above. */
     volatile BOOL         ipv6_enabled;
     /* ---- IPv6 stateful firewall (per subscriber, mirrors the NAT block) ---- */
     ipv6_firewall_entry_t ipv6_firewall_table[IPV6_FIREWALL_MAX_ENTRIES]; /* session pool (slots referenced by the hash) */
     U64                   ipv6_firewall_expire_at[IPV6_FIREWALL_MAX_ENTRIES];  /* SoA expiry deadline, parallel to the pool; 0 = slot free */
-    U64                   ipv6_firewall_last_used[IPV6_FIREWALL_MAX_ENTRIES];  /* SoA last-hit stamp for LRU eviction; 0 = slot free.
-                                                                    * Separate from the deadline because per-state TCP timeouts
-                                                                    * make "expires first" and "idle longest" different sessions */
+    U64                   ipv6_firewall_last_used[IPV6_FIREWALL_MAX_ENTRIES];  /* SoA last-hit stamp for LRU eviction; 0 = slot free */
     U64                   ipv6_firewall_enospc;          /* sessions not created: pool dry or hash full (RELAXED add) */
     U64                   ipv6_firewall_gc_reclaimed;    /* sessions reclaimed by GC scans (RELAXED add) */
     U64                   ipv6_firewall_evicted;         /* sessions dropped by LRU to make room (RELAXED add) */
@@ -278,16 +269,13 @@ typedef struct {
                                                * owns slot reclaim via its RCU dq callback */
     struct rte_ring       *ipv6_firewall_free_ring; /* free-list of pool slot indices (MPMC) */
     U32                   ipv6_firewall_gc_counter; /* amortized expired-slot scan position (approximate, racy by design) */
-    rte_spinlock_t        ipv6_firewall_insert_lock; /* serializes miss-path inserts and LRU eviction for this subscriber;
-                                                * kept separate from nat_insert_lock so IPv4 and IPv6 never block each other */
+    rte_spinlock_t        ipv6_firewall_insert_lock; /* serializes miss-path inserts and LRU eviction for this subscriber */
     struct rte_timer      ppp_ipv6cp;         /* IPV6CP retransmit timer */
     U8                    ipv6cp_local_iid[8]; /* negotiated local interface identifier */
     U8                    ipv6cp_peer_iid[8];  /* negotiated peer interface identifier */
-    /* IPv6 readiness is written by the control plane. The volatile access is
-     * reserved for the data-plane reader introduced with IPv6 forwarding. */
+    /* IPV6CP readiness, written only by the control plane. */
     volatile BOOL         ipv6cp_up;
-    /* DHCPv6-PD client state is owned by the control plane. Future RA and
-     * IPv6 data-plane readers consume the published prefix after ready is set. */
+    /* DHCPv6-PD client state, owned by the control plane. */
     U8                    dhcp6_state;
     U8                    dhcp6_xid[3];
     U8                    dhcp6_server_duid[130];
@@ -302,14 +290,11 @@ typedef struct {
     volatile BOOL         dhcp6_pd_ready;
     /* Data-plane IPv6 forwarding gate: the AND of ipv6_enabled, ipv6cp_up and
      * dhcp6_pd_ready, recomputed by the control plane (its only writer) via
-     * pppd_ipv6_dp_gate_update(). Kept independent of dp_start_bool so that an
-     * IPCP failure never stops IPv6 forwarding and an IPV6CP or prefix
-     * delegation failure never stops IPv4 forwarding. */
+     * pppd_ipv6_dp_gate_update(). Independent of dp_start_bool. */
     rte_atomic16_t        ipv6_dp_bool;
     /* Cycle stamp of the last WAN->LAN neighbor-cache miss handed to the
-     * control plane. Data lcores claim a new stamp with a relaxed
-     * compare-exchange before escalating, so traffic to an unresolved LAN
-     * address cannot flood the control-plane ring. */
+     * control plane. Data lcores must claim a new stamp with a relaxed
+     * compare-exchange before escalating. */
     U64                   nd6_miss_last_cycles;
     struct nd6_table      *nd6_table;       /* single-writer IPv6 neighbor cache */
     struct rte_timer      ra_timer;         /* periodic LAN router advertisement for IPv6 */
@@ -348,14 +333,14 @@ static inline struct rte_timer *ppp_cp_timer(ppp_ccb_t *ppp_ccb)
  * @fn pppd_ipv6_dp_gate_update
  *
  * @brief Recompute a subscriber's IPv6 data-plane gate from ipv6_enabled,
- *        ipv6cp_up and dhcp6_pd_ready. Call it from the control plane after
- *        every write to any of those three flags.
+ *        ipv6cp_up and dhcp6_pd_ready.
  *
- *        Opening the gate publishes a write barrier first, so a data lcore
- *        that observes the gate open also observes the LAN prefix, session id,
- *        peer MAC and VLAN written before the call. Closing needs no barrier:
- *        a packet already in flight reads consistent-but-stale fields, and the
- *        control block itself is preallocated and never freed.
+ *        Caller must be the control plane, and must call after every write to
+ *        any of those three flags.
+ *
+ *        Opening publishes a write barrier first, so a data lcore observing
+ *        the gate open also observes the fields written before the call;
+ *        closing needs no barrier.
  *
  * @param ppp_ccb
  *      Subscriber control block (NULL tolerated)
@@ -367,13 +352,14 @@ void pppd_ipv6_dp_gate_update(ppp_ccb_t *ppp_ccb);
 /**
  * @fn pppd_ipv6_report_strings
  *
- * @brief Format a subscriber's IPv6 session state for northbound reporting
- *        (Kafka events, gRPC, CLI). Every output buffer is written, and one
- *        that has nothing to report is left as an empty string.
+ * @brief Format a subscriber's IPv6 session state for northbound reporting.
  *
- *        Formatting only — the caller decides whether the fields are ready to
- *        be read (control plane: the three IPv6 flags in program order; other
- *        threads: pppd_ipv6_dp_gate_open()).
+ *        Every output buffer is written; one with nothing to report is left
+ *        as an empty string.
+ *
+ *        Caller must decide whether the fields are ready to be read: the
+ *        control plane reads the three IPv6 flags in program order, other
+ *        threads use pppd_ipv6_dp_gate_open().
  *
  * @param ppp_ccb
  *      Subscriber control block (NULL tolerated)
@@ -402,9 +388,8 @@ void pppd_ipv6_report_strings(const ppp_ccb_t *ppp_ccb, char *addr_str,
 /**
  * @fn pppd_ipv6_dp_gate_open
  *
- * @brief Data-plane side of the IPv6 gate: report whether IPv6 forwarding is
- *        open for this subscriber and, when it is, order the read against the
- *        subscriber fields the control plane published before opening it.
+ * @brief Report whether IPv6 forwarding is open, ordering the read against
+ *        the fields the control plane published before opening the gate.
  *
  * @param ppp_ccb
  *      Subscriber control block

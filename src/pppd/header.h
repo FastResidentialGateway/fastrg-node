@@ -148,7 +148,7 @@ typedef struct pppoe_phase {
     BOOL               active;
 }__rte_cache_aligned pppoe_phase_t;
 
-/* Per-control-protocol negotiation automaton. The PPPoE connection stage is
+/* Per-control-protocol negotiation automaton; the PPPoE connection stage is
  * tracked separately in ppp_ccb_t.phase. */
 typedef struct control_protocol {
     U16           state;

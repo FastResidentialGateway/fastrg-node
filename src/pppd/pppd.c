@@ -47,9 +47,8 @@ void pppd_ipv6_dp_gate_update(ppp_ccb_t *ppp_ccb)
         return;
     if (ppp_ccb->ipv6_enabled != FALSE && ppp_ccb->ipv6cp_up != FALSE &&
             ppp_ccb->dhcp6_pd_ready != FALSE) {
-        /* Publish every subscriber field the forwarding path reads (LAN
-         * prefix, session id, peer MAC, VLAN) before the gate that authorizes
-         * reading them. Pairs with the rte_smp_rmb() in
+        /* Publish the fields the forwarding path reads before the gate that
+         * authorizes reading them; pairs with the rte_smp_rmb() in
          * pppd_ipv6_dp_gate_open(). */
         rte_smp_wmb();
         rte_atomic16_set(&ppp_ccb->ipv6_dp_bool, (S16)1);
@@ -67,8 +66,7 @@ void pppd_ipv6_report_strings(const ppp_ccb_t *ppp_ccb, char *addr_str,
 
     if (addr_str != NULL && addr_len > 0) {
         /* RFC 5072: the WAN address is the negotiated interface identifier
-         * under the link-local prefix. The node runs IA_PD only, so this is
-         * the session's sole WAN IPv6 address. */
+         * under the link-local prefix. */
         U8 link_local[16] = { 0xfe, 0x80 };
 
         addr_str[0] = '\0';
@@ -142,8 +140,7 @@ void ppp_build_state_report(const ppp_ccb_t *ppp_ccb, ppp_state_report_t *report
     inet_ntop(AF_INET, &ip, report->ipv4, sizeof(report->ipv4));
     inet_ntop(AF_INET, &gw, report->ipv4_gw, sizeof(report->ipv4_gw));
 
-    /* IPv6 off, IPV6CP down, or a lease being renewed leave report fields 
-     * empty, which every consumer reads as "not reported". */
+    /* Fields left empty here read as "not reported" to every consumer. */
     if (pppd_ipv6_dp_gate_open(ppp_ccb) == TRUE)
         pppd_ipv6_report_strings(ppp_ccb, report->ipv6_addr,
             sizeof(report->ipv6_addr), report->ipv6_pd_prefix,
@@ -163,9 +160,6 @@ static kafka_pppoe_phase_t report_phase_to_kafka(ppp_report_phase_t phase)
     }
 }
 
-/* Sending is deliberately not exported: the controller must only ever see
- * reports this file built, so callers go through ppp_report_connection_status()
- * and cannot hand over a report they assembled themselves. */
 static STATUS ppp_send_state_report(ppp_ccb_t *ppp_ccb,
     const ppp_state_report_t *report)
 {
@@ -173,8 +167,7 @@ static STATUS ppp_send_state_report(ppp_ccb_t *ppp_ccb,
             ppp_ccb->fastrg_ccb->is_standalone == TRUE)
         return ERROR;
 
-    /* An empty field means "nothing to report": pass NULL so the controller
-     * stores a NULL column rather than an empty string. */
+    /* NULL, not an empty string, makes the controller store a NULL column. */
     kafka_report_pppoe_state(report->user_id, report_phase_to_kafka(report->phase),
         report->ipv4[0] != '\0' ? report->ipv4 : NULL,
         report->ipv4_gw[0] != '\0' ? report->ipv4_gw : NULL, NULL,
@@ -468,8 +461,7 @@ static STATUS pppd_create_checked_size_ccb(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_
 {
     STATUS ret;
 
-    /* Lend the caller's QSBR to the element builders and put the field back;
-     * the real one does not exist yet at this point. */
+    /* fastrg_ccb->ppp_ccb_rcu does not exist yet at probe time. */
     struct rte_rcu_qsbr *saved_rcu = fastrg_ccb->ppp_ccb_rcu;
 
     fastrg_ccb->ppp_ccb_rcu = rcu;
@@ -562,8 +554,7 @@ static STATUS pppd_probe_element_bytes(FastRG_t *fastrg_ccb, uint64_t *probe_byt
     FastRG_LOG(INFO, fastrg_ccb->fp, NULL, PPPLOGMSG,
         "PROBEMEASURE before=%" PRIu64 " after=%" PRIu64 " restored=%" PRIu64
         " delta=%" PRId64, before, after, restored, (int64_t)(restored - before));
-    /* Shortfall is a leak, surplus means the window was polluted; either way
-     * the measurement is invalid. */
+    /* Shortfall is a leak; surplus means a polluted measurement window. */
     if (restored != before) {
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, PPPLOGMSG,
             "Capacity probe: heap not restored, before=%" PRIu64 " restored=%" PRIu64
@@ -679,9 +670,8 @@ STATUS ppp_init_config_by_user(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb, U16 ccb
     /* NAT hashes + free-list: flush all learned flows. */
     nat_table_reset(ppp_ccb);
 
-    /* IPv6 firewall hash + free-list: flush all learned sessions. Both resets
-     * run after pppd_ipv6_dp_gate_update() closed the IPv6 gate above, which
-     * is what keeps new packets away from a table being rebuilt. */
+    /* IPv6 firewall hash + free-list: flush all learned sessions. Must run
+     * after pppd_ipv6_dp_gate_update() above has closed the IPv6 gate. */
     ipv6_firewall_table_reset(ppp_ccb);
 
     return SUCCESS;

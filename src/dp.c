@@ -288,14 +288,8 @@ STATUS PORT_INIT(FastRG_t *fastrg_ccb, U16 port)
         return ERROR;
     }
 
-    /* One lcore per TX queue — the layout and the rule for sending on someone
-     * else's queue are in dp.h, next to get_tx_queue_id_for_sender(). The queue count
-     * stays N+3 whatever the lcore count is, because a VF may offer as few as
-     * four TX queues.
-     *
-     * DP_MODE_RSS uses N+1 RX queues, DP_MODE_DISTRIBUTOR one; both use N+3 TX
-     * queues. In distributor mode, clamp the worker count to the NIC's TX
-     * queue capability while preserving all dedicated control queues. */
+    /* One lcore per TX queue; the layout and the rule for sending on someone
+     * else's queue are in dp.h, next to get_tx_queue_id_for_sender(). */
     if (fastrg_ccb->datapath_mode == DP_MODE_RSS) {
         rx_rings = fastrg_calc_queue_count(rte_lcore_count());
         tx_rings = get_tx_queue_count((U16)(rx_rings - 1));
@@ -458,16 +452,11 @@ static U32 fw_flow_gc_ccb_counter;
 /**
  * @fn fw_flow_gc_idle_tick_by_ccb
  *
- * @brief Amortized garbage collection of a subscriber's forwarding flow
- *        tables -- its NAT mappings and its IPv6 firewall sessions. Called 
- *        by data-plane RX loops after a burst with idle headroom 
- *        (nb_rx < BURST_SIZE), or forced every NAT_GC_FORCE_PERIOD consecutive 
- *        full bursts so sustained line rate cannot starve reclaim. Picks 
- *        the next subscriber round-robin and scans one bounded chunk of each 
- *        of its two pools for expired entries. Zombie flows (never looked up 
- *        again) are otherwise unreachable now that slot allocation is free-list 
- *        based -- this restores the self-cleaning the old probe-walk eviction 
- *        provided, at near-zero cost to saturated bursts.
+ * @brief Amortized GC of one subscriber's NAT mappings and IPv6 firewall
+ *        sessions, one bounded chunk of each per call.
+ *
+ *        The only reclaim path: slot allocation is free-list based, so flows
+ *        never looked up again are otherwise unreachable.
  *
  * @param fastrg_ccb
  *        FastRG control block
@@ -577,9 +566,6 @@ int wan_ctrl_rx(void *arg)
                     IPV6_WAN_TO_CP;
 
                 if (verdict == IPV6_WAN_TO_CP) {
-                    /* DHCPv6 and BRAS-side ICMPv6 belong to the control plane,
-                     * and with the gate closed every IPv6 session frame goes
-                     * there untouched. */
                     if (unlikely(rte_atomic16_read(&ppp_ccb->ppp_bool) == 0)) {
                         drop_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
                         continue;
@@ -710,8 +696,8 @@ int wan_data_rx(void *arg)
                 IPV6_L2_LEN + sizeof(pppoe_header_t));
 
             /* ---- IPv6 session data ----
-             * Classified before the IPv4 gate: IPv6 has its own gate, so a
-             * session whose IPCP failed still forwards IPv6. */
+             * Must precede the IPv4 gate: IPv6 has its own gate, so a session
+             * whose IPCP failed still forwards IPv6. */
             if (unlikely(ppp_payload->ppp_protocol == rte_cpu_to_be_16(PPP_IPV6_PROTOCOL))) {
                 struct rte_ipv6_hdr *ip6 = (struct rte_ipv6_hdr *)
                     ((char *)eth_hdr + IPV6_L2_LEN + IPV6_PPPOE_HDR_LEN);
@@ -945,8 +931,6 @@ int lan_ctrl_rx(void *arg)
             if (unlikely(vlan_header->next_proto == rte_cpu_to_be_16(FRAME_TYPE_IPV6))) {
                 ppp_ccb_t *ppp_ccb_ipv6 = PPPD_GET_CCB(fastrg_ccb, ccb_id);
 
-                /* Keep disabled subscribers on the old drop path before
-                 * parsing any IPv6 header. */
                 if (ppp_ccb_ipv6->ipv6_enabled == FALSE) {
                     drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                     continue;
@@ -1446,10 +1430,8 @@ int wan_dist_rx(void *arg)
             }
 
             /* ---- IPv6 session data ----
-             * TCP/UDP is fanned out to a worker still carrying its PPPoE
-             * header, which is exactly how the worker tells IPv6 from the
-             * already-stripped IPv4 packets. Everything else is cheap enough
-             * to finish inline. */
+             * Packets fanned out to a worker keep their PPPoE header; that is
+             * how the worker tells IPv6 from the stripped IPv4 packets. */
             if (unlikely(ppp_payload->ppp_protocol == rte_cpu_to_be_16(PPP_IPV6_PROTOCOL))) {
                 struct rte_ipv6_hdr *ip6 = (struct rte_ipv6_hdr *)
                     ((char *)eth_hdr + IPV6_L2_LEN + IPV6_PPPOE_HDR_LEN);

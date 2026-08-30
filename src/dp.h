@@ -181,35 +181,31 @@ static inline STATUS parse_l2_hdr(FastRG_t *fastrg_ccb, struct rte_mbuf *single_
     return SUCCESS;
 }
 
-/* TX ring depth per queue. Shared because the TX-shortfall report walks the
- * ring to say where the descriptors stand. */
+/* TX ring depth per queue. */
 #define TX_RING_SIZE 512
 
 /* ---------------------------------------------------------------------------
  * TX queue ownership
  *
- * One lcore per TX queue. Two lcores writing one queue corrupt its ring, so
- * queue numbers are decided only here — add a sender to this list, never pick
- * a number at the call site. get_tx_queue_id_for_sender() is the only reader, and
- * the unit test proves no two senders share a queue.
+ * One lcore per TX queue: two lcores writing one queue corrupt its ring, so
+ * queue numbers are assigned only here, never at the call site.
  *
  * With N data queues, per port:
- *   queue 0      control thread, for the frames it builds on this port
- *   queue 1..N   the data lcore reading the other port, for what it forwards here
- *   queue N+1    this port's queue-0 poller, for the replies it sends here
- *   queue N+2    the other port's queue-0 poller, for what it forwards here
+ *   queue 0      control thread
+ *   queue 1..N   the data lcore reading the other port
+ *   queue N+1    this port's queue-0 poller, for its own replies
+ *   queue N+2    the other port's queue-0 poller, for cross-port forwarding
  *
- * Sending on a queue you do not own: hand the packet over with
- * send_pkt_to_other_lcore(); the owner collects it with
- * check_pkt_from_other_lcore() and sends it in its own next burst.
+ * To send on a queue you do not own, hand the packet to
+ * send_pkt_to_other_lcore(); the owner drains it with
+ * check_pkt_from_other_lcore() into its own next burst.
  * ------------------------------------------------------------------------- */
 typedef enum {
     FASTRG_TX_SENDER_CTRL_THREAD = 0, /* only index 0 exists */
     FASTRG_TX_SENDER_WAN_DATA,        /* index = data queue index, 0..N-1 */
     FASTRG_TX_SENDER_LAN_DATA,        /* index = data queue index, 0..N-1 */
-    /* The two queue-0 pollers. Each owns a queue on both ports: one for the
-     * replies it sends on the port it polls, one for what it forwards to the
-     * other port. Only index 0 exists, one poller per port. */
+    /* The two queue-0 pollers; each owns one queue on both ports. Only
+     * index 0 exists, one poller per port. */
     FASTRG_TX_SENDER_LAN_CTRL,        /* polls LAN queue 0 */
     FASTRG_TX_SENDER_WAN_CTRL         /* polls WAN queue 0 */
 } fastrg_tx_sender_t;
@@ -217,8 +213,8 @@ typedef enum {
 /* Returned when a sender does not transmit on the port asked about. */
 #define FASTRG_TX_QUEUE_NONE 0xFFFF
 
-/* How deep one handoff ring is. Bounded on purpose: a slow owner must not be
- * able to back-pressure the lcore handing the packet over. */
+/* Handoff ring depth; bounded so a slow owner cannot back-pressure the lcore
+ * handing the packet over. */
 #define TX_HANDOFF_RING_SIZE 256
 
 /**
@@ -241,8 +237,7 @@ U16 get_tx_queue_count(U16 data_queues);
  * @param sender
  *      Which kind of lcore is asking
  * @param index
- *      Data queue index for the data lcores, polled port id for the pollers,
- *      must be 0 for the control thread
+ *      Data queue index for the data lcores; must be 0 for every other sender
  * @param port_id
  *      Port being transmitted on
  * @param data_queues
@@ -415,9 +410,7 @@ static inline void count_tx_queue_refused(FastRG_t *fastrg_ccb, U16 port_id, U16
  *
  * @brief Hand one packet to the lcore that owns a TX queue.
  *
- * Enqueues only — it never transmits. Lcores that own the queue send the
- * packet themselves, normally by putting it in the batch they are already
- * building.
+ * Enqueues only; the owner transmits it in its own next burst.
  *
  * @param fastrg_ccb
  *      FastRG control block pointer

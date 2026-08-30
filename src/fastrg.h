@@ -93,8 +93,8 @@ struct lcore_usage_counter {
     const char *role;
 } __rte_cache_aligned;
 
-/* Statistics for TX queue refused packets. Each lcore writes only its own row
- * with a plain +=; readers sum the rows with RELAXED loads. */
+/* Each lcore writes only its own row with a plain +=; readers sum the rows
+ * with RELAXED loads. */
 struct tx_queue_stats {
     uint64_t full_packets;    /* packets the queue refused */
     uint64_t short_bursts;    /* bursts in which it refused at least one */
@@ -114,8 +114,8 @@ typedef struct FastRG {
     char                    *log_path;      /* FastRG log file path (pcap captures go in its dir) */
     char                    *unix_sock_path;/* FastRG unix socket file path */
     char                    *node_grpc_ip_port; /* FastRG node grpc ip:port */
-    U16                     node_grpc_port;    /* same port as a number, reported to the controller at
-                                                * registration so it dials what this node configured */
+    U16                     node_grpc_port;    /* same port as a number, reported to the controller
+                                                * at registration */
     U64                     subscriber_cost_bytes; /* measured hugepage cost of one subscriber */
     int                     unix_sock_fd;   /* FastRG unix socket file descriptor */
     FILE                    *fp;            /* FastRG log file pointer */

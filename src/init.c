@@ -103,8 +103,8 @@ static STATUS fastrg_get_system_page_size_for_mempool(size_t *page_size)
         return SUCCESS;
     }
 
-    /* flags=0 matches how the real pools are created, which is what decides
-     * whether objects have to be page-bound at all. */
+    /* flags=0 must match the real pools: it decides whether objects are
+     * page-bound. */
     mp = rte_mempool_create_empty("fastrg_pgsz_probe", 1, 64, 0, 0,
         (int)rte_socket_id(), 0);
     if (mp == NULL)
@@ -225,8 +225,7 @@ STATUS fastrg_compute_max_user_count(FastRG_t *fastrg_ccb)
 
 #ifdef UNIT_TEST
     if (test_subscriber_cost_bytes != 0) {
-        /* Injected cost replaces the measured inputs; the solve below is the
-         * shared production one. */
+        /* Injected cost replaces the measured inputs. */
         fastrg_ccb->max_user_count = (U16)fastrg_get_subscriber_capacity(free_bytes,
             HUGEPAGE_RESERVE_BYTES, test_subscriber_cost_bytes);
         fastrg_ccb->subscriber_cost_bytes = test_subscriber_cost_bytes;
@@ -240,16 +239,12 @@ STATUS fastrg_compute_max_user_count(FastRG_t *fastrg_ccb)
         return ERROR;
     dhcp_get_subscriber_real_size(&dhcp_size_info);
 
-    /* init.c's own per-subscriber rows: one stats row per lcore per port, plus
-     * one PPPoE row per lcore. */
-    /* The +1 unknown-user slot in each row is charged to the reserve. */
+    /* The +1 unknown-user slot in each stats row is charged to the reserve. */
     RTE_LCORE_FOREACH(lcore_id) {
         stats_per_sub += (uint64_t)PORT_AMOUNT * sizeof(struct per_ccb_stats);
         stats_per_sub += sizeof(struct pppoes_lcore_stats);
     }
 
-    /* Plain size: the figure a reader can check against the structure
-     * definitions. */
     const ccb_memory_info_t *size_infos[] = { &ppp_size_info, &dhcp_size_info };
     uint64_t plain_bytes = stats_per_sub;
     uint64_t cost = stats_per_sub;
@@ -589,10 +584,8 @@ static void init_node_runtime_state(FastRG_t *fastrg_ccb)
     }
 }
 
-/* Startup latch for the metrics listener. The bind happens on the metrics
- * thread, so its verdict has to travel back to the startup path that decides
- * whether the node may run. Same three-state contract as the gRPC server
- * latch: pending until the thread reports, then ok or failed exactly once. */
+/* Startup latch for the metrics listener: pending until the thread reports,
+ * then ok or failed exactly once, same contract as the gRPC server latch. */
 typedef enum {
     METRICS_STARTUP_PENDING,
     METRICS_STARTUP_OK,
@@ -606,9 +599,10 @@ static metrics_startup_state_t metrics_startup_result = METRICS_STARTUP_PENDING;
 /**
  * @fn metrics_startup_publish
  *
- * @brief Hand the metrics listener's verdict to whoever is waiting on it. Both
- *        outcomes must be published, or a failed bind would leave the startup
- *        path blocked forever.
+ * @brief Hand the metrics listener's verdict to whoever is waiting on it.
+ *
+ *        Both outcomes must be published, or a failed bind blocks the startup
+ *        path forever.
  *
  * @param result
  *      METRICS_STARTUP_OK or METRICS_STARTUP_FAILED
@@ -688,8 +682,8 @@ STATUS sys_init(FastRG_t *fastrg_ccb, struct fastrg_config *fastrg_cfg)
     if (ret != 0)
         goto err;
 
-    /* After the ports exist, so the queue count the owners are recorded
-     * against is the one the NIC actually got. */
+    /* Must run after the ports exist: owners are recorded against the queue
+     * count the NIC actually got. */
     if (dp_tx_handoff_pkt_init(fastrg_ccb) != SUCCESS) {
         ret = ERROR;
         goto err;

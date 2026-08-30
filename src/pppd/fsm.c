@@ -842,9 +842,7 @@ STATUS ipcp_layer_up(ppp_ccb_t *s_ppp_ccb)
         return ERROR;
     }
     FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " HSI module is spawned.\n", s_ppp_ccb->user_num);
-    /* PPPoE "connected" transition → controller via Kafka. Status is no longer
-     * written to etcd. Prefix delegation normally finishes after this point,
-     * and re-reports from dhcp6_process_message() when it does. */
+    /* dhcp6_process_message() re-reports once prefix delegation finishes. */
     ppp_report_connection_status(s_ppp_ccb);
     if (fastrg_ccb->is_standalone == FALSE) {
         char user_id_str[6];
@@ -878,7 +876,6 @@ STATUS ipv6cp_layer_up(ppp_ccb_t *s_ppp_ccb)
         s_ppp_ccb->ipv6cp_peer_iid[4], s_ppp_ccb->ipv6cp_peer_iid[5],
         s_ppp_ccb->ipv6cp_peer_iid[6], s_ppp_ccb->ipv6cp_peer_iid[7]);
 
-    /* Prefix delegation starts only after the IPv6 control protocol opens. */
     dhcp6_pd_start(s_ppp_ccb);
     return SUCCESS;
 }

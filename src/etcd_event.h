@@ -14,9 +14,7 @@ typedef enum {
     HSI_ACTION_DELETE = 3
 } etcd_action_type_t;
 
-/* PPPoE desired connection state, stored in the HSI config object as
- * config.desire_status. Only the CLI/controller change it (connect/disconnect).
- * The node reconciles the live PPPoE session toward this value. */
+/* Values for hsi_config_t.desire_status; only the CLI/controller set it. */
 #define DESIRE_STATUS_CONNECT    "connect"
 #define DESIRE_STATUS_DISCONNECT "disconnect"
 
@@ -39,7 +37,7 @@ typedef struct {
     BOOL dns_proxy_enable;      /* per-subscriber DNS proxy enable; defaults to TRUE when absent in etcd */
     BOOL tcp_conntrack_enable;  /* per-subscriber TCP SPI enable; defaults to TRUE when absent in etcd */
     BOOL ipv6_enable;           /* per-subscriber IPv6 enable; defaults to FALSE when absent in etcd */
-    char desire_status[16];     /* "connect"/"disconnect"; empty = disconnect. Only CLI/controller set it. */
+    char desire_status[16];     /* "connect"/"disconnect"; empty = disconnect */
     port_mapping_t *port_mappings;  // heap-allocated; use hsi_config_free_port_mappings() to free
     int port_mapping_count;
 } hsi_config_t;
@@ -66,10 +64,9 @@ typedef struct {
 } dns_record_config_t;
 
 /* ---- Asynchronous etcd event delivery -----------------------------------
- * etcd watcher threads parse + self-event-filter, then hand a heap-allocated
- * etcd_event_t to the control-plane loop (fastrg_loop) via the etcd_event_q
- * ring. fastrg_loop is the single thread that applies changes to CCBs, so the
- * apply path needs no locking.
+ * Watcher threads hand a heap-allocated etcd_event_t to fastrg_loop through
+ * etcd_event_q; fastrg_loop is the only thread that applies changes to CCBs,
+ * so the apply path needs no locking.
  */
 typedef enum {
     ETCD_EVENT_HSI = 1,        /* HSI config create/update/delete         */
@@ -83,9 +80,7 @@ typedef struct etcd_event {
     etcd_action_type_t action;          /* CREATE/UPDATE/DELETE; unused for sweep */
     int64_t            revision;        /* etcd ModRevision of the key this event carries */
     BOOL               from_reconcile;  /* TRUE: periodic reconcile; FALSE: live watch event */
-    /* TRUE when the controller asked the node to restate this config. The
-     * dispatcher confirms it as-is when local state already matches, and
-     * otherwise re-applies it like any other event. */
+    /* TRUE when the controller asked the node to restate this config. */
     BOOL               from_republish;
     char               node_id[64];
     char               user_id[64];
