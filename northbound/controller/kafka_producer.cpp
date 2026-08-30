@@ -723,7 +723,7 @@ extern "C" BOOL kafka_report_offline_edits(void) {
     if (dirty == 0)
         return TRUE;   // nothing pending
     // Skip when etcd is unreachable because we need etcd to compare configs;
-    // entries stay dirty and are reported again after reconnection.
+    // if etcd is disconnected, entries stay dirty and are reported again after reconnection.
     if (!etcd_client_is_connected())
         return FALSE;
     OfflineReportCtx ctx;

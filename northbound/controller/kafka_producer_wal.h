@@ -51,7 +51,7 @@ bool kafka_wal_parse(const std::string &data, std::vector<KafkaWalEvent> &out);
 /**
  * @fn kafka_build_config_apply_result
  *
- * @brief fill in the ConfigApplyResult payload of a config-apply event
+ * @brief fill in the ConfigApplyResult payload of a kafka config-apply event
  * @param out
  *      payload to fill; every field is written, so a reused message is safe
  * @param action

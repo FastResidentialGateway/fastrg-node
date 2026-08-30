@@ -10,7 +10,7 @@
 #include <rte_timer.h>
 #include <rte_udp.h>
 
-#include "../../src/dhcp6/dhcp6.h"
+#include "../../src/dhcpd6/dhcpd6.h"
 #include "../../src/protocol.h"
 #include "../../src/pppd/header.h"
 #include "../test_helper.h"

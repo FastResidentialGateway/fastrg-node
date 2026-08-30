@@ -27,7 +27,7 @@
 #include "protocol.h"
 #include "init.h"
 #include "dp.h"
-#include "dhcp6/dhcp6.h"
+#include "dhcpd6/dhcpd6.h"
 #include "nd6/nd6.h"
 #include "pppd/pppd.h"
 #include "pppd/header.h"

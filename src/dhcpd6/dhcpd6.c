@@ -9,7 +9,7 @@
 #include <rte_memcpy.h>
 #include <rte_udp.h>
 
-#include "dhcp6.h"
+#include "dhcpd6.h"
 #include "../dbg.h"
 #include "../dp.h"
 #include "../nd6/nd6.h"
@@ -463,9 +463,9 @@ STATUS dhcp6_process_message(ppp_ccb_t *ppp_ccb, const U8 *dhcp, U16 len)
         "User %" PRIu16 " DHCPv6-PD lease is ready (/%u, T1=%u seconds).",
         ppp_ccb->user_num, ppp_ccb->hsi_ipv6_pd_plen, ppp_ccb->dhcp6_t1);
 
-    /* The connected event sent when IPCP opened carried no IPv6, so re-send
-     * it once the lease is new or changed. Losing IPv6 mid-session sends no
-     * event; the next disconnect or lease corrects the controller. */
+    /* The connected event sent to kafka when IPCP opened carried no IPv6, 
+     * so re-send it once the lease is new or changed. Losing IPv6 mid-session 
+     * sends no event; the next disconnect or lease corrects the controller. */
     if ((was_ready == FALSE || lease_changed == TRUE) &&
             ppp_ccb->phase == DATA_PHASE)
         ppp_report_connection_status(ppp_ccb);

@@ -211,7 +211,7 @@ than the pool fits. Every packet the firewall denies is counted in
 | Metric | Type | Description |
 |--------|------|-------------|
 | `fastrg_node_per_user_dhcp_cur_lease_count` | gauge | Currently leased addresses in the subscriber's pool. |
-| `fastrg_node_per_user_dhcp_max_lease_count` | gauge | Pool capacity (number of addresses). |
+| `fastrg_node_per_user_dhcp_max_lease_count` | gauge | Leasable pool capacity (addresses, excluding .0/.255). |
 
 ### Server status tallies — labels: `node_uuid`
 
