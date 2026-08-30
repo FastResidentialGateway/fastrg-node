@@ -9,7 +9,6 @@
 extern "C" {
 #endif
 
-/* Inside the extern "C" block: the header has no linkage guard of its own. */
 #include "../../src/etcd_event.h"
 
 typedef enum {
@@ -29,7 +28,8 @@ typedef enum {
 // reported to the controller via Kafka (no longer stored in etcd metadata).
 // resource_version is the controller-stamped version inside the JSON;
 // mod_revision is etcd's own ModRevision for the key this value was read from,
-// which is what the node quotes when it reports the config it applied.
+// which is used by the node to report to the controller to indicate which version
+// the node uses.
 typedef struct {
     hsi_config_t config;
     char updated_by[64];

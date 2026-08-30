@@ -64,6 +64,7 @@ cli_ctrl_status_t cli_controller_del_dns(unsigned int user_id, const char *domai
  * (These toggles are HSI config fields, so they go through Update HSI config.) */
 cli_ctrl_status_t cli_controller_set_dns_proxy(unsigned int user_id, int enable);
 cli_ctrl_status_t cli_controller_set_tcp_conntrack(unsigned int user_id, int enable);
+cli_ctrl_status_t cli_controller_set_ipv6(unsigned int user_id, int enable);
 cli_ctrl_status_t cli_controller_snat_set(unsigned int user_id, unsigned int eport,
     const char *dip, unsigned int iport);
 cli_ctrl_status_t cli_controller_snat_unset(unsigned int user_id, unsigned int eport);

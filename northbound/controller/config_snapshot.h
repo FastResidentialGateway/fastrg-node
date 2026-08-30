@@ -174,6 +174,7 @@ void config_snapshot_clear_dirty(snapshot_kind_t kind, const char *user_id,
  * the snapshot is reported for controller arbitration on reconnect. */
 #define SNAPSHOT_FIELD_KIND_DNS_PROXY     "dns_proxy"      /* value: "true"/"false" */
 #define SNAPSHOT_FIELD_KIND_TCP_CONNTRACK "tcp_conntrack"  /* value: "true"/"false" */
+#define SNAPSHOT_FIELD_KIND_IPV6          "ipv6"           /* value: "true"/"false" */
 #define SNAPSHOT_FIELD_KIND_SNAT_UPSERT   "snat_upsert"    /* value: {"eport","dip","dport"} */
 #define SNAPSHOT_FIELD_KIND_SNAT_REMOVE   "snat_remove"    /* value: eport string */
 #define SNAPSHOT_FIELD_KIND_DNS_ADD       "dns_add"        /* value: {"domain","ip","ttl"} */

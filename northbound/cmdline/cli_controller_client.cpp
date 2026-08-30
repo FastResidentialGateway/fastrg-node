@@ -322,6 +322,16 @@ cli_ctrl_status_t cli_controller_set_tcp_conntrack(unsigned int user_id, int ena
     return update_config(user_id, cfg);
 }
 
+cli_ctrl_status_t cli_controller_set_ipv6(unsigned int user_id, int enable) {
+    ensure_stub();
+    if (!g_stub) return CLI_CTRL_UNAVAIL;
+    controller::HSIConfig cfg;
+    cli_ctrl_status_t rc = fetch_config(user_id, &cfg);
+    if (rc != CLI_CTRL_OK) return rc;
+    cfg.set_ipv6_enable(enable != 0);
+    return update_config(user_id, cfg);
+}
+
 cli_ctrl_status_t cli_controller_snat_set(unsigned int user_id, unsigned int eport,
     const char* dip, unsigned int iport) {
     ensure_stub();
