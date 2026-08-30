@@ -645,3 +645,37 @@ this is not json
 # expect-status: 0
 ---
 [{"seq":7,"payload":"1A2B0A0A757365725F636F756E741211434F554E545F455843454544535F4D4158"}]
+==== fixture: p36_ping_loss_zero
+# args: 0
+# expect-status: 0
+---
+4 packets transmitted, 4 received, 0% packet loss, time 3005ms
+rtt min/avg/max/mdev = 0.201/0.244/0.301/0.038 ms
+==== fixture: p36_ping_loss_within_ceiling
+# args: 2
+# expect-status: 0
+---
+50 packets transmitted, 49 received, 2% packet loss, time 49075ms
+rtt min/avg/max/mdev = 0.198/0.251/0.402/0.041 ms
+==== fixture: p36_ping_loss_over_ceiling
+# args: 2
+# expect-status: 1
+---
+50 packets transmitted, 48 received, 4% packet loss, time 49080ms
+rtt min/avg/max/mdev = 0.203/0.249/0.377/0.036 ms
+==== fixture: p36_ping_loss_total_loss
+# args: 2
+# expect-status: 1
+---
+50 packets transmitted, 0 received, 100% packet loss, time 49999ms
+==== fixture: p36_ping_loss_fractional_over
+# args: 2
+# expect-status: 1
+---
+1000 packets transmitted, 974 received, 2.6% packet loss, time 999123ms
+rtt min/avg/max/mdev = 0.199/0.257/0.511/0.044 ms
+==== fixture: p36_ping_loss_no_output
+# args: 2
+# expect-status: 1
+---
+ping: connect: Network is unreachable
