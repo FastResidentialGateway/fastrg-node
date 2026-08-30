@@ -258,12 +258,13 @@ typedef struct {
      * by data-plane cores. 1-byte aligned store/load is atomic on x86 (TSO);
      * volatile blocks the compiler from hoisting/caching the load. */
     volatile BOOL         tcp_conntrack_enabled;
-    /* Per-subscriber IPv6 enable. Written by apply_hsi_config(), then read by
-     * the PPP control plane when IPV6CP negotiation is implemented. The
-     * 1-byte aligned store/load follows the same atomicity rule as conntrack. */
+    /* Per-subscriber IPv6 enable. Written by the control plane
+     * (apply_hsi_config() / SetIpv6()), read by IPV6CP negotiation and folded into
+     * ipv6_dp_bool by pppd_ipv6_dp_gate_update(). The 1-byte aligned
+     * store/load follows the same atomicity rule as conntrack. */
     volatile BOOL         ipv6_enabled;
     /* ---- IPv6 stateful firewall (per subscriber, mirrors the NAT block) ---- */
-    ipv6_firewall_entry_t       ipv6_firewall_table[IPV6_FIREWALL_MAX_ENTRIES]; /* session pool (slots referenced by the hash) */
+    ipv6_firewall_entry_t ipv6_firewall_table[IPV6_FIREWALL_MAX_ENTRIES]; /* session pool (slots referenced by the hash) */
     U64                   ipv6_firewall_expire_at[IPV6_FIREWALL_MAX_ENTRIES];  /* SoA expiry deadline, parallel to the pool; 0 = slot free */
     U64                   ipv6_firewall_last_used[IPV6_FIREWALL_MAX_ENTRIES];  /* SoA last-hit stamp for LRU eviction; 0 = slot free.
                                                                     * Separate from the deadline because per-state TCP timeouts

@@ -754,6 +754,21 @@ void fastrg_grpc_set_tcp_conntrack(U16 user_id, bool enable) {
     }
 }
 
+void fastrg_grpc_set_ipv6(U16 user_id, bool enable) {
+    SetIpv6Request request;
+    SetIpv6Reply reply;
+    request.set_user_id(user_id);
+    request.set_enable(enable);
+    ClientContext context;
+    Status status = fastrg_client->stub_->SetIpv6(&context, request, &reply);
+    if (status.ok()) {
+        std::cout << "ipv6 " << (enable ? "enabled" : "disabled")
+                  << " for user " << user_id << std::endl;
+    } else {
+        std::cout << "Failed to set ipv6: " << status.error_message() << std::endl;
+    }
+}
+
 void fastrg_grpc_pdump_start(U16 direction, U16 subscriber, const char *filter, U32 size_mb) {
     fastrgnodeservice::PdumpRequest request;
     fastrgnodeservice::PdumpReply reply;

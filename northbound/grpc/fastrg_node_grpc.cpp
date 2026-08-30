@@ -1629,6 +1629,53 @@ grpc::Status FastRGNodeServiceImpl::SetTcpConntrack(::grpc::ServerContext* conte
     return grpc::Status::OK;
 }
 
+grpc::Status FastRGNodeServiceImpl::SetIpv6(::grpc::ServerContext* context,
+    const ::fastrgnodeservice::SetIpv6Request* request,
+    ::fastrgnodeservice::SetIpv6Reply* response)
+{
+    cout << "SetIpv6 called" << endl;
+
+    U16 user_id = request->user_id();
+    bool enable = request->enable();
+    U16 ccb_id = user_id - 1;
+
+    if (user_id == 0 || user_id > fastrg_ccb->user_count) {
+        std::string err = "Invalid user_id " + std::to_string(user_id);
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, err);
+    }
+
+    if (etcd_client_is_initialized() && etcd_client_is_connected()) {
+        std::string err = "etcd reachable (SDN mode); set ipv6_enable via controller/etcd, not the node";
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, err);
+    }
+
+    ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
+    if (!ppp_ccb) {
+        std::string err = "PPP CCB not initialized for user " + std::to_string(user_id);
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+
+    /* etcd unreachable: update local state now so it takes effect immediately. */
+    ppp_ccb->ipv6_enabled = enable ? TRUE : FALSE;
+    pppd_ipv6_dp_gate_update(ppp_ccb);
+
+    /* SDN mode but etcd down: queue the field write to flush on reconnect. */
+    if (etcd_client_is_initialized() && fastrg_ccb && fastrg_ccb->node_uuid) {
+        if (!snapshot_field_edit(SNAPSHOT_KIND_HSI,
+                std::to_string(user_id).c_str(), SNAPSHOT_FIELD_KIND_IPV6,
+                enable ? "true" : "false",
+                std::string("ipv6=") + (enable ? "true" : "false"), false)) {
+            std::string err = "Failed to snapshot ipv6_enable for user " + std::to_string(user_id);
+            cout << err << endl;
+            return grpc::Status(grpc::StatusCode::INTERNAL, err);
+        }
+    }
+
+    response->set_status("ok");
+    return grpc::Status::OK;
+}
+
 grpc::Status FastRGNodeServiceImpl::PdumpStart(::grpc::ServerContext* context, const ::fastrgnodeservice::PdumpRequest* request, ::fastrgnodeservice::PdumpReply* response)
 {
     (void)context;

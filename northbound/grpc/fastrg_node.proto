@@ -46,6 +46,7 @@ service FastrgService {
   rpc FlushDnsCache(DnsCacheFlushRequest) returns(DnsCacheFlushReply) {}
   rpc SetDnsProxy(SetDnsProxyRequest) returns(SetDnsProxyReply) {}
   rpc SetTcpConntrack(SetTcpConntrackRequest) returns(SetTcpConntrackReply) {}
+  rpc SetIpv6(SetIpv6Request) returns(SetIpv6Reply) {}
   rpc PdumpStart(PdumpRequest) returns(PdumpReply) {}
   rpc PdumpStop(PdumpRequest) returns(PdumpReply) {}
   rpc RepublishPPPoEStatus(google.protobuf.Empty) returns(RepublishPPPoEStatusReply) {}
@@ -358,6 +359,15 @@ message SetTcpConntrackRequest {
 }
 
 message SetTcpConntrackReply {
+  string status = 1;
+}
+
+message SetIpv6Request {
+  uint32 user_id = 1;
+  bool enable = 2;
+}
+
+message SetIpv6Reply {
   string status = 1;
 }
 

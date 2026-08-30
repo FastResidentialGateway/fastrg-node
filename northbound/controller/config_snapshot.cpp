@@ -565,6 +565,8 @@ static STATUS field_merge_impl(const char *kind, const char *current_json,
         cfg["desire_status"] = value;
     } else if (strcmp(kind, SNAPSHOT_FIELD_KIND_TCP_CONNTRACK) == 0) {
         cfg["tcp_conntrack_enable"] = (strcmp(value, "true") == 0);
+    } else if (strcmp(kind, SNAPSHOT_FIELD_KIND_IPV6) == 0) {
+        cfg["ipv6_enable"] = (strcmp(value, "true") == 0);
     } else if (strcmp(kind, SNAPSHOT_FIELD_KIND_SNAT_UPSERT) == 0) {
         Json::Value entry;
         if (!reader.parse(value, entry) || !entry.isMember("eport"))
