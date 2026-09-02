@@ -71,7 +71,7 @@ phase15_metrics_route() {
     )
     local _m
     for _m in "${_want[@]}"; do
-        printf '%s\n' "$_body" | grep -q "^${_m}{" || _missing="${_missing} ${_m}"
+        grep -q "^${_m}{" <<< "$_body" || _missing="${_missing} ${_m}"
     done
     if [[ -z "$_missing" ]]; then
         pass "Step 64: expected metric families" "all ${#_want[@]} present"

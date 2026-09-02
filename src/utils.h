@@ -32,6 +32,7 @@ typedef enum {
 typedef struct {
     U8 cmd;
     U16 ccb_id;
+    void *payload;
 } fastrg_event_northbound_msg_t;
 
 /**
@@ -39,7 +40,11 @@ typedef struct {
  */
 typedef struct {
     fastrg_event_type_t type;
-    U8                  refp[ETH_JUMBO];
+    fastrg_event_northbound_msg_t northbound_msg; /* EV_NORTHBOUND_PPPoE / EV_NORTHBOUND_DHCP */
+    struct {
+        U8  up_down;                /* LINK_UP / LINK_DOWN */
+        U16 port;
+    } link;                         /* EV_LINK */
     int                 len;
     U16                 ccb_id;     /* subscriber CCB ID (used by EV_DP_DNS / EV_DP_DHCP) */
     U8                  port_id;    /* source port: LAN_PORT(0) or WAN_PORT(1) */

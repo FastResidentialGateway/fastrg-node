@@ -10,8 +10,10 @@
 # expired session cannot be reopened from the WAN side, and the table still
 # performs and drains when it is nearly full.
 #
-# The bench state this phase touches (IPv6 enable flag, sysctls, WAN address
-# and route, the TCP conntrack switch) is undone by
+# The LAN vlan's disable_ipv6, accept_ra and autoconf are switched on without
+# being read first and are left on. The rest of the bench state this phase
+# touches (the guest's SLAAC addresses and RA routes, IPv6 enable flag, WAN
+# sysctl, WAN address and route, the TCP conntrack switch) is undone by
 # _cleanup_phase37_ipv6_firewall, which also runs from the top-level EXIT trap.
 # ---------------------------------------------------------------------------
 
@@ -37,7 +39,6 @@ _P37_SWEEP_SEC=6            # under the 10s idle timeout, so sessions survive
 
 # Bench state to undo.
 _P37_IPV6_SET=0
-_P37_LAN_SYSCTL_SAVED=""
 _P37_WAN_SYSCTL_SAVED=""
 _P37_WAN_ADDR_ADDED=0
 _P37_WAN_ROUTE_ADDED=0
@@ -192,12 +193,10 @@ _cleanup_phase37_ipv6_firewall() {
         _P37_CONNTRACK_TOGGLED=0
     fi
 
-    if [[ -n "${_P37_LAN_SYSCTL_SAVED:-}" ]]; then
-        info "Cleanup(phase37): restoring ${_P37_LAN_VLAN} IPv6 sysctl on the LAN host..."
-        ssh_lan "sysctl -w net.ipv6.conf.${_P37_LAN_VLAN}.disable_ipv6=${_P37_LAN_SYSCTL_SAVED}" \
-            >/dev/null 2>&1 || true
-        _P37_LAN_SYSCTL_SAVED=""
-    fi
+    # Leftover SLAAC addresses and RA routes keep the guest choosing dead IPv6.
+    ssh_lan "ip -6 addr flush dev ${_P37_LAN_VLAN} scope global; \
+        ip -6 route flush dev ${_P37_LAN_VLAN} proto ra" >/dev/null 2>&1 || true
+
     if [[ "${_P37_WAN_ROUTE_ADDED:-0}" -eq 1 ]]; then
         ssh_wan "ip -6 route del ${_P37_PD_ROUTE} via ${_P37_WAN6_GW} dev ${WAN_NIC}" \
             >/dev/null 2>&1 || true
@@ -416,15 +415,16 @@ phase37_ipv6_firewall() {
     [[ -n "$_addr_line" ]]  || _issue="${_issue:+${_issue}; }${_P37_WAN6_HOST_ADDR} not on ${WAN_NIC}"
     [[ -n "$_route_line" ]] || _issue="${_issue:+${_issue}; }no return route for ${_P37_PD_ROUTE}"
 
-    # LAN host: SLAAC address from the advertised prefix.
-    _P37_LAN_SYSCTL_SAVED=$(ssh_lan "sysctl -n net.ipv6.conf.${_P37_LAN_VLAN}.disable_ipv6" \
-        2>/dev/null | tr -d '[:space:]' || true)
-    if [[ "$_P37_LAN_SYSCTL_SAVED" =~ ^[0-9]+$ ]]; then
-        ssh_lan "sysctl -w net.ipv6.conf.${_P37_LAN_VLAN}.disable_ipv6=0" >/dev/null 2>&1 || true
-    else
-        _P37_LAN_SYSCTL_SAVED=""
-        _issue="${_issue:+${_issue}; }cannot read net.ipv6.conf.${_P37_LAN_VLAN}.disable_ipv6"
-    fi
+    # LAN host: SLAAC address from the advertised prefix. SLAAC needs these
+    # three sysctls on and the bench guarantees none of them (accept_ra has been
+    # measured at 0), so switch them on every time without reading or restoring
+    # the old values.
+    ssh_lan "sysctl -w net.ipv6.conf.${_P37_LAN_VLAN}.disable_ipv6=0 \
+        net.ipv6.conf.${_P37_LAN_VLAN}.accept_ra=1 \
+        net.ipv6.conf.${_P37_LAN_VLAN}.autoconf=1" >/dev/null 2>&1 || true
+    # Global addresses left by an earlier delegation would compete to be the
+    # source address, so drop them and let SLAAC rebuild from the new prefix.
+    ssh_lan "ip -6 addr flush dev ${_P37_LAN_VLAN} scope global" >/dev/null 2>&1 || true
     for _i in $(seq 1 25); do
         _lan_addrs=$(ssh_lan "ip -6 -o addr show dev ${_P37_LAN_VLAN} scope global" 2>/dev/null | \
             grep -v tentative | awk '{print $4}' | cut -d/ -f1 | tr '\n' ' ' || true)

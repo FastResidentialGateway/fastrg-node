@@ -10,12 +10,14 @@
 #
 # Turning IPv6 back off is checked as "RAs stop and forwarding stops". The
 # node never sends a lifetime-zero RA — hosts age the prefix out on their own
-# — so the LAN address does not disappear on disable; it goes away when this
-# phase switches IPv6 back off on the guest interface.
+# — so the LAN address survives the disable, and _cleanup_phase35_ipv6 is what
+# takes it away at the end.
 #
-# Every sysctl, address and route this phase touches on the bench is read
-# first and put back by _cleanup_phase35_ipv6, which also runs from the
-# top-level EXIT trap so an aborted run leaves nothing behind.
+# The LAN vlan's disable_ipv6, accept_ra and autoconf are switched on without
+# being read first and are left on. Everything else is undone by
+# _cleanup_phase35_ipv6, which also runs from the top-level EXIT trap so an
+# aborted run leaves nothing behind: it flushes the guest's SLAAC addresses and
+# RA routes, and puts the WAN sysctl, address and route back as it found them.
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
@@ -44,7 +46,6 @@ case_validation_register ra_capture_wrong_interface phase35_ipv6 \
 
 # Bench state to undo, and the values read from the node.
 _P35_IPV6_SET=0
-_P35_LAN_SYSCTL_SAVED=""
 _P35_WAN_SYSCTL_SAVED=""
 _P35_WAN_ADDR_ADDED=0
 _P35_WAN_ROUTE_ADDED=0
@@ -52,6 +53,9 @@ _P35_PD_PREFIX=""
 _P35_V6_ADDR=""
 _P35_V6_DNS_JOINED=""
 _P35_REDIAL_STAGE=""
+_P35_LAN_ADDRS=""
+_P35_LAN64=""
+_P35_SLAAC_ISSUE=""
 
 _p35_user_phase() {
     local _uid="$1"
@@ -150,6 +154,105 @@ local_validation_register capture_window_counts e2e_get_capture_window_counts \
     capture_window_no_control \
     capture_window_ra_present
 
+# What one ping run says about reachability: "pass" (nothing lost), "blocked"
+# (everything lost), "partial" (some lost), or "err" when the output carries no
+# loss line at all. A ping that never ran must not read as either outcome, and
+# the loss figure is compared as a number so "100%" cannot substring-match as
+# a zero and "0.5%" cannot read as none.
+e2e_ping_loss_verdict() {
+    local _out="$1" _loss=""
+
+    _loss=$(printf '%s\n' "$_out" | \
+        sed -nE 's/.*[ ,]([0-9]+([.][0-9]+)?)% packet loss.*/\1/p' | tail -1 || true)
+    if ! [[ "$_loss" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        printf 'err'
+        return 1
+    fi
+    if awk -v l="$_loss" 'BEGIN { exit !(l == 0) }'; then
+        printf 'pass'
+    elif awk -v l="$_loss" 'BEGIN { exit !(l >= 100) }'; then
+        printf 'blocked'
+    else
+        printf 'partial'
+    fi
+    return 0
+}
+
+local_validation_register ping_loss_verdict e2e_ping_loss_verdict \
+    ping_verdict_zero_loss \
+    ping_verdict_total_loss \
+    ping_verdict_partial_loss \
+    ping_verdict_fractional_loss \
+    ping_verdict_no_output \
+    ping_verdict_unreachable \
+    ping_verdict_zero_inside_hundred
+
+# Toggle ipv6_enable for a subscriber through the controller. Wrapped so the
+# drill below can take the toggle away without touching the steps.
+_p35_set_ipv6() {
+    fastrg_grpc set_ipv6 "$1" "$2" >/dev/null 2>&1 || true
+}
+
+# Drill: leave the toggle out. Nothing changes, so the node has no reason to
+# reconnect — the step must notice the session id never moved instead of passing
+# on the state the previous step left behind.
+_p35_inject_midsession_toggle_skipped() {
+    sabotage_override_function _p35_set_ipv6 'return 0'
+}
+
+_p35_cleanup_midsession_toggle_skipped() {
+    restore_phase_functions phase35_ipv6.sh
+    _cleanup_phase35_ipv6
+}
+
+case_validation_register midsession_toggle_skipped phase35_ipv6 \
+    _p35_inject_midsession_toggle_skipped _p35_cleanup_midsession_toggle_skipped \
+    'Step 149a:'
+
+# Drop the LAN host's global addresses and wait for SLAAC to rebuild them from
+# the prefix the node is advertising now. Each delegation hands out a fresh
+# prefix while the old addresses sit out their 24h lifetime, so the flush is what
+# makes the poll below describe the current prefix rather than the previous one.
+# Results come back in globals, not on stdout: _P35_SLAAC_ISSUE says what is
+# wrong (empty when healthy), _P35_LAN_ADDRS and _P35_LAN64 carry the detail for
+# the pass message.
+_p35_lan_slaac_acquire() {
+    local _pd_prefix="$1" _i _issue="" _lan_default=""
+
+    _P35_LAN_ADDRS=""
+    _P35_LAN64=""
+    _P35_SLAAC_ISSUE=""
+
+    ssh_lan "ip -6 addr flush dev ${_P35_LAN_VLAN} scope global" >/dev/null 2>&1 || true
+
+    for _i in $(seq 1 25); do
+        _P35_LAN_ADDRS=$(ssh_lan "ip -6 -o addr show dev ${_P35_LAN_VLAN} scope global" 2>/dev/null | \
+            grep -v tentative | awk '{print $4}' | cut -d/ -f1 | tr '\n' ' ' || true)
+        [[ -n "${_P35_LAN_ADDRS// /}" ]] && break
+        sleep 3
+    done
+
+    # Every global address must sit in the first /64 of the delegated prefix —
+    # that is the one the node advertises. Temporary addresses make several.
+    if [[ -n "$_pd_prefix" ]]; then
+        _P35_LAN64=$(python3 -c 'import ipaddress, sys
+pd = ipaddress.IPv6Network(sys.argv[1], strict=False)
+lan64 = ipaddress.IPv6Network((pd.network_address, 64))
+addrs = [ipaddress.IPv6Address(a) for a in sys.argv[2:]]
+if not addrs or not all(a in lan64 for a in addrs):
+    sys.exit(1)
+print(lan64)' "$_pd_prefix" ${_P35_LAN_ADDRS} 2>/dev/null || true)
+    fi
+    [[ -n "$_P35_LAN64" ]] || \
+        _issue="global addresses '${_P35_LAN_ADDRS:-none}' are not inside the first /64 of ${_pd_prefix:-unknown}"
+
+    _lan_default=$(ssh_lan "ip -6 route show default dev ${_P35_LAN_VLAN}" 2>/dev/null || true)
+    [[ -n "$_lan_default" ]] || \
+        _issue="${_issue:+${_issue}; }RA installed no default route on ${_P35_LAN_VLAN}"
+
+    _P35_SLAAC_ISSUE="$_issue"
+}
+
 _p35_ra_window() {
     local _secs="$1" _raw=""
 
@@ -169,25 +272,29 @@ _p35_ctrl_row() {
 
 # Recent IPv6 lines from the node log — failure diagnosis only, never asserted.
 _p35_node_ipv6_log() {
-    local _path=""
+    _p35_node_log_grep 'IPV6CP|DHCPv6|IPv6' 6
+}
+
+# Recent node log lines matching a pattern — failure diagnosis only, never
+# asserted. A toggle that goes nowhere can fail either in the config apply or in
+# IPV6CP itself, so the two need to be readable separately.
+_p35_node_log_grep() {
+    local _pattern="$1" _lines="$2" _path=""
 
     _path=$(ssh_node "grep 'LogPath' /etc/fastrg/config.cfg 2>/dev/null" 2>/dev/null | \
         awk -F'"' '{print $2}' || true)
     [[ -n "$_path" ]] || _path=/var/log/fastrg/fastrg.log
-    ssh_node "tail -n 200 '${_path}' 2>/dev/null" 2>/dev/null | \
-        grep -E 'IPV6CP|DHCPv6|IPv6' | tail -n 6 | tr '\n' ' ' || true
+    ssh_node "tail -n 400 '${_path}' 2>/dev/null" 2>/dev/null | \
+        grep -E "$_pattern" | tail -n "$_lines" | tr '\n' ' ' || true
 }
 
 # Idempotent: called at the end of phase35 and from the top-level EXIT trap.
 _cleanup_phase35_ipv6() {
     ssh_wan "pkill -f 'iperf3 -s' 2>/dev/null || true" >/dev/null 2>&1 || true
 
-    if [[ -n "${_P35_LAN_SYSCTL_SAVED:-}" ]]; then
-        info "Cleanup(phase35): restoring ${_P35_LAN_VLAN} IPv6 sysctl on the LAN host..."
-        ssh_lan "sysctl -w net.ipv6.conf.${_P35_LAN_VLAN}.disable_ipv6=${_P35_LAN_SYSCTL_SAVED}" \
-            >/dev/null 2>&1 || true
-        _P35_LAN_SYSCTL_SAVED=""
-    fi
+    # Leftover SLAAC addresses and RA routes keep the guest choosing dead IPv6.
+    ssh_lan "ip -6 addr flush dev ${_P35_LAN_VLAN} scope global; \
+        ip -6 route flush dev ${_P35_LAN_VLAN} proto ra" >/dev/null 2>&1 || true
 
     if [[ "${_P35_WAN_ROUTE_ADDED:-0}" -eq 1 ]]; then
         ssh_wan "ip -6 route del ${_P35_PD_ROUTE} via ${_P35_WAN6_GW} dev ${WAN_NIC}" \
@@ -224,6 +331,8 @@ phase35_ipv6() {
     local _row="" _db_prefix="" _db_addr="" _db_dns=""
     local _disable_at=0 _elapsed=0 _ra_count="" _pfx="" _v6addr=""
     local _uid="" _phase=""
+    local _slaac_issue="" _v4_before="" _v4_verdict="" _v6_verdict=""
+    local _sid_before="" _sid_after=""
 
     bold "═══════════════════════════════════════════════════════"
     bold " Phase 35 — HSI IPv6 End to End (Steps 142-151)"
@@ -330,46 +439,21 @@ phase35_ipv6() {
     # ------------------------------------------------------------------
     info "Step 145: enabling IPv6 on ${LAN_HOST} ${_P35_LAN_VLAN} and waiting for SLAAC..."
     _issue=""
-    _P35_LAN_SYSCTL_SAVED=$(ssh_lan "sysctl -n net.ipv6.conf.${_P35_LAN_VLAN}.disable_ipv6" \
-        2>/dev/null | tr -d '[:space:]' || true)
-    if [[ "$_P35_LAN_SYSCTL_SAVED" =~ ^[0-9]+$ ]]; then
-        # accept_ra and autoconf are already on; this is the only switch needed.
-        ssh_lan "sysctl -w net.ipv6.conf.${_P35_LAN_VLAN}.disable_ipv6=0" >/dev/null 2>&1 || true
-    else
-        _P35_LAN_SYSCTL_SAVED=""
-        _issue="cannot read net.ipv6.conf.${_P35_LAN_VLAN}.disable_ipv6"
-    fi
+    # SLAAC needs these three on and the bench guarantees none of them
+    # (accept_ra has been measured at 0), so switch them on every time without
+    # reading or restoring the old values.
+    ssh_lan "sysctl -w net.ipv6.conf.${_P35_LAN_VLAN}.disable_ipv6=0 \
+        net.ipv6.conf.${_P35_LAN_VLAN}.accept_ra=1 \
+        net.ipv6.conf.${_P35_LAN_VLAN}.autoconf=1" >/dev/null 2>&1 || true
 
-    # Each redial delegates a fresh prefix while the previous SLAAC addresses sit
-    # out their 24h lifetime, so clear the global ones and let the poll below
-    # watch the current prefix form. Link-local is kept: RS/RA runs on it.
-    ssh_lan "ip -6 addr flush dev ${_P35_LAN_VLAN} scope global" >/dev/null 2>&1 || true
-
-    for _i in $(seq 1 25); do
-        _lan_addrs=$(ssh_lan "ip -6 -o addr show dev ${_P35_LAN_VLAN} scope global" 2>/dev/null | \
-            grep -v tentative | awk '{print $4}' | cut -d/ -f1 | tr '\n' ' ' || true)
-        [[ -n "${_lan_addrs// /}" ]] && break
-        sleep 3
-    done
+    # Link-local is kept through the flush inside the helper: RS/RA runs on it.
+    _p35_lan_slaac_acquire "$_P35_PD_PREFIX"
+    _slaac_issue="$_P35_SLAAC_ISSUE"
+    _lan_addrs="$_P35_LAN_ADDRS"
+    _lan64="$_P35_LAN64"
     _lan_addr_count=$(printf '%s' "$_lan_addrs" | wc -w | tr -d '[:space:]' || true)
-
-    # Every global address must sit in the first /64 of the delegated prefix —
-    # that is the one the node advertises. Temporary addresses make several.
-    if [[ -n "$_P35_PD_PREFIX" ]]; then
-        _lan64=$(python3 -c 'import ipaddress, sys
-pd = ipaddress.IPv6Network(sys.argv[1], strict=False)
-lan64 = ipaddress.IPv6Network((pd.network_address, 64))
-addrs = [ipaddress.IPv6Address(a) for a in sys.argv[2:]]
-if not addrs or not all(a in lan64 for a in addrs):
-    sys.exit(1)
-print(lan64)' "$_P35_PD_PREFIX" ${_lan_addrs} 2>/dev/null || true)
-    fi
-    [[ -n "$_lan64" ]] || \
-        _issue="${_issue:+${_issue}; }global addresses '${_lan_addrs:-none}' are not inside the first /64 of ${_P35_PD_PREFIX:-unknown}"
-
+    [[ -z "$_slaac_issue" ]] || _issue="${_issue:+${_issue}; }${_slaac_issue}"
     _lan_default=$(ssh_lan "ip -6 route show default dev ${_P35_LAN_VLAN}" 2>/dev/null || true)
-    [[ -n "$_lan_default" ]] || \
-        _issue="${_issue:+${_issue}; }RA installed no default route on ${_P35_LAN_VLAN}"
 
     if [[ -z "$_issue" ]]; then
         pass "Step 145: LAN host SLAAC from the delegated prefix" \
@@ -518,6 +602,126 @@ print(lan64)' "$_P35_PD_PREFIX" ${_lan_addrs} 2>/dev/null || true)
             "gRPC IPv6 fields cleared and IPv6 forwarding stopped without a redial"
     else
         fail "Step 149: disable takes effect live" "$_issue"
+    fi
+
+    # ------------------------------------------------------------------
+    # Step 149a — switching IPv6 on reconnects the session automatically
+    # ------------------------------------------------------------------
+    # IPV6CP is only negotiated while a session is being brought up, so the node
+    # reconnects a live session by itself when ipv6_enable changes. The new
+    # PPPoE session id is what proves the reconnect really happened.
+    info "Step 149a: switching ipv6_enable back on for user ${USER_ID} (expect an automatic reconnect)..."
+    _issue=""
+    _phase=$(_p35_user_phase "${USER_ID}" || true)
+    [[ "$_phase" == "Data phase" ]] || \
+        _issue="user ${USER_ID} is in '${_phase:-missing}', not Data phase; there is no live session to toggle"
+    _sid_before=$(_p35_hsi_field "${USER_ID}" 'session_id')
+    [[ -n "$_sid_before" ]] || \
+        _issue="${_issue:+${_issue}; }no session id reported before the toggle; a changed id would prove nothing"
+    _v4_before=$(e2e_ping_loss_verdict "$(ssh_lan "ping -c 3 -W 2 ${WAN_IP} 2>&1" || true)" || true)
+
+    _P35_IPV6_SET=1
+    _p35_set_ipv6 "${USER_ID}" true
+
+    _ok=0
+    for _i in $(seq 1 45); do
+        sleep 2
+        [[ "$(_p35_user_phase "${USER_ID}" || true)" == "Data phase" ]] || continue
+        _sid_after=$(_p35_hsi_field "${USER_ID}" 'session_id')
+        [[ -n "$_sid_after" && "$_sid_after" != "$_sid_before" ]] || continue
+        _pfx=$(_p35_hsi_field "${USER_ID}" 'ipv6_pd_prefix')
+        _v6addr=$(_p35_hsi_field "${USER_ID}" 'ipv6_addr')
+        if [[ "$_pfx" == */56 && "$_v6addr" == fe80:* ]]; then
+            _ok=1
+            break
+        fi
+    done
+    if [[ $_ok -eq 1 ]]; then
+        _P35_PD_PREFIX="$_pfx"
+        _P35_V6_ADDR="$_v6addr"
+    else
+        _issue="${_issue:+${_issue}; }no reconnected session with IPv6 within 90s (session id '${_sid_before}' -> '${_sid_after:-missing}', prefix='${_pfx:-empty}' addr='${_v6addr:-empty}')"
+    fi
+
+    # The reconnect delegates a fresh prefix, so the guest has to build its
+    # address again before IPv6 traffic can say anything.
+    if [[ $_ok -eq 1 ]]; then
+        _p35_lan_slaac_acquire "$_P35_PD_PREFIX"
+        _slaac_issue="$_P35_SLAAC_ISSUE"
+        [[ -z "$_slaac_issue" ]] || _issue="${_issue:+${_issue}; }${_slaac_issue}"
+    fi
+
+    _v6_verdict=err
+    for _i in $(seq 1 6); do
+        _ping_out=$(ssh_lan "ping -6 -c 4 -W 3 ${_P35_WAN6_HOST_ADDR} 2>&1" || true)
+        _v6_verdict=$(e2e_ping_loss_verdict "$_ping_out" || true)
+        [[ "$_v6_verdict" == "pass" ]] && break
+        sleep 5
+    done
+    [[ "$_v6_verdict" == "pass" ]] || \
+        _issue="${_issue:+${_issue}; }IPv6 not forwarded after the reconnect (verdict '${_v6_verdict}')"
+
+    # IPv4 has to survive the reconnect. Checked before and after so a link that
+    # was already broken is not blamed on this step.
+    _v4_verdict=$(e2e_ping_loss_verdict "$(ssh_lan "ping -c 3 -W 2 ${WAN_IP} 2>&1" || true)" || true)
+    if [[ "$_v4_before" == "pass" && "$_v4_verdict" != "pass" ]]; then
+        _issue="${_issue:+${_issue}; }IPv4 to ${WAN_IP} did not come back after the reconnect (verdict '${_v4_verdict}')"
+    fi
+
+    if [[ -z "$_issue" ]]; then
+        pass "Step 149a: enabling IPv6 reconnects the session" \
+            "session id ${_sid_before} -> ${_sid_after}, IPV6CP negotiated ${_P35_PD_PREFIX} and IPv6 forwarding works; IPv4 verdict '${_v4_verdict}'"
+    else
+        fail "Step 149a: enabling IPv6 reconnects the session" \
+            "${_issue}; ipv6 log: $(_p35_node_ipv6_log); reconnect log: $(_p35_node_log_grep 'ipv6_enable changed|honouring deferred connect|HSI config' 6)"
+    fi
+
+    # ------------------------------------------------------------------
+    # Step 149b — and switching it off reconnects again, without IPv6
+    # ------------------------------------------------------------------
+    info "Step 149b: switching ipv6_enable off again for user ${USER_ID} (expect another reconnect)..."
+    _issue=""
+    _sid_before=$(_p35_hsi_field "${USER_ID}" 'session_id')
+    [[ -n "$_sid_before" ]] || \
+        _issue="no session id reported before the toggle; a changed id would prove nothing"
+    _p35_set_ipv6 "${USER_ID}" false
+    # Step 150 measures its silent window from this disable.
+    _disable_at=$SECONDS
+
+    _ok=0
+    for _i in $(seq 1 45); do
+        sleep 2
+        [[ "$(_p35_user_phase "${USER_ID}" || true)" == "Data phase" ]] || continue
+        _sid_after=$(_p35_hsi_field "${USER_ID}" 'session_id')
+        [[ -n "$_sid_after" && "$_sid_after" != "$_sid_before" ]] || continue
+        _pfx=$(_p35_hsi_field "${USER_ID}" 'ipv6_pd_prefix')
+        if [[ -z "$_pfx" ]]; then
+            _ok=1
+            break
+        fi
+    done
+    [[ $_ok -eq 1 ]] || \
+        _issue="${_issue:+${_issue}; }no reconnected IPv4-only session within 90s (session id '${_sid_before}' -> '${_sid_after:-missing}', prefix='${_pfx:-empty}')"
+    # The cleared field only means something if the RPC still lists this user.
+    _p35_hsi_has_record "${USER_ID}" || \
+        _issue="${_issue:+${_issue}; }get_hsi_info lists no record for user ${USER_ID}; a cleared field proves nothing"
+
+    _v6_verdict=$(e2e_ping_loss_verdict "$(ssh_lan "ping -6 -c 3 -W 2 ${_P35_WAN6_HOST_ADDR} 2>&1" || true)" || true)
+    [[ "$_v6_verdict" == "blocked" ]] || \
+        _issue="${_issue:+${_issue}; }IPv6 not fully stopped after the reconnect (verdict '${_v6_verdict}')"
+
+    _v4_verdict=$(e2e_ping_loss_verdict "$(ssh_lan "ping -c 3 -W 2 ${WAN_IP} 2>&1" || true)" || true)
+    if [[ "$_v4_before" == "pass" && "$_v4_verdict" != "pass" ]]; then
+        _issue="${_issue:+${_issue}; }IPv4 to ${WAN_IP} did not come back after the reconnect (verdict '${_v4_verdict}')"
+    fi
+
+    if [[ -z "$_issue" ]]; then
+        _P35_IPV6_SET=0
+        pass "Step 149b: disabling IPv6 reconnects the session" \
+            "session id ${_sid_before} -> ${_sid_after}, IPv6 fields cleared and IPv6 forwarding stopped; IPv4 verdict '${_v4_verdict}'"
+    else
+        fail "Step 149b: disabling IPv6 reconnects the session" \
+            "${_issue}; ipv6 log: $(_p35_node_ipv6_log); reconnect log: $(_p35_node_log_grep 'ipv6_enable changed|honouring deferred connect|HSI config' 6)"
     fi
 
     # ------------------------------------------------------------------

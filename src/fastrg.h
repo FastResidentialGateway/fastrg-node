@@ -30,6 +30,11 @@ extern "C" {
 
 #define INVALID_CCB_ID UINT16_MAX
 
+/* FastRG_t.cli_config_apply_result for CLI while standalone mode */
+#define CONFIG_APPLY_NONE   0
+#define CONFIG_APPLY_OK     1
+#define CONFIG_APPLY_FAILED 2
+
 #define WAN_PORT    1
 #define LAN_PORT    0
 
@@ -188,6 +193,8 @@ typedef struct FastRG {
      * the pthread_join in fastrg_stop(). The thread re-checks this flag right
      * after lighthttp_init() (under rte_smp_mb()) and closes its own fd. */
     rte_atomic16_t          metrics_stop_requested;
+    /* Only used in standalone mode for CLI config apply results, clear before use every time */
+    rte_atomic16_t          cli_config_apply_result;
     lighthttp_server_t      metrics_server;
     pthread_t               grpc_thread;      /* joinable northbound gRPC server thread */
     BOOL                    grpc_thread_started;
@@ -202,7 +209,7 @@ typedef struct FastRG {
 STATUS fastrg_disable_subscriber_stats(FastRG_t *fastrg_ccb, U16 disable_count, 
     U16 old_count);
 STATUS fastrg_gen_northbound_event(FastRG_t *fastrg_ccb, fastrg_event_type_t event_type,
-    U8 cmd_type, U16 ccb_id);
+    U8 cmd_type, U16 ccb_id, void *payload);
 
 /**
  * @fn FASTRG_GET_PER_SUBSCRIBER_STATS

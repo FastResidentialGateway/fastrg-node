@@ -114,10 +114,12 @@ int main()
     /* Minimal EAL so DPDK objects (rte_hash / rte_ring, used by the NAT and
      * IPv6 firewall suites) can be created without hugepages. The heap has to
      * hold every subscriber fixture the suites build at once, and each
-     * subscriber owns two NAT hashes plus a firewall hash and their rings. */
+     * subscriber owns two NAT hashes plus a firewall hash and their rings.
+     * The private file prefix keeps the runtime files separate from a running
+     * fastrg node. */
     char *eal_argv[] = {"unit-tester", "--no-huge", "--iova-mode=va", "-m", "768",
-        "-l", "0", "--log-level=lib.eal:error"};
-    if (rte_eal_init(8, eal_argv) < 0) {
+        "-l", "0", "--file-prefix=unittest", "--log-level=lib.eal:error"};
+    if (rte_eal_init(9, eal_argv) < 0) {
         puts("rte_eal_init failed");
         return 1;
     }

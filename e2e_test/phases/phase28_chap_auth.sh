@@ -143,8 +143,8 @@ phase28_chap_auth() {
     _new_log=$(_p28_new_log "$_log_baseline" || true)
     if [[ $_step113_ok -eq 1 ]]; then
         for _uid in "${SUB_IDS[@]}"; do
-            if ! printf '%s\n' "$_new_log" | grep -qF "User ${_uid} recv chap challenge." ||
-               ! printf '%s\n' "$_new_log" | grep -qF "User ${_uid} auth success."; then
+            if ! grep -qF "User ${_uid} recv chap challenge." <<< "$_new_log" ||
+               ! grep -qF "User ${_uid} auth success." <<< "$_new_log"; then
                 _step113_ok=0
                 _issue113="${_issue113:+${_issue113}; }missing CHAP challenge/auth-success log for user ${_uid}"
             fi
