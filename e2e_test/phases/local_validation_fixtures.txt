@@ -679,3 +679,46 @@ rtt min/avg/max/mdev = 0.199/0.257/0.511/0.044 ms
 # expect-status: 1
 ---
 ping: connect: Network is unreachable
+==== fixture: ping_verdict_zero_loss
+# expect-output: pass
+# expect-status: 0
+---
+PING 2001:db8:201::11(2001:db8:201::11) 56 data bytes
+64 bytes from 2001:db8:201::11: icmp_seq=1 ttl=63 time=0.421 ms
+4 packets transmitted, 4 received, 0% packet loss, time 3004ms
+rtt min/avg/max/mdev = 0.401/0.437/0.482/0.031 ms
+==== fixture: ping_verdict_total_loss
+# expect-output: blocked
+# expect-status: 0
+---
+PING 2001:db8:201::11(2001:db8:201::11) 56 data bytes
+3 packets transmitted, 0 received, 100% packet loss, time 2043ms
+==== fixture: ping_verdict_partial_loss
+# expect-output: partial
+# expect-status: 0
+---
+4 packets transmitted, 2 received, 50% packet loss, time 3012ms
+rtt min/avg/max/mdev = 0.410/0.455/0.500/0.045 ms
+==== fixture: ping_verdict_fractional_loss
+# expect-output: partial
+# expect-status: 0
+---
+1000 packets transmitted, 995 received, 0.5% packet loss, time 999123ms
+rtt min/avg/max/mdev = 0.199/0.257/0.511/0.044 ms
+==== fixture: ping_verdict_no_output
+# expect-output: err
+# expect-status: 1
+---
+
+==== fixture: ping_verdict_unreachable
+# expect-output: err
+# expect-status: 1
+---
+ping: connect: Network is unreachable
+==== fixture: ping_verdict_zero_inside_hundred
+# expect-output: blocked
+# expect-status: 0
+---
+PING 2001:db8:201::11(2001:db8:201::11) 56 data bytes
+From 2001:db8:6400::1 icmp_seq=1 Destination unreachable: Address unreachable
+3 packets transmitted, 0 received, +3 errors, 100% packet loss, time 2050ms

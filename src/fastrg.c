@@ -33,6 +33,7 @@
 #include "config.h"
 #include "controller.h"
 #include "etcd_integration.h"
+#include "northbound.h"
 #include "kafka_producer.h"
 #include "config_snapshot.h"
 #include "utils.h"
@@ -148,7 +149,7 @@ void fastrg_cleanup_pppoes_stats(FastRG_t *fastrg_ccb)
 }
 
 STATUS fastrg_gen_northbound_event(FastRG_t *fastrg_ccb, fastrg_event_type_t event_type,
-    U8 cmd_type, U16 ccb_id)
+    U8 cmd_type, U16 ccb_id, void *payload)
 {
     /* Try to get a free mail slot from free_mail_ring */
     tFastRG_MBX *slot = NULL;
@@ -156,10 +157,10 @@ STATUS fastrg_gen_northbound_event(FastRG_t *fastrg_ccb, fastrg_event_type_t eve
 
     /* Get a free mail slot */
     if (rte_ring_dequeue(fastrg_ccb->free_mail_ring, (void **)&slot) == 0) {
-        /* Deep copy packet data to slot's refp buffer to avoid data buffer being overwritten by rx_burst */
-        northbound_msg = (fastrg_event_northbound_msg_t *)slot->refp;
+        northbound_msg = &slot->northbound_msg;
         northbound_msg->cmd = cmd_type;
         northbound_msg->ccb_id = ccb_id;
+        northbound_msg->payload = payload;
         slot->type = event_type;
         slot->len = sizeof(fastrg_event_northbound_msg_t);
         /* cp_q is full: return slot to free_mail_ring */
@@ -175,7 +176,7 @@ STATUS fastrg_gen_northbound_event(FastRG_t *fastrg_ccb, fastrg_event_type_t eve
 void link_disconnect(__attribute__((unused)) struct rte_timer *tim, FastRG_t *fastrg_ccb)
 {
     for(int i=0; i<fastrg_ccb->user_count; i++)
-        fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_PPPoE, PPPoE_CMD_FORCE_DISABLE, i);
+        fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_PPPoE, PPPoE_CMD_FORCE_DISABLE, i, NULL);
 }
 
 /***************************************************************
@@ -191,6 +192,11 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
     uint64_t prev_tsc = fastrg_get_cur_cycles(), cur_tsc = 0, diff_tsc = 0;
     uint64_t timer_resolution_cycles = fastrg_get_cycles_in_sec() / 10; /* check every 100ms */
 
+    /* Boot loads config straight from the main lcore, so stay parked until it
+     * sets start_flag; that keeps CCB writes single-threaded during startup. */
+    while(rte_atomic16_read(&start_flag) == 0)
+        rte_pause();
+
     fastrg_ccb->lcore_usage[rte_lcore_id()].role = "ctrl";
     while(rte_atomic16_read(&stop_flag) == 0) {
         uint64_t _t0 = fastrg_get_cur_cycles();
@@ -200,7 +206,24 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
             switch(recv_type) {
             case EV_NORTHBOUND_PPPoE: {
                 /* process cli command */
-                fastrg_event_northbound_msg_t *pppoe_msg = (fastrg_event_northbound_msg_t *)mail[i]->refp;
+                fastrg_event_northbound_msg_t *pppoe_msg = &mail[i]->northbound_msg;
+                /* Ahead of the ccb lookup below: an out-of-range id must still
+                 * free the payload and answer the waiting gRPC thread. */
+                if (pppoe_msg->cmd == PPPoE_CMD_APPLY_CONFIG) {
+                    hsi_config_t *cfg = (hsi_config_t *)pppoe_msg->payload;
+                    STATUS apply_ret;
+
+                    /* is_update FALSE: a CLI apply always writes the whole config. */
+                    apply_ret = apply_hsi_config(fastrg_ccb, pppoe_msg->ccb_id, cfg, FALSE);
+                    if (apply_ret == SUCCESS)
+                        reconcile_pppoe_desire(fastrg_ccb, pppoe_msg->ccb_id, cfg->desire_status);
+                    free(cfg);
+                    /* Publishing the verdict releases the waiter, so it comes last. */
+                    rte_atomic16_set(&fastrg_ccb->cli_config_apply_result,
+                        apply_ret == SUCCESS ? CONFIG_APPLY_OK : CONFIG_APPLY_FAILED);
+                    rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
+                    break;
+                }
                 /* pppd_get_ccb() indexes the pointer array without a bound check, so the
                  * range must be validated before the fetch. The array is RCU-protected and
                  * a slot may be transiently NULL while a config change (re)allocates it. */
@@ -236,12 +259,21 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
                 } else if (pppoe_msg->cmd == PPPoE_CMD_FORCE_DISABLE) {
                     FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "User %d pppoe is force terminating\n", pppoe_msg->ccb_id + 1);
                     fastrg_force_terminate_hsi(ppp_ccb);
+                } else if (pppoe_msg->cmd == PPPoE_CMD_IPV6_CHANGED) {
+                    if (is_ppp_ipv6_need_redial(TRUE, ppp_ccb->phase,
+                            ppp_ccb->ppp_processing) == TRUE) {
+                        ppp_ipv6_redial(ppp_ccb);
+                    } else {
+                        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                            "User %d ipv6_enable changed without redial, phase %u, ppp_processing %u\n",
+                            pppoe_msg->ccb_id + 1, ppp_ccb->phase, ppp_ccb->ppp_processing);
+                    }
                 }
                 rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
                 break;
             }
             case EV_NORTHBOUND_DHCP: {
-                fastrg_event_northbound_msg_t *dhcp_msg = (fastrg_event_northbound_msg_t *)mail[i]->refp;
+                fastrg_event_northbound_msg_t *dhcp_msg = &mail[i]->northbound_msg;
                 /* Same as the PPPoE branch: bound check before the unchecked array index,
                  * then NULL check on the RCU-protected slot. */
                 if (dhcp_msg->ccb_id >= fastrg_ccb->user_count) {
@@ -271,12 +303,12 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
             }
             case EV_LINK: {
                 FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "Recv Link Up/Down event");
-                U16 link_port = *(U16 *)&(mail[i]->refp[1]);
+                U16 link_port = mail[i]->link.port;
                 /* Update per-port link state cache for Prometheus metrics. Count a flap
                  * whenever the state actually transitions (caught even if it toggles
                  * faster than the scrape interval). */
                 if (link_port < PORT_AMOUNT) {
-                    U8 new_up = (mail[i]->refp[0] == LINK_UP) ? 1 : 0;
+                    U8 new_up = (mail[i]->link.up_down == LINK_UP) ? 1 : 0;
                     U8 old_up = __atomic_exchange_n(&fastrg_ccb->nic_link_up[link_port],
                         new_up, __ATOMIC_RELAXED);
                     if (old_up != new_up)
@@ -293,7 +325,7 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
                     }
                 }
                 if (link_port == 1) {
-                    if (mail[i]->refp[0] == LINK_DOWN) {
+                    if (mail[i]->link.up_down == LINK_DOWN) {
                         if (rte_timer_reset(&fastrg_ccb->link,
                                 LINK_DOWN_TIMEOUT * fastrg_get_cycles_in_sec(), // 10 seconds
                                 SINGLE, fastrg_ccb->lcore.timer_thread,
@@ -305,7 +337,7 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
                             FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
                                 "Link-down timer rearm skipped: its disconnect callback is running on another lcore and already handling this link down");
                         }
-                    } else if (mail[i]->refp[0] == LINK_UP) {
+                    } else if (mail[i]->link.up_down == LINK_UP) {
                         rte_timer_stop(&fastrg_ccb->link);
                     }
                 }

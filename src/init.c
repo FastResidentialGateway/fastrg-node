@@ -416,7 +416,7 @@ STATUS init_ring(FastRG_t *fastrg_ccb)
         goto err;
     }
 
-    /* Pre-allocate and enqueue 31 mail slots to free_mail_ring */
+    /* Pre-allocate and enqueue 63 mail slots to free_mail_ring */
     for(int i=0; i<RING_BURST_SIZE-1; i++) {
         tFastRG_MBX *mail_slot = fastrg_malloc(tFastRG_MBX, sizeof(tFastRG_MBX), 0);
         if (!mail_slot) {

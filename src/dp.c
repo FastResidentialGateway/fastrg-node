@@ -2323,14 +2323,13 @@ static int lsi_event_callback(U16 port_id, enum rte_eth_event_type type, void *p
                 port_id, (unsigned)link.link_speed,
             (link.link_duplex == RTE_ETH_LINK_FULL_DUPLEX) ?
                 ("full-duplex") : ("half-duplex"));
-        mail->refp[0] = LINK_UP;
+        mail->link.up_down = LINK_UP;
     } else {
         FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL, "Port %d Link Down\n\n", port_id);
-        mail->refp[0] = LINK_DOWN;
+        mail->link.up_down = LINK_DOWN;
     }
-    *(U16 *)&(mail->refp[1]) = port_id;
+    mail->link.port = port_id;
     mail->type = EV_LINK;
-    mail->len = 1;
     //enqueue down event to main thread
     if (rte_ring_enqueue(fastrg_ccb->cp_q, (void *)mail) != 0) {
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,

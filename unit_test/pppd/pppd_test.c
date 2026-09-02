@@ -116,7 +116,7 @@ static int pppd_drain_pppoe_enable_events(void)
     int found = 0;
     while (rte_ring_dequeue(g_pppd_fastrg_ccb->cp_q, (void **)&mail) == 0) {
         if (mail->type == EV_NORTHBOUND_PPPoE) {
-            fastrg_event_northbound_msg_t *msg = (fastrg_event_northbound_msg_t *)mail->refp;
+            fastrg_event_northbound_msg_t *msg = &mail->northbound_msg;
             if (msg->cmd == PPPoE_CMD_ENABLE && msg->ccb_id == 0)
                 found++;
         }
@@ -535,6 +535,122 @@ static void test_dp_gate_open_tracks_flag(void)
         "open gate reports TRUE", "");
 }
 
+/* ---- mid-session ipv6_enable convergence ---- */
+
+/* One row of the is_ppp_ipv6_need_redial() matrix. */
+struct ipv6_apply_decide_case {
+    const char              *name;
+    BOOL                     ipv6_changed;
+    U8                       phase;
+    BOOL                     ppp_processing;
+    BOOL                     expected;
+};
+
+/* Put the fixture in the state a fully connected session reaches. */
+static void pppd_ccb_reset_connected(void)
+{
+    pppd_ccb_reset();
+    test_ppp_ccb.control_protocol[PPP_CP_LCP].state = S_OPENED;
+    test_ppp_ccb.control_protocol[PPP_CP_IPCP].state = S_OPENED;
+    test_ppp_ccb.phase = DATA_PHASE;
+    test_ppp_ccb.ppp_processing = FALSE;
+    rte_atomic16_set(&test_ppp_ccb.ppp_bool, 1);
+    rte_atomic16_set(&test_ppp_ccb.dp_start_bool, 1);
+}
+
+/* Mirrors both call sites: gate first, redial only when the gate says so. */
+static void ipv6_redial_if_needed(BOOL ipv6_changed)
+{
+    if (is_ppp_ipv6_need_redial(ipv6_changed, test_ppp_ccb.phase,
+            test_ppp_ccb.ppp_processing) == TRUE)
+        ppp_ipv6_redial(&test_ppp_ccb);
+}
+
+static void test_is_ppp_ipv6_need_redial(void)
+{
+    printf("\nTesting is_ppp_ipv6_need_redial:\n");
+    printf("=========================================\n\n");
+
+    static const struct ipv6_apply_decide_case cases[] = {
+        /* A connected session is the only one that has to be reconnected. */
+        { "changed on a connected session -> REDIAL",
+          TRUE, DATA_PHASE, FALSE, TRUE },
+
+        /* Rewriting the same value must never disturb a working session —
+         * the periodic config reconcile re-applies configs constantly. */
+        { "unchanged on a connected session -> NONE",
+          FALSE, DATA_PHASE, FALSE, FALSE },
+        { "unchanged on an idle session -> NONE",
+          FALSE, END_PHASE, FALSE, FALSE },
+
+        /* Nothing to reconnect: these all read the flag when they dial. */
+        { "changed while still negotiating IPCP -> NONE",
+          TRUE, IPCP_PHASE, FALSE, FALSE },
+        { "changed while authenticating -> NONE",
+          TRUE, AUTH_PHASE, FALSE, FALSE },
+        { "changed while only LCP is up -> NONE",
+          TRUE, LCP_PHASE, FALSE, FALSE },
+        { "changed on a session that is down -> NONE",
+          TRUE, END_PHASE, FALSE, FALSE },
+        { "changed on an unconfigured subscriber -> NONE",
+          TRUE, NOT_CONFIGURED, FALSE, FALSE },
+
+        /* Already going down: the teardown in flight owns the session. */
+        { "changed while the session is tearing down -> NONE",
+          TRUE, DATA_PHASE, TRUE, FALSE },
+    };
+
+    for(unsigned i=0; i<RTE_DIM(cases); i++) {
+        BOOL got = is_ppp_ipv6_need_redial(cases[i].ipv6_changed, cases[i].phase, cases[i].ppp_processing);
+        TEST_ASSERT(got == cases[i].expected, cases[i].name,
+            "expected=%d got=%d", cases[i].expected, got);
+    }
+
+    /* Driven through the call-site helper: a held gate must leave the CCB alone. */
+    pppd_ccb_reset_connected();
+    ipv6_redial_if_needed(FALSE);
+    TEST_ASSERT(test_ppp_ccb.ppp_processing == FALSE &&
+        rte_atomic16_read(&test_ppp_ccb.redial_pending) == 0 &&
+        test_ppp_ccb.control_protocol[PPP_CP_LCP].state == S_OPENED,
+        "rewriting the same value leaves the session alone",
+        "processing=%u redial=%d lcp_state=%u", test_ppp_ccb.ppp_processing,
+        rte_atomic16_read(&test_ppp_ccb.redial_pending),
+        test_ppp_ccb.control_protocol[PPP_CP_LCP].state);
+
+    pppd_ccb_reset();
+    ipv6_redial_if_needed(TRUE);
+    TEST_ASSERT(rte_atomic16_read(&test_ppp_ccb.redial_pending) == 0 &&
+        test_ppp_ccb.ppp_processing == FALSE,
+        "a session that is not connected is left to pick the flag up when it dials",
+        "redial=%d processing=%u", rte_atomic16_read(&test_ppp_ccb.redial_pending),
+        test_ppp_ccb.ppp_processing);
+}
+
+/*
+ * IPV6CP is only negotiated while a session comes up, so a mid-session change
+ * is applied by reconnecting. The redial has to be parked before the hangup,
+ * or the session would go down and stay down.
+ */
+static void test_ppp_ipv6_redial(void)
+{
+    printf("\nTesting ppp_ipv6_redial on a connected session:\n");
+    printf("=========================================\n\n");
+
+    pppd_ccb_reset_connected();
+
+    ppp_ipv6_redial(&test_ppp_ccb);
+
+    TEST_ASSERT(test_ppp_ccb.ppp_processing == TRUE,
+        "the redial starts the teardown", "ppp_processing=%u",
+        test_ppp_ccb.ppp_processing);
+    TEST_ASSERT(rte_atomic16_read(&test_ppp_ccb.redial_pending) == 1,
+        "the session is parked to dial again once it is down",
+        "redial_pending=%d", rte_atomic16_read(&test_ppp_ccb.redial_pending));
+    TEST_ASSERT(test_ppp_ccb.control_protocol[PPP_CP_LCP].state == S_CLOSING,
+        "the teardown is the graceful LCP one", "lcp_state=%u",
+        test_ppp_ccb.control_protocol[PPP_CP_LCP].state);
+}
+
 /* ---- IPv6 northbound string formatting ---- */
 
 /* 2001:db8:ab00:: */
@@ -814,6 +930,9 @@ void test_pppd(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_port_fwd_entry_packing();
 
     test_dp_gate_open_tracks_flag();
+
+    test_is_ppp_ipv6_need_redial();
+    test_ppp_ipv6_redial();
 
     test_ipv6_report_strings_full_lease();
     test_ipv6_report_strings_single_dns();

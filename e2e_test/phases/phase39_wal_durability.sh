@@ -77,7 +77,7 @@ e2e_wal_holds_error_code() {
 
     _payloads=$(printf '%s' "$_text" | jq -r '.[].payload' 2>/dev/null | \
         tr 'A-F' 'a-f' || true)
-    if printf '%s\n' "$_payloads" | grep -qF "$_needle"; then
+    if grep -qF "$_needle" <<< "$_payloads"; then
         printf 'ok'
         return 0
     fi

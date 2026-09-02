@@ -702,8 +702,8 @@ phase27_link_flap() {
     fi
     _wan_flap_sustained="$_wan_flap_after"
     _wan_new_log=$(_p27_new_log "$_P27_LOG_PATH" "$_wan_log_baseline" || true)
-    printf '%s\n' "$_wan_new_log" | grep -qF "Port 1 Link Down" && _down_log=1 || true
-    printf '%s\n' "$_wan_new_log" | grep -qF "Port 1 Link Up" && _up_log=1 || true
+    grep -qF "Port 1 Link Down" <<< "$_wan_new_log" && _down_log=1 || true
+    grep -qF "Port 1 Link Up" <<< "$_wan_new_log" && _up_log=1 || true
     if [[ $_wan_delta -lt 2 || $(( _wan_delta % 2 )) -ne 0 || \
           $_down_log -ne 1 || $_up_log -ne 1 ]]; then
         _step110_ok=0
@@ -745,8 +745,8 @@ phase27_link_flap() {
                 _flash_delta=$(( _flash_after - _flash_base ))
             fi
             _flash_new_log=$(_p27_new_log "$_P27_LOG_PATH" "$_flash_log_baseline" || true)
-            printf '%s\n' "$_flash_new_log" | grep -qF "Port 1 Link Down" && _flash_down_log=1 || true
-            printf '%s\n' "$_flash_new_log" | grep -qF "Port 1 Link Up" && _flash_up_log=1 || true
+            grep -qF "Port 1 Link Down" <<< "$_flash_new_log" && _flash_down_log=1 || true
+            grep -qF "Port 1 Link Up" <<< "$_flash_new_log" && _flash_up_log=1 || true
             if [[ $_flash_delta -ne 2 || $_flash_down_log -ne 1 || $_flash_up_log -ne 1 ]]; then
                 _step110_ok=0
                 _issue110="${_issue110:+${_issue110}; }fast-flap: ${_P27_FLASH_HOLD_SEC}s toggle gave flap=${_flash_base}->${_flash_after} delta=${_flash_delta} (expected exactly 2); down_log=${_flash_down_log} up_log=${_flash_up_log}; log='$(_p27_log_snippet "$_P27_LOG_PATH" "$_flash_log_baseline")'"
@@ -867,8 +867,8 @@ phase27_link_flap() {
 
     _wan_after_lan=$(_p27_read_metric fastrg_nic_link_flaps_total 1 || true)
     _lan_new_log=$(_p27_new_log "$_P27_LOG_PATH" "$_lan_log_baseline" || true)
-    printf '%s\n' "$_lan_new_log" | grep -qF "Port 0 Link Down" && _lan_down_log=1 || true
-    printf '%s\n' "$_lan_new_log" | grep -qF "Port 0 Link Up" && _lan_up_log=1 || true
+    grep -qF "Port 0 Link Down" <<< "$_lan_new_log" && _lan_down_log=1 || true
+    grep -qF "Port 0 Link Up" <<< "$_lan_new_log" && _lan_up_log=1 || true
     if [[ $_lan_delta -ne 2 || "$_wan_after_lan" != "$_wan_flap_after" || \
           $_lan_down_log -ne 1 || $_lan_up_log -ne 1 ]]; then
         _step111_ok=0

@@ -122,7 +122,7 @@ dns_pending_query_t *find_pending_by_upstream_id(dns_proxy_state_t *state, U16 u
 }
 
 /* ================================================================
- * Control-plane versions — work on raw packet buffers (tFastRG_MBX.refp)
+ * Control-plane versions — work on the raw packet buffer of the event mbuf
  * and send via lan_ctrl_tx() / wan_ctrl_tx() from the ctrl_thread.
  * ================================================================ */
 

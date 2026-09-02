@@ -85,6 +85,8 @@ STATUS apply_hsi_config(FastRG_t *fastrg_ccb, int ccb_id, const hsi_config_t *co
         return ERROR;
     }
 
+    BOOL ipv6_was_enabled = ppp_ccb->ipv6_enabled;
+
     U16 ori_ppp_status = rte_atomic16_exchange((volatile uint16_t *)&ppp_ccb->ppp_bool.cnt, 0);
     U16 ori_dp_status = rte_atomic16_exchange((volatile uint16_t *)&ppp_ccb->dp_start_bool.cnt, 0);
     U16 ori_dhcp_status = rte_atomic16_exchange((volatile uint16_t *)&dhcp_ccb->dhcp_bool.cnt, 0);
@@ -227,6 +229,10 @@ out:
     rte_atomic16_set(&ppp_ccb->dp_start_bool, ori_dp_status);
     rte_atomic16_set(&dhcp_ccb->dhcp_bool, ori_dhcp_status);
 
+    if (ret == SUCCESS && ppp_ccb->ipv6_enabled != ipv6_was_enabled)
+        fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_PPPoE,
+            PPPoE_CMD_IPV6_CHANGED, ccb_id, NULL);
+
     return ret;
 }
 
@@ -288,16 +294,16 @@ STATUS execute_pppoe_dial(FastRG_t *fastrg_ccb, int ccb_id)
     }
 
     if (is_pppoe_enabled == FALSE && 
-            fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_PPPoE, PPPoE_CMD_ENABLE, ccb_id) == ERROR) {
+            fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_PPPoE, PPPoE_CMD_ENABLE, ccb_id, NULL) == ERROR) {
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Failed to generate PPPoE enable event for user %d", ccb_id + 1);
         return ERROR;
     }
 
     if (is_dhcp_enabled == FALSE && 
-            fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_DHCP, DHCP_CMD_ENABLE, ccb_id) == ERROR) {
+            fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_DHCP, DHCP_CMD_ENABLE, ccb_id, NULL) == ERROR) {
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Failed to generate DHCP enable event for user %d", ccb_id + 1);
         if (is_pppoe_enabled == FALSE && 
-                fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_PPPoE, PPPoE_CMD_DISABLE, ccb_id) == ERROR) {
+                fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_PPPoE, PPPoE_CMD_DISABLE, ccb_id, NULL) == ERROR) {
             FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Failed to generate PPPoE disable event for user %d", ccb_id + 1);
             return ERROR;
         }
@@ -328,12 +334,12 @@ STATUS execute_pppoe_hangup(FastRG_t *fastrg_ccb, int ccb_id)
     if (rte_atomic16_read(&dhcp_ccb->dhcp_bool) == 0)
         FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL, "DHCP is already disabled for user %d", ccb_id + 1);
 
-    if (fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_PPPoE, PPPoE_CMD_DISABLE, ccb_id) == ERROR) {
+    if (fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_PPPoE, PPPoE_CMD_DISABLE, ccb_id, NULL) == ERROR) {
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Failed to generate PPPoE disable event for user %d", ccb_id + 1);
         return ERROR;
     }
 
-    if (fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_DHCP, DHCP_CMD_DISABLE, ccb_id) == ERROR) {
+    if (fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_DHCP, DHCP_CMD_DISABLE, ccb_id, NULL) == ERROR) {
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Failed to generate DHCP disable event for user %d", ccb_id + 1);
         return ERROR;
     }

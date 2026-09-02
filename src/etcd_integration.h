@@ -173,6 +173,24 @@ BOOL dns_record_matches_local(const char *user_id,
     const dns_record_config_t *etcd_record, void *user_data);
 
 /**
+ * @fn reconcile_pppoe_desire
+ *
+ * @brief
+ *      Drive a subscriber's live PPPoE session toward desire_status.
+ *      Control-plane thread only. Idempotent: dial/hangup skip when the
+ *      session already is in the target state.
+ * @param fastrg_ccb
+ *      Pointer to FastRG context
+ * @param ccb_id
+ *      0-based CCB id
+ * @param desire_status
+ *      "connect"/"disconnect"; NULL or empty is treated as disconnect
+ * @return
+ *      void
+ */
+void reconcile_pppoe_desire(FastRG_t *fastrg_ccb, int ccb_id, const char *desire_status);
+
+/**
  * @fn etcd_event_dispatch
  *
  * @brief

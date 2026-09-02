@@ -1,7 +1,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-#include <pthread.h>
 #include <time.h>
 #include <rte_cycles.h>
 
@@ -16,7 +15,7 @@
 #include "dhcpd/dhcpd.h"
 #include "northbound.h"
 
-STATUS etcd_integration_init(FastRG_t *fastrg_ccb) 
+STATUS etcd_integration_init(FastRG_t *fastrg_ccb)
 {
     if (!fastrg_ccb)
         return ERROR;
@@ -53,6 +52,8 @@ STATUS etcd_integration_start(FastRG_t *fastrg_ccb)
 
     // Load existing HSI configs from etcd before starting the watcher
     FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "Loading existing HSI configs for node: %s", fastrg_ccb->node_uuid);
+    /* Safe to apply straight from this lcore: fastrg_loop and the data-plane
+     * lcores all wait on start_flag, which is set only after this returns. */
     etcd_status_t load_status = etcd_client_load_existing_configs(
         fastrg_ccb->node_uuid,
         hsi_config_changed_callback,
@@ -317,19 +318,11 @@ BOOL dns_record_matches_local(const char *user_id,
     return TRUE;
 }
 
-/* Reconcile the live PPPoE session of a subscriber toward its desired state.
- * desire_status ("connect"/"disconnect"; empty treated as disconnect) is the only
- * source of PPPoE intent, set exclusively by the CLI/controller. Idempotent:
- * execute_pppoe_dial/hangup skip when the session is already in the target state.
- *
- * TODO(slice 13): add dial-rate limiting (stagger) so a node restart that loads
- * many desire_status=connect subscribers does not issue all PADIs at once.
- */
 /* Minimum spacing between PPPoE dials, to avoid a PADI storm when a node
  * restart loads many desire_status=connect subscribers at once (slice 13). */
 #define PPPOE_DIAL_MIN_GAP_US 50000   /* 50 ms */
 
-static void reconcile_pppoe_desire(FastRG_t *fastrg_ccb, int ccb_id, const char *desire_status)
+void reconcile_pppoe_desire(FastRG_t *fastrg_ccb, int ccb_id, const char *desire_status)
 {
     static uint64_t s_last_dial_cycles = 0;   /* control-plane thread only */
 
