@@ -44,7 +44,7 @@ _p33_wait_for_new_log() {
 
     for _elapsed in $(seq 1 "$_timeout"); do
         _new=$(_p33_new_log "$_path" "$_baseline" || true)
-        if printf '%s\n' "$_new" | grep -qF "$_needle"; then
+        if grep -qF "$_needle" <<< "$_new"; then
             return 0
         fi
         sleep 1

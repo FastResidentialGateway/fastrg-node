@@ -57,6 +57,36 @@ void pppd_ipv6_dp_gate_update(ppp_ccb_t *ppp_ccb)
     }
 }
 
+BOOL is_ppp_ipv6_need_redial(BOOL ipv6_changed, U8 phase,
+    BOOL ppp_processing)
+{
+    if (ipv6_changed == FALSE)
+        return FALSE;
+
+    /* Anything not connected reads the flag at its own IPV6CP trigger point. */
+    if (phase != DATA_PHASE || ppp_processing == TRUE)
+        return FALSE;
+
+    return TRUE;
+}
+
+void ppp_ipv6_redial(ppp_ccb_t *ppp_ccb)
+{
+    FastRG_t *fastrg_ccb = ppp_ccb->fastrg_ccb;
+
+    FastRG_LOG(INFO, fastrg_ccb->fp, ppp_ccb, PPPLOGMSG, "User %" PRIu16
+        " ipv6_enable changed on a connected session; reconnecting so the new"
+        " setting is negotiated.", ppp_ccb->user_num);
+
+    rte_atomic16_set(&ppp_ccb->redial_pending, 1);
+    if (ppp_disconnect(ppp_ccb) != SUCCESS) {
+        rte_atomic16_set(&ppp_ccb->redial_pending, 0);
+        FastRG_LOG(ERR, fastrg_ccb->fp, ppp_ccb, PPPLOGMSG, "User %" PRIu16
+            " could not be reconnected for the IPv6 change; the new setting"
+            " takes effect on the next reconnect.", ppp_ccb->user_num);
+    }
+}
+
 void pppd_ipv6_report_strings(const ppp_ccb_t *ppp_ccb, char *addr_str,
     U32 addr_len, char *prefix_str, U32 prefix_len, char *dns_str,
     U32 dns_len)
@@ -966,15 +996,21 @@ void exit_ppp(ppp_ccb_t *ppp_ccb)
     /* Honour a deferred connect: a desire_status=connect that arrived while this
      * session was tearing down was parked (redial_pending) instead of being
      * dropped. Now that the session is fully down (ppp_bool just cleared above),
-     * re-dial immediately rather than waiting up to one 60s reconcile sweep.
+     * re-dial immediately rather than waiting for the next connect request.
      * execute_pppoe_dial only enqueues a northbound ENABLE event, so this is safe
      * to call from the teardown context. Cleared first so a failing redial cannot
-     * loop (the next attempt falls back to the periodic reconcile). */
+     * loop; a failed enqueue is retried by the next etcd reconcile (SDN mode)
+     * or connect request (standalone mode). */
     if (rte_atomic16_cmpset((U16 *)&ppp_ccb->redial_pending.cnt, 1, 0)) {
         FastRG_LOG(INFO, fastrg_ccb->fp, ppp_ccb, PPPLOGMSG,
             "User %" PRIu16 " teardown complete; honouring deferred connect (redial)",
             ppp_ccb->user_num);
-        execute_pppoe_dial(fastrg_ccb, ccb_id);
+        if (execute_pppoe_dial(fastrg_ccb, ccb_id) == ERROR) {
+            FastRG_LOG(ERR, fastrg_ccb->fp, ppp_ccb, PPPLOGMSG, "User %" PRIu16
+                " deferred connect could not be queued; the next etcd reconcile"
+                " (SDN mode) or connect request (standalone mode) will retry.",
+                ppp_ccb->user_num);
+        }
     }
 }
 

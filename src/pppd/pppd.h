@@ -43,6 +43,9 @@ struct nd6_table;
 #define PPPoE_CMD_DISABLE       0
 #define PPPoE_CMD_FORCE_DISABLE 1
 #define PPPoE_CMD_ENABLE        2
+/* ipv6_enable changed on a live session: reconnect so the new value takes effect. */
+#define PPPoE_CMD_IPV6_CHANGED  3
+#define PPPoE_CMD_APPLY_CONFIG  4
 
 /* Buffer sizes for pppd_ipv6_report_strings(). */
 #define PPPD_IPV6_ADDR_STRLEN   INET6_ADDRSTRLEN            /* "fe80::1"          */
@@ -348,6 +351,36 @@ static inline struct rte_timer *ppp_cp_timer(ppp_ccb_t *ppp_ccb)
  *      void
  */
 void pppd_ipv6_dp_gate_update(ppp_ccb_t *ppp_ccb);
+
+/**
+ * @fn is_ppp_ipv6_need_redial
+ *
+ * @brief Decide whether a PPPoE session needs to be redialed because of a 
+ *        change to ipv6_enable.
+ *
+ * @param ipv6_changed
+ *      TRUE when ipv6_enable actually moved
+ * @param phase
+ *      Subscriber's PPPoE connection phase
+ * @param ppp_processing
+ *      TRUE while the session is already tearing down
+ * @return
+ *      TRUE when ipv6_enable is changed and the session is connected, FALSE otherwise
+ */
+BOOL is_ppp_ipv6_need_redial(BOOL ipv6_changed, U8 phase,
+    BOOL ppp_processing);
+
+/**
+ * @fn ppp_ipv6_redial
+ *
+ * @brief Redial the session so ipv6_enable is renegotiated.
+ *
+ * @param ppp_ccb
+ *      Subscriber control block
+ * @return
+ *      void
+ */
+void ppp_ipv6_redial(ppp_ccb_t *ppp_ccb);
 
 /**
  * @fn pppd_ipv6_report_strings

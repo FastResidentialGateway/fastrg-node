@@ -2,6 +2,7 @@
 #include <fstream>
 #include <sys/utsname.h>
 #include <ifaddrs.h>
+#include <unistd.h>
 #include <jsoncpp/json/json.h>
 #include "fastrg_node_grpc.h"
 #include "../controller/etcd_client.h"
@@ -130,10 +131,46 @@ grpc::Status FastRGNodeServiceImpl::ApplyConfig(::grpc::ServerContext* context, 
         return grpc::Status(grpc::StatusCode::INTERNAL, err);
     }
 
-    // etcd unreachable (pure standalone, or SDN with etcd down): apply locally now.
+    // etcd unreachable (pure standalone, or SDN with etcd down): queue the
+    // config on cp_q, the northbound channel into the control thread, which is
+    // the only writer of CCB state.
     std::string user_id_str = std::to_string(user_id);
-    if (apply_hsi_config(fastrg_ccb, ccb_id, &hsi_config, FALSE) == ERROR) {
-        std::string err = "Error! Failed to apply configuration for user " + user_id_str;
+    rte_atomic16_set(&fastrg_ccb->cli_config_apply_result, CONFIG_APPLY_NONE);
+    hsi_config_t *cfg = (hsi_config_t *)malloc(sizeof(*cfg));
+    if (cfg == NULL) {
+        std::string err = "Error! Out of memory queueing config for user " + user_id_str;
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+    *cfg = hsi_config;
+    /* This handler builds no port mappings; keep the payload owning nothing. */
+    cfg->port_mappings = NULL;
+    cfg->port_mapping_count = 0;
+    /* Hands the config over to the control thread; on ERROR it stays ours. */
+    if (fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_PPPoE,
+            PPPoE_CMD_APPLY_CONFIG, ccb_id, cfg) == ERROR) {
+        free(cfg);
+        std::string err = "Error! Cannot reach the control thread for user " + user_id_str;
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+
+    /* Wait for the control thread's verdict. Bounded: it stops before this
+     * server does, so a request arriving late must not block shutdown. */
+    const useconds_t apply_poll_us = 1000;
+    const int apply_poll_max = 5000;   /* 5 s */
+    S16 apply_result = CONFIG_APPLY_NONE;
+    for(int i=0; i<apply_poll_max; i++) {
+        apply_result = rte_atomic16_read(&fastrg_ccb->cli_config_apply_result);
+        if (apply_result != CONFIG_APPLY_NONE)
+            break;
+        usleep(apply_poll_us);
+    }
+    rte_atomic16_set(&fastrg_ccb->cli_config_apply_result, CONFIG_APPLY_NONE);
+    if (apply_result != CONFIG_APPLY_OK) {
+        std::string err = apply_result == CONFIG_APPLY_NONE
+            ? "Error! Config for user " + user_id_str + " was queued but the control thread did not answer within 5s"
+            : "Error! Failed to apply configuration for user " + user_id_str;
         cout << err << endl;
         return grpc::Status(grpc::StatusCode::INTERNAL, err);
     }
@@ -150,7 +187,7 @@ grpc::Status FastRGNodeServiceImpl::ApplyConfig(::grpc::ServerContext* context, 
             cout << err << endl;
             return grpc::Status(grpc::StatusCode::INTERNAL, err);
         }
-        cout << "Config applied locally and snapshotted for offline-edit report, user " << user_id_str << endl;
+        cout << "Config applied and snapshotted for offline-edit report, user " << user_id_str << endl;
     }
 
     response->set_status("Configuration successful");
@@ -310,7 +347,7 @@ grpc::Status FastRGNodeServiceImpl::ConnectHsi(::grpc::ServerContext* context, c
                 cout << "User " << i + 1 << " is already connecting/connected, skip connecting" << endl;
                 continue;
             }
-            if (fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_PPPoE, PPPoE_CMD_ENABLE, i) == ERROR) {
+            if (fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_PPPoE, PPPoE_CMD_ENABLE, i, NULL) == ERROR) {
                 cout << "Failed to generate PPPoE enable event for user " << i + 1 << endl;
                 continue;
             }
@@ -339,7 +376,7 @@ grpc::Status FastRGNodeServiceImpl::ConnectHsi(::grpc::ServerContext* context, c
             cout << err << endl;
             return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, err);
         }
-        if (fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_PPPoE, PPPoE_CMD_ENABLE, ccb_id) == ERROR) {
+        if (fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_PPPoE, PPPoE_CMD_ENABLE, ccb_id, NULL) == ERROR) {
             cout << "Failed to generate PPPoE enable event for user " << ccb_id + 1 << endl;
             std::string err = "Failed to generate PPPoE enable event for user " + std::to_string(user_id);
             cout << err << endl;
@@ -377,7 +414,7 @@ grpc::Status FastRGNodeServiceImpl::DisconnectHsi(::grpc::ServerContext* context
     if (user_id == 0) {
         for(int i=0; i<fastrg_ccb->user_count; i++) {
             if (force) {
-                if (fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_PPPoE, PPPoE_CMD_FORCE_DISABLE, i) == ERROR) {
+                if (fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_PPPoE, PPPoE_CMD_FORCE_DISABLE, i, NULL) == ERROR) {
                     cout << "Failed to generate PPPoE enable event for user " << i + 1 << endl;
                     std::string err = "Failed to generate PPPoE enable event for user " + std::to_string(i + 1);
                     cout << err << endl;
@@ -399,7 +436,7 @@ grpc::Status FastRGNodeServiceImpl::DisconnectHsi(::grpc::ServerContext* context
                 cout << "User " << i + 1 << " is already disconnecting/disconnected, skip disconnecting" << endl;
                 continue;
             }
-            if (fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_PPPoE, PPPoE_CMD_DISABLE, i) == ERROR) {
+            if (fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_PPPoE, PPPoE_CMD_DISABLE, i, NULL) == ERROR) {
                 cout << "Failed to generate PPPoE disable event for user " << i + 1 << endl;
                 continue;
             }
@@ -411,7 +448,7 @@ grpc::Status FastRGNodeServiceImpl::DisconnectHsi(::grpc::ServerContext* context
         }
     } else {
         if (force) {
-            if (fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_PPPoE, PPPoE_CMD_FORCE_DISABLE, ccb_id) == ERROR) {
+            if (fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_PPPoE, PPPoE_CMD_FORCE_DISABLE, ccb_id, NULL) == ERROR) {
                 cout << "Failed to generate PPPoE enable event for user " << ccb_id + 1 << endl;
                 std::string err = "Failed to generate PPPoE enable event for user " + std::to_string(ccb_id + 1);
                 cout << err << endl;
@@ -441,7 +478,7 @@ grpc::Status FastRGNodeServiceImpl::DisconnectHsi(::grpc::ServerContext* context
             cout << err << endl;
             return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, err);
         }
-        if (fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_PPPoE, PPPoE_CMD_DISABLE, ccb_id) == ERROR) {
+        if (fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_PPPoE, PPPoE_CMD_DISABLE, ccb_id, NULL) == ERROR) {
             cout << "Failed to generate PPPoE disable event for user " << ccb_id + 1 << endl;
             std::string err = "Failed to generate PPPoE disable event for user " + std::to_string(user_id);
             cout << err << endl;
@@ -487,7 +524,7 @@ grpc::Status FastRGNodeServiceImpl::DhcpServerStart(::grpc::ServerContext* conte
                 err += "User " + std::to_string(i + 1) + " DHCP server has not been configured\n";
                 continue;
             }
-            if (fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_DHCP, DHCP_CMD_ENABLE, i) == ERROR) {
+            if (fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_DHCP, DHCP_CMD_ENABLE, i, NULL) == ERROR) {
                 cout << "Failed to generate DHCP enable event for user " << i + 1 << endl;
                 err += "Failed to generate DHCP enable event for user " + std::to_string(i + 1) + "\n";
                 continue;
@@ -512,7 +549,7 @@ grpc::Status FastRGNodeServiceImpl::DhcpServerStart(::grpc::ServerContext* conte
             std::string err = "User " + std::to_string(ccb_id + 1) + " DHCP server has not been configured\n";
             return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, err);
         }
-        if (fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_DHCP, DHCP_CMD_ENABLE, ccb_id) == ERROR) {
+        if (fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_DHCP, DHCP_CMD_ENABLE, ccb_id, NULL) == ERROR) {
             cout << "Failed to generate DHCP enable event for user " << ccb_id + 1 << endl;
             std::string err = "Failed to generate DHCP enable event for user " + std::to_string(ccb_id + 1) + "\n";
             return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, err);
@@ -549,7 +586,7 @@ grpc::Status FastRGNodeServiceImpl::DhcpServerStop(::grpc::ServerContext* contex
                 err += "User " + std::to_string(i + 1) + " DHCP server is already disabled\n";
                 continue;
             }
-            if (fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_DHCP, DHCP_CMD_DISABLE, i) == ERROR) {
+            if (fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_DHCP, DHCP_CMD_DISABLE, i, NULL) == ERROR) {
                 cout << "Failed to generate DHCP disable event for user " << i + 1 << endl;
                 err += "Failed to generate DHCP disable event for user " + std::to_string(i + 1) + "\n";
                 continue;
@@ -569,7 +606,7 @@ grpc::Status FastRGNodeServiceImpl::DhcpServerStop(::grpc::ServerContext* contex
             std::string err = "User " + std::to_string(ccb_id + 1) + " DHCP server is already disabled\n";
             return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, err);
         }
-        if (fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_DHCP, DHCP_CMD_DISABLE, ccb_id) == ERROR) {
+        if (fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_DHCP, DHCP_CMD_DISABLE, ccb_id, NULL) == ERROR) {
             cout << "Failed to generate DHCP disable event for user " << ccb_id + 1 << endl;
             std::string err = "Failed to generate DHCP disable event for user " + std::to_string(ccb_id + 1) + "\n";
             return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, err);
@@ -1654,8 +1691,18 @@ grpc::Status FastRGNodeServiceImpl::SetIpv6(::grpc::ServerContext* context,
     }
 
     /* etcd unreachable: update local state now so it takes effect immediately. */
+    BOOL was_enabled = ppp_ccb->ipv6_enabled;
     ppp_ccb->ipv6_enabled = enable ? TRUE : FALSE;
     pppd_ipv6_dp_gate_update(ppp_ccb);
+
+    /* Queued only on a real change; the control thread owns the reconnect. */
+    if (ppp_ccb->ipv6_enabled != was_enabled &&
+            fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_PPPoE,
+                PPPoE_CMD_IPV6_CHANGED, ccb_id, NULL) == ERROR) {
+        std::string err = "Failed to queue the IPv6 change for user " + std::to_string(user_id);
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
 
     /* SDN mode but etcd down: record this edit in the offline queue so it is
     reported to the controller after reconnection. */

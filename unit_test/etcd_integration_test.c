@@ -141,6 +141,36 @@ static void test_reconcile_sweep(void)
     free_sweep_fixture(fastrg_ccb);
 }
 
+static void test_etcd_event_dispatch(void)
+{
+    FastRG_t *fastrg_ccb = make_sweep_fixture();
+    etcd_event_t *ev = calloc(1, sizeof(*ev));
+    assert(ev != NULL);
+
+    /* user 9 is outside the fixture's subscriber count, so the apply fails —
+     * the case where a stray verdict would be most visible. */
+    ev->kind = ETCD_EVENT_HSI;
+    ev->action = HSI_ACTION_UPDATE;
+    strncpy(ev->node_id, "node", sizeof(ev->node_id) - 1);
+    strncpy(ev->user_id, "9", sizeof(ev->user_id) - 1);
+    strncpy(ev->event_data.hsi.config.user_id, "9",
+        sizeof(ev->event_data.hsi.config.user_id) - 1);
+
+    rte_atomic16_init(&fastrg_ccb->cli_config_apply_result);
+    rte_atomic16_set(&fastrg_ccb->cli_config_apply_result, CONFIG_APPLY_NONE);
+    etcd_event_dispatch(fastrg_ccb, ev);
+    /*
+     * The gRPC ApplyConfig waiter is released by the cp_q apply command alone, so an
+     * etcd-side HSI event passing through at the same time must not answer for it.
+     */
+    TEST_ASSERT(rte_atomic16_read(&fastrg_ccb->cli_config_apply_result) == CONFIG_APPLY_NONE,
+        "an etcd HSI event leaves the CLI apply verdict untouched", "got %d",
+        rte_atomic16_read(&fastrg_ccb->cli_config_apply_result));
+
+    etcd_event_free(ev);
+    free_sweep_fixture(fastrg_ccb);
+}
+
 void test_etcd_integration(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 {
     (void)fastrg_ccb;
@@ -149,6 +179,7 @@ void test_etcd_integration(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pa
 
     test_parse_user_id_contract();
     test_reconcile_sweep();
+    test_etcd_event_dispatch();
 
     *total_tests += test_count;
     *total_pass += pass_count;
