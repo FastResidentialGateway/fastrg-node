@@ -99,8 +99,9 @@ public:
             if (error_msg.find("node not registered") != std::string::npos) {
                 std::cout << "Node not registered, attempting to re-register..." << std::endl;
 
-                // Attempt to re-register using stored credentials
-                if (!last_node_uuid_.empty() && !last_ip_.empty() && !last_version_.empty()) {
+                // Attempt to re-register using stored credentials. Version is not
+                // required: an unknown version must not block re-registration.
+                if (!last_node_uuid_.empty() && !last_ip_.empty()) {
                     controller_status_t reg_status = RegisterNode(last_node_uuid_, last_ip_, last_version_, last_location_, last_grpc_port_);
                     if (reg_status == CONTROLLER_SUCCESS) {
                         std::cout << "Re-registration successful, retrying heartbeat..." << std::endl;
@@ -111,6 +112,8 @@ public:
                             return CONTROLLER_SUCCESS;
                         }
                     }
+                } else {
+                    std::cerr << "Re-registration skipped: no stored node uuid/ip" << std::endl;
                 }
             }
 
