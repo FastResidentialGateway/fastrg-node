@@ -201,6 +201,10 @@ int main()
     test_northbound(fastrg_ccb, &total_tests, &total_pass);
     puts("ok!");
 
+    puts("====================test cli_request.c====================");
+    test_cli_request(fastrg_ccb, &total_tests, &total_pass);
+    puts("ok!");
+
     puts("====================test etcd_integration.c====================");
     test_etcd_integration(fastrg_ccb, &total_tests, &total_pass);
     puts("ok!");

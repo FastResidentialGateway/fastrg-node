@@ -3,8 +3,14 @@
 
 #include <common.h>
 
+#include <rte_lcore.h>
+#include <rte_ring.h>
+
 #include "../src/northbound.h"
+#include "../src/cli_request.h"
 #include "../src/fastrg.h"
+#include "../src/dhcpd/dhcpd.h"
+#include "../src/pppd/pppd.h"
 #include "../src/pppd/nat.h"
 #include "test_helper.h"
 
@@ -227,6 +233,68 @@ void test_reconcile_port_mapping(FastRG_t *fastrg_ccb)
     printf("\n  All reconcile_port_mapping tests done.\n");
 }
 
+void test_fastrg_gen_cli_request(FastRG_t *fastrg_ccb)
+{
+    printf("\nTesting fastrg_gen_cli_request function:\n");
+    printf("========================================\n\n");
+
+    /* The shared fixture has no rings, so this case brings its own and hands
+     * the CCB back untouched. */
+    struct rte_ring *saved_cp_q = fastrg_ccb->cp_q;
+    struct rte_ring *saved_free_mail_ring = fastrg_ccb->free_mail_ring;
+    struct rte_ring *cp_q = rte_ring_create("nb_test_cp_q", 16, rte_socket_id(), 0);
+    struct rte_ring *free_mail_ring = rte_ring_create("nb_test_free_mail", 16, rte_socket_id(), 0);
+    tFastRG_MBX mail_slot;
+
+    TEST_ASSERT(cp_q != NULL && free_mail_ring != NULL, "create the test mail rings",
+        "cp_q %p free_mail_ring %p", (void *)cp_q, (void *)free_mail_ring);
+    if (cp_q == NULL || free_mail_ring == NULL)
+        goto out;
+
+    memset(&mail_slot, 0, sizeof(mail_slot));
+    fastrg_ccb->cp_q = cp_q;
+    fastrg_ccb->free_mail_ring = free_mail_ring;
+    rte_ring_enqueue(free_mail_ring, &mail_slot);
+
+    snat_fwd_req_t req = {.eport = 8080, .iport = 80, .dip = "192.168.1.100"};
+    STATUS ret = fastrg_gen_cli_request(fastrg_ccb, EV_NORTHBOUND_PPPoE,
+        PPPoE_CMD_SNAT_SET, 0, &req, 5);
+    TEST_ASSERT(ret == SUCCESS, "posting a CLI request returns SUCCESS", "got ERROR");
+
+    tFastRG_MBX *posted = NULL;
+    TEST_ASSERT(rte_ring_dequeue(cp_q, (void **)&posted) == 0 && posted == &mail_slot,
+        "the request lands on cp_q", "dequeue failed or wrong slot");
+    TEST_ASSERT(posted->type == EV_NORTHBOUND_PPPoE &&
+        posted->northbound_msg.cmd == PPPoE_CMD_SNAT_SET &&
+        posted->northbound_msg.ccb_id == 0 &&
+        posted->northbound_msg.seq == 5 &&
+        posted->northbound_msg.payload == &req,
+        "the mail carries cmd, ccb id, seq and payload", "seq %u cmd %u",
+        posted->northbound_msg.seq, posted->northbound_msg.cmd);
+
+    /* The same path with no waiter: fire-and-forget events carry seq 0. */
+    rte_ring_enqueue(free_mail_ring, posted);
+    ret = fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_DHCP, DHCP_CMD_ENABLE, 0, NULL);
+    TEST_ASSERT(ret == SUCCESS, "posting a fire-and-forget event returns SUCCESS", "got ERROR");
+    TEST_ASSERT(rte_ring_dequeue(cp_q, (void **)&posted) == 0 &&
+        posted->northbound_msg.seq == 0,
+        "a fire-and-forget event carries seq 0", "seq %u", posted->northbound_msg.seq);
+
+    /* No free mail slot left: the caller keeps the payload. */
+    ret = fastrg_gen_cli_request(fastrg_ccb, EV_NORTHBOUND_PPPoE,
+        PPPoE_CMD_SNAT_SET, 0, &req, 6);
+    TEST_ASSERT(ret == ERROR, "an empty free mail ring fails the post", "got SUCCESS");
+
+    fastrg_ccb->cp_q = saved_cp_q;
+    fastrg_ccb->free_mail_ring = saved_free_mail_ring;
+
+out:
+    if (cp_q != NULL)
+        rte_ring_free(cp_q);
+    if (free_mail_ring != NULL)
+        rte_ring_free(free_mail_ring);
+}
+
 void test_northbound(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 {
     printf("\n");
@@ -238,6 +306,7 @@ void test_northbound(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     pass_count = 0;
 
     test_reconcile_port_mapping(fastrg_ccb);
+    test_fastrg_gen_cli_request(fastrg_ccb);
 
     printf("\n");
     printf("╔════════════════════════════════════════════════════════════╗\n");

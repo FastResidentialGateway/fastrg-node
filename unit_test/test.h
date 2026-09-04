@@ -21,6 +21,7 @@ void test_dp_ipv6(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass);
 void test_dbg(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass);
 void test_config(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass);
 void test_northbound(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass);
+void test_cli_request(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass);
 void test_dns_codec(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass);
 void test_dns_cache(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass);
 void test_dns_static(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass);

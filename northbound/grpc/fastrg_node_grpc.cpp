@@ -1,5 +1,6 @@
 #include <grpc++/grpc++.h>
 #include <fstream>
+#include <mutex>
 #include <sys/utsname.h>
 #include <ifaddrs.h>
 #include <unistd.h>
@@ -22,6 +23,7 @@ extern "C"
 #include "../../src/fastrg.h"
 #include "../../src/dhcpd/dhcpd.h"
 #include "../../src/northbound.h"
+#include "../../src/cli_request.h"
 #include "../../src/pppd/pppd.h"
 #include "../../src/pppd/nat.h"
 #include "../../src/etcd_integration.h"
@@ -63,6 +65,57 @@ static bool snapshot_field_edit(snapshot_kind_t skind, const char *user_id,
         summary.c_str()) == SUCCESS;
     free(merged);
     return ok;
+}
+
+/* Only one CLI request is in flight at a time: FastRG_t has only single result slot. */
+static std::mutex cli_request_mutex;
+static U32 cli_request_seq = 0;
+
+/* Posts a CLI request to the control thread and waits up to 5s for its verdict.
+ * Returns CLI_REQUEST_OK / CLI_REQUEST_FAILED, or CLI_REQUEST_NONE on timeout.
+ * *posted true means the payload belongs to the control thread; while it is
+ * false the payload is still the caller's to free. Result payloads are the
+ * exception: those stay the caller's.
+ * A timeout marks the request abandoned so the control thread skips it. */
+static S16 cli_request_run(FastRG_t *fastrg_ccb, fastrg_event_type_t type, U8 cmd,
+    U16 ccb_id, void *payload, bool *posted)
+{
+    const useconds_t poll_us = 1000;
+    const int poll_max = 5000;   /* 5 s */
+
+    std::lock_guard<std::mutex> lock(cli_request_mutex);
+    /* Sequence 0 stands for "no waiter", so it is never handed out. */
+    if (cli_request_seq >= CLI_REQUEST_SEQ_MAX)
+        cli_request_seq = 0;
+    U32 seq = ++cli_request_seq;
+
+    *posted = false;
+    rte_atomic32_set(&fastrg_ccb->cli_request_result,
+        (int32_t)cli_request_result_pack(0, CLI_REQUEST_NONE));
+    if (fastrg_gen_cli_request(fastrg_ccb, type, cmd, ccb_id, payload, seq) == ERROR)
+        return CLI_REQUEST_NONE;
+    *posted = true;
+
+    S16 verdict = CLI_REQUEST_NONE;
+    for(int i=0; i<poll_max; i++) {
+        U32 packed = (U32)rte_atomic32_read(&fastrg_ccb->cli_request_result);
+        /* Seq pairing: a verdict left over from a request that timed out
+         * carries that request's sequence and must not answer this one. */
+        if ((packed >> CLI_REQUEST_VERDICT_BITS) == seq &&
+                (packed & CLI_REQUEST_VERDICT_MASK) != CLI_REQUEST_NONE) {
+            verdict = (S16)(packed & CLI_REQUEST_VERDICT_MASK);
+            /* Acquire: pairs with the release in cli_request_publish(), so
+             * every result written before the verdict is readable here. */
+            rte_smp_rmb();
+            break;
+        }
+        usleep(poll_us);
+    }
+    if (verdict == CLI_REQUEST_NONE)
+        cli_request_abandon(fastrg_ccb, seq);
+    rte_atomic32_set(&fastrg_ccb->cli_request_result,
+        (int32_t)cli_request_result_pack(0, CLI_REQUEST_NONE));
+    return verdict;
 }
 
 grpc::Status FastRGNodeServiceImpl::ApplyConfig(::grpc::ServerContext* context, const ::fastrgnodeservice::ConfigRequest* request, ::fastrgnodeservice::ConfigReply* response)
@@ -135,7 +188,6 @@ grpc::Status FastRGNodeServiceImpl::ApplyConfig(::grpc::ServerContext* context, 
     // config on cp_q, the northbound channel into the control thread, which is
     // the only writer of CCB state.
     std::string user_id_str = std::to_string(user_id);
-    rte_atomic16_set(&fastrg_ccb->cli_config_apply_result, CONFIG_APPLY_NONE);
     hsi_config_t *cfg = (hsi_config_t *)malloc(sizeof(*cfg));
     if (cfg == NULL) {
         std::string err = "Error! Out of memory queueing config for user " + user_id_str;
@@ -146,30 +198,18 @@ grpc::Status FastRGNodeServiceImpl::ApplyConfig(::grpc::ServerContext* context, 
     /* This handler builds no port mappings; keep the payload owning nothing. */
     cfg->port_mappings = NULL;
     cfg->port_mapping_count = 0;
-    /* Hands the config over to the control thread; on ERROR it stays ours. */
-    if (fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_PPPoE,
-            PPPoE_CMD_APPLY_CONFIG, ccb_id, cfg) == ERROR) {
+    bool posted = false;
+    S16 apply_result = cli_request_run(fastrg_ccb, EV_NORTHBOUND_PPPoE,
+        PPPoE_CMD_APPLY_CONFIG, ccb_id, cfg, &posted);
+    if (!posted) {
         free(cfg);
         std::string err = "Error! Cannot reach the control thread for user " + user_id_str;
         cout << err << endl;
         return grpc::Status(grpc::StatusCode::INTERNAL, err);
     }
-
-    /* Wait for the control thread's verdict. Bounded: it stops before this
-     * server does, so a request arriving late must not block shutdown. */
-    const useconds_t apply_poll_us = 1000;
-    const int apply_poll_max = 5000;   /* 5 s */
-    S16 apply_result = CONFIG_APPLY_NONE;
-    for(int i=0; i<apply_poll_max; i++) {
-        apply_result = rte_atomic16_read(&fastrg_ccb->cli_config_apply_result);
-        if (apply_result != CONFIG_APPLY_NONE)
-            break;
-        usleep(apply_poll_us);
-    }
-    rte_atomic16_set(&fastrg_ccb->cli_config_apply_result, CONFIG_APPLY_NONE);
-    if (apply_result != CONFIG_APPLY_OK) {
-        std::string err = apply_result == CONFIG_APPLY_NONE
-            ? "Error! Config for user " + user_id_str + " was queued but the control thread did not answer within 5s"
+    if (apply_result != CLI_REQUEST_OK) {
+        std::string err = apply_result == CLI_REQUEST_NONE
+            ? "Error! Config for user " + user_id_str + " was queued but the control thread did not answer within 5s; the request was dropped"
             : "Error! Failed to apply configuration for user " + user_id_str;
         cout << err << endl;
         return grpc::Status(grpc::StatusCode::INTERNAL, err);
@@ -220,10 +260,21 @@ grpc::Status FastRGNodeServiceImpl::RemoveConfig(::grpc::ServerContext* context,
         return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, err);
     }
 
-    // etcd unreachable (pure standalone, or SDN with etcd down): remove locally now.
+    // etcd unreachable (pure standalone, or SDN with etcd down): queue the
+    // removal on cp_q, the control thread is the only writer of CCB state.
     std::string user_id_str = std::to_string(user_id);
-    if (remove_hsi_config(fastrg_ccb, ccb_id) == ERROR) {
-        std::string err = "Error! Failed to remove configuration for user " + user_id_str;
+    bool posted = false;
+    S16 remove_result = cli_request_run(fastrg_ccb, EV_NORTHBOUND_PPPoE,
+        PPPoE_CMD_REMOVE_CONFIG, ccb_id, NULL, &posted);
+    if (!posted) {
+        std::string err = "Error! Cannot reach the control thread for user " + user_id_str;
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+    if (remove_result != CLI_REQUEST_OK) {
+        std::string err = remove_result == CLI_REQUEST_NONE
+            ? "Error! Config removal for user " + user_id_str + " was queued but the control thread did not answer within 5s; the request was dropped"
+            : "Error! Failed to remove configuration for user " + user_id_str;
         cout << err << endl;
         return grpc::Status(grpc::StatusCode::INTERNAL, err);
     }
@@ -248,15 +299,18 @@ grpc::Status FastRGNodeServiceImpl::RemoveConfig(::grpc::ServerContext* context,
 
 grpc::Status FastRGNodeServiceImpl::SetSubscriberCount(::grpc::ServerContext* context, const ::fastrgnodeservice::SetSubscriberCountRequest* request, ::fastrgnodeservice::SetSubscriberCountReply* response)
 {
-    int subscriber_count = request->subscriber_count();
+    // Judge the wire value before narrowing: a uint32 above INT_MAX would turn
+    // negative and slip past the bounds below.
+    uint32_t requested_count = request->subscriber_count();
 
     cout << "SetSubscriberCount called" << endl;
 
-    if (subscriber_count == 0 || subscriber_count > MAX_USER_COUNT) {
-        std::string err = "Error! Subscriber count " + std::to_string(subscriber_count) + " is invalid";
+    if (requested_count == 0 || requested_count > MAX_USER_COUNT) {
+        std::string err = "Error! Subscriber count " + std::to_string(requested_count) + " is invalid";
         cout << err << endl;
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, err);
     }
+    int subscriber_count = (int)requested_count;
 
     if (!fastrg_ccb || !fastrg_ccb->node_uuid) {
         std::string err = "Error! fastrg_ccb or node_uuid is NULL";
@@ -280,13 +334,32 @@ grpc::Status FastRGNodeServiceImpl::SetSubscriberCount(::grpc::ServerContext* co
         return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, err);
     }
 
-    // etcd unreachable: apply locally now.
+    // etcd unreachable (pure standalone, or SDN with etcd down): queue the new
+    // count on cp_q. Applying it tears CCBs down, and the control thread is
+    // their only writer.
     std::string subscriber_count_str = std::to_string(subscriber_count);
-    user_count_config_t config = {
-        .user_count = subscriber_count
-    };
-    if (user_count_changed_callback("", &config, HSI_ACTION_UPDATE, 0, fastrg_ccb) == ERROR) {
-        std::string err = "Error! Failed to set subscriber count to " + subscriber_count_str;
+    user_count_config_t *cfg = (user_count_config_t *)calloc(1, sizeof(*cfg));
+    if (cfg == NULL) {
+        std::string err = "Error! Out of memory queueing subscriber count " + subscriber_count_str;
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+    cfg->user_count = subscriber_count;
+    bool posted = false;
+    S16 count_result = cli_request_run(fastrg_ccb, EV_NORTHBOUND_NODE,
+        NODE_CMD_SET_USER_COUNT, 0, cfg, &posted);
+    if (!posted) {
+        free(cfg);
+        std::string err = "Error! Cannot reach the control thread for subscriber count " +
+            subscriber_count_str;
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+    if (count_result != CLI_REQUEST_OK) {
+        std::string err = count_result == CLI_REQUEST_NONE
+            ? "Error! Subscriber count " + subscriber_count_str +
+                " was queued but the control thread did not answer within 5s; the request was dropped"
+            : "Error! Failed to set subscriber count to " + subscriber_count_str;
         cout << err << endl;
         return grpc::Status(grpc::StatusCode::INTERNAL, err);
     }
@@ -641,10 +714,42 @@ grpc::Status FastRGNodeServiceImpl::SetSnatConfig(::grpc::ServerContext* context
         return grpc::Status(grpc::StatusCode::INTERNAL, err);
     }
 
-    // etcd unreachable (pure standalone, or SDN with etcd down): apply locally now.
-    if (set_snat_port_fwd(fastrg_ccb, ccb_id, eport, dip.c_str(), iport) == ERROR) {
-        std::string err = "Error! Failed to set SNAT port forward for user " + std::to_string(user_id) +
-            " eport=" + std::to_string(eport) + " dip=" + dip + " iport=" + std::to_string(iport);
+    // Validate the destination IP here so a malformed one never reaches the
+    // control thread; everything else is checked where the rule is written.
+    U32 dip_be;
+    if (parse_ip(dip.c_str(), &dip_be) == ERROR) {
+        std::string err = "Error! Invalid destination IP " + dip + " for user " + std::to_string(user_id);
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, err);
+    }
+
+    // etcd unreachable (pure standalone, or SDN with etcd down): queue the rule
+    // on cp_q, the control thread is the only writer of CCB state.
+    snat_fwd_req_t *req = (snat_fwd_req_t *)malloc(sizeof(*req));
+    if (req == NULL) {
+        std::string err = "Error! Out of memory queueing SNAT port forward for user " + std::to_string(user_id);
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+    req->eport = eport;
+    req->iport = iport;
+    strncpy(req->dip, dip.c_str(), sizeof(req->dip) - 1);
+    req->dip[sizeof(req->dip) - 1] = '\0';
+    bool posted = false;
+    S16 snat_result = cli_request_run(fastrg_ccb, EV_NORTHBOUND_PPPoE,
+        PPPoE_CMD_SNAT_SET, ccb_id, req, &posted);
+    if (!posted) {
+        free(req);
+        std::string err = "Error! Cannot reach the control thread for user " + std::to_string(user_id);
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+    if (snat_result != CLI_REQUEST_OK) {
+        std::string err = snat_result == CLI_REQUEST_NONE
+            ? "Error! SNAT port forward for user " + std::to_string(user_id) +
+                " was queued but the control thread did not answer within 5s; the request was dropped"
+            : "Error! Failed to set SNAT port forward for user " + std::to_string(user_id) +
+                " eport=" + std::to_string(eport) + " dip=" + dip + " iport=" + std::to_string(iport);
         cout << err << endl;
         return grpc::Status(grpc::StatusCode::INTERNAL, err);
     }
@@ -693,10 +798,31 @@ grpc::Status FastRGNodeServiceImpl::RemoveSnatConfig(::grpc::ServerContext* cont
         return grpc::Status(grpc::StatusCode::INTERNAL, err);
     }
 
-    // etcd unreachable: apply locally now.
-    if (remove_snat_port_fwd(fastrg_ccb, ccb_id, eport) == ERROR) {
-        std::string err = "Error! Failed to remove SNAT port forward for user " + std::to_string(user_id) +
-            " eport=" + std::to_string(eport);
+    // etcd unreachable (pure standalone, or SDN with etcd down): queue the
+    // removal on cp_q, the control thread is the only writer of CCB state.
+    snat_fwd_req_t *req = (snat_fwd_req_t *)calloc(1, sizeof(*req));
+    if (req == NULL) {
+        std::string err = "Error! Out of memory queueing SNAT port forward removal for user " +
+            std::to_string(user_id);
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+    req->eport = eport;
+    bool posted = false;
+    S16 snat_result = cli_request_run(fastrg_ccb, EV_NORTHBOUND_PPPoE,
+        PPPoE_CMD_SNAT_REMOVE, ccb_id, req, &posted);
+    if (!posted) {
+        free(req);
+        std::string err = "Error! Cannot reach the control thread for user " + std::to_string(user_id);
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+    if (snat_result != CLI_REQUEST_OK) {
+        std::string err = snat_result == CLI_REQUEST_NONE
+            ? "Error! SNAT port forward removal for user " + std::to_string(user_id) +
+                " was queued but the control thread did not answer within 5s; the request was dropped"
+            : "Error! Failed to remove SNAT port forward for user " + std::to_string(user_id) +
+                " eport=" + std::to_string(eport);
         cout << err << endl;
         return grpc::Status(grpc::StatusCode::INTERNAL, err);
     }
@@ -1391,6 +1517,11 @@ grpc::Status FastRGNodeServiceImpl::AddDnsRecord(::grpc::ServerContext* context,
     U32 ttl = request->ttl();
     if (ttl == 0) ttl = 3600;
 
+    if (user_id == 0 || user_id > fastrg_ccb->user_count) {
+        std::string err = "Invalid user_id " + std::to_string(user_id);
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, err);
+    }
+
     // SDN guard first: DNS records are managed via the controller when etcd
     // is reachable; the dns watcher applies them locally.
     if (etcd_client_is_initialized() && etcd_client_is_connected()) {
@@ -1399,7 +1530,6 @@ grpc::Status FastRGNodeServiceImpl::AddDnsRecord(::grpc::ServerContext* context,
         return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, err);
     }
 
-    // etcd unreachable: apply locally now.
     U16 ccb_id = user_id - 1;
     dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
     if (!dhcp_ccb) {
@@ -1410,7 +1540,35 @@ grpc::Status FastRGNodeServiceImpl::AddDnsRecord(::grpc::ServerContext* context,
     if (inet_pton(AF_INET, ip.c_str(), &ip_addr) != 1) {
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "Invalid IP address");
     }
-    dns_static_add(&dhcp_ccb->dns_state.static_table, domain.c_str(), ip_addr, ttl);
+
+    // etcd unreachable (pure standalone, or SDN with etcd down): queue the
+    // record on cp_q, the control thread is the only writer of CCB state.
+    dns_record_req_t *req = (dns_record_req_t *)calloc(1, sizeof(*req));
+    if (req == NULL) {
+        std::string err = "Error! Out of memory queueing DNS record for user " + std::to_string(user_id);
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+    strncpy(req->domain, domain.c_str(), sizeof(req->domain) - 1);
+    req->ip_addr = ip_addr;
+    req->ttl = ttl;
+    bool posted = false;
+    S16 record_result = cli_request_run(fastrg_ccb, EV_NORTHBOUND_DNS,
+        DNS_CMD_RECORD_ADD, ccb_id, req, &posted);
+    if (!posted) {
+        free(req);
+        std::string err = "Error! Cannot reach the control thread for user " + std::to_string(user_id);
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+    if (record_result != CLI_REQUEST_OK) {
+        std::string err = record_result == CLI_REQUEST_NONE
+            ? "Error! DNS record for user " + std::to_string(user_id) +
+                " was queued but the control thread did not answer within 5s; the request was dropped"
+            : "Failed to add DNS record " + domain + " for user " + std::to_string(user_id);
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
 
     // SDN mode but etcd down: queue the record write to flush on reconnect.
     if (etcd_client_is_initialized() && fastrg_ccb && fastrg_ccb->node_uuid) {
@@ -1442,6 +1600,11 @@ grpc::Status FastRGNodeServiceImpl::RemoveDnsRecord(::grpc::ServerContext* conte
     U16 user_id = request->user_id();
     std::string domain = request->domain();
 
+    if (user_id == 0 || user_id > fastrg_ccb->user_count) {
+        std::string err = "Invalid user_id " + std::to_string(user_id);
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, err);
+    }
+
     // SDN guard first: see AddDnsRecord.
     if (etcd_client_is_initialized() && etcd_client_is_connected()) {
         std::string err = "etcd reachable (SDN mode); manage DNS records via controller/etcd, not the node";
@@ -1449,14 +1612,44 @@ grpc::Status FastRGNodeServiceImpl::RemoveDnsRecord(::grpc::ServerContext* conte
         return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, err);
     }
 
-    // etcd unreachable: apply locally now.
     U16 ccb_id = user_id - 1;
     dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
     if (!dhcp_ccb) {
         std::string err = "DNS proxy not initialized for user " + std::to_string(user_id);
         return grpc::Status(grpc::StatusCode::INTERNAL, err);
     }
-    dns_static_remove(&dhcp_ccb->dns_state.static_table, domain.c_str());
+
+    // etcd unreachable (pure standalone, or SDN with etcd down): queue the
+    // removal on cp_q, the control thread is the only writer of CCB state.
+    dns_record_req_t *req = (dns_record_req_t *)calloc(1, sizeof(*req));
+    if (req == NULL) {
+        std::string err = "Error! Out of memory queueing DNS record removal for user " +
+            std::to_string(user_id);
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+    strncpy(req->domain, domain.c_str(), sizeof(req->domain) - 1);
+    bool posted = false;
+    S16 record_result = cli_request_run(fastrg_ccb, EV_NORTHBOUND_DNS,
+        DNS_CMD_RECORD_REMOVE, ccb_id, req, &posted);
+    if (!posted) {
+        free(req);
+        std::string err = "Error! Cannot reach the control thread for user " + std::to_string(user_id);
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+    if (record_result == CLI_REQUEST_NONE) {
+        std::string err = "Error! DNS record removal for user " + std::to_string(user_id) +
+            " was queued but the control thread did not answer within 5s; the request was dropped";
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+    if (record_result != CLI_REQUEST_OK) {
+        // The removal only fails when the domain is not in the table.
+        std::string err = "DNS record " + domain + " not found for user " + std::to_string(user_id);
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::NOT_FOUND, err);
+    }
 
     // SDN mode but etcd down: queue the record removal to flush on reconnect.
     if (etcd_client_is_initialized() && fastrg_ccb && fastrg_ccb->node_uuid) {
@@ -1480,7 +1673,12 @@ grpc::Status FastRGNodeServiceImpl::GetDnsCache(::grpc::ServerContext* context,
 {
     cout << "GetDnsCache called" << endl;
 
-    U16 user_id = request->user_id();
+    uint32_t requested_user_id = request->user_id();
+    if (requested_user_id == 0 || requested_user_id > fastrg_ccb->user_count) {
+        std::string err = "Invalid user_id " + std::to_string(requested_user_id);
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, err);
+    }
+    U16 user_id = (U16)requested_user_id;
     U16 ccb_id = user_id - 1;
     dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
     if (!dhcp_ccb) {
@@ -1488,28 +1686,59 @@ grpc::Status FastRGNodeServiceImpl::GetDnsCache(::grpc::ServerContext* context,
         return grpc::Status(grpc::StatusCode::INTERNAL, err);
     }
 
-    response->set_user_id(user_id);
-    dns_cache_t *cache = &dhcp_ccb->dns_state.cache;
-    U32 total = 0;
-    U64 now = rte_rdtsc();
-    U64 cycles_in_sec = fastrg_get_cycles_in_sec();
-
-    for(U32 i=0; i<DNS_CACHE_BUCKET_COUNT; i++) {
-        dns_cache_entry_t *entry = cache->buckets[i];
-        while (entry) {
-            total++;
-            DnsCacheEntry* e = response->add_entries();
-            e->set_domain(entry->domain);
-            e->set_qtype(entry->qtype);
-            e->set_ttl(entry->ttl);
-            U32 elapsed = (U32)((now - entry->insert_time) / cycles_in_sec);
-            U32 remaining = (elapsed < entry->ttl) ? (entry->ttl - elapsed) : 0;
-            e->set_remaining_ttl(remaining);
-            e->set_hit_count(entry->hit_count);
-            entry = entry->next;
-        }
+    /* The control thread owns the cache chains, so it copies the snapshot out
+     * for us, sizing the entry array to what the cache actually holds. Both the
+     * header and that array are ours to free once the verdict arrives; on
+     * timeout both must be leaked, because the control thread may still be
+     * writing them. */
+    dns_cache_dump_t *dump = (dns_cache_dump_t *)calloc(1, sizeof(*dump));
+    if (dump == NULL) {
+        std::string err = "Error! Out of memory reading the DNS cache for user " +
+            std::to_string(user_id);
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
     }
-    response->set_total_entries(total);
+    bool posted = false;
+    S16 dump_result = cli_request_run(fastrg_ccb, EV_NORTHBOUND_DNS,
+        DNS_CMD_CACHE_DUMP, ccb_id, dump, &posted);
+    if (!posted) {
+        free(dump);
+        std::string err = "Error! Cannot reach the control thread for user " + std::to_string(user_id);
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+    if (dump_result != CLI_REQUEST_OK) {
+        std::string err;
+        if (dump_result == CLI_REQUEST_NONE) {
+            err = "Error! DNS cache read for user " + std::to_string(user_id) +
+                " was queued but the control thread did not answer within 5s; the request was dropped";
+            cout << "WARN: leaking the DNS cache dump buffer for user " << user_id
+                << "; the control thread may still write to it" << endl;
+        } else {
+            err = "Error! Failed to read the DNS cache for user " + std::to_string(user_id);
+            free(dump->entries);
+            free(dump);
+        }
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+
+    response->set_user_id(user_id);
+    for(U32 i=0; i<dump->count; i++) {
+        const dns_cache_entry_t *src = &dump->entries[i];
+        DnsCacheEntry* e = response->add_entries();
+
+        e->set_domain(src->domain);
+        e->set_qtype(src->qtype);
+        e->set_ttl(src->ttl);
+        /* Not derived from the snapshot: a dump reports what is cached, not how
+         * long it has left. */
+        e->set_remaining_ttl(0);
+        e->set_hit_count(src->hit_count);
+    }
+    response->set_total_entries(dump->count);
+    free(dump->entries);
+    free(dump);
     return grpc::Status::OK;
 }
 
@@ -1519,7 +1748,12 @@ grpc::Status FastRGNodeServiceImpl::GetDnsStaticRecords(::grpc::ServerContext* c
 {
     cout << "GetDnsStaticRecords called" << endl;
 
-    U16 user_id = request->user_id();
+    uint32_t requested_user_id = request->user_id();
+    if (requested_user_id == 0 || requested_user_id > fastrg_ccb->user_count) {
+        std::string err = "Invalid user_id " + std::to_string(requested_user_id);
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, err);
+    }
+    U16 user_id = (U16)requested_user_id;
     U16 ccb_id = user_id - 1;
     dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
     if (!dhcp_ccb) {
@@ -1527,23 +1761,54 @@ grpc::Status FastRGNodeServiceImpl::GetDnsStaticRecords(::grpc::ServerContext* c
         return grpc::Status(grpc::StatusCode::INTERNAL, err);
     }
 
-    response->set_user_id(user_id);
-    dns_static_table_t *tbl = &dhcp_ccb->dns_state.static_table;
-    U32 total = 0;
-    char ip_str[32];
+    /* Same split ownership as GetDnsCache: the control thread sizes and fills
+     * the record array, and both parts are ours to free or to leak. */
+    dns_static_dump_t *dump = (dns_static_dump_t *)calloc(1, sizeof(*dump));
+    if (dump == NULL) {
+        std::string err = "Error! Out of memory reading DNS static records for user " +
+            std::to_string(user_id);
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+    bool posted = false;
+    S16 dump_result = cli_request_run(fastrg_ccb, EV_NORTHBOUND_DNS,
+        DNS_CMD_STATIC_DUMP, ccb_id, dump, &posted);
+    if (!posted) {
+        free(dump);
+        std::string err = "Error! Cannot reach the control thread for user " + std::to_string(user_id);
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+    if (dump_result != CLI_REQUEST_OK) {
+        std::string err;
+        if (dump_result == CLI_REQUEST_NONE) {
+            err = "Error! DNS static record read for user " + std::to_string(user_id) +
+                " was queued but the control thread did not answer within 5s; the request was dropped";
+            cout << "WARN: leaking the DNS static dump buffer for user " << user_id
+                << "; the control thread may still write to it" << endl;
+        } else {
+            err = "Error! Failed to read DNS static records for user " + std::to_string(user_id);
+            free(dump->records);
+            free(dump);
+        }
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
 
-    for(U32 i=0; i<DNS_STATIC_MAX_RECORDS; i++) {
-        if (!tbl->records[i].active) continue;
-        total++;
+    response->set_user_id(user_id);
+    char ip_str[32];
+    for(U32 i=0; i<dump->count; i++) {
         DnsStaticEntry* e = response->add_entries();
-        e->set_domain(tbl->records[i].domain);
         struct in_addr addr;
-        addr.s_addr = tbl->records[i].ip_addr;
+
+        e->set_domain(dump->records[i].domain);
+        addr.s_addr = dump->records[i].ip_addr;
         inet_ntop(AF_INET, &addr, ip_str, sizeof(ip_str));
         e->set_ip(ip_str);
-        e->set_ttl(tbl->records[i].ttl);
+        e->set_ttl(dump->records[i].ttl);
     }
-    response->set_total_entries(total);
+    response->set_total_entries(dump->count);
+    free(dump);
     return grpc::Status::OK;
 }
 
@@ -1555,15 +1820,56 @@ grpc::Status FastRGNodeServiceImpl::FlushDnsCache(::grpc::ServerContext* context
 
     U16 user_id = request->user_id();
     U16 ccb_id = user_id - 1;
+
+    if (user_id == 0 || user_id > fastrg_ccb->user_count) {
+        std::string err = "Invalid user_id " + std::to_string(user_id);
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, err);
+    }
+
     dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
     if (!dhcp_ccb) {
         std::string err = "DNS proxy not initialized for user " + std::to_string(user_id);
         return grpc::Status(grpc::StatusCode::INTERNAL, err);
     }
 
-    U32 flushed = dns_cache_flush(&dhcp_ccb->dns_state.cache);
+    /* Queue the flush on cp_q: the control thread is the only writer of CCB
+     * state, and it is also the thread that walks the cache on the DNS path.
+     * The count buffer is ours to free once the verdict arrives, and to leak
+     * on timeout, exactly like the dump headers. */
+    dns_cache_flush_t *req = (dns_cache_flush_t *)calloc(1, sizeof(*req));
+    if (req == NULL) {
+        std::string err = "Error! Out of memory flushing the DNS cache for user " +
+            std::to_string(user_id);
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+    bool posted = false;
+    S16 flush_result = cli_request_run(fastrg_ccb, EV_NORTHBOUND_DNS,
+        DNS_CMD_CACHE_FLUSH, ccb_id, req, &posted);
+    if (!posted) {
+        free(req);
+        std::string err = "Error! Cannot reach the control thread for user " + std::to_string(user_id);
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+    if (flush_result != CLI_REQUEST_OK) {
+        std::string err;
+        if (flush_result == CLI_REQUEST_NONE) {
+            err = "Error! DNS cache flush for user " + std::to_string(user_id) +
+                " was queued but the control thread did not answer within 5s; the request was dropped";
+            cout << "WARN: leaking the DNS cache flush buffer for user " << user_id
+                << "; the control thread may still write to it" << endl;
+        } else {
+            err = "Error! Failed to flush the DNS cache for user " + std::to_string(user_id);
+            free(req);
+        }
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+
     response->set_status("ok");
-    response->set_flushed_count(flushed);
+    response->set_flushed_count(req->flushed);
+    free(req);
     return grpc::Status::OK;
 }
 
@@ -1596,8 +1902,25 @@ grpc::Status FastRGNodeServiceImpl::SetDnsProxy(::grpc::ServerContext* context,
         return grpc::Status(grpc::StatusCode::INTERNAL, err);
     }
 
-    /* etcd unreachable: update local state now so it takes effect immediately. */
-    dhcp_ccb->dns_state.dns_proxy_enabled = enable ? TRUE : FALSE;
+    /* etcd unreachable: queue the toggle on cp_q, the control thread is the
+     * only writer of CCB state. */
+    bool posted = false;
+    S16 dns_proxy_result = cli_request_run(fastrg_ccb, EV_NORTHBOUND_DNS,
+        enable ? DNS_CMD_PROXY_ENABLE : DNS_CMD_PROXY_DISABLE,
+        ccb_id, NULL, &posted);
+    if (!posted) {
+        std::string err = "Error! Cannot reach the control thread for user " + std::to_string(user_id);
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+    if (dns_proxy_result != CLI_REQUEST_OK) {
+        std::string err = dns_proxy_result == CLI_REQUEST_NONE
+            ? "Error! dns_proxy_enable for user " + std::to_string(user_id) +
+                " was queued but the control thread did not answer within 5s; the request was dropped"
+            : "Error! Failed to set dns_proxy_enable for user " + std::to_string(user_id);
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
 
     /* SDN mode but etcd down: queue the field write to flush on reconnect. */
     if (etcd_client_is_initialized() && fastrg_ccb && fastrg_ccb->node_uuid) {
@@ -1644,8 +1967,25 @@ grpc::Status FastRGNodeServiceImpl::SetTcpConntrack(::grpc::ServerContext* conte
         return grpc::Status(grpc::StatusCode::INTERNAL, err);
     }
 
-    /* etcd unreachable: update local state now so it takes effect immediately. */
-    ppp_ccb->tcp_conntrack_enabled = enable ? TRUE : FALSE;
+    /* etcd unreachable: queue the toggle on cp_q, the control thread is the
+     * only writer of CCB state. */
+    bool posted = false;
+    S16 conntrack_result = cli_request_run(fastrg_ccb, EV_NORTHBOUND_PPPoE,
+        enable ? PPPoE_CMD_TCP_CONNTRACK_ENABLE : PPPoE_CMD_TCP_CONNTRACK_DISABLE,
+        ccb_id, NULL, &posted);
+    if (!posted) {
+        std::string err = "Error! Cannot reach the control thread for user " + std::to_string(user_id);
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+    if (conntrack_result != CLI_REQUEST_OK) {
+        std::string err = conntrack_result == CLI_REQUEST_NONE
+            ? "Error! tcp_conntrack_enable for user " + std::to_string(user_id) +
+                " was queued but the control thread did not answer within 5s; the request was dropped"
+            : "Error! Failed to set tcp_conntrack_enable for user " + std::to_string(user_id);
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
 
     /* SDN mode but etcd down: queue the field write to flush on reconnect. */
     if (etcd_client_is_initialized() && fastrg_ccb && fastrg_ccb->node_uuid) {
@@ -1690,16 +2030,22 @@ grpc::Status FastRGNodeServiceImpl::SetIpv6(::grpc::ServerContext* context,
         return grpc::Status(grpc::StatusCode::INTERNAL, err);
     }
 
-    /* etcd unreachable: update local state now so it takes effect immediately. */
-    BOOL was_enabled = ppp_ccb->ipv6_enabled;
-    ppp_ccb->ipv6_enabled = enable ? TRUE : FALSE;
-    pppd_ipv6_dp_gate_update(ppp_ccb);
-
-    /* Queued only on a real change; the control thread owns the reconnect. */
-    if (ppp_ccb->ipv6_enabled != was_enabled &&
-            fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_PPPoE,
-                PPPoE_CMD_IPV6_CHANGED, ccb_id, NULL) == ERROR) {
-        std::string err = "Failed to queue the IPv6 change for user " + std::to_string(user_id);
+    /* etcd unreachable: queue the toggle on cp_q, the control thread is the
+     * only writer of CCB state and it owns the redial that follows. */
+    bool posted = false;
+    S16 ipv6_result = cli_request_run(fastrg_ccb, EV_NORTHBOUND_PPPoE,
+        enable ? PPPoE_CMD_IPV6_ENABLE : PPPoE_CMD_IPV6_DISABLE,
+        ccb_id, NULL, &posted);
+    if (!posted) {
+        std::string err = "Error! Cannot reach the control thread for user " + std::to_string(user_id);
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INTERNAL, err);
+    }
+    if (ipv6_result != CLI_REQUEST_OK) {
+        std::string err = ipv6_result == CLI_REQUEST_NONE
+            ? "Error! ipv6_enable for user " + std::to_string(user_id) +
+                " was queued but the control thread did not answer within 5s; the request was dropped"
+            : "Failed to queue the IPv6 change for user " + std::to_string(user_id);
         cout << err << endl;
         return grpc::Status(grpc::StatusCode::INTERNAL, err);
     }
