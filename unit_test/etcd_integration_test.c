@@ -10,6 +10,7 @@
 #include "../northbound/controller/etcd_client.h"
 #include "../src/dhcpd/dhcpd.h"
 #include "../src/etcd_integration.h"
+#include "../src/cli_request.h"
 #include "../src/fastrg.h"
 #include "../src/pppd/pppd.h"
 #include "test_helper.h"
@@ -156,16 +157,16 @@ static void test_etcd_event_dispatch(void)
     strncpy(ev->event_data.hsi.config.user_id, "9",
         sizeof(ev->event_data.hsi.config.user_id) - 1);
 
-    rte_atomic16_init(&fastrg_ccb->cli_config_apply_result);
-    rte_atomic16_set(&fastrg_ccb->cli_config_apply_result, CONFIG_APPLY_NONE);
+    rte_atomic32_init(&fastrg_ccb->cli_request_result);
+    rte_atomic32_set(&fastrg_ccb->cli_request_result, CLI_REQUEST_NONE);
     etcd_event_dispatch(fastrg_ccb, ev);
     /*
      * The gRPC ApplyConfig waiter is released by the cp_q apply command alone, so an
      * etcd-side HSI event passing through at the same time must not answer for it.
      */
-    TEST_ASSERT(rte_atomic16_read(&fastrg_ccb->cli_config_apply_result) == CONFIG_APPLY_NONE,
+    TEST_ASSERT(rte_atomic32_read(&fastrg_ccb->cli_request_result) == CLI_REQUEST_NONE,
         "an etcd HSI event leaves the CLI apply verdict untouched", "got %d",
-        rte_atomic16_read(&fastrg_ccb->cli_config_apply_result));
+        rte_atomic32_read(&fastrg_ccb->cli_request_result));
 
     etcd_event_free(ev);
     free_sweep_fixture(fastrg_ccb);

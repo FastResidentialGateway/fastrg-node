@@ -34,6 +34,7 @@
 #include "controller.h"
 #include "etcd_integration.h"
 #include "northbound.h"
+#include "cli_request.h"
 #include "kafka_producer.h"
 #include "config_snapshot.h"
 #include "utils.h"
@@ -148,8 +149,8 @@ void fastrg_cleanup_pppoes_stats(FastRG_t *fastrg_ccb)
     }
 }
 
-STATUS fastrg_gen_northbound_event(FastRG_t *fastrg_ccb, fastrg_event_type_t event_type,
-    U8 cmd_type, U16 ccb_id, void *payload)
+static STATUS northbound_event_post(FastRG_t *fastrg_ccb, fastrg_event_type_t event_type,
+    U8 cmd_type, U16 ccb_id, void *payload, U32 seq)
 {
     /* Try to get a free mail slot from free_mail_ring */
     tFastRG_MBX *slot = NULL;
@@ -160,6 +161,7 @@ STATUS fastrg_gen_northbound_event(FastRG_t *fastrg_ccb, fastrg_event_type_t eve
         northbound_msg = &slot->northbound_msg;
         northbound_msg->cmd = cmd_type;
         northbound_msg->ccb_id = ccb_id;
+        northbound_msg->seq = seq;
         northbound_msg->payload = payload;
         slot->type = event_type;
         slot->len = sizeof(fastrg_event_northbound_msg_t);
@@ -171,6 +173,19 @@ STATUS fastrg_gen_northbound_event(FastRG_t *fastrg_ccb, fastrg_event_type_t eve
         return SUCCESS;
     }
     return ERROR;
+}
+
+STATUS fastrg_gen_northbound_event(FastRG_t *fastrg_ccb, fastrg_event_type_t event_type,
+    U8 cmd_type, U16 ccb_id, void *payload)
+{
+    /* seq 0: fire and forget, no caller waits for a verdict. */
+    return northbound_event_post(fastrg_ccb, event_type, cmd_type, ccb_id, payload, 0);
+}
+
+STATUS fastrg_gen_cli_request(FastRG_t *fastrg_ccb, fastrg_event_type_t event_type,
+    U8 cmd_type, U16 ccb_id, void *payload, U32 seq)
+{
+    return northbound_event_post(fastrg_ccb, event_type, cmd_type, ccb_id, payload, seq);
 }
 
 void link_disconnect(__attribute__((unused)) struct rte_timer *tim, FastRG_t *fastrg_ccb)
@@ -207,20 +222,55 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
             case EV_NORTHBOUND_PPPoE: {
                 /* process cli command */
                 fastrg_event_northbound_msg_t *pppoe_msg = &mail[i]->northbound_msg;
-                /* Ahead of the ccb lookup below: an out-of-range id must still
-                 * free the payload and answer the waiting gRPC thread. */
+                /* Commands that validate the ccb id themselves run ahead of the
+                 * lookup below, so an out-of-range id still frees the payload and
+                 * answers the waiting gRPC thread. */
                 if (pppoe_msg->cmd == PPPoE_CMD_APPLY_CONFIG) {
                     hsi_config_t *cfg = (hsi_config_t *)pppoe_msg->payload;
                     STATUS apply_ret;
 
+                    if (cli_request_dropped(fastrg_ccb, pppoe_msg, cfg) == TRUE) {
+                        rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
+                        break;
+                    }
                     /* is_update FALSE: a CLI apply always writes the whole config. */
                     apply_ret = apply_hsi_config(fastrg_ccb, pppoe_msg->ccb_id, cfg, FALSE);
                     if (apply_ret == SUCCESS)
                         reconcile_pppoe_desire(fastrg_ccb, pppoe_msg->ccb_id, cfg->desire_status);
                     free(cfg);
                     /* Publishing the verdict releases the waiter, so it comes last. */
-                    rte_atomic16_set(&fastrg_ccb->cli_config_apply_result,
-                        apply_ret == SUCCESS ? CONFIG_APPLY_OK : CONFIG_APPLY_FAILED);
+                    cli_request_publish(fastrg_ccb, pppoe_msg->seq, apply_ret);
+                    rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
+                    break;
+                }
+                if (pppoe_msg->cmd == PPPoE_CMD_SNAT_SET ||
+                        pppoe_msg->cmd == PPPoE_CMD_SNAT_REMOVE) {
+                    snat_fwd_req_t *req = (snat_fwd_req_t *)pppoe_msg->payload;
+                    STATUS snat_ret = ERROR;
+
+                    if (cli_request_dropped(fastrg_ccb, pppoe_msg, req) == TRUE) {
+                        rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
+                        break;
+                    }
+                    if (req != NULL) {
+                        snat_ret = (pppoe_msg->cmd == PPPoE_CMD_SNAT_SET) ?
+                            set_snat_port_fwd(fastrg_ccb, pppoe_msg->ccb_id, req->eport,
+                                req->dip, req->iport) :
+                            remove_snat_port_fwd(fastrg_ccb, pppoe_msg->ccb_id, req->eport);
+                        free(req);
+                    }
+                    cli_request_publish(fastrg_ccb, pppoe_msg->seq, snat_ret);
+                    rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
+                    break;
+                }
+                if (pppoe_msg->cmd == PPPoE_CMD_REMOVE_CONFIG) {
+                    if (cli_request_dropped(fastrg_ccb, pppoe_msg, NULL) == TRUE) {
+                        rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
+                        break;
+                    }
+                    STATUS remove_ret = remove_hsi_config(fastrg_ccb, pppoe_msg->ccb_id);
+
+                    cli_request_publish(fastrg_ccb, pppoe_msg->seq, remove_ret);
                     rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
                     break;
                 }
@@ -230,6 +280,7 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
                 if (pppoe_msg->ccb_id >= fastrg_ccb->user_count) {
                     FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Drop pppoe event with out of range ccb id %d\n",
                         pppoe_msg->ccb_id);
+                    cli_request_publish(fastrg_ccb, pppoe_msg->seq, ERROR);
                     rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
                     break;
                 }
@@ -237,6 +288,7 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
                 if (ppp_ccb == NULL) {
                     FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Drop pppoe event, user %d ppp ccb is not initialized\n",
                         pppoe_msg->ccb_id + 1);
+                    cli_request_publish(fastrg_ccb, pppoe_msg->seq, ERROR);
                     rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
                     break;
                 }
@@ -268,6 +320,23 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
                             "User %d ipv6_enable changed without redial, phase %u, ppp_processing %u\n",
                             pppoe_msg->ccb_id + 1, ppp_ccb->phase, ppp_ccb->ppp_processing);
                     }
+                } else if (pppoe_msg->cmd == PPPoE_CMD_TCP_CONNTRACK_ENABLE ||
+                        pppoe_msg->cmd == PPPoE_CMD_TCP_CONNTRACK_DISABLE) {
+                    if (cli_request_dropped(fastrg_ccb, pppoe_msg, NULL) == FALSE) {
+                        STATUS conntrack_ret = set_tcp_conntrack_enable(fastrg_ccb,
+                            pppoe_msg->ccb_id,
+                            pppoe_msg->cmd == PPPoE_CMD_TCP_CONNTRACK_ENABLE ? TRUE : FALSE);
+
+                        cli_request_publish(fastrg_ccb, pppoe_msg->seq, conntrack_ret);
+                    }
+                } else if (pppoe_msg->cmd == PPPoE_CMD_IPV6_ENABLE ||
+                        pppoe_msg->cmd == PPPoE_CMD_IPV6_DISABLE) {
+                    if (cli_request_dropped(fastrg_ccb, pppoe_msg, NULL) == FALSE) {
+                        STATUS ipv6_ret = set_ipv6_enable(fastrg_ccb, pppoe_msg->ccb_id,
+                            pppoe_msg->cmd == PPPoE_CMD_IPV6_ENABLE ? TRUE : FALSE);
+
+                        cli_request_publish(fastrg_ccb, pppoe_msg->seq, ipv6_ret);
+                    }
                 }
                 rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
                 break;
@@ -279,6 +348,7 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
                 if (dhcp_msg->ccb_id >= fastrg_ccb->user_count) {
                     FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Drop dhcp event with out of range ccb id %d\n",
                         dhcp_msg->ccb_id);
+                    cli_request_publish(fastrg_ccb, dhcp_msg->seq, ERROR);
                     rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
                     break;
                 }
@@ -286,6 +356,7 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
                 if (dhcp_ccb == NULL) {
                     FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Drop dhcp event, user %d dhcp ccb is not initialized\n",
                         dhcp_msg->ccb_id + 1);
+                    cli_request_publish(fastrg_ccb, dhcp_msg->seq, ERROR);
                     rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
                     break;
                 }
@@ -297,6 +368,132 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
                     FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "User %d dhcp server is spawning\n", dhcp_msg->ccb_id + 1);
                     rte_atomic16_cmpset((uint16_t *)&dhcp_ccb->dhcp_bool.cnt, 0, 1);
                     FastRG_LOG(INFO, fastrg_ccb->fp, dhcp_ccb, DHCPLOGMSG, "User %d dhcp server is spawned\n", dhcp_msg->ccb_id + 1);
+                }
+                rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
+                break;
+            }
+            case EV_NORTHBOUND_DNS: {
+                fastrg_event_northbound_msg_t *dns_msg = &mail[i]->northbound_msg;
+                /* DNS_CMD_RECORD_ADD and DNS_CMD_RECORD_REMOVE contain payload 
+                dns_record_req_t and others don't, so we need to deal with it alone. */
+                if (dns_msg->cmd == DNS_CMD_RECORD_ADD ||
+                        dns_msg->cmd == DNS_CMD_RECORD_REMOVE) {
+                    dns_record_req_t *req = (dns_record_req_t *)dns_msg->payload;
+                    STATUS record_ret = ERROR;
+
+                    if (cli_request_dropped(fastrg_ccb, dns_msg, req) == TRUE) {
+                        rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
+                        break;
+                    }
+                    if (req != NULL) {
+                        if (is_valid_ccb_id(fastrg_ccb, dns_msg->ccb_id)) {
+                            dns_static_table_t *table =
+                                &DHCPD_GET_CCB(fastrg_ccb, dns_msg->ccb_id)->dns_state.static_table;
+
+                            record_ret = (dns_msg->cmd == DNS_CMD_RECORD_ADD) ?
+                                dns_static_add(table, req->domain, req->ip_addr, req->ttl) :
+                                dns_static_remove(table, req->domain);
+                        }
+                        free(req);
+                    }
+                    cli_request_publish(fastrg_ccb, dns_msg->seq, record_ret);
+                    rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
+                    break;
+                }
+                if (dns_msg->ccb_id >= fastrg_ccb->user_count) {
+                    FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Drop dns event with out of range ccb id %d\n",
+                        dns_msg->ccb_id);
+                    cli_request_publish(fastrg_ccb, dns_msg->seq, ERROR);
+                    rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
+                    break;
+                }
+                dhcp_ccb_t *dns_owner_ccb = DHCPD_GET_CCB(fastrg_ccb, dns_msg->ccb_id);
+                if (dns_owner_ccb == NULL) {
+                    FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Drop dns event, user %d dhcp ccb is not initialized\n",
+                        dns_msg->ccb_id + 1);
+                    cli_request_publish(fastrg_ccb, dns_msg->seq, ERROR);
+                    rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
+                    break;
+                }
+                if (dns_msg->cmd == DNS_CMD_PROXY_ENABLE ||
+                        dns_msg->cmd == DNS_CMD_PROXY_DISABLE) {
+                    if (cli_request_dropped(fastrg_ccb, dns_msg, NULL) == FALSE) {
+                        STATUS dns_proxy_ret = set_dns_proxy_enable(fastrg_ccb, dns_msg->ccb_id,
+                            dns_msg->cmd == DNS_CMD_PROXY_ENABLE ? TRUE : FALSE);
+
+                        cli_request_publish(fastrg_ccb, dns_msg->seq, dns_proxy_ret);
+                    }
+                } else if (dns_msg->cmd == DNS_CMD_CACHE_FLUSH) {
+                    dns_cache_flush_t *req = (dns_cache_flush_t *)dns_msg->payload;
+
+                    if (cli_request_dropped(fastrg_ccb, dns_msg, NULL) == FALSE) {
+                        STATUS flush_ret = ERROR;
+
+                        if (req != NULL) {
+                            req->flushed = dns_cache_flush(&dns_owner_ccb->dns_state.cache);
+                            flush_ret = SUCCESS;
+                        }
+                        cli_request_publish(fastrg_ccb, dns_msg->seq, flush_ret);
+                    }
+                } else if (dns_msg->cmd == DNS_CMD_CACHE_DUMP) {
+                    dns_cache_dump_t *dump = (dns_cache_dump_t *)dns_msg->payload;
+                    if (cli_request_dropped(fastrg_ccb, dns_msg, NULL) == FALSE) {
+                        STATUS dump_ret = ERROR;
+                        if (dump != NULL) {
+                            /* Size the array to what the cache holds right now, so
+                             * caller side doesn't need to guess. */
+                            U32 entries = dns_owner_ccb->dns_state.cache.entry_count;
+
+                            dump->entries = entries != 0 ?
+                                malloc((size_t)entries * sizeof(*dump->entries)) : NULL;
+                            if (entries == 0 || dump->entries != NULL) {
+                                dump->count = dns_cache_dump(&dns_owner_ccb->dns_state.cache,
+                                    dump->entries, entries);
+                                dump_ret = SUCCESS;
+                            }
+                        }
+                        cli_request_publish(fastrg_ccb, dns_msg->seq, dump_ret);
+                    }
+                } else if (dns_msg->cmd == DNS_CMD_STATIC_DUMP) {
+                    dns_static_dump_t *dump = (dns_static_dump_t *)dns_msg->payload;
+
+                    if (cli_request_dropped(fastrg_ccb, dns_msg, NULL) == FALSE) {
+                        STATUS dump_ret = ERROR;
+
+                        if (dump != NULL) {
+                            U32 records = dns_owner_ccb->dns_state.static_table.count;
+
+                            dump->records = records != 0 ?
+                                malloc((size_t)records * sizeof(*dump->records)) : NULL;
+                            if (records == 0 || dump->records != NULL) {
+                                dump->count = dns_static_dump(
+                                    &dns_owner_ccb->dns_state.static_table,
+                                    dump->records, records);
+                                dump_ret = SUCCESS;
+                            }
+                        }
+                        cli_request_publish(fastrg_ccb, dns_msg->seq, dump_ret);
+                    }
+                }
+                rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
+                break;
+            }
+            case EV_NORTHBOUND_NODE: {
+                fastrg_event_northbound_msg_t *node_msg = &mail[i]->northbound_msg;
+                if (node_msg->cmd == NODE_CMD_SET_USER_COUNT) {
+                    user_count_config_t *cfg = (user_count_config_t *)node_msg->payload;
+                    STATUS count_ret = ERROR;
+
+                    if (cli_request_dropped(fastrg_ccb, node_msg, cfg) == TRUE) {
+                        rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
+                        break;
+                    }
+                    if (cfg != NULL) {
+                        count_ret = user_count_changed_callback("", cfg, HSI_ACTION_UPDATE,
+                            0, fastrg_ccb);
+                        free(cfg);
+                    }
+                    cli_request_publish(fastrg_ccb, node_msg->seq, count_ret);
                 }
                 rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
                 break;
@@ -786,7 +983,6 @@ int fastrg_start(int argc, char **argv)
         FastRG_LOG(WARN, stdout, NULL, NULL, "Failed to open log file %s, using stdout", fastrg_cfg.log_path);
         fastrg_ccb.fp = stdout;
     }
-
 
     /* init users and ports info */
     /* vlan 1 is mapped to index 0. However, vlan 1 is not assigned to any user by default, 

@@ -45,7 +45,6 @@ struct nd6_table;
 #define PPPoE_CMD_ENABLE        2
 /* ipv6_enable changed on a live session: reconnect so the new value takes effect. */
 #define PPPoE_CMD_IPV6_CHANGED  3
-#define PPPoE_CMD_APPLY_CONFIG  4
 
 /* Buffer sizes for pppd_ipv6_report_strings(). */
 #define PPPD_IPV6_ADDR_STRLEN   INET6_ADDRSTRLEN            /* "fe80::1"          */
