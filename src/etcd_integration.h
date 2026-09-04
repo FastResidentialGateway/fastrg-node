@@ -85,7 +85,7 @@ STATUS hsi_config_changed_callback(const char *node_id, const char *user_id,
 /**
  * @fn user_count_changed_callback
  * 
- * @brief 
+ * @brief
  *      Callback for user count configuration changes from etcd
  *      This callback handles dynamic scaling by adding or removing CCBs
  * @param node_id

@@ -30,11 +30,6 @@ extern "C" {
 
 #define INVALID_CCB_ID UINT16_MAX
 
-/* FastRG_t.cli_config_apply_result for CLI while standalone mode */
-#define CONFIG_APPLY_NONE   0
-#define CONFIG_APPLY_OK     1
-#define CONFIG_APPLY_FAILED 2
-
 #define WAN_PORT    1
 #define LAN_PORT    0
 
@@ -193,8 +188,12 @@ typedef struct FastRG {
      * the pthread_join in fastrg_stop(). The thread re-checks this flag right
      * after lighthttp_init() (under rte_smp_mb()) and closes its own fd. */
     rte_atomic16_t          metrics_stop_requested;
-    /* Only used in standalone mode for CLI config apply results, clear before use every time */
-    rte_atomic16_t          cli_config_apply_result;
+    /* Verdict slot shared by the gRPC handlers waiting on the control thread:
+     * one CLI request at a time. */
+    rte_atomic32_t          cli_request_result;
+    /* Seq of a CLI request whose caller stopped waiting; 0 = none. One slot is
+     * enough because cli_request_mutex keeps a single request in flight. */
+    rte_atomic32_t          cli_request_abandoned;
     lighthttp_server_t      metrics_server;
     pthread_t               grpc_thread;      /* joinable northbound gRPC server thread */
     BOOL                    grpc_thread_started;
@@ -210,6 +209,32 @@ STATUS fastrg_disable_subscriber_stats(FastRG_t *fastrg_ccb, U16 disable_count,
     U16 old_count);
 STATUS fastrg_gen_northbound_event(FastRG_t *fastrg_ccb, fastrg_event_type_t event_type,
     U8 cmd_type, U16 ccb_id, void *payload);
+
+/**
+ * @fn fastrg_gen_cli_request
+ *
+ * @brief Post a northbound event that a CLI caller waits on, tagged with seq.
+ *        On SUCCESS the payload belongs to the control thread.
+ *
+ * @param fastrg_ccb
+ *      Pointer to FastRG control block
+ * @param event_type
+ *      EV_NORTHBOUND_PPPoE, EV_NORTHBOUND_DHCP, EV_NORTHBOUND_DNS or
+ *      EV_NORTHBOUND_NODE
+ * @param cmd_type
+ *      Command carried by the event
+ * @param ccb_id
+ *      User ID (0-based index)
+ * @param payload
+ *      Heap payload for the command, NULL when it needs none
+ * @param seq
+ *      Sequence the verdict is published with; must not be 0
+ *
+ * @return
+ *      SUCCESS when the event is queued, ERROR otherwise
+ */
+STATUS fastrg_gen_cli_request(FastRG_t *fastrg_ccb, fastrg_event_type_t event_type,
+    U8 cmd_type, U16 ccb_id, void *payload, U32 seq);
 
 /**
  * @fn FASTRG_GET_PER_SUBSCRIBER_STATS

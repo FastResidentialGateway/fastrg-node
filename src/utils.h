@@ -21,6 +21,8 @@ extern rte_atomic16_t stop_flag;
 typedef enum {
     EV_NORTHBOUND_PPPoE,
     EV_NORTHBOUND_DHCP,
+    EV_NORTHBOUND_DNS,
+    EV_NORTHBOUND_NODE,
     EV_DP_PPPoE,
     EV_DP_DNS,
     EV_DP_DHCP,
@@ -32,6 +34,7 @@ typedef enum {
 typedef struct {
     U8 cmd;
     U16 ccb_id;
+    U32 seq;        /* CLI request sequence to publish the verdict with; 0 = no waiter */
     void *payload;
 } fastrg_event_northbound_msg_t;
 
@@ -40,7 +43,7 @@ typedef struct {
  */
 typedef struct {
     fastrg_event_type_t type;
-    fastrg_event_northbound_msg_t northbound_msg; /* EV_NORTHBOUND_PPPoE / EV_NORTHBOUND_DHCP */
+    fastrg_event_northbound_msg_t northbound_msg; /* EV_NORTHBOUND_PPPoE / _DHCP / _DNS / _NODE */
     struct {
         U8  up_down;                /* LINK_UP / LINK_DOWN */
         U16 port;
