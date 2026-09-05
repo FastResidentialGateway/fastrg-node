@@ -209,17 +209,21 @@ STATUS config_snapshot_field_merge(const char *kind, const char *current_json,
  * @fn config_snapshot_apply_all
  *
  * @brief boot-time fallback: apply the persisted snapshot as the operating
- *        base when etcd is unreachable at startup. The snapshot's subscriber
- *        count is applied first, then every HSI config, through the same
- *        callbacks the etcd load path uses (HSI JSON is parsed via
- *        etcd_client_parse_hsi_config — the schema is the etcd client's
- *        domain). DNS records load lazily on PPPoE establishment as usual.
+ *        base when etcd is unreachable at startup. The subscriber count is
+ *        applied first, then every HSI config, then every static DNS record,
+ *        through the same callbacks the etcd load path uses (HSI JSON is
+ *        parsed via etcd_client_parse_hsi_config — the schema is the etcd
+ *        client's domain). Every callback gets revision 0 because the
+ *        snapshot holds no etcd revision, and all three come as
+ *        HSI_ACTION_UPDATE.
  * @param node_id
  *      node UUID
  * @param hsi_callback
  *      callback applying one HSI config
  * @param user_count_callback
  *      callback applying the subscriber count
+ * @param dns_callback
+ *      callback applying one static DNS record
  * @param user_data
  *      opaque pointer passed through to the callbacks
  * @return
@@ -228,6 +232,7 @@ STATUS config_snapshot_field_merge(const char *kind, const char *current_json,
 void config_snapshot_apply_all(const char *node_id,
     hsi_config_callback_t hsi_callback,
     user_count_changed_callback_t user_count_callback,
+    dns_record_callback_t dns_callback,
     void *user_data);
 
 #ifdef __cplusplus

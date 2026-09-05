@@ -58,18 +58,19 @@ STATUS etcd_integration_start(FastRG_t *fastrg_ccb)
         fastrg_ccb->node_uuid,
         hsi_config_changed_callback,
         user_count_changed_callback,
-        NULL, // No need to load DNS records here since they are loaded while PPPoE connections are established
+        dns_record_changed_callback, // static DNS records are applied here, like the HSI configs
         fastrg_ccb);
 
     if (load_status != ETCD_SUCCESS) {
         /* etcd unreachable at boot: operate from the persisted snapshot as the
-         * base — apply its subscriber count and HSI configs
-         * through the same callbacks the etcd load would have used. The
-         * watcher below still recovers live sync once etcd returns. */
+         * base — apply its subscriber count, HSI configs and static DNS
+         * records through the same callbacks the etcd load would have used.
+         * The watcher below still recovers live sync once etcd returns. */
         FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
             "Failed to load configs from etcd; operating from the local snapshot");
         config_snapshot_apply_all(fastrg_ccb->node_uuid,
-            hsi_config_changed_callback, user_count_changed_callback, fastrg_ccb);
+            hsi_config_changed_callback, user_count_changed_callback,
+            dns_record_changed_callback, fastrg_ccb);
     }
 
     // Start etcd watching. Watch/reconcile events are delivered to fastrg_loop
