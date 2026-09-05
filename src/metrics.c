@@ -430,7 +430,11 @@ int metrics_build(lighthttp_buf_t *out, const char **content_type, void *arg)
     }
 
     /* ---- TX queue shortfalls ---- */
-    static const struct { const char *name; const char *help; size_t off; } txq_metrics[] = {
+    static const struct { 
+        const char *name;
+        const char *help;
+        size_t off;
+    } txq_metrics[] = {
         {
             "fastrg_node_tx_queue_full_total",
             "Packet count refused by the NIC queue.",
@@ -446,7 +450,7 @@ int metrics_build(lighthttp_buf_t *out, const char **content_type, void *arg)
             "Packet count dropped during handoff between lcores.",
             offsetof(struct tx_queue_stats, handoff_dropped)
         },
-        };
+    };
     for(size_t m=0; m<sizeof(txq_metrics)/sizeof(txq_metrics[0]); m++) {
         emit_header(out, txq_metrics[m].name, "gauge", txq_metrics[m].help);
         for(int p=0; p<PORT_AMOUNT; p++) {

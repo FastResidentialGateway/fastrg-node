@@ -229,7 +229,7 @@ int lighthttp_init(lighthttp_server_t *s, const char *addr)
 
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
-        int saved = errno;
+        int saved = errno; // avoid overwriting errno with fprintf()'s internal errors
 
         fprintf(stderr, "lighthttp: socket() failed: %s\n", strerror(saved));
         errno = saved;
@@ -252,7 +252,7 @@ int lighthttp_init(lighthttp_server_t *s, const char *addr)
     }
 
     if (bind(fd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
-        int saved = errno;
+        int saved = errno; // avoid overwriting errno with fprintf()'s internal errors
 
         fprintf(stderr, "lighthttp: bind(%s:%d) failed: %s\n", s->host, s->port, strerror(saved));
         close(fd);
@@ -260,7 +260,7 @@ int lighthttp_init(lighthttp_server_t *s, const char *addr)
         return -1;
     }
     if (listen(fd, LIGHTHTTP_BACKLOG) < 0) {
-        int saved = errno;
+        int saved = errno; // avoid overwriting errno with fprintf()'s internal errors
 
         fprintf(stderr, "lighthttp: listen() failed: %s\n", strerror(saved));
         close(fd);
