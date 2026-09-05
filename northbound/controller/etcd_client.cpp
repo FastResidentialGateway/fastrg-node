@@ -42,7 +42,7 @@ private:
     // via node gRPC while etcd is unreachable; flushed to etcd on reconnect.
     
     // Watch/reconcile events are delivered to the control-plane loop via
-    // FastRG_t.etcd_event_q; the apply-side callbacks are no longer stored
+    // FastRG_t.cp_q; the apply-side callbacks are no longer stored
     // here. sync_request_callback_ is the one exception — Step 4 of
     // sync_state_with_etcd() still invokes it directly.
     sync_request_callback_t sync_request_callback_;
@@ -584,15 +584,14 @@ public:
     }
 
     // Hand an etcd_event_t to the control-plane loop. Takes ownership: on
-    // success the loop frees it; on failure (ring full / unavailable) it is
+    // success the loop frees it; when the control queue cannot take it, it is
     // freed here. Returns true if enqueued.
     bool enqueue_etcd_event(etcd_event_t *ev) {
         if (!ev)
             return false;
-        if (!fastrg_ccb || !fastrg_ccb->etcd_event_q ||
-                rte_ring_enqueue(fastrg_ccb->etcd_event_q, ev) != 0) {
+        if (fastrg_gen_etcd_event(fastrg_ccb, ev) != SUCCESS) {
             FastRG_LOG(WARN, fastrg_ccb ? fastrg_ccb->fp : NULL, NULL, NULL,
-                "etcd_event_q unavailable/full, dropping event (kind=%d)", ev->kind);
+                "control queue full, dropping event (kind=%d)", ev->kind);
             etcd_event_free(ev);
             return false;
         }
@@ -693,6 +692,7 @@ public:
                 etcd_event_t *sweep = fastrg_alloc_etcd_event(ETCD_EVENT_HSI_SWEEP);
                 if (sweep) {
                     sweep->from_reconcile = TRUE;
+                    sweep->event_data.sweep.reconcile_revision = hsi_response.index();
                     sweep->event_data.sweep.count = (int)present_ccb_ids.size();
                     if (sweep->event_data.sweep.count > 0) {
                         sweep->event_data.sweep.present_ccb_ids =
@@ -1258,15 +1258,16 @@ public:
                     continue;
                 }
 
-                config_snapshot_watch_update(SNAPSHOT_KIND_HSI, user_id.c_str(),
-                    value.c_str());
+                if (parse_user_id(user_id.c_str(), fastrg_ccb->user_count) >= 0)
+                    config_snapshot_watch_update(SNAPSHOT_KIND_HSI, user_id.c_str(),
+                        value.c_str());
 
                 // Parse HSI config from JSON
                 hsi_config_t config;
                 bool is_enabled = false;
                 if (parse_hsi_config(value, &config, &is_enabled)) {
-                    // Get the revision from response
-                    int64_t revision = response.index();
+                    /* Per-key ModRevision: the reconcile gate uses this to compare whether the config has changed */
+                    int64_t revision = response.value(i).modified_index();
 
                     // Invoke callback with UPDATE action for existing configs. The
                     // callback applies the config and reconciles PPPoE toward
@@ -1475,7 +1476,6 @@ public:
             return false;
         }
     }
-
     etcd_status_t load_dns_records(const char *node_uuid, const char *user_id,
         dns_record_callback_t dns_record_callback, void *user_data) {
 
@@ -1532,6 +1532,7 @@ public:
         }
     }
 
+
 private:
     // configs/{nodeId}/hsi/{userId}
     static bool extract_ids_from_hsi_key(const std::string &key, std::string *node_id,
@@ -1566,7 +1567,6 @@ private:
         *node_id = m[1].str();
         return true;
     }
-
     // DNS records are stored as {"records":[...],"metadata":{...}}
     static bool parse_dns_records_envelope(const std::string &value,
         Json::Value *records_out) {
@@ -1592,6 +1592,7 @@ private:
         return true;
     }
 
+
     // Mirror + parse + enqueue one HSI config value for the control-plane
     // loop. Shared by the watch handler (live action, from_reconcile FALSE)
     // and the reconcile pass (UPDATE, from_reconcile TRUE); the boot load
@@ -1600,8 +1601,9 @@ private:
     STATUS ingest_hsi_value(const std::string &node_id, const std::string &user_id,
         const std::string *value, etcd_action_type_t action, int64_t revision,
         BOOL from_reconcile) {
-        config_snapshot_watch_update(SNAPSHOT_KIND_HSI, user_id.c_str(),
-            value ? value->c_str() : NULL);
+        if (parse_user_id(user_id.c_str(), fastrg_ccb->user_count) >= 0)
+            config_snapshot_watch_update(SNAPSHOT_KIND_HSI, user_id.c_str(),
+                value ? value->c_str() : NULL);
         etcd_event_t *ev = fastrg_alloc_etcd_event(ETCD_EVENT_HSI);
         if (!ev)
             return ERROR;
@@ -1975,8 +1977,6 @@ void etcd_client_cleanup(void) {
     if (g_etcd_client) {
         g_etcd_client.reset();
     }
-}
-
 
 
 etcd_status_t etcd_client_load_dns_records(const char *node_uuid,
@@ -1986,6 +1986,8 @@ etcd_status_t etcd_client_load_dns_records(const char *node_uuid,
     if (!g_etcd_client) return ETCD_ERROR;
     return g_etcd_client->load_dns_records(node_uuid, user_id,
         dns_record_callback, user_data);
+}
+
 }
 
 } // extern "C"

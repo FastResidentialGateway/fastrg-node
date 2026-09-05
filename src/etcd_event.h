@@ -2,7 +2,7 @@
 #define _ETCD_EVENT_H_
 
 /* The etcd config value shapes and the event the watcher threads hand to the
- * control-plane loop through FastRG_t.etcd_event_q. */
+ * control-plane loop through FastRG_t.cp_q. */
 
 #include <common.h>
 #include <stdlib.h>
@@ -65,7 +65,7 @@ typedef struct {
 
 /* ---- Asynchronous etcd event delivery -----------------------------------
  * Watcher threads hand a heap-allocated etcd_event_t to fastrg_loop through
- * etcd_event_q; fastrg_loop is the only thread that applies changes to CCBs,
+ * cp_q; fastrg_loop is the only thread that applies changes to CCBs,
  * so the apply path needs no locking.
  */
 typedef enum {
@@ -97,6 +97,7 @@ typedef struct etcd_event {
         struct {
             int *present_ccb_ids;       /* heap-owned: ccb_ids that exist in etcd */
             int  count;
+            S64 reconcile_revision;     /* etcd store revision the reconcile pass read the present list at */
         } sweep;
     } event_data;
 } etcd_event_t;
