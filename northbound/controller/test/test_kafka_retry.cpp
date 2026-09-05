@@ -3,13 +3,14 @@
 #include <cstdlib>
 
 #include "../kafka_retry_policy.h"
+#include "../../../src/fastrg.h"
 
 // The policy methods live in kafka_producer.cpp, so linking this test pulls in
 // the producer and the etcd client with it. etcd_client.o calls parse_user_id
-// from its watcher-thread filter, whose real definition is in
-// src/etcd_integration.c; that file is not part of this test, so stand in for
-// it the same way test_etcd_cas.cpp does. Nothing here is exercised by the
-// cases below.
+// and fastrg_gen_etcd_event, whose real definitions are in
+// src/etcd_integration.c and src/fastrg.c; those files are not part of this
+// test, so stand in for them the same way test_etcd_cas.cpp does. Nothing here
+// is exercised by the cases below.
 extern "C" {
 int parse_user_id(const char *user_id_str, int max_count)
 {
@@ -21,6 +22,15 @@ int parse_user_id(const char *user_id_str, int max_count)
     if (endptr == user_id_str || *endptr != '\0')
         return -1;
     return (int)val - 1;
+}
+
+// No control-plane loop here: take ownership and drop the event, which is what
+// the loop does once it has dispatched one.
+STATUS fastrg_gen_etcd_event(FastRG_t *fastrg_ccb, etcd_event_t *ev)
+{
+    (void)fastrg_ccb;
+    etcd_event_free(ev);
+    return SUCCESS;
 }
 }
 

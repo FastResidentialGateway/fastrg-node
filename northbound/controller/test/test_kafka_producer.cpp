@@ -5,16 +5,17 @@
 #include <vector>
 
 #include "../kafka_producer_wal.h"
+#include "../../../src/fastrg.h"
 
 // Unit tests for the pure functions kafka_producer.cpp exports through
 // kafka_producer_wal.h: the WAL's serialize/parse pair and the event
 // payload builder. Neither needs a broker, a WAL file or etcd.
 //
 // Linking them pulls in the producer and the etcd client with it. etcd_client.o
-// calls parse_user_id from its watcher-thread filter, whose real definition is
-// in src/etcd_integration.c; that file is not part of this test, so stand in
-// for it the same way test_kafka_retry.cpp does. Nothing here is exercised by
-// the cases below.
+// calls parse_user_id and fastrg_gen_etcd_event, whose real definitions are in
+// src/etcd_integration.c and src/fastrg.c; those files are not part of this
+// test, so stand in for them the same way test_kafka_retry.cpp does. Nothing
+// here is exercised by the cases below.
 extern "C" {
 int parse_user_id(const char *user_id_str, int max_count)
 {
@@ -26,6 +27,15 @@ int parse_user_id(const char *user_id_str, int max_count)
     if (endptr == user_id_str || *endptr != '\0')
         return -1;
     return (int)val - 1;
+}
+
+// No control-plane loop here: take ownership and drop the event, which is what
+// the loop does once it has dispatched one.
+STATUS fastrg_gen_etcd_event(FastRG_t *fastrg_ccb, etcd_event_t *ev)
+{
+    (void)fastrg_ccb;
+    etcd_event_free(ev);
+    return SUCCESS;
 }
 }
 

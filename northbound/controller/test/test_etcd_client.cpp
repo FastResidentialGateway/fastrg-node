@@ -3,10 +3,14 @@
 #include <cstring>
 #include <cstdlib>
 #include "../etcd_client.h"
+#include "../../../src/fastrg.h"
 
-// etcd_client.o calls these from its watcher-thread self-event filter; the real
-// definitions live in src/etcd_integration.c. This standalone test links only
-// etcd_client.o, so provide minimal stand-ins.
+
+// etcd_client.o calls these from its watcher-thread self-event filter and its
+// event hand-off; the real definitions live in src/etcd_integration.c and
+// src/fastrg.c. This standalone test links only etcd_client.o, so provide
+// minimal stand-ins.
+
 extern "C" {
 int parse_user_id(const char *user_id_str, int max_count) {
     (void)max_count;
@@ -18,6 +22,14 @@ int parse_user_id(const char *user_id_str, int max_count) {
         return -1;
     int ccb_id = (int)val - 1;
     return ccb_id < 0 ? -1 : ccb_id;
+}
+
+// No control-plane loop here: take ownership and drop the event, which is what
+// the loop does once it has dispatched one.
+STATUS fastrg_gen_etcd_event(FastRG_t *fastrg_ccb, etcd_event_t *ev) {
+    (void)fastrg_ccb;
+    etcd_event_free(ev);
+    return SUCCESS;
 }
 }
 

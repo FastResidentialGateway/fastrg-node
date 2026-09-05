@@ -278,6 +278,11 @@ void config_snapshot_watch_update(snapshot_kind_t kind, const char *user_id,
             key.c_str());
         return;
     }
+    // Reconcile mirrors every key each tick; when the value (or the deleted
+    // state) is already what we hold, skip the file rewrite.
+    if (it != g_entries.end() && it->second.exists == (value_json != nullptr) &&
+            it->second.value == (value_json ? value_json : ""))
+        return;
     Entry &e = g_entries[key];
     e.value = value_json ? value_json : "";
     e.exists = (value_json != nullptr);

@@ -37,7 +37,8 @@
 #define NUM_MBUFS 		8191
 #define MBUF_CACHE_SIZE 512
 #define RING_SIZE 		16384
-#define ETCD_EVENT_RING_SIZE 4096
+/* Mail slot pool: one slot per in-flight cp_q event. */
+#define MAIL_SLOT_RING_SIZE 4096
 
 /* Headroom for the pdump pool, runtime rte_malloc calls, and the small metadata
  * the capacity measurement does not itemise. */
@@ -325,10 +326,6 @@ void cleanup_ring(FastRG_t *fastrg_ccb)
         rte_ring_free(fastrg_ccb->cp_q);
         fastrg_ccb->cp_q = NULL;
     }
-    if (fastrg_ccb->etcd_event_q != NULL) {
-        rte_ring_free(fastrg_ccb->etcd_event_q);
-        fastrg_ccb->etcd_event_q = NULL;
-    }
 }
 
 /**
@@ -410,14 +407,14 @@ STATUS init_ring(FastRG_t *fastrg_ccb)
     }
 
     /* Multiple control and data-plane threads dequeue mail slots, so the ring must use MC dequeue. */
-    fastrg_ccb->free_mail_ring = rte_ring_create("free_mail_ring", RING_BURST_SIZE, rte_socket_id(), 0);
+    fastrg_ccb->free_mail_ring = rte_ring_create("free_mail_ring", MAIL_SLOT_RING_SIZE, rte_socket_id(), 0);
     if (!fastrg_ccb->free_mail_ring) {
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Cannot create free_mail_ring", rte_strerror(rte_errno));
         goto err;
     }
 
-    /* Pre-allocate and enqueue 63 mail slots to free_mail_ring */
-    for(int i=0; i<RING_BURST_SIZE-1; i++) {
+    /* Fill the pool: a DPDK ring holds size-1 entries. */
+    for(int i=0; i<MAIL_SLOT_RING_SIZE-1; i++) {
         tFastRG_MBX *mail_slot = fastrg_malloc(tFastRG_MBX, sizeof(tFastRG_MBX), 0);
         if (!mail_slot) {
             FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Cannot allocate memory for mail_slot: %s", rte_strerror(rte_errno));
@@ -428,14 +425,6 @@ STATUS init_ring(FastRG_t *fastrg_ccb)
             fastrg_mfree(mail_slot);
             goto err;
         }
-    }
-
-    /* etcd watcher threads (multi-producer) -> fastrg_loop (single consumer) */
-    fastrg_ccb->etcd_event_q = rte_ring_create("etcd_event_q", ETCD_EVENT_RING_SIZE,
-        rte_socket_id(), RING_F_SC_DEQ);
-    if (!fastrg_ccb->etcd_event_q) {
-        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Cannot create etcd_event_q: %s", rte_strerror(rte_errno));
-        goto err;
     }
 
     return SUCCESS;
@@ -743,6 +732,15 @@ STATUS sys_init(FastRG_t *fastrg_ccb, struct fastrg_config *fastrg_cfg)
         goto err;
     }
 
+    /* One applied-revision slot per subscriber, same fixed-max lifetime as the
+     * stats rows below. */
+    fastrg_ccb->hsi_subscriber_last_revision =
+        fastrg_calloc(S64, fastrg_ccb->max_user_count, sizeof(S64), 0);
+    if (fastrg_ccb->hsi_subscriber_last_revision == NULL) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Cannot allocate hsi_subscriber_last_revision");
+        goto err;
+    }
+
     /* Fixed-max stats rows: allocate every EAL lcore's per-port subscriber
      * row and PPPoE-session row once, sized max_user_count+1 (the last entry
      * is the unknown-user slot). The rows are never resized or swapped at
@@ -773,6 +771,10 @@ err:
     if (fastrg_ccb->lcore_usage != NULL) {
         fastrg_mfree(fastrg_ccb->lcore_usage);
         fastrg_ccb->lcore_usage = NULL;
+    }
+    if (fastrg_ccb->hsi_subscriber_last_revision != NULL) {
+        fastrg_mfree(fastrg_ccb->hsi_subscriber_last_revision);
+        fastrg_ccb->hsi_subscriber_last_revision = NULL;
     }
     cleanup_ring(fastrg_ccb);
     cleanup_mem();
@@ -828,6 +830,11 @@ void sys_cleanup(FastRG_t *fastrg_ccb)
     if (fastrg_ccb->lcore_usage != NULL) {
         fastrg_mfree(fastrg_ccb->lcore_usage);
         fastrg_ccb->lcore_usage = NULL;
+    }
+
+    if (fastrg_ccb->hsi_subscriber_last_revision != NULL) {
+        fastrg_mfree(fastrg_ccb->hsi_subscriber_last_revision);
+        fastrg_ccb->hsi_subscriber_last_revision = NULL;
     }
 
     cleanup_ring(fastrg_ccb);

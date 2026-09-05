@@ -21,6 +21,7 @@ extern "C" {
 #include "utils.h"
 #include "init.h"
 #include "lighthttp.h"
+#include "etcd_event.h"
 
 #define MAX_VLAN_ID 4000
 #define MIN_VLAN_ID 2
@@ -175,7 +176,9 @@ typedef struct FastRG {
     struct rte_distributor  *lan_dist;        /* LAN ingress software distributor (DP_MODE_DISTRIBUTOR) */
     struct rte_ring         *cp_q;            /* data/ctrl plane -> control loop event ring */
     struct rte_ring         *free_mail_ring;  /* pre-allocated tFastRG_MBX slot pool */
-    struct rte_ring         *etcd_event_q;    /* etcd watcher threads -> control loop event ring */
+    /* Per subscriber, the revision of the etcd event that last applied or
+     * removed its HSI config; 0 = no etcd event ever touched it. */
+    S64                     *hsi_subscriber_last_revision;
     struct lcore_usage_counter *lcore_usage;  /* per-lcore busy/total cycle counters, index by lcore_id */
     char                    *metrics_ip_port; /* Prometheus /metrics HTTP listen addr, e.g. "0.0.0.0:9101" */
     pthread_t               metrics_thread;   /* joinable Prometheus HTTP server thread */
@@ -235,6 +238,22 @@ STATUS fastrg_gen_northbound_event(FastRG_t *fastrg_ccb, fastrg_event_type_t eve
  */
 STATUS fastrg_gen_cli_request(FastRG_t *fastrg_ccb, fastrg_event_type_t event_type,
     U8 cmd_type, U16 ccb_id, void *payload, U32 seq);
+
+/**
+ * @fn fastrg_gen_etcd_event
+ *
+ * @brief Post an etcd config event to the control thread.
+ *
+ * @param fastrg_ccb
+ *      Pointer to FastRG control block
+ * @param ev
+ *      Malloc'd etcd event; still owned by the caller when this returns ERROR.
+ *      If SUCCESS, the control thread owns it and frees it after processing.
+ *
+ * @return
+ *      SUCCESS when the event is queued, ERROR otherwise
+ */
+STATUS fastrg_gen_etcd_event(FastRG_t *fastrg_ccb, etcd_event_t *ev);
 
 /**
  * @fn FASTRG_GET_PER_SUBSCRIBER_STATS

@@ -195,23 +195,54 @@ void reconcile_pppoe_desire(FastRG_t *fastrg_ccb, int ccb_id, const char *desire
  *
  * @brief
  *      Apply one etcd_event_t to local CCB state. Called exclusively from the
- *      control-plane loop (fastrg_loop) after dequeuing from etcd_event_q, so
+ *      control-plane loop (fastrg_loop) after dequeuing from cp_q, so
  *      every CCB mutation happens on a single thread with no locking.
  *      Does NOT free the event; the caller owns it.
  * @param fastrg_ccb
  *      Pointer to FastRG context
  * @param ev
- *      Event dequeued from FastRG_t.etcd_event_q
+ *      Event dequeued from FastRG_t.cp_q
  * @return
  *      void
  */
 void etcd_event_dispatch(FastRG_t *fastrg_ccb, etcd_event_t *ev);
 
 /**
+ * @fn is_hsi_etcd_revision_newest
+ *
+ * @brief Check if the etcd event's revision is newer than the last applied or 
+ *        removed revision for a subscriber.
+ * @param subscriber_last_revision
+ *      Revision of the event that last applied or removed the subscriber's
+ *      config; 0 when no etcd event ever touched it
+ * @param ev
+ *      HSI event about to be dispatched
+ * @return
+ *      TRUE when the event may be applied, FALSE when it is a stale reconcile
+ */
+BOOL is_hsi_etcd_revision_newest(S64 subscriber_last_revision, const etcd_event_t *ev);
+
+/**
+ * @fn is_sweep_may_remove
+ *
+ * @brief Check if the subscriber's last applied revision is older than the
+ *        reconcile revision, so the sweep may remove it.
+ * @param subscriber_last_revision
+ *      Revision of the event that last applied or removed the subscriber's
+ *      config; 0 when no etcd event ever touched it
+ * @param reconcile_revision
+ *      etcd store revision the reconcile pass read the present list at;
+ *      0 when unknown
+ * @return
+ *      TRUE when the subscriber may be removed
+ */
+BOOL is_sweep_may_remove(S64 subscriber_last_revision, S64 reconcile_revision);
+
+/**
  * @fn etcd_integration_republish_config_status
  *
  * @brief
- *      Queue every subscriber's etcd config on etcd_event_q for re-check.
+ *      Queue every subscriber's etcd config on cp_q for re-check.
  *
  *      Contoller will trigger this function to re-reports every subscriber's 
  *      config-apply status, so an event the controller missed does not leave 

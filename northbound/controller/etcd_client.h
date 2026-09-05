@@ -62,7 +62,7 @@ typedef STATUS (*dns_record_callback_t)(const char *node_id, const char *user_id
 etcd_status_t etcd_client_init(const char *etcd_endpoints, void* user_data);
 
 /* Start watching etcd for changes. Watch/reconcile events are delivered to the
- * control-plane loop via FastRG_t.etcd_event_q; only sync_request_callback
+ * control-plane loop via FastRG_t.cp_q; only sync_request_callback
  * (invoked when etcd has no data for this node) is passed through here. */
 etcd_status_t etcd_client_start_watch(const char *node_uuid,
     sync_request_callback_t sync_request_callback);

@@ -46,7 +46,8 @@ void config_snapshot_cleanup(void);
  * @fn config_snapshot_watch_update
  * @brief Record the etcd value seen by the watch/load path. Overwrites the
  *        entry and clears its dirty flag; value_json == NULL records a key
- *        deletion. Never generates a proposal.
+ *        deletion. A value equal to the one already stored is a no-op, so
+ *        nothing is rewritten. Never generates a proposal.
  * @param kind snapshot family
  * @param user_id subscriber id ("0" for SNAPSHOT_KIND_COUNT)
  * @param value_json raw etcd value, or NULL when the key was deleted

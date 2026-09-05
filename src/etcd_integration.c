@@ -73,7 +73,7 @@ STATUS etcd_integration_start(FastRG_t *fastrg_ccb)
     }
 
     // Start etcd watching. Watch/reconcile events are delivered to fastrg_loop
-    // via FastRG_t.etcd_event_q; only sync_request_callback is passed through.
+    // via FastRG_t.cp_q; only sync_request_callback is passed through.
     etcd_status_t status = etcd_client_start_watch(
         fastrg_ccb->node_uuid, sync_request_callback);
 
@@ -374,6 +374,43 @@ void reconcile_pppoe_desire(FastRG_t *fastrg_ccb, int ccb_id, const char *desire
     }
 }
 
+static S64 hsi_get_subscriber_last_revision(const FastRG_t *fastrg_ccb, int ccb_id)
+{
+    if (fastrg_ccb->hsi_subscriber_last_revision == NULL || ccb_id < 0 ||
+            ccb_id >= (int)fastrg_ccb->max_user_count)
+        return 0;
+    return fastrg_ccb->hsi_subscriber_last_revision[ccb_id];
+}
+
+static void hsi_set_subscriber_last_revision(FastRG_t *fastrg_ccb, int ccb_id, S64 revision)
+{
+    if (fastrg_ccb->hsi_subscriber_last_revision == NULL || ccb_id < 0 ||
+            ccb_id >= (int)fastrg_ccb->max_user_count)
+        return;
+    fastrg_ccb->hsi_subscriber_last_revision[ccb_id] = revision;
+}
+
+BOOL is_hsi_etcd_revision_newest(S64 subscriber_last_revision, const etcd_event_t *ev)
+{
+    if (ev == NULL)
+        return FALSE;
+    /* Live watch events are always the newest keys */
+    if (ev->from_reconcile == FALSE)
+        return TRUE;
+    return (ev->revision < subscriber_last_revision) ? FALSE : TRUE;
+}
+
+BOOL is_sweep_may_remove(S64 subscriber_last_revision, S64 reconcile_revision)
+{
+    /* subscriber_last_revision = 0 means it is not from etcd(e.g. CLI config). 
+    * reconcile_revision = 0 means sweep(reconcile deletion) does not have a 
+    * revision(e.g. legacy event). Both scenarios mean the subscriber config 
+    * is removable. */
+    if (subscriber_last_revision == 0 || reconcile_revision == 0)
+        return TRUE;
+    return (subscriber_last_revision <= reconcile_revision) ? TRUE : FALSE;
+}
+
 STATUS hsi_config_changed_callback(const char *node_id, const char *user_id,
     const hsi_config_t *config, etcd_action_type_t action,
     int64_t revision, void *user_data)
@@ -440,6 +477,7 @@ STATUS hsi_config_changed_callback(const char *node_id, const char *user_id,
                  * execute_pppoe_dial/hangup are idempotent (skip when already
                  * in the target state). */
                 reconcile_pppoe_desire(fastrg_ccb, ccb_id, config->desire_status);
+                hsi_set_subscriber_last_revision(fastrg_ccb, ccb_id, revision);
             }
             break;
 
@@ -449,6 +487,10 @@ STATUS hsi_config_changed_callback(const char *node_id, const char *user_id,
 
             // Remove HSI configuration
             ret = remove_hsi_config(fastrg_ccb, ccb_id);
+            /* Keep the delete's revision so in case older etcd event arrives
+            won't override the delete */
+            if (ret == SUCCESS)
+                hsi_set_subscriber_last_revision(fastrg_ccb, ccb_id, revision);
             break;
 
         default:
@@ -504,12 +546,11 @@ STATUS etcd_integration_republish_config_status(FastRG_t *fastrg_ccb, U32 *out_e
             (int)(sizeof(ev->event_data.hsi.resource_version) - 1),
             full.resource_version);
 
-        if (fastrg_ccb->etcd_event_q == NULL || 
-                rte_ring_enqueue(fastrg_ccb->etcd_event_q, ev) != 0) {
+        if (fastrg_gen_etcd_event(fastrg_ccb, ev) != SUCCESS) {
             /* Dropping one is safe: the controller's confirmation loop asks
              * again when the row it is waiting for does not arrive. */
             FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
-                "Config status republish: etcd_event_q full, skipping user %s", user_id);
+                "Config status republish: control queue full, skipping user %s", user_id);
             etcd_event_free(ev);
             continue;
         }
@@ -667,7 +708,8 @@ STATUS dns_record_changed_callback(const char *node_id, const char *user_id,
 
 /* Reconcile sweep: remove subscribers active locally but no longer present in
  * etcd. Runs on the control-plane loop, so reading CCB state here is race-free. */
-static void etcd_reconcile_sweep(FastRG_t *fastrg_ccb, const int *present, int count)
+static void etcd_reconcile_sweep(FastRG_t *fastrg_ccb, const int *present, int count,
+    S64 reconcile_revision)
 {
     for(int ccb_id=0; ccb_id<fastrg_ccb->user_count; ccb_id++) {
         ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
@@ -681,12 +723,18 @@ static void etcd_reconcile_sweep(FastRG_t *fastrg_ccb, const int *present, int c
                 break;
             }
         }
-        if (in_etcd == FALSE) {
-            FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
-                "Reconcile sweep: user %d active locally but absent from etcd, removing",
-                ccb_id + 1);
-            remove_hsi_config(fastrg_ccb, ccb_id);
-        }
+        if (in_etcd == TRUE)
+            continue;
+        if (is_sweep_may_remove(hsi_get_subscriber_last_revision(fastrg_ccb, ccb_id),
+                reconcile_revision) == FALSE)
+            continue;
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "Reconcile sweep: user %d active locally but absent from etcd, removing",
+            ccb_id + 1);
+        remove_hsi_config(fastrg_ccb, ccb_id);
+        /* Record the revision of the delete event so it doesn't get overridden 
+        if there is an older event comes. */
+        hsi_set_subscriber_last_revision(fastrg_ccb, ccb_id, reconcile_revision);
     }
 }
 
@@ -699,6 +747,18 @@ void etcd_event_dispatch(FastRG_t *fastrg_ccb, etcd_event_t *ev)
         case ETCD_EVENT_HSI: {
             const hsi_config_t *cfg =
                 (ev->action == HSI_ACTION_DELETE) ? NULL : &ev->event_data.hsi.config;
+            int gate_ccb_id = parse_user_id(ev->user_id, fastrg_ccb->user_count);
+
+            /* Sometimes reconcile events may arrive in delay. We must check if the event is 
+             * still relevant. */
+            if (is_hsi_etcd_revision_newest(hsi_get_subscriber_last_revision(fastrg_ccb, gate_ccb_id),
+                    ev) == FALSE) {
+                FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                    "Reconcile: HSI user %s revision %" PRId64 " is older than the applied "
+                    "%" PRId64 ", skipping stale reconcile", ev->user_id, ev->revision,
+                    hsi_get_subscriber_last_revision(fastrg_ccb, gate_ccb_id));
+                break;
+            }
 
             /* A republish whose state already matches is confirmed as-is, so
              * the consumer refreshes its view without recording a transition
@@ -761,7 +821,8 @@ void etcd_event_dispatch(FastRG_t *fastrg_ccb, etcd_event_t *ev)
             break;
 
         case ETCD_EVENT_HSI_SWEEP:
-            etcd_reconcile_sweep(fastrg_ccb, ev->event_data.sweep.present_ccb_ids, ev->event_data.sweep.count);
+            etcd_reconcile_sweep(fastrg_ccb, ev->event_data.sweep.present_ccb_ids,
+                ev->event_data.sweep.count, ev->event_data.sweep.reconcile_revision);
             break;
 
         default:
