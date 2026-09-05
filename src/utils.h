@@ -13,6 +13,7 @@
 #include <linux/ethtool.h>
 
 #include "protocol.h"
+#include "etcd_event.h"
 
 #define RING_BURST_SIZE 64
 
@@ -23,6 +24,7 @@ typedef enum {
     EV_NORTHBOUND_DHCP,
     EV_NORTHBOUND_DNS,
     EV_NORTHBOUND_NODE,
+    EV_ETCD,
     EV_DP_PPPoE,
     EV_DP_DNS,
     EV_DP_DHCP,
@@ -48,6 +50,7 @@ typedef struct {
         U8  up_down;                /* LINK_UP / LINK_DOWN */
         U16 port;
     } link;                         /* EV_LINK */
+    struct etcd_event   *etcd_ev;   /* EV_ETCD: heap event, freed after dispatch */
     int                 len;
     U16                 ccb_id;     /* subscriber CCB ID (used by EV_DP_DNS / EV_DP_DHCP) */
     U8                  port_id;    /* source port: LAN_PORT(0) or WAN_PORT(1) */

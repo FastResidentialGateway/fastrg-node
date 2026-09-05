@@ -188,6 +188,27 @@ STATUS fastrg_gen_cli_request(FastRG_t *fastrg_ccb, fastrg_event_type_t event_ty
     return northbound_event_post(fastrg_ccb, event_type, cmd_type, ccb_id, payload, seq);
 }
 
+STATUS fastrg_gen_etcd_event(FastRG_t *fastrg_ccb, etcd_event_t *ev)
+{
+    tFastRG_MBX *slot = NULL;
+
+    if (fastrg_ccb == NULL || ev == NULL)
+        return ERROR;
+    if (rte_ring_dequeue(fastrg_ccb->free_mail_ring, (void **)&slot) != 0)
+        return ERROR;
+
+    slot->type = EV_ETCD;
+    slot->etcd_ev = ev;
+    slot->len = 0;              /* the event carries its own payload */
+    /* cp_q is full: return the slot and leave the event with the caller. */
+    if (rte_ring_enqueue(fastrg_ccb->cp_q, slot) != 0) {
+        slot->etcd_ev = NULL;
+        rte_ring_enqueue(fastrg_ccb->free_mail_ring, slot);
+        return ERROR;
+    }
+    return SUCCESS;
+}
+
 void link_disconnect(__attribute__((unused)) struct rte_timer *tim, FastRG_t *fastrg_ccb)
 {
     for(int i=0; i<fastrg_ccb->user_count; i++)
@@ -498,6 +519,13 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
                 rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
                 break;
             }
+            case EV_ETCD: {
+                etcd_event_dispatch(fastrg_ccb, mail[i]->etcd_ev);
+                etcd_event_free(mail[i]->etcd_ev);
+                mail[i]->etcd_ev = NULL;
+                rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
+                break;
+            }
             case EV_LINK: {
                 FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "Recv Link Up/Down event");
                 U16 link_port = mail[i]->link.port;
@@ -622,16 +650,6 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
             mail[i] = NULL;
         }
 
-        /* Drain etcd config events. Applying them here (and nowhere else)
-         * makes the control-plane loop the single writer of CCB state. */
-        etcd_event_t *etcd_evs[RING_BURST_SIZE];
-        U16 etcd_burst = rte_ring_dequeue_burst(fastrg_ccb->etcd_event_q,
-            (void **)etcd_evs, RING_BURST_SIZE, NULL);
-        for(int i=0; i<etcd_burst; i++) {
-            etcd_event_dispatch(fastrg_ccb, etcd_evs[i]);
-            etcd_event_free(etcd_evs[i]);
-        }
-
         cur_tsc = fastrg_get_cur_cycles();
         diff_tsc = cur_tsc - prev_tsc;
         if (diff_tsc >= timer_resolution_cycles) {
@@ -641,7 +659,7 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
 
         uint64_t _elapsed = fastrg_get_cur_cycles() - _t0;
         fastrg_ccb->lcore_usage[rte_lcore_id()].total_cycles += _elapsed;
-        if (burst_size > 0 || etcd_burst > 0)
+        if (burst_size > 0)
             fastrg_ccb->lcore_usage[rte_lcore_id()].busy_cycles += _elapsed;
     }
 
@@ -802,15 +820,6 @@ void fastrg_stop()
     if (fastrg_ccb.controller_address)
         controller_cleanup(&fastrg_ccb);
 
-    /* Drain any etcd events left unconsumed (their payloads are only freeable
-     * via etcd_event_free); the ring itself is freed by sys_cleanup below. The
-     * producers (etcd watcher threads) were stopped by etcd_integration_cleanup
-     * above, so nothing can enqueue after this drain. */
-    etcd_event_t *ev;
-    if (fastrg_ccb.etcd_event_q) {
-        while (rte_ring_dequeue(fastrg_ccb.etcd_event_q, (void **)&ev) == 0)
-            etcd_event_free(ev);
-    }
     if (fastrg_ccb.unix_sock_fd > 0)
         close(fastrg_ccb.unix_sock_fd);
     fastrg_ccb.user_count = 0;
@@ -842,11 +851,12 @@ void fastrg_stop()
      * sys_cleanup below. Placed after PORT_CLOSE: the LSC callback (the last
      * possible producer, running on the interrupt thread) is unregistered
      * there, so nothing can enqueue after this drain. EV_DP_* mails own an
-     * mbuf that must be freed; EV_LINK mails are individually allocated (see
-     * lsi_event_callback) and are freed here. Every other mail is a borrowed
-     * pool slot: hand it back to free_mail_ring so cleanup_ring (via
-     * sys_cleanup) frees every slot in one place. The ring holds all 31
-     * slots, so the give-back cannot fail. */
+     * mbuf that must be freed; EV_ETCD mails own a heap etcd event that only
+     * etcd_event_free can release; EV_LINK mails are individually allocated
+     * (see lsi_event_callback) and are freed here. Every other mail is a
+     * borrowed pool slot: hand it back to free_mail_ring so cleanup_ring (via
+     * sys_cleanup) frees every slot in one place. free_mail_ring is sized for
+     * the whole pool, so the give-back cannot fail. */
     if (fastrg_ccb.cp_q) {
         tFastRG_MBX *left_mail;
         while (rte_ring_dequeue(fastrg_ccb.cp_q, (void **)&left_mail) == 0) {
@@ -858,6 +868,11 @@ void fastrg_stop()
             case EV_DP_ND6_MISS:
                 if (left_mail->mbuf)
                     rte_pktmbuf_free(left_mail->mbuf);
+                rte_ring_enqueue(fastrg_ccb.free_mail_ring, left_mail);
+                break;
+            case EV_ETCD:
+                etcd_event_free(left_mail->etcd_ev);
+                left_mail->etcd_ev = NULL;
                 rte_ring_enqueue(fastrg_ccb.free_mail_ring, left_mail);
                 break;
             case EV_LINK:
@@ -880,8 +895,8 @@ void fastrg_stop()
     /* Single-owner teardown of everything sys_init created: the stats rows
      * (already NULL after the two cleanups above, so the guarded loops are
      * no-ops), the arp_pending pool (its per-ccb queues were returned by
-     * pppd_cleanup_ccb above), node_uuid, lcore_usage, all three rings
-     * (cp_q / etcd_event_q / free_mail_ring including the 31 mail slots) and
+     * pppd_cleanup_ccb above), node_uuid, lcore_usage, the applied-revision
+     * table, both rings (cp_q / free_mail_ring including every mail slot) and
      * the mbuf pools. Must precede rte_eal_cleanup(): the rings and pools
      * live in EAL hugepage memory. */
     sys_cleanup(&fastrg_ccb);
