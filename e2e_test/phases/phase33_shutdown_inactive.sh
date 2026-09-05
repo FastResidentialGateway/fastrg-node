@@ -11,7 +11,7 @@
 _P33_LOG_PATH=""
 # Where the start command sends the node's stdout and stderr. A teardown
 # crash writes its reason here (glibc abort text, C++ terminate) and never to
-# the application log, and the next start truncates it.
+# the application log. It is a symlink to the newest start's file.
 _P33_STDERR_LOG="/var/log/fastrg.log"
 _P33_RESTART_NEEDED=0
 
@@ -176,7 +176,7 @@ _cleanup_phase33_shutdown_inactive() {
         fi
     fi
 
-    ssh_node "nohup ${_FASTRG_START_CMD} >/var/log/fastrg.log 2>&1 &" >/dev/null 2>&1 || true
+    e2e_start_node >/dev/null 2>&1 || true
     _FASTRG_STARTED_BY_SCRIPT=1
     for _i in $(seq 1 15); do
         if [[ "$(_p33_process_state)" == "running" ]]; then
@@ -238,8 +238,8 @@ phase33_shutdown_inactive() {
         done
         [[ $_stopped -eq 1 ]] || _issue135="${_issue135} fastrg_still_running_after_30s"
 
-        # fastrg.log is truncated on every start, so this must be read before
-        # Step 138 cold-starts the node.
+        # The application log is truncated on every start, so this must be
+        # read before Step 138 cold-starts the node.
         if ! _p33_wait_for_new_log "$_P33_LOG_PATH" "$_log_baseline" \
             "Reported shutdown to controller" 5; then
             _issue135="${_issue135} report_log_missing; log='$(_p33_log_snippet "$_P33_LOG_PATH" "$_log_baseline")'"
@@ -276,7 +276,7 @@ phase33_shutdown_inactive() {
     # ------------------------------------------------------------------
     info "Step 138: cold-starting fastrg and waiting up to 150s for both users..."
 
-    if ssh_node "nohup ${_FASTRG_START_CMD} >/var/log/fastrg.log 2>&1 &" >/dev/null 2>&1; then
+    if e2e_start_node >/dev/null 2>&1; then
         _relaunched=1
     else
         _issue136="fastrg relaunch failed"

@@ -5,8 +5,9 @@
 #
 # Turns IPv6 on for the primary subscriber, redials so IPV6CP and DHCPv6-PD
 # run, then checks the whole path: the LAN host builds a SLAAC address inside
-# the delegated prefix, ping6 and iperf3 reach the WAN host, and the
-# controller DB reports the same /56 the node does.
+# the delegated prefix, ping6 and iperf3 reach the WAN host, RSS spreads the
+# IPv6 flows over the data queues, and the controller DB reports the same /56
+# the node does.
 #
 # Turning IPv6 back off is checked as "RAs stop and forwarding stops". The
 # node never sends a lifetime-zero RA — hosts age the prefix out on their own
@@ -209,6 +210,23 @@ case_validation_register midsession_toggle_skipped phase35_ipv6 \
     _p35_inject_midsession_toggle_skipped _p35_cleanup_midsession_toggle_skipped \
     'Step 149a:'
 
+# Drill: let the client report full delivery without putting a packet on the
+# wire. The reply count then looks healthy, so only the per-queue rx deltas can
+# tell the step that the traffic it is judging never happened.
+_p35_inject_ipv6_rss_client_skipped() {
+    sabotage_override_function _e2e_rss_client \
+        'printf "flows_with_reply=%s replies=0 sent=0" "${_E2E_RSS_FLOWS}"'
+}
+
+_p35_cleanup_ipv6_rss_client_skipped() {
+    restore_phase_functions rss_probe_lib.sh
+    _cleanup_phase35_ipv6
+}
+
+case_validation_register ipv6_rss_client_skipped phase35_ipv6 \
+    _p35_inject_ipv6_rss_client_skipped _p35_cleanup_ipv6_rss_client_skipped \
+    'Step 147a:'
+
 # Drop the LAN host's global addresses and wait for SLAAC to rebuild them from
 # the prefix the node is advertising now. Each delegation hands out a fresh
 # prefix while the old addresses sit out their 24h lifetime, so the flush is what
@@ -333,6 +351,8 @@ phase35_ipv6() {
     local _uid="" _phase=""
     local _slaac_issue="" _v4_before="" _v4_verdict="" _v6_verdict=""
     local _sid_before="" _sid_after=""
+    local _iperf6_ok=0 _rss_stats="" _rss_verdict="" _rss_detail=""
+    local _wd_hit="" _wd_count="" _wd_sum="" _wc_delta="" _flows_ok=""
 
     bold "═══════════════════════════════════════════════════════"
     bold " Phase 35 — HSI IPv6 End to End (Steps 142-151)"
@@ -522,11 +542,46 @@ phase35_ipv6() {
         _bps_int=$(printf '%.0f' "${_bps}" 2>/dev/null || echo "0")
         if [[ "$_bps_int" -gt 0 ]]; then
             _mbps=$(awk "BEGIN {printf \"%.2f\", ${_bps_int} / 1000000}")
+            _iperf6_ok=1
             pass "Step 147: iperf3 -6 LAN→WAN" "received ${_mbps} Mbps over IPv6"
         else
             _iperf_err=$(printf '%s' "$_iperf_out" | jq -r '.error // empty' 2>/dev/null || true)
             fail "Step 147: iperf3 -6 LAN→WAN" "bits_per_second=0${_iperf_err:+; error: $_iperf_err}"
         fi
+    fi
+
+    # ------------------------------------------------------------------
+    # Step 147a — RSS spreads the session's IPv6 traffic across the data lcores
+    #
+    # Same probe as Step 107b, one address family up. The inner IPv6 header is
+    # a different hash input from the inner IPv4 one, so a red here next to a
+    # green 107b means the node/DDP does not spread PPPoE-encapsulated IPv6
+    # over the queues: that is a node finding for error.md, never a reason to
+    # soften this step. It needs IPv6 to reach the WAN host at all, so it runs
+    # only once Step 147 has shown that path carrying traffic — and fails
+    # rather than skips otherwise, because a check that never ran is not a
+    # check that passed.
+    # ------------------------------------------------------------------
+    if [[ "$_iperf6_ok" -eq 1 ]]; then
+        info "Step 147a: probing IPv6 RSS distribution with ${_E2E_RSS_FLOWS} UDP echo flows..."
+        _rss_stats=$(e2e_rss_probe 6 "${_P35_WAN6_HOST_ADDR}")
+        _wd_hit=$(e2e_rss_field "$_rss_stats" wd_hit)
+        _wd_count=$(e2e_rss_field "$_rss_stats" wd_count)
+        _wd_sum=$(e2e_rss_field "$_rss_stats" wd_sum)
+        _wc_delta=$(e2e_rss_field "$_rss_stats" wc_delta)
+        _flows_ok=$(e2e_rss_field "$_rss_stats" flows_ok)
+        _rss_verdict=$(e2e_rss_spread_verdict "$_wd_hit" "$_wd_count" "$_wd_sum" \
+            "$_wc_delta" "$_flows_ok" "${_E2E_RSS_FLOWS}" || true)
+        _rss_detail="${_wd_hit}/${_wd_count} wan_data lcores took rx (deltas sum=${_wd_sum}); wan_ctrl delta=${_wc_delta}; flows_with_reply=${_flows_ok}/${_E2E_RSS_FLOWS}"
+        if [[ "$_rss_verdict" == "pass" ]]; then
+            pass "Step 147a: IPv6 RSS queue distribution" "$_rss_detail"
+        else
+            fail "Step 147a: IPv6 RSS queue distribution" \
+                "verdict=${_rss_verdict}; ${_rss_detail}"
+        fi
+    else
+        fail "Step 147a: IPv6 RSS queue distribution" \
+            "the IPv6 path itself is not carrying traffic, see Step 147; the probe would have measured nothing"
     fi
 
     # ------------------------------------------------------------------

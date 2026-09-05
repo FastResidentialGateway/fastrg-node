@@ -35,7 +35,7 @@ _cleanup_phase19_node_restart() {
         fi
     fi
 
-    ssh_node "nohup ${_FASTRG_START_CMD} >/var/log/fastrg.log 2>&1 &" >/dev/null 2>&1 || true
+    e2e_start_node >/dev/null 2>&1 || true
     _FASTRG_STARTED_BY_SCRIPT=1
     for _i in $(seq 1 15); do
         if [[ "$(_p19_process_state)" == "running" ]]; then
@@ -111,6 +111,13 @@ phase19_node_restart() {
     local _vlan1_after=""
     local _vlan2_after=""
     local _p19_metrics=""
+    local _p19_dns_started_at=0
+    local _p19_dns_elapsed=0
+    local _p19_dns_checked=0
+    local _p19_dns_raw=""
+    local _p19_dns_records=""
+    local _p19_dns_detail=""
+    local _p19_primary_status=""
     local _p19_restart_before=""
     local _p19_restart_after=""
     local _p19_start_before=""
@@ -220,7 +227,8 @@ phase19_node_restart() {
     # to recover from the etcd desire_status without any dial/config call.
     # ------------------------------------------------------------------
     info "Step 77: Cold-starting fastrg and waiting up to 150s for autonomous recovery..."
-    if ssh_node "nohup ${_FASTRG_START_CMD} >/var/log/fastrg.log 2>&1 &" >/dev/null 2>&1; then
+    _p19_dns_started_at=$(date +%s)
+    if e2e_start_node >/dev/null 2>&1; then
         _restart_launched=1
     else
         _step74_issue="startup_command=failed"
@@ -243,6 +251,23 @@ phase19_node_restart() {
                 jq -r '.hsi_infos[] | select(.user_id == 1) | .vlan_id // empty' 2>/dev/null || true)
             _vlan2_after=$(printf '%s' "$_hsi_after" | \
                 jq -r '.hsi_infos[] | select(.user_id == 2) | .vlan_id // empty' 2>/dev/null || true)
+            # Static DNS records are applied when a subscriber's config is
+            # loaded, not when its session comes up, so they have to be there
+            # the moment the primary subscriber reaches Data phase. Read once,
+            # as early as possible: the 60s reconcile refills the table later
+            # and would hide a boot path that never applied them.
+            if [[ "$USER_ID" == "1" ]]; then
+                _p19_primary_status="$_status1_after"
+            else
+                _p19_primary_status="$_status2_after"
+            fi
+            if [[ $_p19_dns_checked -eq 0 && "$_p19_primary_status" == "Data phase" ]]; then
+                _p19_dns_elapsed=$(( $(date +%s) - _p19_dns_started_at ))
+                _p19_dns_raw=$(fastrg_grpc get_dns_static "${USER_ID}" 2>/dev/null || true)
+                _p19_dns_records=$(printf '%s' "$_p19_dns_raw" | \
+                    jq -r '.entries[]?.domain' 2>/dev/null || true)
+                _p19_dns_checked=1
+            fi
             if [[ "$_status1_after" == "Data phase" && "$_status2_after" == "Data phase" && \
                   -n "$_account1_after" && -n "$_account2_after" ]]; then
                 _recovery_ready=1
@@ -279,11 +304,30 @@ phase19_node_restart() {
         fi
     fi
 
+    if [[ $_p19_dns_checked -ne 1 ]]; then
+        _p19_dns_detail="static DNS records not read (the primary subscriber never reached Data phase)"
+    elif [[ "$_p19_dns_elapsed" -ge 55 ]]; then
+        # Past the 60s reconcile the table says nothing about the boot path,
+        # either way, so this reading is reported and not asserted on.
+        _p19_dns_detail="dns check inconclusive (${_p19_dns_elapsed}s after start)"
+    elif [[ -z "$_p19_dns_raw" ]]; then
+        # An empty answer is the RPC failing, not an empty table: say so
+        # rather than reporting a record that was never actually looked for.
+        _step74_issue="${_step74_issue} dns_static_unreadable=${_p19_dns_elapsed}s"
+        _p19_dns_detail="get_dns_static answered nothing ${_p19_dns_elapsed}s after start"
+    elif printf '%s\n' "$_p19_dns_records" | grep -qxF 'www.fastrg.org'; then
+        _p19_dns_detail="www.fastrg.org already in the static records ${_p19_dns_elapsed}s after start"
+    else
+        _step74_issue="${_step74_issue} dns_static_missing=${_p19_dns_elapsed}s records='${_p19_dns_records//$'\n'/,}'"
+        _p19_dns_detail="www.fastrg.org missing from the static records ${_p19_dns_elapsed}s after start"
+    fi
+
     if [[ -z "$_step74_issue" ]]; then
         pass "Step 77: Cold restart autonomous recovery" \
-            "users 1/2 returned to Data phase with etcd account/vlan, without dial or config writes; restart_total ${_p19_restart_before}->${_p19_restart_after}, start_time ${_p19_start_before}->${_p19_start_after}"
+            "users 1/2 returned to Data phase with etcd account/vlan, without dial or config writes; restart_total ${_p19_restart_before}->${_p19_restart_after}, start_time ${_p19_start_before}->${_p19_start_after}; ${_p19_dns_detail}"
     else
-        fail "Step 77: Cold restart autonomous recovery" "${_step74_issue# }"
+        fail "Step 77: Cold restart autonomous recovery" \
+            "${_step74_issue# }; ${_p19_dns_detail}"
     fi
 
     # ------------------------------------------------------------------
@@ -381,7 +425,7 @@ phase19_node_restart() {
         return
     fi
 
-    if ! ssh_node "nohup ${_FASTRG_START_CMD} >/var/log/fastrg.log 2>&1 &" >/dev/null 2>&1; then
+    if ! e2e_start_node >/dev/null 2>&1; then
         _step79_issue="cold start command failed"
     fi
     _FASTRG_STARTED_BY_SCRIPT=1

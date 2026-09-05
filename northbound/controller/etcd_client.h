@@ -213,33 +213,23 @@ etcd_status_t etcd_client_load_existing_configs(const char *node_uuid,
     dns_record_callback_t dns_record_callback,
     void *user_data);
 
-/**
- * @fn etcd_client_load_dns_records
- *
- * @brief Load all DNS static records for a specific subscriber from etcd.
- *        Called when a PPPoE session comes up to restore per-user DNS overrides.
- *        key pattern: configs/{nodeId}/dns/{userId}/{domain}
- * @param node_uuid Node UUID
- *      Node UUID
- * @param user_id
- *      Subscriber user ID string
- * @param dns_record_callback
- *      Callback invoked for each record found (action = HSI_ACTION_CREATE)
- * @param user_data
- *      Opaque pointer forwarded to the callback
- * @return
- *      ETCD_SUCCESS on success, ETCD_ERROR otherwise
- */
-etcd_status_t etcd_client_load_dns_records(const char *node_uuid,
-    const char *user_id,
-    dns_record_callback_t dns_record_callback,
-    void *user_data);
-
 /* Cleanup etcd client */
 void etcd_client_cleanup(void);
 
 #ifdef __cplusplus
 }
+
+#include <string>
+
+/* Forward declaration only: not every includer of this header builds with the
+ * jsoncpp include path. */
+namespace Json { class Value; }
+
+/* Extract the record array out of a DNS value {"records":[...],"metadata":{...}}. */
+bool parse_dns_records_envelope(const std::string &value, Json::Value *records_out);
+
+/* Decode one envelope entry {"domain","ip","ttl"}; ttl defaults to 3600. */
+bool parse_dns_record_from_json(const Json::Value &entry, dns_record_config_t *rec);
 #endif
 
 #endif /* _ETCD_CLIENT_H_ */

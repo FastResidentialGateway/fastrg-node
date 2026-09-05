@@ -26,41 +26,19 @@
 # trap.
 # ---------------------------------------------------------------------------
 
-_p17_iptables_blocked=0
-
-_p17_block_etcd() {
-    # Idempotent: clear any stale rule left by a previous crashed run first.
-    ssh_node "iptables -D OUTPUT -p tcp -d ${_P17_ETCD_HOST} --dport ${_P17_ETCD_PORT} -j REJECT --reject-with tcp-reset 2>/dev/null || true" \
-        >/dev/null 2>&1 || true
-    if ssh_node "iptables -I OUTPUT 1 -p tcp -d ${_P17_ETCD_HOST} --dport ${_P17_ETCD_PORT} -j REJECT --reject-with tcp-reset" \
-        >/dev/null 2>&1; then
-        _p17_iptables_blocked=1
-    else
-        _p17_iptables_blocked=0
-        warn "Step 69: failed to install iptables block on node"
-    fi
-}
-
-_p17_unblock_etcd() {
-    # -D is safe to call even if the rule is already gone (idempotent cleanup).
-    ssh_node "iptables -D OUTPUT -p tcp -d ${_P17_ETCD_HOST} --dport ${_P17_ETCD_PORT} -j REJECT --reject-with tcp-reset 2>/dev/null || true" \
-        >/dev/null 2>&1 || true
-    _p17_iptables_blocked=0
-}
-
 # Idempotent: called at the end of phase17 AND from the cleanup_fastrg EXIT
 # trap, so a crash mid-phase can never leave the node's etcd path blocked or
 # a stray test-user key behind.
 _cleanup_phase17_etcd_offline_queue() {
-    if [[ "${_p17_iptables_blocked:-0}" -eq 1 ]]; then
+    if e2e_node_etcd_blocked; then
         info "Cleanup(phase17): removing node->etcd iptables block..."
-        _p17_unblock_etcd
+        e2e_unblock_node_etcd
     fi
     # Step 70c safety: never leave the node down after its restart scenario.
     if [[ "${_P17C_RESTART_NEEDED:-0}" -eq 1 ]]; then
         warn "Cleanup(phase17): step-69c restart did not complete; retrying fastrg startup best-effort."
         if ! ssh_node "pgrep -x fastrg >/dev/null 2>&1"; then
-            ssh_node "nohup ${_FASTRG_START_CMD} >/var/log/fastrg.log 2>&1 &" >/dev/null 2>&1 || true
+            e2e_start_node >/dev/null 2>&1 || true
             _FASTRG_STARTED_BY_SCRIPT=1
         fi
         _P17C_RESTART_NEEDED=0
@@ -161,7 +139,7 @@ phase17_etcd_offline_queue() {
     #           directly, confirm local apply + dirty snapshot entry
     # ------------------------------------------------------------------
     info "Step 69: blocking node->etcd (${_P17_ETCD_HOST}:${_P17_ETCD_PORT}) and waiting for offline mode..."
-    _p17_block_etcd
+    e2e_block_node_etcd
 
     local _p17_vlan=888
     local _p17_accepted=0
@@ -220,7 +198,7 @@ phase17_etcd_offline_queue() {
     #           over Kafka and must NOT write etcd
     # ------------------------------------------------------------------
     info "Step 70: restoring node->etcd connectivity and waiting for the offline-edit report..."
-    _p17_unblock_etcd
+    e2e_unblock_node_etcd
 
     # Wait for the reconnect sync: the dirty flag clears once the edit has
     # been reported (or matched etcd content, which cannot happen here).
@@ -306,7 +284,7 @@ phase17_etcd_offline_queue() {
     [[ "$_p17b_kafka_baseline" =~ ^[0-9]+$ ]] || _p17b_kafka_baseline=-1
 
     info "Step 70b: blocking node->etcd and issuing offline RemoveConfig..."
-    _p17_block_etcd
+    e2e_block_node_etcd
     local _p17b_removed=0 _p17b_out=""
     for _i in $(seq 1 45); do
         sleep 2
@@ -337,7 +315,7 @@ phase17_etcd_offline_queue() {
     fi
 
     info "Step 70b: restoring connectivity and waiting for the delete proposal..."
-    _p17_unblock_etcd
+    e2e_unblock_node_etcd
     if [[ -z "$_p17b_issue" ]]; then
         local _p17b_synced=0
         for _i in $(seq 1 60); do
@@ -435,7 +413,7 @@ phase17_etcd_offline_queue() {
     fi
 
     info "Step 70c: blocking node->etcd and applying an offline edit (vlan 890)..."
-    _p17_block_etcd
+    e2e_block_node_etcd
     local _p17c_vlan=890
     local _p17c_accepted=0 _p17c_out=""
     for _i in $(seq 1 45); do
@@ -491,9 +469,9 @@ phase17_etcd_offline_queue() {
     [[ "$_p17c_kafka_baseline" =~ ^[0-9]+$ ]] || _p17c_kafka_baseline=-1
 
     info "Step 70c: restoring node->etcd connectivity and cold-starting fastrg..."
-    _p17_unblock_etcd
+    e2e_unblock_node_etcd
     if [[ $_p17c_stopped -eq 1 ]]; then
-        ssh_node "nohup ${_FASTRG_START_CMD} >/var/log/fastrg.log 2>&1 &" >/dev/null 2>&1 || \
+        e2e_start_node >/dev/null 2>&1 || \
             _p17c_issue="${_p17c_issue:+${_p17c_issue}; }cold start command failed"
         _FASTRG_STARTED_BY_SCRIPT=1
     fi

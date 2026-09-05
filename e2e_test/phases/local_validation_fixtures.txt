@@ -722,3 +722,132 @@ ping: connect: Network is unreachable
 PING 2001:db8:201::11(2001:db8:201::11) 56 data bytes
 From 2001:db8:6400::1 icmp_seq=1 Destination unreachable: Address unreachable
 3 packets transmitted, 0 received, +3 errors, 100% packet loss, time 2050ms
+==== fixture: dns_answer_answered
+# args: 192.168.201.11
+# expect-output: answered
+# expect-status: 0
+---
+192.168.201.11
+==== fixture: dns_answer_prefix_of_longer_ip
+# args: 192.168.201.11
+# expect-output: silent
+# expect-status: 0
+---
+192.168.201.110
+==== fixture: dns_answer_timed_out
+# args: 192.168.201.11
+# expect-output: silent
+# expect-status: 0
+---
+;; communications error to 192.168.4.1#53: timed out
+==== fixture: dns_answer_empty_output
+# args: 192.168.201.11
+# expect-output: silent
+# expect-status: 0
+---
+
+==== fixture: dns_answer_dig_missing
+# args: 192.168.201.11
+# expect-output: err
+# expect-status: 1
+---
+bash: line 1: dig: command not found
+==== fixture: dns_answer_no_ip_asked
+# expect-output: err
+# expect-status: 1
+---
+192.168.201.11
+==== fixture: redial_verdict_enabled
+# args: 1234 on
+# expect-output: pass
+# expect-status: 0
+---
+4660 2001:db8:6400:100::/56 fe80::1
+==== fixture: redial_verdict_disabled
+# args: 1234 off
+# expect-output: pass
+# expect-status: 0
+---
+4660
+==== fixture: redial_verdict_same_session
+# args: 1234 on
+# expect-output: same_session
+# expect-status: 1
+---
+1234 2001:db8:6400:100::/56 fe80::1
+==== fixture: redial_verdict_no_prefix
+# args: 1234 on
+# expect-output: no_prefix
+# expect-status: 1
+---
+4660 2001:db8:6400::/48 fe80::1
+==== fixture: redial_verdict_no_addr
+# args: 1234 on
+# expect-output: no_addr
+# expect-status: 1
+---
+4660 2001:db8:6400:100::/56 2001:db8:6400:100::1
+==== fixture: redial_verdict_still_has_ipv6
+# args: 1234 off
+# expect-output: ipv6_present
+# expect-status: 1
+---
+4660 2001:db8:6400:100::/56 fe80::1
+==== fixture: redial_verdict_unreadable
+# args: 1234 on
+# expect-output: err
+# expect-status: 1
+---
+err
+==== fixture: redial_verdict_no_session_before
+# expect-output: err
+# expect-status: 1
+---
+4660 2001:db8:6400:100::/56 fe80::1
+==== fixture: redial_verdict_session_absent
+# args: 1234 off
+# expect-output: err
+# expect-status: 1
+---
+null
+==== fixture: rss_spread_good
+# invoke: args-only
+# args: 3 4 800 12 16 16
+# expect-output: pass
+# expect-status: 0
+---
+==== fixture: rss_spread_no_rows
+# invoke: args-only
+# args: 0 1 0 0 0 16
+# expect-output: no_rows
+# expect-status: 1
+---
+==== fixture: rss_spread_probe_broken
+# invoke: args-only
+# args: 0 4 0 0 11 16
+# expect-output: probe_broken
+# expect-status: 1
+---
+==== fixture: rss_spread_single_queue
+# invoke: args-only
+# args: 1 4 640 0 16 16
+# expect-output: single_queue
+# expect-status: 1
+---
+==== fixture: rss_spread_queue0
+# invoke: args-only
+# args: 2 4 100 40 16 16
+# expect-output: queue0
+# expect-status: 1
+---
+==== fixture: rss_spread_unreadable_rows
+# invoke: args-only
+# args: err 4 err 0 16 16
+# expect-output: err
+# expect-status: 1
+---
+==== fixture: rss_spread_empty_input
+# invoke: args-only
+# expect-output: err
+# expect-status: 1
+---

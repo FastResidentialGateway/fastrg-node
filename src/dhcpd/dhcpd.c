@@ -108,6 +108,9 @@ void dhcp_init_by_user(dhcp_ccb_t *dhcp_ccb, U16 ccb_id,
     /* Default before any HSI config is applied; overridden per-subscriber
      * by apply_hsi_config() using dns_proxy_enable from etcd. */
     dhcp_ccb->dns_state.dns_proxy_enabled = TRUE;
+    /* Static DNS records belong to the subscriber config, so the table is
+     * created once with the CCB */
+    dns_static_init(&dhcp_ccb->dns_state.static_table);
 
     // critical section
     dhcp_pool_init_by_user(dhcp_ccb, 0, 0, 0, 0); //initialize with empty pool

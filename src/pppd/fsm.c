@@ -27,7 +27,6 @@
 #include "../dhcpd/dhcpd.h"
 #include "../dnsd/dnsd.h"
 #include "../etcd_integration.h"
-#include "../../northbound/controller/etcd_client.h"
 
 static STATUS A_this_layer_start(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
 static STATUS send_config_request(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
@@ -844,14 +843,6 @@ STATUS ipcp_layer_up(ppp_ccb_t *s_ppp_ccb)
     FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " HSI module is spawned.\n", s_ppp_ccb->user_num);
     /* dhcp6_process_message() re-reports once prefix delegation finishes. */
     ppp_report_connection_status(s_ppp_ccb);
-    if (fastrg_ccb->is_standalone == FALSE) {
-        char user_id_str[6];
-        snprintf(user_id_str, sizeof(user_id_str), "%u", s_ppp_ccb->user_num);
-        /* Static DNS records are still loaded from etcd (read-only) now that
-         * the session is up. */
-        etcd_client_load_dns_records(fastrg_ccb->node_uuid, user_id_str,
-            dns_record_changed_callback, fastrg_ccb);
-    }
 
     return SUCCESS;
 }

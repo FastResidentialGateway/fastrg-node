@@ -26,6 +26,31 @@
 #include <mutex>
 #include <fstream>
 
+// DNS records are stored as {"records":[...],"metadata":{...}}
+bool parse_dns_records_envelope(const std::string &value, Json::Value *records_out)
+{
+    Json::Value root;
+    Json::Reader reader;
+    if (!reader.parse(value, root) || !root.isObject() ||
+            !root.isMember("records") || !root["records"].isArray())
+        return false;
+    *records_out = root["records"];
+    return true;
+}
+
+// One envelope entry {"domain","ip","ttl"} -> dns_record_config_t
+// (ttl defaults to 3600 when absent).
+bool parse_dns_record_from_json(const Json::Value &entry, dns_record_config_t *rec)
+{
+    if (!entry.isMember("domain") || !entry.isMember("ip"))
+        return false;
+    memset(rec, 0, sizeof(*rec));
+    strncpy(rec->domain, entry["domain"].asString().c_str(), sizeof(rec->domain) - 1);
+    strncpy(rec->ip, entry["ip"].asString().c_str(), sizeof(rec->ip) - 1);
+    rec->ttl = entry.isMember("ttl") ? entry["ttl"].asUInt() : 3600;
+    return true;
+}
+
 class EtcdClientImpl {
 private:
     std::unique_ptr<etcd::Client> client_;
@@ -1323,7 +1348,7 @@ public:
 
                                 STATUS dns_ret = dns_record_callback(dns_node_id.c_str(),
                                     dns_user_id.c_str(), &dns_rec,
-                                    HSI_ACTION_CREATE, dns_revision, user_data);
+                                    HSI_ACTION_UPDATE, dns_revision, user_data);
                                 if (dns_ret == SUCCESS) {
                                     dns_count++;
                                     std::cout << "Loaded DNS record: " << dns_rec.domain
@@ -1476,62 +1501,6 @@ public:
             return false;
         }
     }
-    etcd_status_t load_dns_records(const char *node_uuid, const char *user_id,
-        dns_record_callback_t dns_record_callback, void *user_data) {
-
-        if (!client_ || !node_uuid || !user_id || !dns_record_callback)
-            return ETCD_ERROR;
-
-        try {
-            std::string key = std::string("configs/") + node_uuid + "/dns/" + user_id;
-
-            auto response = client_->get(key).get();
-            if (response.error_code() != 0) {
-                if (response.error_code() == 100)
-                    return ETCD_SUCCESS; // No records — not an error
-                FastRG_LOG(ERR, fastrg_ccb ? fastrg_ccb->fp : nullptr, NULL, NULL,
-                    "load_dns_records: get failed for key %s: %s",
-                    key.c_str(), response.error_message().c_str());
-                return ETCD_ERROR;
-            }
-
-            std::string value = response.value().as_string();
-            config_snapshot_watch_update(SNAPSHOT_KIND_DNS, user_id, value.c_str());
-
-            Json::Value records;
-            if (!parse_dns_records_envelope(value, &records)) {
-                FastRG_LOG(WARN, fastrg_ccb ? fastrg_ccb->fp : nullptr, NULL, NULL,
-                    "load_dns_records: failed to parse records envelope for key %s", key.c_str());
-                return ETCD_ERROR;
-            }
-
-            int loaded = 0;
-            int64_t revision = response.index();
-            for (const Json::Value& entry : records) {
-                dns_record_config_t rec;
-                if (!parse_dns_record_from_json(entry, &rec))
-                    continue;
-
-                /* load_dns_records runs on the control-plane thread (PPPoE
-                 * session establishment), the same thread that applies queued
-                 * etcd events, so calling the callback directly is race-free. */
-                if (dns_record_callback(node_uuid, user_id, &rec,
-                        HSI_ACTION_CREATE, revision, user_data) == SUCCESS)
-                    loaded++;
-            }
-
-            FastRG_LOG(INFO, fastrg_ccb ? fastrg_ccb->fp : nullptr, NULL, NULL,
-                "load_dns_records: loaded %d DNS record(s) for user %s",
-                loaded, user_id);
-            return ETCD_SUCCESS;
-
-        } catch (const std::exception &e) {
-            FastRG_LOG(ERR, fastrg_ccb ? fastrg_ccb->fp : nullptr, NULL, NULL,
-                "load_dns_records: exception: %s", e.what());
-            return ETCD_ERROR;
-        }
-    }
-
 
 private:
     // configs/{nodeId}/hsi/{userId}
@@ -1567,31 +1536,6 @@ private:
         *node_id = m[1].str();
         return true;
     }
-    // DNS records are stored as {"records":[...],"metadata":{...}}
-    static bool parse_dns_records_envelope(const std::string &value,
-        Json::Value *records_out) {
-        Json::Value root;
-        Json::Reader reader;
-        if (!reader.parse(value, root) || !root.isObject() ||
-                !root.isMember("records") || !root["records"].isArray())
-            return false;
-        *records_out = root["records"];
-        return true;
-    }
-
-    // One envelope entry {"domain","ip","ttl"} -> dns_record_config_t
-    // (ttl defaults to 3600 when absent).
-    static bool parse_dns_record_from_json(const Json::Value &entry,
-        dns_record_config_t *rec) {
-        if (!entry.isMember("domain") || !entry.isMember("ip"))
-            return false;
-        memset(rec, 0, sizeof(*rec));
-        strncpy(rec->domain, entry["domain"].asString().c_str(), sizeof(rec->domain) - 1);
-        strncpy(rec->ip, entry["ip"].asString().c_str(), sizeof(rec->ip) - 1);
-        rec->ttl = entry.isMember("ttl") ? entry["ttl"].asUInt() : 3600;
-        return true;
-    }
-
 
     // Mirror + parse + enqueue one HSI config value for the control-plane
     // loop. Shared by the watch handler (live action, from_reconcile FALSE)
@@ -1977,17 +1921,6 @@ void etcd_client_cleanup(void) {
     if (g_etcd_client) {
         g_etcd_client.reset();
     }
-
-
-etcd_status_t etcd_client_load_dns_records(const char *node_uuid,
-    const char *user_id,
-    dns_record_callback_t dns_record_callback,
-    void *user_data) {
-    if (!g_etcd_client) return ETCD_ERROR;
-    return g_etcd_client->load_dns_records(node_uuid, user_id,
-        dns_record_callback, user_data);
-}
-
 }
 
 } // extern "C"

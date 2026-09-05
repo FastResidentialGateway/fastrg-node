@@ -888,8 +888,13 @@ source "${_E2E_PHASES_DIR}/local_validation_lib.sh"
 source "${_E2E_PHASES_DIR}/case_validation_lib.sh"
 # Shared /metrics sampling helpers — not a phase; must be sourced first.
 source "${_E2E_PHASES_DIR}/metrics_lib.sh"
+# The RSS distribution probe both traffic phases share — not a phase; reads
+# through metrics_lib.sh, so it comes after it.
+source "${_E2E_PHASES_DIR}/rss_probe_lib.sh"
 # Duration formatting and the ETA arithmetic — not a phase either.
 source "${_E2E_PHASES_DIR}/progress_lib.sh"
+# The node->etcd block every offline phase shares — not a phase either.
+source "${_E2E_PHASES_DIR}/etcd_block_lib.sh"
 source "${_E2E_PHASES_DIR}/phase0_setup.sh"
 source "${_E2E_PHASES_DIR}/phase1_subscriber_count_tests.sh"
 source "${_E2E_PHASES_DIR}/phase2_etcd_config_sync.sh"
@@ -932,7 +937,8 @@ source "${_E2E_PHASES_DIR}/phase36_nat_capacity.sh"
 source "${_E2E_PHASES_DIR}/phase37_ipv6_firewall.sh"
 source "${_E2E_PHASES_DIR}/phase38_config_republish.sh"
 source "${_E2E_PHASES_DIR}/phase39_wal_durability.sh"
-source "${_E2E_PHASES_DIR}/phase40_summary.sh"
+source "${_E2E_PHASES_DIR}/phase40_offline_cli_writes.sh"
+source "${_E2E_PHASES_DIR}/phase41_summary.sh"
 
 # ---------------------------------------------------------------------------
 # Phase table, progress display and phase-duration history
@@ -984,7 +990,8 @@ E2E_PHASES=(
     phase37_ipv6_firewall
     phase38_config_republish
     phase39_wal_durability
-    phase40_summary
+    phase40_offline_cli_writes
+    phase41_summary
 )
 
 # Both are index-aligned with E2E_PHASES: how long each phase took in this run,
@@ -1268,6 +1275,10 @@ cleanup_fastrg() {
     # subscriber count -- is also better done before the steps that expect the
     # node to answer.
     _cleanup_phase17_etcd_offline_queue 2>/dev/null || true
+    # Second, for the same reason: it is the other phase that can leave the
+    # node cut off from etcd, and it undoes its config edits over the path the
+    # block leaves usable.
+    _cleanup_phase40_offline_cli_writes 2>/dev/null || true
     _cleanup_phase0_setup 2>/dev/null || true
     _cleanup_phase11_kafka_pipeline || true
     _cleanup_phase20_nat_expiry 2>/dev/null || true

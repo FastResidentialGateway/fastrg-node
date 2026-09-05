@@ -6,6 +6,17 @@
 _FASTRG_DAEMON="/root/fastrg/fastrg-node/fastrg"
 _FASTRG_START_CMD="${_FASTRG_DAEMON} -l 1-8 -n 4 --socket-mem 17408 -a 0000:07:00.0 -a 0000:08:00.0"
 
+# Start fastrg on the node. Every start gets its own timestamped stdout/stderr
+# file and /var/log/fastrg.log is pointed at it, so a node that dies on boot no
+# longer erases the previous attempt's output; the last 20 files are kept.
+# Readers keep using /var/log/fastrg.log and always see the newest start.
+e2e_start_node() {
+    ssh_node "ts=\$(date +%Y%m%d-%H%M%S); \
+        nohup ${_FASTRG_START_CMD} >/var/log/fastrg.\${ts}.log 2>&1 & \
+        ln -sfn /var/log/fastrg.\${ts}.log /var/log/fastrg.log; \
+        ls -t /var/log/fastrg.2*.log 2>/dev/null | tail -n +21 | xargs -r rm -f"
+}
+
 # Phase 0 bounces the LAN subscriber connection to force a DHCP renew. An
 # interrupt landing between the down and the up would leave the interface down
 # for every later run, so bring it back whatever happened. Idempotent.
@@ -311,7 +322,7 @@ phase0_setup() {
 
         warn "fastrg is NOT running — attempting to start..."
         info "Starting: ${_FASTRG_START_CMD}"
-        ssh_node "nohup ${_FASTRG_START_CMD} >/var/log/fastrg.log 2>&1 &"
+        e2e_start_node
         _FASTRG_STARTED_BY_SCRIPT=1
 
         # Wait up to 120 s for fastrg gRPC + HSI data for USER_ID to be ready
