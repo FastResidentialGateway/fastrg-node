@@ -264,6 +264,7 @@ STATUS remove_hsi_config(FastRG_t *fastrg_ccb, int ccb_id)
     // Remove DHCP and PPPoE configuration
     ppp_cleanup_config_by_user(ppp_ccb, ccb_id);
     dhcp_pool_init_by_user(dhcp_ccb, 0, 0, 0, 0); //initialize with empty pool
+    dns_static_cleanup(&dhcp_ccb->dns_state.static_table);
 
     FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "Removed HSI config for user %d", ccb_id + 1);
 

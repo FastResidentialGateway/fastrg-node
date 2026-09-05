@@ -23,6 +23,47 @@
 static int test_count = 0;
 static int pass_count = 0;
 
+/* ---- dns_proxy_init / dns_proxy_cleanup tests ---- */
+
+static void test_dns_proxy_init_cleanup(void)
+{
+    printf("\nTesting dns_proxy_init / dns_proxy_cleanup:\n");
+    printf("=========================================\n\n");
+
+    dns_proxy_state_t state = {0};
+
+    TEST_ASSERT(dns_proxy_init(NULL, 0x01010101, 0) == ERROR,
+        "dns_proxy_init rejects NULL", "");
+
+    /* The static table belongs to the subscriber config, so it is seeded
+     * independently of the session state. */
+    dns_static_init(&state.static_table);
+    dns_static_add(&state.static_table, "www.fastrg.org", htonl(0x0A000001), 60);
+
+    TEST_ASSERT(dns_proxy_init(&state, 0x01010101, 0x02020202) == SUCCESS,
+        "dns_proxy_init returns SUCCESS", "");
+    TEST_ASSERT(state.active_dns == 0x01010101 && state.next_upstream_id == 1,
+        "init selects the primary DNS and resets the query ID",
+        "active %u id %u", state.active_dns, state.next_upstream_id);
+    TEST_ASSERT(dns_static_lookup(&state.static_table, "www.fastrg.org") != NULL &&
+        dns_static_get_count(&state.static_table) == 1,
+        "a static record survives a session re-establishment",
+        "count %u", dns_static_get_count(&state.static_table));
+
+    /* A pending query is session state and must not survive teardown. */
+    state.pending[0].active = TRUE;
+    dns_proxy_cleanup(&state);
+    TEST_ASSERT(state.pending[0].active == FALSE,
+        "cleanup drops pending queries", "");
+    TEST_ASSERT(dns_static_lookup(&state.static_table, "www.fastrg.org") != NULL &&
+        dns_static_get_count(&state.static_table) == 1,
+        "a static record survives a session teardown",
+        "count %u", dns_static_get_count(&state.static_table));
+
+    dns_proxy_cleanup(NULL); /* must not crash */
+    dns_static_cleanup(&state.static_table);
+}
+
 /* ---- dnsd_check_failover tests ---- */
 
 static void test_failover_disabled(void)
@@ -1306,6 +1347,9 @@ void test_dnsd(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 
     test_count = 0;
     pass_count = 0;
+
+    /* dns_proxy_init / dns_proxy_cleanup tests */
+    test_dns_proxy_init_cleanup();
 
     /* dnsd_check_failover tests */
     test_failover_disabled();

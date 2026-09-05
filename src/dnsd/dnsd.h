@@ -58,7 +58,8 @@ typedef struct dns_proxy_state {
 /**
  * @fn dns_proxy_init
  *
- * @brief Initialize DNS proxy state for a subscriber
+ * @brief Initialize a subscriber's per-session DNS proxy state (cache, pending
+ *        queries, upstream servers).
  * @param state
  *      DNS proxy state to initialize
  * @param primary_dns
@@ -72,7 +73,7 @@ STATUS dns_proxy_init(dns_proxy_state_t *state, U32 primary_dns, U32 secondary_d
 /**
  * @fn dns_proxy_cleanup
  *
- * @brief Cleanup DNS proxy state
+ * @brief Clear a subscriber's per-session DNS proxy state.
  * @param state
  *      DNS proxy state to cleanup
  */

@@ -5,6 +5,7 @@
 
 #include <rte_lcore.h>
 #include <rte_ring.h>
+#include <rte_timer.h>
 
 #include "../src/northbound.h"
 #include "../src/cli_request.h"
@@ -12,6 +13,8 @@
 #include "../src/dhcpd/dhcpd.h"
 #include "../src/pppd/pppd.h"
 #include "../src/pppd/nat.h"
+#include "../src/pppd/ipv6_firewall.h"
+#include "../src/dnsd/dns_static.h"
 #include "test_helper.h"
 
 // Global test counters
@@ -233,6 +236,112 @@ void test_reconcile_port_mapping(FastRG_t *fastrg_ccb)
     printf("\n  All reconcile_port_mapping tests done.\n");
 }
 
+/* -----------------------------------------------------------------------
+ * remove_hsi_config unit tests
+ * --------------------------------------------------------------------- */
+
+/*
+ * remove_hsi_config() resolves both control blocks through PPPD_GET_CCB /
+ * DHCPD_GET_CCB, so the fixture is installed at index 0 of the shared ccb and
+ * the original pointers are restored at the end. ppp_cleanup_config_by_user()
+ * flushes the NAT and IPv6-firewall tables, hence the real DPDK objects here.
+ */
+#define NB_REMOVE_VLAN_ID       1234
+#define NB_REMOVE_NAT_ID        998
+#define NB_REMOVE_FIREWALL_ID   60004
+
+static ppp_ccb_t nb_remove_ppp_ccb;
+static dhcp_ccb_t nb_remove_dhcp_ccb;
+static dhcp_ccb_per_lan_user_t nb_remove_pool_user;
+static dhcp_ccb_per_lan_user_t *nb_remove_pool_array[1];
+
+void test_remove_hsi_config(FastRG_t *fastrg_ccb)
+{
+    printf("\nTesting remove_hsi_config function:\n");
+    printf("=========================================\n\n");
+
+    ppp_ccb_t *orig_ppp_ccb = fastrg_ccb->ppp_ccb[0];
+    dhcp_ccb_t *orig_dhcp_ccb = fastrg_ccb->dhcp_ccb[0];
+    rte_atomic16_t *orig_vlan_map = fastrg_ccb->vlan_userid_map;
+
+    /* The shared mock leaves the VLAN map unallocated; remove_hsi_config
+     * releases the subscriber's VLAN through it. */
+    rte_atomic16_t *vlan_map = fastrg_calloc(rte_atomic16_t, MAX_VLAN_ID,
+        sizeof(rte_atomic16_t), 0);
+    TEST_ASSERT(vlan_map != NULL, "allocate the fixture VLAN map", "out of memory");
+    if (vlan_map == NULL)
+        return;
+    for(U16 i=0; i<MAX_VLAN_ID; i++)
+        rte_atomic16_set(&vlan_map[i], INVALID_CCB_ID);
+    fastrg_ccb->vlan_userid_map = vlan_map;
+
+    memset(&nb_remove_ppp_ccb, 0, sizeof(nb_remove_ppp_ccb));
+    memset(&nb_remove_dhcp_ccb, 0, sizeof(nb_remove_dhcp_ccb));
+    memset(&nb_remove_pool_user, 0, sizeof(nb_remove_pool_user));
+
+    nb_remove_ppp_ccb.fastrg_ccb = fastrg_ccb;
+    nb_remove_dhcp_ccb.fastrg_ccb = fastrg_ccb;
+    nb_remove_pool_array[0] = &nb_remove_pool_user;
+    nb_remove_pool_user.dhcp_ccb = &nb_remove_dhcp_ccb;
+    nb_remove_dhcp_ccb.per_lan_user_pool = nb_remove_pool_array;
+    rte_timer_init(&nb_remove_pool_user.lan_user_info.timer);
+
+    if (nat_table_init(&nb_remove_ppp_ccb, NB_REMOVE_NAT_ID, fastrg_ccb->ppp_ccb_rcu) != SUCCESS ||
+            ipv6_firewall_table_init(&nb_remove_ppp_ccb, NB_REMOVE_FIREWALL_ID,
+                fastrg_ccb->ppp_ccb_rcu) != SUCCESS) {
+        TEST_ASSERT(FALSE, "build the remove_hsi_config fixture",
+            "NAT or IPv6 firewall table creation failed");
+        fastrg_ccb->vlan_userid_map = orig_vlan_map;
+        fastrg_mfree(vlan_map);
+        return;
+    }
+
+    fastrg_ccb->ppp_ccb[0] = &nb_remove_ppp_ccb;
+    fastrg_ccb->dhcp_ccb[0] = &nb_remove_dhcp_ccb;
+
+    dns_static_init(&nb_remove_dhcp_ccb.dns_state.static_table);
+    dns_static_add(&nb_remove_dhcp_ccb.dns_state.static_table, "static.fastrg.org",
+        rte_cpu_to_be_32(0xC0000277), 60);
+
+    TEST_ASSERT(remove_hsi_config(fastrg_ccb, -1) == ERROR,
+        "an invalid ccb id returns ERROR", "got SUCCESS");
+
+    /* vlan_id 0 means the subscriber was never configured. */
+    TEST_ASSERT(remove_hsi_config(fastrg_ccb, 0) == ERROR,
+        "an unconfigured subscriber returns ERROR", "got SUCCESS");
+
+    rte_atomic16_set(&nb_remove_ppp_ccb.vlan_id, NB_REMOVE_VLAN_ID);
+    rte_atomic16_set(&nb_remove_ppp_ccb.ppp_bool, 1);
+    TEST_ASSERT(remove_hsi_config(fastrg_ccb, 0) == ERROR,
+        "a live PPPoE session blocks the removal", "got SUCCESS");
+    rte_atomic16_set(&nb_remove_ppp_ccb.ppp_bool, 0);
+
+    rte_atomic16_set(&nb_remove_dhcp_ccb.dhcp_bool, 1);
+    TEST_ASSERT(remove_hsi_config(fastrg_ccb, 0) == ERROR,
+        "a running DHCP server blocks the removal", "got SUCCESS");
+    rte_atomic16_set(&nb_remove_dhcp_ccb.dhcp_bool, 0);
+
+    TEST_ASSERT(dns_static_get_count(&nb_remove_dhcp_ccb.dns_state.static_table) == 1,
+        "a refused removal keeps the static DNS records", "count %u",
+        dns_static_get_count(&nb_remove_dhcp_ccb.dns_state.static_table));
+
+    TEST_ASSERT(remove_hsi_config(fastrg_ccb, 0) == SUCCESS,
+        "removing an idle subscriber returns SUCCESS", "got ERROR");
+    TEST_ASSERT(rte_atomic16_read(&nb_remove_ppp_ccb.vlan_id) == 0,
+        "the VLAN binding is cleared", "vlan %d",
+        rte_atomic16_read(&nb_remove_ppp_ccb.vlan_id));
+    TEST_ASSERT(dns_static_get_count(&nb_remove_dhcp_ccb.dns_state.static_table) == 0 &&
+        dns_static_lookup(&nb_remove_dhcp_ccb.dns_state.static_table,
+            "static.fastrg.org") == NULL,
+        "static DNS records are cleared with the HSI config", "count %u",
+        dns_static_get_count(&nb_remove_dhcp_ccb.dns_state.static_table));
+
+    fastrg_ccb->ppp_ccb[0] = orig_ppp_ccb;
+    fastrg_ccb->dhcp_ccb[0] = orig_dhcp_ccb;
+    fastrg_ccb->vlan_userid_map = orig_vlan_map;
+    fastrg_mfree(vlan_map);
+}
+
 void test_fastrg_gen_cli_request(FastRG_t *fastrg_ccb)
 {
     printf("\nTesting fastrg_gen_cli_request function:\n");
@@ -307,6 +416,7 @@ void test_northbound(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 
     test_reconcile_port_mapping(fastrg_ccb);
     test_fastrg_gen_cli_request(fastrg_ccb);
+    test_remove_hsi_config(fastrg_ccb);
 
     printf("\n");
     printf("╔════════════════════════════════════════════════════════════╗\n");
