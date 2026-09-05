@@ -548,6 +548,8 @@ static inline U16 nat_learning_port_reuse(ppp_ccb_t *ppp_ccb, struct rte_ether_h
     do {
         U32 nat_port_host = rte_be_to_cpu_16(nat_port);
         void *data;
+        /* Declared before the first goto: nat.h is also compiled as C++, which
+         * rejects a jump across an initialised declaration. */
         nat_reverse_key_t key;
         addr_table_t *entry;
 
@@ -563,22 +565,22 @@ static inline U16 nat_learning_port_reuse(ppp_ccb_t *ppp_ccb, struct rte_ether_h
 
         /* Lock-free fast path: existing mapping for this (port, dst)? */
         if (rte_hash_lookup_data(ppp_ccb->nat_reverse_hash, &key, &data) >= 0) {
-            addr_table_t *entry = &ppp_ccb->addr_table[(U32)(uintptr_t)data];
+            addr_table_t *exist_entry = &ppp_ccb->addr_table[(U32)(uintptr_t)data];
 
             /* Same flow already exists — refresh and done (LAN side is
              * trusted: no expiry check, traffic just revives the mapping) */
-            if (nat_entry_same_flow(entry, nat_port, src_ip, src_port, dst_ip, dst_port)) {
-                nat_expire_refresh(entry->expire_slot, nat_expiry_cycles());
+            if (nat_entry_same_flow(exist_entry, nat_port, src_ip, src_port, dst_ip, dst_port)) {
+                nat_expire_refresh(exist_entry->expire_slot, nat_expiry_cycles());
                 if (out_entry != NULL)
-                    *out_entry = entry;
+                    *out_entry = exist_entry;
                 return nat_port;
             }
             /* Different source, still alive: genuine conflict → next port */
-            if (!nat_entry_is_expired(entry))
+            if (!nat_entry_is_expired(exist_entry))
                 goto next_nat_port;
             /* Expired mapping of someone else: evict both keys (slot
              * recycles via RCU) and fall through to insert fresh for us */
-            nat_entry_del_keys(ppp_ccb, entry);
+            nat_entry_del_keys(ppp_ccb, exist_entry);
         }
 
         /* Miss (or just evicted): insert under the per-sub lock, re-checking
@@ -586,22 +588,22 @@ static inline U16 nat_learning_port_reuse(ppp_ccb_t *ppp_ccb, struct rte_ether_h
         rte_spinlock_lock(&ppp_ccb->nat_insert_lock);
         if (rte_hash_lookup_data(ppp_ccb->nat_forward_hash, &fkey, &fdata) >= 0) {
             /* Raced: another lcore just learned this very flow */
-            addr_table_t *entry = &ppp_ccb->addr_table[(U32)(uintptr_t)fdata];
+            addr_table_t *exist_entry = &ppp_ccb->addr_table[(U32)(uintptr_t)fdata];
 
             rte_spinlock_unlock(&ppp_ccb->nat_insert_lock);
-            nat_expire_refresh(entry->expire_slot, nat_expiry_cycles());
+            nat_expire_refresh(exist_entry->expire_slot, nat_expiry_cycles());
             if (out_entry != NULL)
-                *out_entry = entry;
-            return entry->nat_port;
+                *out_entry = exist_entry;
+            return exist_entry->nat_port;
         }
         if (rte_hash_lookup_data(ppp_ccb->nat_reverse_hash, &key, &data) >= 0) {
-            addr_table_t *entry = &ppp_ccb->addr_table[(U32)(uintptr_t)data];
+            addr_table_t *exist_entry = &ppp_ccb->addr_table[(U32)(uintptr_t)data];
 
             rte_spinlock_unlock(&ppp_ccb->nat_insert_lock);
-            if (nat_entry_same_flow(entry, nat_port, src_ip, src_port, dst_ip, dst_port)) {
-                nat_expire_refresh(entry->expire_slot, nat_expiry_cycles());
+            if (nat_entry_same_flow(exist_entry, nat_port, src_ip, src_port, dst_ip, dst_port)) {
+                nat_expire_refresh(exist_entry->expire_slot, nat_expiry_cycles());
                 if (out_entry != NULL)
-                    *out_entry = entry;
+                    *out_entry = exist_entry;
                 return nat_port;
             }
             goto next_nat_port; /* raced: someone else owns this key now */
