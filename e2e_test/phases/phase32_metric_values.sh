@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # ---------------------------------------------------------------------------
-# Phase 32 — Prometheus metric value assertions (Steps 128-134)
+# Phase 32 — Prometheus metric value assertions (Steps 130-136)
 #
 # Phase 15 proves the /metrics route is reachable and well formed. This phase
 # checks the numbers themselves for every family whose value can be verified
@@ -14,10 +14,10 @@
 # restart, are asserted where that scenario already exists — phases 25, 27 and
 # 19 respectively — instead of being re-created here.
 #
-# The phase runs last before the summary because that is where the fixture is
-# back in its canonical steady state: phase 31 restores the subscriber count to
-# 2 and its Step 127 has just proven both subscribers are in Data phase, which
-# is exactly the precondition the tallies are checked against.
+# The phase runs right after phase 31 because that is where the fixture is back
+# in its canonical steady state: phase 31 restores the subscriber count to 2 and
+# its Step 129 has just proven both subscribers are in Data phase, which is
+# exactly the precondition the tallies are checked against.
 # ---------------------------------------------------------------------------
 
 # Number of leasable addresses in a "start-end" (or "start~end") pool range:
@@ -64,7 +64,7 @@ _p32_dhcp_running_count() {
 
 phase32_metric_values() {
     bold "═══════════════════════════════════════════════════════"
-    bold " Phase 32 — Prometheus Metric Values (Steps 128-134)"
+    bold " Phase 32 — Prometheus Metric Values (Steps 130-136)"
     bold "═══════════════════════════════════════════════════════"
 
     local _body="" _body2="" _issue=""
@@ -87,18 +87,18 @@ phase32_metric_values() {
     if [[ -z "$_body" ]] || ! e2e_is_uint "$_uc" || [[ "$_uc" -lt 1 ]] || \
        ! e2e_is_uint "$_max" || [[ "${_max:-0}" -lt 1 ]]; then
         _issue="metrics scrape, subscriber count, or capacity gauge invalid (port='$(e2e_metrics_port)', num_users='${_uc:-empty}', max_user_count='${_max:-empty}')"
-        fail "Step 128: PPPoE phase tallies"        "$_issue"
-        fail "Step 129: DHCP lease and server gauges" "$_issue"
-        fail "Step 130: DPDK mempool accounting"    "$_issue"
-        fail "Step 131: DPDK heap and hugepage"     "$_issue"
-        fail "Step 132: lcore cycle counters"       "$_issue"
-        fail "Step 133: NIC info and node start time" "$_issue"
-        fail "Step 134: unknown-user and NIC error counters" "$_issue"
+        fail "Step 130: PPPoE phase tallies"        "$_issue"
+        fail "Step 131: DHCP lease and server gauges" "$_issue"
+        fail "Step 132: DPDK mempool accounting"    "$_issue"
+        fail "Step 133: DPDK heap and hugepage"     "$_issue"
+        fail "Step 134: lcore cycle counters"       "$_issue"
+        fail "Step 135: NIC info and node start time" "$_issue"
+        fail "Step 136: unknown-user and NIC error counters" "$_issue"
         return 0
     fi
 
     # ------------------------------------------------------------------
-    # Step 128 — the eight PPPoE phase gauges partition the subscriber
+    # Step 130 — the eight PPPoE phase gauges partition the subscriber
     # slots: they must sum to user_count, and with the canonical fixture
     # fully connected every session sits in the Data phase.
     # ------------------------------------------------------------------
@@ -126,14 +126,14 @@ phase32_metric_values() {
     fi
 
     if [[ -z "$_issue" ]]; then
-        pass "Step 128: PPPoE phase tallies" \
+        pass "Step 130: PPPoE phase tallies" \
             "8 gauges sum to user_count=${_uc}; data=${_data}, every other phase 0 (error=0)"
     else
-        fail "Step 128: PPPoE phase tallies" "$_issue"
+        fail "Step 130: PPPoE phase tallies" "$_issue"
     fi
 
     # ------------------------------------------------------------------
-    # Step 129 — per-subscriber lease gauges match the configured pool
+    # Step 131 — per-subscriber lease gauges match the configured pool
     # capacity, and the three server-status gauges partition the slots and
     # agree with what the gRPC API reports.
     # ------------------------------------------------------------------
@@ -170,14 +170,14 @@ phase32_metric_values() {
     fi
 
     if [[ -z "$_issue" ]]; then
-        pass "Step 129: DHCP lease and server gauges" \
+        pass "Step 131: DHCP lease and server gauges" \
             "max_lease matches the configured pool capacity for users ${SUB_IDS[*]}; running/stopped/not_configured=${_run}/${_stop}/${_dncfg} sums to ${_uc} and matches gRPC"
     else
-        fail "Step 129: DHCP lease and server gauges" "$_issue"
+        fail "Step 131: DHCP lease and server gauges" "$_issue"
     fi
 
     # ------------------------------------------------------------------
-    # Step 130 — every mempool row is self-consistent, and the two CCB
+    # Step 132 — every mempool row is self-consistent, and the two CCB
     # pools show the fixed-max preallocation: all node-capacity objects are
     # taken at init and never returned while the node runs.
     # ------------------------------------------------------------------
@@ -213,14 +213,14 @@ phase32_metric_values() {
     done
 
     if [[ -z "$_issue" ]]; then
-        pass "Step 130: DPDK mempool accounting" \
+        pass "Step 132: DPDK mempool accounting" \
             "${_checked} pool(s): avail+in_use == size; ppp_ccb_pool/dhcp_ccb_pool in_use == node capacity=${_max}"
     else
-        fail "Step 130: DPDK mempool accounting" "$_issue"
+        fail "Step 132: DPDK mempool accounting" "$_issue"
     fi
 
     # ------------------------------------------------------------------
-    # Step 131 — heap accounting per NUMA socket plus the hugepage gauge.
+    # Step 133 — heap accounting per NUMA socket plus the hugepage gauge.
     # used+free is allowed a 0.1% slack rather than exact equality: the four
     # heap values come from one rte_malloc_get_socket_stats() call, but the
     # gauge contract only promises they describe the same heap.
@@ -257,14 +257,14 @@ phase32_metric_values() {
     fi
 
     if [[ -z "$_issue" ]]; then
-        pass "Step 131: DPDK heap and hugepage" \
+        pass "Step 133: DPDK heap and hugepage" \
             "socket(s) ${_sockets//$'\n'/,}: used+free ≈ total, largest_free_block <= free; hugepage_pinned_bytes=${_pinned}"
     else
-        fail "Step 131: DPDK heap and hugepage" "$_issue"
+        fail "Step 133: DPDK heap and hugepage" "$_issue"
     fi
 
     # ------------------------------------------------------------------
-    # Step 132 — lcore cycle counters over two samples. They are cumulative,
+    # Step 134 — lcore cycle counters over two samples. They are cumulative,
     # so neither may go backwards and busy can never exceed total. A lcore
     # that sees no packets legitimately keeps busy at its previous value, so
     # forward progress is required of the polling (total) counter instead,
@@ -332,14 +332,14 @@ phase32_metric_values() {
     done
 
     if [[ -z "$_issue" ]]; then
-        pass "Step 132: lcore cycle counters" \
+        pass "Step 134: lcore cycle counters" \
             "$(printf '%s\n' "$_lcores" | wc -l | tr -d '[:space:]') lcore(s) monotonic with busy <= total; ${_advanced} advanced total cycles between samples; per-lcore traffic rows numeric on both ports and lcore-axis sums match user-axis sums (100-packet slack)"
     else
-        fail "Step 132: lcore cycle counters" "$_issue"
+        fail "Step 134: lcore cycle counters" "$_issue"
     fi
 
     # ------------------------------------------------------------------
-    # Step 133 — NIC info rows are proper info metrics (value 1, all labels
+    # Step 135 — NIC info rows are proper info metrics (value 1, all labels
     # populated), and the process start time is a plausible past epoch.
     # ------------------------------------------------------------------
     _issue=""
@@ -373,14 +373,14 @@ phase32_metric_values() {
         _issue="${_issue:+${_issue}; }snapshot_persist_ok='${_persist_ok:-NA}', expected 1"
 
     if [[ -z "$_issue" ]]; then
-        pass "Step 133: NIC info and node start time" \
+        pass "Step 135: NIC info and node start time" \
             "ports 0/1 expose fastrg_nic_info=1 with model/driver/pci/mac set; start_time=${_start_time} is $(( _now - _start_time ))s in the past; snapshot_persist_ok=1"
     else
-        fail "Step 133: NIC info and node start time" "$_issue"
+        fail "Step 135: NIC info and node start time" "$_issue"
     fi
 
     # ------------------------------------------------------------------
-    # Step 134 — the counters no e2e scenario can reliably provoke. They are
+    # Step 136 — the counters no e2e scenario can reliably provoke. They are
     # cumulative gauges, so the contract that is checkable without a fault
     # injection is: the row exists on both ports and never goes backwards.
     # ------------------------------------------------------------------
@@ -410,10 +410,10 @@ phase32_metric_values() {
     done
 
     if [[ -z "$_issue" ]]; then
-        pass "Step 134: unknown-user and NIC error counters" \
+        pass "Step 136: unknown-user and NIC error counters" \
             "${_checked} row(s) across 9 families present on both ports and non-decreasing between samples"
     else
-        fail "Step 134: unknown-user and NIC error counters" "$_issue"
+        fail "Step 136: unknown-user and NIC error counters" "$_issue"
     fi
 
     return 0

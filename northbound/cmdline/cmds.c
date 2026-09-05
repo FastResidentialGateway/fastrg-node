@@ -208,7 +208,9 @@ static void cmd_help_parsed(__attribute__((unused)) void *parsed_result,
         "config set subscriber_count <count> to set subscriber pool size\n"
         "config set subscriber <id> dns_proxy <on|off> to toggle per-subscriber DNS proxy\n"
         "config set subscriber <id> tcp_conntrack <on|off> to toggle per-subscriber TCP conntrack\n"
+        "config set subscriber <id> ipv6 <on|off> to toggle per-subscriber IPv6\n"
         "show user <id> nat port-forwarding to show port forwarding entries\n"
+        "show user <id> nat sessions to show live dynamic NAT entries\n"
         "show user <id> arp-table [count] to show subscriber ARP table (default: 100 entries)\n"
         "exec hsi <start|stop> <user id | all> to start/stop HSI (PPPoE + DHCP)\n"
         "exec pppoe <start|stop> <user id | all> to start/stop PPPoE only\n"
@@ -645,6 +647,69 @@ cmdline_parse_inst_t cmd_config_set_tcp_conntrack = {
 };
 
 /**********************************************************/
+/* config set subscriber <id> ipv6 on|off                 */
+/**********************************************************/
+
+struct cmd_config_ipv6_result {
+    cmdline_fixed_string_t  config;
+    cmdline_fixed_string_t  cmd_str;        /* set */
+    cmdline_fixed_string_t  subscriber_str; /* subscriber */
+    uint16_t                user_id;
+    cmdline_fixed_string_t  ipv6_str;       /* ipv6 */
+    cmdline_fixed_string_t  onoff;          /* on/off */
+};
+
+static void cmd_config_parse_ipv6(void *parsed_result,
+                struct cmdline *cl,
+                __attribute__((unused)) void *data)
+{
+    struct cmd_config_ipv6_result *res = parsed_result;
+    bool enable;
+
+    if (strcmp(res->onoff, "on") == 0) {
+        enable = true;
+    } else if (strcmp(res->onoff, "off") == 0) {
+        enable = false;
+    } else {
+        cmdline_printf(cl, "Invalid value '%s' for ipv6 (use on|off)\n", res->onoff);
+        return;
+    }
+
+    cmdline_printf(cl, "Setting ipv6=%s for subscriber %u\n",
+        enable ? "on" : "off", res->user_id);
+
+    cli_dispatch_set_ipv6(res->user_id, enable);
+}
+
+cmdline_parse_token_string_t cmd_ipv6_config =
+    TOKEN_STRING_INITIALIZER(struct cmd_config_ipv6_result, config, "config");
+cmdline_parse_token_string_t cmd_ipv6_set =
+    TOKEN_STRING_INITIALIZER(struct cmd_config_ipv6_result, cmd_str, "set");
+cmdline_parse_token_string_t cmd_ipv6_subscriber =
+    TOKEN_STRING_INITIALIZER(struct cmd_config_ipv6_result, subscriber_str, "subscriber");
+cmdline_parse_token_num_t cmd_ipv6_user_id =
+    TOKEN_NUM_INITIALIZER(struct cmd_config_ipv6_result, user_id, RTE_UINT16);
+cmdline_parse_token_string_t cmd_ipv6_keyword =
+    TOKEN_STRING_INITIALIZER(struct cmd_config_ipv6_result, ipv6_str, "ipv6");
+cmdline_parse_token_string_t cmd_ipv6_onoff =
+    TOKEN_STRING_INITIALIZER(struct cmd_config_ipv6_result, onoff, "on#off");
+
+cmdline_parse_inst_t cmd_config_set_ipv6 = {
+    .f = cmd_config_parse_ipv6,
+    .data = NULL,
+    .help_str = "toggle per-subscriber IPv6: config set subscriber <id> ipv6 on|off",
+    .tokens = {
+        (void *)&cmd_ipv6_config,
+        (void *)&cmd_ipv6_set,
+        (void *)&cmd_ipv6_subscriber,
+        (void *)&cmd_ipv6_user_id,
+        (void *)&cmd_ipv6_keyword,
+        (void *)&cmd_ipv6_onoff,
+        NULL,
+    },
+};
+
+/**********************************************************/
 
 struct cmd_exec_result {
     cmdline_fixed_string_t exec_token;
@@ -752,6 +817,49 @@ cmdline_parse_inst_t cmd_show_port_fwd = {
         (void *)&cmd_show_port_fwd_user_id,
         (void *)&cmd_show_port_fwd_nat,
         (void *)&cmd_show_port_fwd_pfwd,
+        NULL,
+    },
+};
+
+/****** SHOW USER NAT SESSIONS ******/
+
+struct cmd_show_nat_sessions_result {
+    cmdline_fixed_string_t show_token;
+    cmdline_fixed_string_t user_str;
+    uint16_t               user_id;
+    cmdline_fixed_string_t nat_str;
+    cmdline_fixed_string_t sessions_str;
+};
+
+static void cmd_show_nat_sessions_parsed(void *parsed_result,
+                struct cmdline *cl,
+                __attribute__((unused)) void *data)
+{
+    struct cmd_show_nat_sessions_result *res = parsed_result;
+    fastrg_grpc_get_nat_entries(res->user_id);
+}
+
+cmdline_parse_token_string_t cmd_show_nat_sessions_show =
+    TOKEN_STRING_INITIALIZER(struct cmd_show_nat_sessions_result, show_token, "show");
+cmdline_parse_token_string_t cmd_show_nat_sessions_user =
+    TOKEN_STRING_INITIALIZER(struct cmd_show_nat_sessions_result, user_str, "user");
+cmdline_parse_token_num_t cmd_show_nat_sessions_user_id =
+    TOKEN_NUM_INITIALIZER(struct cmd_show_nat_sessions_result, user_id, RTE_UINT16);
+cmdline_parse_token_string_t cmd_show_nat_sessions_nat =
+    TOKEN_STRING_INITIALIZER(struct cmd_show_nat_sessions_result, nat_str, "nat");
+cmdline_parse_token_string_t cmd_show_nat_sessions_kw =
+    TOKEN_STRING_INITIALIZER(struct cmd_show_nat_sessions_result, sessions_str, "sessions");
+
+cmdline_parse_inst_t cmd_show_nat_sessions = {
+    .f = cmd_show_nat_sessions_parsed,
+    .data = NULL,
+    .help_str = "show user <id> nat sessions: display live dynamic NAT entries for a subscriber",
+    .tokens = {
+        (void *)&cmd_show_nat_sessions_show,
+        (void *)&cmd_show_nat_sessions_user,
+        (void *)&cmd_show_nat_sessions_user_id,
+        (void *)&cmd_show_nat_sessions_nat,
+        (void *)&cmd_show_nat_sessions_kw,
         NULL,
     },
 };
@@ -1273,11 +1381,13 @@ cmdline_parse_ctx_t ctx[] = {
         (cmdline_parse_inst_t *)&cmd_config_set_subscriber,
         (cmdline_parse_inst_t *)&cmd_config_set_dns_proxy,
         (cmdline_parse_inst_t *)&cmd_config_set_tcp_conntrack,
+        (cmdline_parse_inst_t *)&cmd_config_set_ipv6,
         (cmdline_parse_inst_t *)&cmd_config_add_dns,
         (cmdline_parse_inst_t *)&cmd_config_del_dns,
         (cmdline_parse_inst_t *)&cmd_exec,
         (cmdline_parse_inst_t *)&cmd_exec_pdump,
         (cmdline_parse_inst_t *)&cmd_show_port_fwd,
+        (cmdline_parse_inst_t *)&cmd_show_nat_sessions,
         (cmdline_parse_inst_t *)&cmd_show_arp_table_count,
         (cmdline_parse_inst_t *)&cmd_show_arp_table,
         (cmdline_parse_inst_t *)&cmd_show_dns,

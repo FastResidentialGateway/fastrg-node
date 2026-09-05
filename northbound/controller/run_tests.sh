@@ -278,6 +278,39 @@ else
     echo "⚠️  etcd server is not available. Skipping etcd CAS put test."
 fi
 
+# Test 5: Kafka retry policy (no broker, no WAL, no etcd needed)
+echo ""
+echo "🔧 Test 5: Kafka retry policy test"
+if [ -f "./test/test_kafka_retry" ]; then
+    ./test/test_kafka_retry
+    if [ $? -ne 0 ]; then
+        echo "❌ Kafka retry policy test failed."
+        TEST_FAILED=1
+    else
+        echo "✅ Kafka retry policy test completed!"
+    fi
+else
+    echo "❌ test_kafka_retry executable not found."
+    TEST_FAILED=1
+fi
+
+# Test 6: Kafka producer pure functions — WAL serialization and event payload
+# builders (no broker, no WAL file, no etcd needed)
+echo ""
+echo "🔧 Test 6: Kafka producer unit tests"
+if [ -f "./test/test_kafka_producer" ]; then
+    ./test/test_kafka_producer
+    if [ $? -ne 0 ]; then
+        echo "❌ Kafka producer unit tests failed."
+        TEST_FAILED=1
+    else
+        echo "✅ Kafka producer unit tests completed!"
+    fi
+else
+    echo "❌ test_kafka_producer executable not found."
+    TEST_FAILED=1
+fi
+
 echo ""
 echo "✅ All tests completed!"
 exit "$TEST_FAILED"

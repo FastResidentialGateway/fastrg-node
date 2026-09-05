@@ -26,6 +26,31 @@
 #include <mutex>
 #include <fstream>
 
+// DNS records are stored as {"records":[...],"metadata":{...}}
+bool parse_dns_records_envelope(const std::string &value, Json::Value *records_out)
+{
+    Json::Value root;
+    Json::Reader reader;
+    if (!reader.parse(value, root) || !root.isObject() ||
+            !root.isMember("records") || !root["records"].isArray())
+        return false;
+    *records_out = root["records"];
+    return true;
+}
+
+// One envelope entry {"domain","ip","ttl"} -> dns_record_config_t
+// (ttl defaults to 3600 when absent).
+bool parse_dns_record_from_json(const Json::Value &entry, dns_record_config_t *rec)
+{
+    if (!entry.isMember("domain") || !entry.isMember("ip"))
+        return false;
+    memset(rec, 0, sizeof(*rec));
+    strncpy(rec->domain, entry["domain"].asString().c_str(), sizeof(rec->domain) - 1);
+    strncpy(rec->ip, entry["ip"].asString().c_str(), sizeof(rec->ip) - 1);
+    rec->ttl = entry.isMember("ttl") ? entry["ttl"].asUInt() : 3600;
+    return true;
+}
+
 class EtcdClientImpl {
 private:
     std::unique_ptr<etcd::Client> client_;
@@ -42,7 +67,7 @@ private:
     // via node gRPC while etcd is unreachable; flushed to etcd on reconnect.
     
     // Watch/reconcile events are delivered to the control-plane loop via
-    // FastRG_t.etcd_event_q; the apply-side callbacks are no longer stored
+    // FastRG_t.cp_q; the apply-side callbacks are no longer stored
     // here. sync_request_callback_ is the one exception — Step 4 of
     // sync_state_with_etcd() still invokes it directly.
     sync_request_callback_t sync_request_callback_;
@@ -575,14 +600,6 @@ public:
         reconnect_cv_.notify_all();
     }
 
-    // Allocate a zeroed etcd_event_t of the given kind.
-    static etcd_event_t *alloc_etcd_event(etcd_event_kind_t kind) {
-        etcd_event_t *ev = (etcd_event_t *)calloc(1, sizeof(etcd_event_t));
-        if (ev)
-            ev->kind = kind;
-        return ev;
-    }
-
     // Heap copy of a std::string (caller owns; NULL on OOM).
     static char *dup_string(const std::string& s) {
         char *p = (char *)malloc(s.size() + 1);
@@ -592,15 +609,14 @@ public:
     }
 
     // Hand an etcd_event_t to the control-plane loop. Takes ownership: on
-    // success the loop frees it; on failure (ring full / unavailable) it is
+    // success the loop frees it; when the control queue cannot take it, it is
     // freed here. Returns true if enqueued.
     bool enqueue_etcd_event(etcd_event_t *ev) {
         if (!ev)
             return false;
-        if (!fastrg_ccb || !fastrg_ccb->etcd_event_q ||
-                rte_ring_enqueue(fastrg_ccb->etcd_event_q, ev) != 0) {
+        if (fastrg_gen_etcd_event(fastrg_ccb, ev) != SUCCESS) {
             FastRG_LOG(WARN, fastrg_ccb ? fastrg_ccb->fp : NULL, NULL, NULL,
-                "etcd_event_q unavailable/full, dropping event (kind=%d)", ev->kind);
+                "control queue full, dropping event (kind=%d)", ev->kind);
             etcd_event_free(ev);
             return false;
         }
@@ -686,8 +702,10 @@ public:
                     if (ccb_id >= 0)
                         present_ccb_ids.push_back(ccb_id);
 
+                    /* Use value(i).modified_index() to ensure each subscriber's 
+                    revision is unique. */
                     ingest_hsi_value(node_id, user_id, &value, HSI_ACTION_UPDATE,
-                        hsi_response.index(), TRUE);
+                        hsi_response.value(i).modified_index(), TRUE);
                 }
             }
             FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
@@ -696,9 +714,10 @@ public:
             // Step 3b-sweep: hand the loop the set of ccb_ids present in etcd so
             // it can remove subscribers active locally but no longer in etcd.
             if (hsi_response.error_code() == 0) {
-                etcd_event_t *sweep = alloc_etcd_event(ETCD_EVENT_HSI_SWEEP);
+                etcd_event_t *sweep = fastrg_alloc_etcd_event(ETCD_EVENT_HSI_SWEEP);
                 if (sweep) {
                     sweep->from_reconcile = TRUE;
+                    sweep->event_data.sweep.reconcile_revision = hsi_response.index();
                     sweep->event_data.sweep.count = (int)present_ccb_ids.size();
                     if (sweep->event_data.sweep.count > 0) {
                         sweep->event_data.sweep.present_ccb_ids =
@@ -741,7 +760,7 @@ public:
                                 dns_record_config_t rec;
                                 if (!parse_dns_record_from_json(entry, &rec))
                                     continue;
-                                etcd_event_t *ev = alloc_etcd_event(ETCD_EVENT_DNS_RECORD);
+                                etcd_event_t *ev = fastrg_alloc_etcd_event(ETCD_EVENT_DNS_RECORD);
                                 if (!ev)
                                     continue;
                                 ev->action = HSI_ACTION_CREATE;
@@ -848,7 +867,7 @@ public:
     // by the offline-edit snapshot path so serialization stays identical to
     // the controller's schema. Metadata fields are placeholders; the snapshot
     // layer re-stamps them.
-    std::string build_hsi_config_json(const char* node_id, const hsi_config_t* config,
+    static std::string build_hsi_config_json(const char* node_id, const hsi_config_t* config,
         const char* updated_by) {
         Json::Value root;
         Json::Value cfg;
@@ -861,6 +880,7 @@ public:
         cfg["dhcp_gateway"] = std::string(config->dhcp_gateway);
         cfg["dns_proxy_enable"] = (config->dns_proxy_enable == TRUE);
         cfg["tcp_conntrack_enable"] = (config->tcp_conntrack_enable == TRUE);
+        cfg["ipv6_enable"] = (config->ipv6_enable == TRUE);
         // PPPoE desired state; default to disconnect when unset.
         cfg["desire_status"] = (config->desire_status[0] != '\0')
             ? std::string(config->desire_status) : std::string(DESIRE_STATUS_DISCONNECT);
@@ -989,6 +1009,10 @@ public:
 
             std::string value = get_response.value().as_string();
 
+            /* ModRevision lives in etcd's own per kv entry metadata, not part 
+            of the stored key-value */
+            output->mod_revision = get_response.value().modified_index();
+
             // Parse JSON
             Json::Value root;
             Json::Reader reader;
@@ -1051,6 +1075,18 @@ public:
                     output->config.tcp_conntrack_enable = (v.asString() == "false") ? FALSE : TRUE;
                 else if (v.isIntegral())
                     output->config.tcp_conntrack_enable = v.asInt() != 0 ? TRUE : FALSE;
+            }
+
+            // ipv6_enable defaults to FALSE when absent in etcd
+            output->config.ipv6_enable = FALSE;
+            if (config_obj.isMember("ipv6_enable")) {
+                const Json::Value& v = config_obj["ipv6_enable"];
+                if (v.isBool())
+                    output->config.ipv6_enable = v.asBool() ? TRUE : FALSE;
+                else if (v.isString())
+                    output->config.ipv6_enable = (v.asString() == "true") ? TRUE : FALSE;
+                else if (v.isIntegral())
+                    output->config.ipv6_enable = v.asInt() != 0 ? TRUE : FALSE;
             }
 
             // desire_status: "connect"/"disconnect"; empty/absent treated as disconnect.
@@ -1247,15 +1283,16 @@ public:
                     continue;
                 }
 
-                config_snapshot_watch_update(SNAPSHOT_KIND_HSI, user_id.c_str(),
-                    value.c_str());
+                if (parse_user_id(user_id.c_str(), fastrg_ccb->user_count) >= 0)
+                    config_snapshot_watch_update(SNAPSHOT_KIND_HSI, user_id.c_str(),
+                        value.c_str());
 
                 // Parse HSI config from JSON
                 hsi_config_t config;
                 bool is_enabled = false;
                 if (parse_hsi_config(value, &config, &is_enabled)) {
-                    // Get the revision from response
-                    int64_t revision = response.index();
+                    /* Per-key ModRevision: the reconcile gate uses this to compare whether the config has changed */
+                    int64_t revision = response.value(i).modified_index();
 
                     // Invoke callback with UPDATE action for existing configs. The
                     // callback applies the config and reconciles PPPoE toward
@@ -1311,7 +1348,7 @@ public:
 
                                 STATUS dns_ret = dns_record_callback(dns_node_id.c_str(),
                                     dns_user_id.c_str(), &dns_rec,
-                                    HSI_ACTION_CREATE, dns_revision, user_data);
+                                    HSI_ACTION_UPDATE, dns_revision, user_data);
                                 if (dns_ret == SUCCESS) {
                                     dns_count++;
                                     std::cout << "Loaded DNS record: " << dns_rec.domain
@@ -1339,7 +1376,7 @@ public:
         }
     }
 
-    bool parse_hsi_config(const std::string& json_str, hsi_config_t* config, bool* is_enabled) {
+    static bool parse_hsi_config(const std::string& json_str, hsi_config_t* config, bool* is_enabled) {
         try {
             Json::Value root;
             Json::Reader reader;
@@ -1406,6 +1443,18 @@ public:
                     config->tcp_conntrack_enable = v.asInt() != 0 ? TRUE : FALSE;
             }
 
+            // ipv6_enable defaults to FALSE when the field is absent in etcd
+            config->ipv6_enable = FALSE;
+            if (config_obj.isMember("ipv6_enable")) {
+                const Json::Value& v = config_obj["ipv6_enable"];
+                if (v.isBool())
+                    config->ipv6_enable = v.asBool() ? TRUE : FALSE;
+                else if (v.isString())
+                    config->ipv6_enable = (v.asString() == "true") ? TRUE : FALSE;
+                else if (v.isIntegral())
+                    config->ipv6_enable = v.asInt() != 0 ? TRUE : FALSE;
+            }
+
             // desire_status: "connect"/"disconnect"; empty/absent treated as disconnect.
             memset(config->desire_status, 0, sizeof(config->desire_status));
             if (config_obj.isMember("desire_status") && config_obj["desire_status"].isString()) {
@@ -1453,62 +1502,6 @@ public:
         }
     }
 
-    etcd_status_t load_dns_records(const char *node_uuid, const char *user_id,
-        dns_record_callback_t dns_record_callback, void *user_data) {
-
-        if (!client_ || !node_uuid || !user_id || !dns_record_callback)
-            return ETCD_ERROR;
-
-        try {
-            std::string key = std::string("configs/") + node_uuid + "/dns/" + user_id;
-
-            auto response = client_->get(key).get();
-            if (response.error_code() != 0) {
-                if (response.error_code() == 100)
-                    return ETCD_SUCCESS; // No records — not an error
-                FastRG_LOG(ERR, fastrg_ccb ? fastrg_ccb->fp : nullptr, NULL, NULL,
-                    "load_dns_records: get failed for key %s: %s",
-                    key.c_str(), response.error_message().c_str());
-                return ETCD_ERROR;
-            }
-
-            std::string value = response.value().as_string();
-            config_snapshot_watch_update(SNAPSHOT_KIND_DNS, user_id, value.c_str());
-
-            Json::Value records;
-            if (!parse_dns_records_envelope(value, &records)) {
-                FastRG_LOG(WARN, fastrg_ccb ? fastrg_ccb->fp : nullptr, NULL, NULL,
-                    "load_dns_records: failed to parse records envelope for key %s", key.c_str());
-                return ETCD_ERROR;
-            }
-
-            int loaded = 0;
-            int64_t revision = response.index();
-            for (const Json::Value& entry : records) {
-                dns_record_config_t rec;
-                if (!parse_dns_record_from_json(entry, &rec))
-                    continue;
-
-                /* load_dns_records runs on the control-plane thread (PPPoE
-                 * session establishment), the same thread that applies queued
-                 * etcd events, so calling the callback directly is race-free. */
-                if (dns_record_callback(node_uuid, user_id, &rec,
-                        HSI_ACTION_CREATE, revision, user_data) == SUCCESS)
-                    loaded++;
-            }
-
-            FastRG_LOG(INFO, fastrg_ccb ? fastrg_ccb->fp : nullptr, NULL, NULL,
-                "load_dns_records: loaded %d DNS record(s) for user %s",
-                loaded, user_id);
-            return ETCD_SUCCESS;
-
-        } catch (const std::exception &e) {
-            FastRG_LOG(ERR, fastrg_ccb ? fastrg_ccb->fp : nullptr, NULL, NULL,
-                "load_dns_records: exception: %s", e.what());
-            return ETCD_ERROR;
-        }
-    }
-
 private:
     // configs/{nodeId}/hsi/{userId}
     static bool extract_ids_from_hsi_key(const std::string &key, std::string *node_id,
@@ -1544,31 +1537,6 @@ private:
         return true;
     }
 
-    // DNS records are stored as {"records":[...],"metadata":{...}}
-    static bool parse_dns_records_envelope(const std::string &value,
-        Json::Value *records_out) {
-        Json::Value root;
-        Json::Reader reader;
-        if (!reader.parse(value, root) || !root.isObject() ||
-                !root.isMember("records") || !root["records"].isArray())
-            return false;
-        *records_out = root["records"];
-        return true;
-    }
-
-    // One envelope entry {"domain","ip","ttl"} -> dns_record_config_t
-    // (ttl defaults to 3600 when absent).
-    static bool parse_dns_record_from_json(const Json::Value &entry,
-        dns_record_config_t *rec) {
-        if (!entry.isMember("domain") || !entry.isMember("ip"))
-            return false;
-        memset(rec, 0, sizeof(*rec));
-        strncpy(rec->domain, entry["domain"].asString().c_str(), sizeof(rec->domain) - 1);
-        strncpy(rec->ip, entry["ip"].asString().c_str(), sizeof(rec->ip) - 1);
-        rec->ttl = entry.isMember("ttl") ? entry["ttl"].asUInt() : 3600;
-        return true;
-    }
-
     // Mirror + parse + enqueue one HSI config value for the control-plane
     // loop. Shared by the watch handler (live action, from_reconcile FALSE)
     // and the reconcile pass (UPDATE, from_reconcile TRUE); the boot load
@@ -1577,9 +1545,10 @@ private:
     STATUS ingest_hsi_value(const std::string &node_id, const std::string &user_id,
         const std::string *value, etcd_action_type_t action, int64_t revision,
         BOOL from_reconcile) {
-        config_snapshot_watch_update(SNAPSHOT_KIND_HSI, user_id.c_str(),
-            value ? value->c_str() : NULL);
-        etcd_event_t *ev = alloc_etcd_event(ETCD_EVENT_HSI);
+        if (parse_user_id(user_id.c_str(), fastrg_ccb->user_count) >= 0)
+            config_snapshot_watch_update(SNAPSHOT_KIND_HSI, user_id.c_str(),
+                value ? value->c_str() : NULL);
+        etcd_event_t *ev = fastrg_alloc_etcd_event(ETCD_EVENT_HSI);
         if (!ev)
             return ERROR;
         ev->action = action;
@@ -1616,7 +1585,7 @@ private:
         // placeholder user_id "0" (no subscriber dimension).
         config_snapshot_watch_update(SNAPSHOT_KIND_COUNT, "0",
             value ? value->c_str() : NULL);
-        etcd_event_t *ev = alloc_etcd_event(ETCD_EVENT_USER_COUNT);
+        etcd_event_t *ev = fastrg_alloc_etcd_event(ETCD_EVENT_USER_COUNT);
         if (!ev)
             return ERROR;
         ev->action = action;
@@ -1778,7 +1747,7 @@ private:
                         dns_record_config_t rec;
                         if (!parse_dns_record_from_json(entry, &rec))
                             continue;
-                        etcd_event_t *ev = alloc_etcd_event(ETCD_EVENT_DNS_RECORD);
+                        etcd_event_t *ev = fastrg_alloc_etcd_event(ETCD_EVENT_DNS_RECORD);
                         if (!ev)
                             continue;
                         ev->action = action;
@@ -1815,7 +1784,7 @@ private:
                     for (const Json::Value& entry : records) {
                         if (!entry.isMember("domain"))
                             continue;
-                        etcd_event_t *ev = alloc_etcd_event(ETCD_EVENT_DNS_RECORD);
+                        etcd_event_t *ev = fastrg_alloc_etcd_event(ETCD_EVENT_DNS_RECORD);
                         if (!ev)
                             continue;
                         ev->action = HSI_ACTION_DELETE;
@@ -1894,18 +1863,18 @@ int etcd_client_is_connected(void) {
 // etcd is unreachable at startup. The subscriber count is applied first so HSI 
 // configs land within range.
 char *etcd_client_render_hsi_config(const char* node_id, const hsi_config_t* config) {
-    if (!g_etcd_client || !node_id || !config) return NULL;
-    std::string s = g_etcd_client->build_hsi_config_json(node_id, config,
+    if (!node_id || !config) return NULL;
+    std::string s = EtcdClientImpl::build_hsi_config_json(node_id, config,
         "fastrg-node-offline");
     return strdup(s.c_str());
 }
 
 STATUS etcd_client_parse_hsi_config(const char *value_json, hsi_config_t *out_config,
     BOOL *out_is_enabled) {
-    if (!g_etcd_client || !value_json || !out_config)
+    if (!value_json || !out_config)
         return ERROR;
     bool is_enabled = false;
-    if (!g_etcd_client->parse_hsi_config(value_json, out_config, &is_enabled))
+    if (!EtcdClientImpl::parse_hsi_config(value_json, out_config, &is_enabled))
         return ERROR;
     if (out_is_enabled)
         *out_is_enabled = is_enabled == true? TRUE : FALSE;
@@ -1952,17 +1921,6 @@ void etcd_client_cleanup(void) {
     if (g_etcd_client) {
         g_etcd_client.reset();
     }
-}
-
-
-
-etcd_status_t etcd_client_load_dns_records(const char *node_uuid,
-    const char *user_id,
-    dns_record_callback_t dns_record_callback,
-    void *user_data) {
-    if (!g_etcd_client) return ETCD_ERROR;
-    return g_etcd_client->load_dns_records(node_uuid, user_id,
-        dns_record_callback, user_data);
 }
 
 } // extern "C"

@@ -12,6 +12,7 @@ Commands:
     get_system_stats                                        - GetFastrgSystemStats → JSON
     get_user_drop_count <user_id> [port_idx]               - GetFastrgSystemStats, WAN dropped_packets for user
     get_port_fwd_info <user_id>                             - GetPortFwdInfo    → JSON
+    get_nat_entries <user_id>                               - GetNatEntries     → JSON
     get_dns_static <user_id>                                - GetDnsStaticRecords → JSON
     get_dns_cache <user_id>                                 - GetDnsCache → JSON
     flush_dns_cache <user_id>                               - FlushDnsCache → JSON
@@ -30,6 +31,8 @@ Commands:
     set_subscriber_count <count>                            - SetSubscriberCount → JSON
     set_snat_config <user_id> <eport> <dip> <iport>         - SetSnatConfig → JSON
     remove_snat_config <user_id> <eport>                    - RemoveSnatConfig → JSON
+    republish_pppoe_status                                  - RepublishPPPoEStatus → JSON
+    republish_config_status                                 - RepublishConfigStatus → JSON
 
 Requirements:
     - python3 (stdlib only)
@@ -219,6 +222,14 @@ def get_port_fwd_info(node_addr, user_id):
     }
 
 
+def get_nat_entries(node_addr, user_id):
+    resp = _grpcurl(node_addr, 'GetNatEntries', {'user_id': user_id})
+    return {
+        "user_id": resp.get('user_id', user_id),
+        "entries": resp.get('entries', []),
+    }
+
+
 def get_dns_static(node_addr, user_id):
     resp = _grpcurl(node_addr, 'GetDnsStaticRecords', {'user_id': user_id})
     return {
@@ -371,6 +382,11 @@ def set_tcp_conntrack(node_addr, user_id, enable):
     return {"status": "tcp_conntrack set"}
 
 
+def set_ipv6(node_addr, user_id, enable):
+    _update_hsi_field(user_id, lambda cfg: cfg.__setitem__("ipv6_enable", bool(enable)))
+    return {"status": "ipv6 set"}
+
+
 def ctrl_login(node_addr=None):
     """Verify controller login works; return a short token preview ({} on failure)."""
     tok = _ctrl_token(force=True)
@@ -388,6 +404,11 @@ def ctrl_pppoe(node_addr, user_id):
     return _ctrl("GET", f"/api/config/{NODE_UUID}/pppoe/{user_id}")
 
 
+def ctrl_pppoe_status(node_addr, user_id):
+    """Full PPPoE status row for a user, including the IPv6 columns."""
+    return _ctrl("GET", f"/api/pppoe/status/{NODE_UUID}/{user_id}")
+
+
 def get_user_drop_count(node_addr, user_id, port_idx=1):
     """Return dropped_packets for user_id on port_idx (1=WAN_PORT, 0=LAN_PORT)."""
     resp = _grpcurl(node_addr, 'GetFastrgSystemStats')
@@ -398,6 +419,28 @@ def get_user_drop_count(node_addr, user_id, port_idx=1):
         if int(u.get('user_id', -1)) == int(user_id):
             return {"dropped_packets": int(u.get('dropped_packets', 0))}
     return {"dropped_packets": 0}
+
+
+def republish_pppoe_status(node_addr):
+    """Ask the node to re-emit every subscriber's current PPPoE state to Kafka.
+
+    Returns the reply as-is (event_count is always present thanks to
+    -emit-defaults), so a missing field stays visible instead of turning into a
+    silent zero.
+    """
+    return _grpcurl(node_addr, 'RepublishPPPoEStatus')
+
+
+def republish_config_status(node_addr):
+    """Ask the node to re-report every subscriber's config-apply state to Kafka.
+
+    A subscriber whose local state already matches etcd is confirmed as-is; one
+    that differs is re-applied first and the result of that apply is reported.
+    Returns the reply as-is (event_count is always present thanks to
+    -emit-defaults), so a missing field stays visible instead of turning into a
+    silent zero.
+    """
+    return _grpcurl(node_addr, 'RepublishConfigStatus')
 
 
 def pdump_start(node_addr, dir_val, subscriber, filter_expr='', size_mb=0):
@@ -439,6 +482,12 @@ def main():
                       file=sys.stderr)
                 sys.exit(1)
             result = get_port_fwd_info(opts.node, int(opts.args[0]))
+        elif opts.command == "get_nat_entries":
+            if not opts.args:
+                print(json.dumps({"error": "get_nat_entries requires <user_id>"}),
+                      file=sys.stderr)
+                sys.exit(1)
+            result = get_nat_entries(opts.node, int(opts.args[0]))
         elif opts.command == "get_dns_static":
             if not opts.args:
                 print(json.dumps({"error": "get_dns_static requires <user_id>"}),
@@ -544,6 +593,13 @@ def main():
                 sys.exit(1)
             enable = opts.args[1].lower() not in ("false", "0", "off")
             result = set_tcp_conntrack(opts.node, opts.args[0], enable)
+        elif opts.command == "set_ipv6":
+            if len(opts.args) < 2:
+                print(json.dumps({"error": "set_ipv6 requires <user_id> <true|false>"}),
+                      file=sys.stderr)
+                sys.exit(1)
+            enable = opts.args[1].lower() not in ("false", "0", "off")
+            result = set_ipv6(opts.node, opts.args[0], enable)
         elif opts.command == "ctrl_login":
             result = ctrl_login(opts.node)
         elif opts.command == "ctrl_desire":
@@ -556,6 +612,11 @@ def main():
                 print(json.dumps({"error": "ctrl_pppoe requires <user_id>"}), file=sys.stderr)
                 sys.exit(1)
             result = ctrl_pppoe(opts.node, int(opts.args[0]))
+        elif opts.command == "ctrl_pppoe_status":
+            if not opts.args:
+                print(json.dumps({"error": "ctrl_pppoe_status requires <user_id>"}), file=sys.stderr)
+                sys.exit(1)
+            result = ctrl_pppoe_status(opts.node, int(opts.args[0]))
         elif opts.command == "get_user_drop_count":
             if not opts.args:
                 print(json.dumps({"error": "get_user_drop_count requires <user_id> [port_idx]"}),
@@ -563,6 +624,10 @@ def main():
                 sys.exit(1)
             port_idx = int(opts.args[1]) if len(opts.args) > 1 else 1
             result = get_user_drop_count(opts.node, int(opts.args[0]), port_idx)
+        elif opts.command == "republish_pppoe_status":
+            result = republish_pppoe_status(opts.node)
+        elif opts.command == "republish_config_status":
+            result = republish_config_status(opts.node)
         elif opts.command == "pdump_start":
             # args: dir subscriber [filter_expr [size_mb]]
             if len(opts.args) < 2:

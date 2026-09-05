@@ -178,7 +178,7 @@ void test_build_config_request(FastRG_t *fastrg_ccb)
 
     ppp_ccb_t s_ppp_ccb[] = {
         {
-            .ppp_phase = {{
+            .control_protocol = {{
                 .timer_counter = 0,
                 .max_retransmit = 10,
             },{
@@ -193,7 +193,7 @@ void test_build_config_request(FastRG_t *fastrg_ccb)
                 .addr_bytes = {0x74, 0x4d, 0x28, 0x8d, 0x00, 0x31},
             },
             .session_id = htons(0x000a),
-            .cp = 0,
+            .cp_id = PPP_CP_LCP,
             .magic_num = htonl(0x01020304),
             /* Per-CP counters: LCP starts at 0xfd, IPCP at 0xfe, so the three
              * requests below still produce ids 0xfe, 0xff, 0x01 — identical
@@ -228,7 +228,7 @@ void test_build_config_request(FastRG_t *fastrg_ccb)
             "packet content mismatch");
         /* test IPCP */
         printf("Test %d: \"%s\"\n", i * 3 + 2, "build_config_request() IPCP result");
-        s_ppp_ccb[0].cp = 1;
+        s_ppp_ccb[0].cp_id = PPP_CP_IPCP;
         memset(buffer, 0, sizeof(buffer));
         build_config_request(buffer, &mulen, &s_ppp_ccb[0]);
         TEST_ASSERT(mulen == sizeof(pkt_ipcp_1), "build_config_request packet length", 
@@ -256,7 +256,7 @@ void test_build_config_ack(FastRG_t *fastrg_ccb)
     U16 mulen = 0;
 
     ppp_ccb_t s_ppp_ccb_1 = {
-        .ppp_phase = {{
+        .control_protocol = {{
             .timer_counter = 0,
             .max_retransmit = 10,
             .ppp_payload = (ppp_payload_t) {
@@ -293,7 +293,7 @@ void test_build_config_ack(FastRG_t *fastrg_ccb)
             .addr_bytes = {0x74, 0x4d, 0x28, 0x8d, 0x00, 0x31},
         },
         .session_id = htons(0x000a),
-        .cp = 0,
+        .cp_id = PPP_CP_LCP,
         .eth_hdr = (struct rte_ether_hdr) {
             .ether_type = htons(VLAN),
         },
@@ -331,7 +331,7 @@ void test_build_config_ack(FastRG_t *fastrg_ccb)
     memset(buffer, 0, sizeof(buffer));
     /* test IPCP */
     printf("Test 2: \"%s\"\n", "build_config_ack() IPCP result");
-    s_ppp_ccb_1.cp = 1;
+    s_ppp_ccb_1.cp_id = PPP_CP_IPCP;
     s_ppp_ccb_1.pppoe_header.length = htons(0x000c);
     build_config_ack(buffer, &mulen, &s_ppp_ccb_1);
     TEST_ASSERT(mulen == sizeof(pkt_ipcp), "build_config_ack packet length", 
@@ -347,8 +347,8 @@ void test_build_config_ack(FastRG_t *fastrg_ccb)
     U8 overflow_buffer[PPP_MSG_BUF_LEN] = { 0 };
     U8 zero_buffer[PPP_MSG_BUF_LEN] = { 0 };
     U16 overflow_mulen = 0;
-    s_ppp_ccb_1.ppp_phase[1].ppp_hdr.length = htons(sizeof(ppp_header_t) + sizeof(big_opts));
-    s_ppp_ccb_1.ppp_phase[1].ppp_options = (ppp_options_t *)big_opts;
+    s_ppp_ccb_1.control_protocol[PPP_CP_IPCP].ppp_hdr.length = htons(sizeof(ppp_header_t) + sizeof(big_opts));
+    s_ppp_ccb_1.control_protocol[PPP_CP_IPCP].ppp_options = (ppp_options_t *)big_opts;
     build_config_ack(overflow_buffer, &overflow_mulen, &s_ppp_ccb_1);
     TEST_ASSERT(overflow_mulen == 0, "build_config_ack oversized options refused",
         "expected mulen 0, got %u", overflow_mulen);
@@ -364,7 +364,7 @@ void test_build_terminate_request(FastRG_t *fastrg_ccb)
     U16 mulen = 0;
 
     ppp_ccb_t s_ppp_ccb_1 = {
-        .ppp_phase = {{
+        .control_protocol = {{
             .timer_counter = 0,
             .max_retransmit = 10,
         },{
@@ -379,7 +379,7 @@ void test_build_terminate_request(FastRG_t *fastrg_ccb)
             .addr_bytes = {0x74, 0x4d, 0x28, 0x8d, 0x00, 0x31},
         },
         .session_id = htons(0x000a),
-        .cp = 0,
+        .cp_id = PPP_CP_LCP,
         .fastrg_ccb = fastrg_ccb,
     };
 
@@ -408,7 +408,7 @@ void test_build_terminate_request(FastRG_t *fastrg_ccb)
     /* test IPCP */
     printf("Test 2: \"%s\"\n", "build_terminate_request() IPCP result");
     memset(buffer, 0, sizeof(buffer));
-    s_ppp_ccb_1.cp = 1;
+    s_ppp_ccb_1.cp_id = PPP_CP_IPCP;
     build_terminate_request(buffer, &mulen, &s_ppp_ccb_1);
     TEST_ASSERT(mulen == sizeof(pkt_ipcp), "build_terminate_request packet length", 
         "expected length %zu, got %u", sizeof(pkt_ipcp), mulen);
@@ -430,7 +430,7 @@ void test_build_config_nak_rej(FastRG_t *fastrg_ccb)
     U16 mulen = 0;
 
     ppp_ccb_t s_ppp_ccb_1 = {
-        .ppp_phase = {{
+        .control_protocol = {{
             .timer_counter = 0,
             .max_retransmit = 10,
             .ppp_payload = (ppp_payload_t) {
@@ -467,7 +467,7 @@ void test_build_config_nak_rej(FastRG_t *fastrg_ccb)
             .addr_bytes = {0x74, 0x4d, 0x28, 0x8d, 0x00, 0x31},
         },
         .session_id = htons(0x000a),
-        .cp = 0,
+        .cp_id = PPP_CP_LCP,
         .eth_hdr = (struct rte_ether_hdr) {
             .ether_type = htons(VLAN),
         },
@@ -484,7 +484,7 @@ void test_build_config_nak_rej(FastRG_t *fastrg_ccb)
         .fastrg_ccb = fastrg_ccb,
     };
     ppp_ccb_t s_ppp_ccb_2 = {
-        .ppp_phase = {{
+        .control_protocol = {{
             .timer_counter = 0,
             .max_retransmit = 10,
             .ppp_payload = (ppp_payload_t) {
@@ -521,7 +521,7 @@ void test_build_config_nak_rej(FastRG_t *fastrg_ccb)
             .addr_bytes = {0x74, 0x4d, 0x28, 0x8d, 0x00, 0x31},
         },
         .session_id = htons(0x000a),
-        .cp = 0,
+        .cp_id = PPP_CP_LCP,
         .eth_hdr = (struct rte_ether_hdr) {
             .ether_type = htons(VLAN),
         },
@@ -566,7 +566,7 @@ void test_build_config_nak_rej(FastRG_t *fastrg_ccb)
 
     /* test IPCP */
     printf("Test 2: \"%s\"\n", "build_config_nak_rej() IPCP result");
-    s_ppp_ccb_1.cp = 1;
+    s_ppp_ccb_1.cp_id = PPP_CP_IPCP;
     s_ppp_ccb_1.pppoe_header.length = htons(0x000c);
     memset(buffer, 0, sizeof(buffer));
     build_config_nak_rej(buffer, &mulen, &s_ppp_ccb_1);
@@ -575,7 +575,7 @@ void test_build_config_nak_rej(FastRG_t *fastrg_ccb)
     TEST_ASSERT(memcmp(buffer, pkt_ipcp_1, sizeof(pkt_ipcp_1)) == 0, 
         "build_config_nak_rej packet content", "packet content mismatch");
 
-    s_ppp_ccb_2.cp = 0;
+    s_ppp_ccb_2.cp_id = PPP_CP_LCP;
     printf("Test 3: \"%s\"\n", "build_config_nak_rej() LCP result");
     memset(buffer, 0, sizeof(buffer));
     build_config_nak_rej(buffer, &mulen, &s_ppp_ccb_2);
@@ -585,7 +585,7 @@ void test_build_config_nak_rej(FastRG_t *fastrg_ccb)
         "build_config_nak_rej packet content", "packet content mismatch");
 
     printf("Test 4: \"%s\"\n", "build_config_nak_rej() IPCP result");
-    s_ppp_ccb_2.cp = 1;
+    s_ppp_ccb_2.cp_id = PPP_CP_IPCP;
     s_ppp_ccb_2.pppoe_header.length = htons(0x0010);
     memset(buffer, 0, sizeof(buffer));
     build_config_nak_rej(buffer, &mulen, &s_ppp_ccb_2);
@@ -602,8 +602,8 @@ void test_build_config_nak_rej(FastRG_t *fastrg_ccb)
     U8 overflow_buffer[PPP_MSG_BUF_LEN] = { 0 };
     U8 zero_buffer[PPP_MSG_BUF_LEN] = { 0 };
     U16 overflow_mulen = 0;
-    s_ppp_ccb_2.ppp_phase[1].ppp_hdr.length = htons(sizeof(ppp_header_t) + sizeof(big_opts));
-    s_ppp_ccb_2.ppp_phase[1].ppp_options = (ppp_options_t *)big_opts;
+    s_ppp_ccb_2.control_protocol[PPP_CP_IPCP].ppp_hdr.length = htons(sizeof(ppp_header_t) + sizeof(big_opts));
+    s_ppp_ccb_2.control_protocol[PPP_CP_IPCP].ppp_options = (ppp_options_t *)big_opts;
     build_config_nak_rej(overflow_buffer, &overflow_mulen, &s_ppp_ccb_2);
     TEST_ASSERT(overflow_mulen == 0, "build_config_nak_rej oversized options refused",
         "expected mulen 0, got %u", overflow_mulen);
@@ -620,7 +620,7 @@ void test_build_terminate_ack(FastRG_t *fastrg_ccb)
     U16 mulen = 0;
 
     ppp_ccb_t s_ppp_ccb_1 = {
-        .ppp_phase = {{
+        .control_protocol = {{
             .timer_counter = 0,
             .max_retransmit = 10,
             .ppp_payload = (ppp_payload_t) {
@@ -661,7 +661,7 @@ void test_build_terminate_ack(FastRG_t *fastrg_ccb)
             .addr_bytes = {0x74, 0x4d, 0x28, 0x8d, 0x00, 0x31},
         },
         .session_id = htons(0x000a),
-        .cp = 0,
+        .cp_id = PPP_CP_LCP,
         .eth_hdr = (struct rte_ether_hdr) {
             .ether_type = htons(VLAN),
         },
@@ -698,7 +698,7 @@ void test_build_terminate_ack(FastRG_t *fastrg_ccb)
     memset(buffer, 0, sizeof(buffer));
     /* test IPCP */
     printf("Test 2: \"%s\"\n", "build_terminate_ack() IPCP result");
-    s_ppp_ccb_1.cp = 1;
+    s_ppp_ccb_1.cp_id = PPP_CP_IPCP;
     build_terminate_ack(buffer, &mulen, &s_ppp_ccb_1);
     TEST_ASSERT(mulen == sizeof(pkt_ipcp), "build_terminate_ack packet length", 
         "expected length %zu, got %u", sizeof(pkt_ipcp), mulen);
@@ -714,7 +714,7 @@ void test_build_echo_reply(FastRG_t *fastrg_ccb)
     U16 mulen = 0;
 
     ppp_ccb_t s_ppp_ccb_1 = {
-        .ppp_phase = {{
+        .control_protocol = {{
             .timer_counter = 0,
             .max_retransmit = 10,
             .ppp_payload = (ppp_payload_t) {
@@ -737,7 +737,7 @@ void test_build_echo_reply(FastRG_t *fastrg_ccb)
             .addr_bytes = {0x74, 0x4d, 0x28, 0x8d, 0x00, 0x31},
         },
         .session_id = htons(0x000a),
-        .cp = 0,
+        .cp_id = PPP_CP_LCP,
         .magic_num = htonl(0x01020304),
         .eth_hdr = (struct rte_ether_hdr) {
             .ether_type = htons(VLAN),
@@ -772,7 +772,7 @@ void test_build_echo_reply(FastRG_t *fastrg_ccb)
     0x11, 0x00, 0x00, 0x0a, 0x00, 0x0e, /* ppp protocol */0xc0, 0x21, /* ppp hdr*/
     0x0a, 0x01, 0x00, 0x0c, /* magic number */0x01, 0x02, 0x03, 0x04, /* echo 
     requester's magic number */0x05, 0x06, 0x07, 0x08};
-    s_ppp_ccb_1.ppp_phase[0].ppp_hdr.length = htons(ntohs(s_ppp_ccb_1.ppp_phase[0].ppp_hdr.length) + 4);
+    s_ppp_ccb_1.control_protocol[PPP_CP_LCP].ppp_hdr.length = htons(ntohs(s_ppp_ccb_1.control_protocol[PPP_CP_LCP].ppp_hdr.length) + 4);
 
     printf("Test 2: \"%s\"\n", "build_echo_reply() LCP result with extra data");
     build_echo_reply(buffer, &mulen, &s_ppp_ccb_1);
@@ -789,13 +789,13 @@ void test_build_echo_request(FastRG_t *fastrg_ccb)
     U8 buffer[80] = { 0 };
     U16 mulen = 0;
 
-    /* ppp_phase[0] (the "LCP slot") is deliberately left as PAP (0xc023): that is
+    /* control_protocol[PPP_CP_LCP] (the "LCP slot") is deliberately left as PAP (0xc023): that is
      * the stale value the slot holds after authentication. The original bug was
      * build_echo_request copying it; the function must IGNORE it and always emit
      * the LCP protocol (0xc021). All headers are built from the authoritative
      * vlan_id / session_id / magic_num, not from stored copies. */
     ppp_ccb_t s_ppp_ccb_1 = {
-        .ppp_phase = {{
+        .control_protocol = {{
             .ppp_payload = (ppp_payload_t) {
                 .ppp_protocol = htons(PAP_PROTOCOL),
             },
@@ -808,7 +808,7 @@ void test_build_echo_request(FastRG_t *fastrg_ccb)
             .addr_bytes = {0x74, 0x4d, 0x28, 0x8d, 0x00, 0x31},
         },
         .session_id = htons(0x000a),
-        .cp = 0,
+        .cp_id = PPP_CP_LCP,
         .magic_num = htonl(0x01020304),
         .fastrg_ccb = fastrg_ccb,
     };
@@ -845,7 +845,7 @@ void test_build_auth_request_pap(FastRG_t *fastrg_ccb)
     U16 mulen = 0;
 
     ppp_ccb_t s_ppp_ccb_1 = {
-        .ppp_phase = {{
+        .control_protocol = {{
             .timer_counter = 0,
             .max_retransmit = 10,
             .ppp_payload = (ppp_payload_t) {
@@ -865,7 +865,7 @@ void test_build_auth_request_pap(FastRG_t *fastrg_ccb)
             .addr_bytes = {0x74, 0x4d, 0x28, 0x8d, 0x00, 0x31},
         },
         .session_id = htons(0x000a),
-        .cp = 0,
+        .cp_id = PPP_CP_LCP,
         .magic_num = htonl(0x01020304),
         .ppp_user_acc = (U8 *)"asdf", // 0x61, 0x73, 0x64, 0x66
         .ppp_passwd = (U8 *)"zxcv", // 0x7a, 0x78, 0x63, 0x76
@@ -1008,7 +1008,7 @@ void test_build_auth_ack_pap(FastRG_t *fastrg_ccb)
     U16 mulen = 0;
 
     ppp_ccb_t s_ppp_ccb_1 = {
-        .ppp_phase = {{
+        .control_protocol = {{
             .timer_counter = 0,
             .max_retransmit = 10,
             .ppp_payload = (ppp_payload_t) {
@@ -1028,7 +1028,7 @@ void test_build_auth_ack_pap(FastRG_t *fastrg_ccb)
             .addr_bytes = {0x74, 0x4d, 0x28, 0x8d, 0x00, 0x31},
         },
         .session_id = htons(0x000a),
-        .cp = 0,
+        .cp_id = PPP_CP_LCP,
         .magic_num = htonl(0x01020304),
         .ppp_user_acc = (U8 *)"asdf", // 0x61, 0x73, 0x64, 0x66
         .ppp_passwd = (U8 *)"zxcv", // 0x7a, 0x78, 0x63, 0x76
@@ -1084,7 +1084,7 @@ void test_build_auth_response_chap(FastRG_t *fastrg_ccb)
         .name = NULL,
     };
     ppp_ccb_t s_ppp_ccb = {
-        .ppp_phase = {{
+        .control_protocol = {{
             .ppp_payload = (ppp_payload_t) {
                 .ppp_protocol = htons(CHAP_PROTOCOL),
             },
@@ -1116,7 +1116,7 @@ void test_build_auth_response_chap(FastRG_t *fastrg_ccb)
 
     printf("Test 1: \"%s\"\n", "16-byte CHAP challenge response");
     MD5Init(&context);
-    MD5Update(&context, &s_ppp_ccb.ppp_phase[0].ppp_hdr.identifier, sizeof(U8));
+    MD5Update(&context, &s_ppp_ccb.control_protocol[PPP_CP_LCP].ppp_hdr.identifier, sizeof(U8));
     MD5Update(&context, (U8 *)"pass1", strlen("pass1"));
     MD5Update(&context, challenge, sizeof(challenge));
     MD5Final(expected_hash, &context);
@@ -1164,7 +1164,7 @@ void test_build_auth_response_chap(FastRG_t *fastrg_ccb)
     printf("Test 2: \"%s\"\n", "8-byte CHAP challenge hashes only its declared value");
     chap_data.val_size = 8;
     MD5Init(&context);
-    MD5Update(&context, &s_ppp_ccb.ppp_phase[0].ppp_hdr.identifier, sizeof(U8));
+    MD5Update(&context, &s_ppp_ccb.control_protocol[PPP_CP_LCP].ppp_hdr.identifier, sizeof(U8));
     MD5Update(&context, (U8 *)"pass1", strlen("pass1"));
     MD5Update(&context, challenge, chap_data.val_size);
     MD5Final(expected_hash, &context);
@@ -1341,9 +1341,9 @@ void test_build_code_reject(FastRG_t *fastrg_ccb)
 
     /* Test 1: unknown LCP code — Code-Reject rides on LCP, copies the packet */
     printf("Test 1: \"%s\"\n", "build_code_reject() LCP unknown code");
-    s_ppp_ccb.cp = 0;
-    s_ppp_ccb.ppp_phase[0].ppp_hdr = (ppp_header_t){.code = 0x0E, .identifier = 0x42, .length = htons(6)};
-    s_ppp_ccb.ppp_phase[0].ppp_options = (ppp_options_t *)lcp_opts;
+    s_ppp_ccb.cp_id = PPP_CP_LCP;
+    s_ppp_ccb.control_protocol[PPP_CP_LCP].ppp_hdr = (ppp_header_t){.code = 0x0E, .identifier = 0x42, .length = htons(6)};
+    s_ppp_ccb.control_protocol[PPP_CP_LCP].ppp_options = (ppp_options_t *)lcp_opts;
     TEST_ASSERT(build_code_reject(buffer, &s_ppp_ccb, &mulen) == SUCCESS,
         "build_code_reject LCP returns SUCCESS", "");
     /* overhead = eth(14) + vlan(4) + pppoe(6) + ppp_payload(2) + ppp_hdr(4) = 30; + rejected pkt(6) = 36 */
@@ -1372,9 +1372,9 @@ void test_build_code_reject(FastRG_t *fastrg_ccb)
     printf("Test 2: \"%s\"\n", "build_code_reject() IPCP unknown code");
     memset(buffer, 0, sizeof(buffer));
     mulen = 0;
-    s_ppp_ccb.cp = 1;
-    s_ppp_ccb.ppp_phase[1].ppp_hdr = (ppp_header_t){.code = 0x0D, .identifier = 0x11, .length = htons(4)};
-    s_ppp_ccb.ppp_phase[1].ppp_options = NULL;
+    s_ppp_ccb.cp_id = PPP_CP_IPCP;
+    s_ppp_ccb.control_protocol[PPP_CP_IPCP].ppp_hdr = (ppp_header_t){.code = 0x0D, .identifier = 0x11, .length = htons(4)};
+    s_ppp_ccb.control_protocol[PPP_CP_IPCP].ppp_options = NULL;
     TEST_ASSERT(build_code_reject(buffer, &s_ppp_ccb, &mulen) == SUCCESS,
         "build_code_reject IPCP returns SUCCESS", "");
     TEST_ASSERT(mulen == 34, "build_code_reject IPCP mulen", "expected 34, got %u", mulen);
@@ -1391,9 +1391,9 @@ void test_build_code_reject(FastRG_t *fastrg_ccb)
     memset(big_opts, 0xAB, sizeof(big_opts));
     memset(buffer, 0, sizeof(buffer));
     mulen = 0;
-    s_ppp_ccb.cp = 0;
-    s_ppp_ccb.ppp_phase[0].ppp_hdr = (ppp_header_t){.code = 0x0E, .identifier = 0x43, .length = htons(120)};
-    s_ppp_ccb.ppp_phase[0].ppp_options = (ppp_options_t *)big_opts;
+    s_ppp_ccb.cp_id = PPP_CP_LCP;
+    s_ppp_ccb.control_protocol[PPP_CP_LCP].ppp_hdr = (ppp_header_t){.code = 0x0E, .identifier = 0x43, .length = htons(120)};
+    s_ppp_ccb.control_protocol[PPP_CP_LCP].ppp_options = (ppp_options_t *)big_opts;
     TEST_ASSERT(build_code_reject(buffer, &s_ppp_ccb, &mulen) == SUCCESS,
         "build_code_reject truncated returns SUCCESS", "");
     /* max_rej = PPP_MSG_BUF_LEN(128) - 30 = 98; mulen = 30 + 98 = 128 */
@@ -1411,7 +1411,7 @@ void test_build_code_reject(FastRG_t *fastrg_ccb)
     /* Test 4: stashed packet shorter than a PPP header → ERROR, nothing to reject */
     printf("Test 4: \"%s\"\n", "build_code_reject() bogus stashed length");
     mulen = 0;
-    s_ppp_ccb.ppp_phase[0].ppp_hdr = (ppp_header_t){.code = 0x0E, .identifier = 0x44, .length = htons(2)};
+    s_ppp_ccb.control_protocol[PPP_CP_LCP].ppp_hdr = (ppp_header_t){.code = 0x0E, .identifier = 0x44, .length = htons(2)};
     TEST_ASSERT(build_code_reject(buffer, &s_ppp_ccb, &mulen) == ERROR,
         "build_code_reject short packet returns ERROR", "");
 }
@@ -1597,7 +1597,7 @@ void test_ppp_decode_frame(FastRG_t *fastrg_ccb)
         "PAP ACK in AUTH_PHASE returns SUCCESS", NULL);
 
     decode_ccb_reset(fastrg_ccb, AUTH_PHASE);
-    decode_ccb.ppp_phase[1].state = S_INIT;
+    decode_ccb.control_protocol[PPP_CP_IPCP].state = S_INIT;
     frame_len = build_session_frame(frame, CHAP_PROTOCOL, CHAP_SUCCESS,
         sizeof(ppp_header_t), 0);
     TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == SUCCESS,
@@ -1606,14 +1606,14 @@ void test_ppp_decode_frame(FastRG_t *fastrg_ccb)
         "CHAP Success decoder preserves AUTH_PHASE",
         "got phase %u", decode_ccb.phase);
     TEST_ASSERT(check_auth_result(&decode_ccb) == 1 &&
-        decode_ccb.cp == 1 && decode_ccb.phase == IPCP_PHASE &&
-        decode_ccb.ppp_phase[1].state == S_STARTING,
+        decode_ccb.cp_id == PPP_CP_IPCP && decode_ccb.phase == IPCP_PHASE &&
+        decode_ccb.control_protocol[PPP_CP_IPCP].state == S_STARTING,
         "check_auth_result advances CHAP Success through NCP E_OPEN",
-        "cp=%u phase=%u state=%u", decode_ccb.cp, decode_ccb.phase,
-        decode_ccb.ppp_phase[1].state);
+        "cp=%u phase=%u state=%u", decode_ccb.cp_id, decode_ccb.phase,
+        decode_ccb.control_protocol[PPP_CP_IPCP].state);
 
     decode_ccb_reset(fastrg_ccb, AUTH_PHASE);
-    decode_ccb.ppp_phase[0].state = S_OPENED;
+    decode_ccb.control_protocol[PPP_CP_LCP].state = S_OPENED;
     frame_len = build_session_frame(frame, CHAP_PROTOCOL, CHAP_FAILURE,
         sizeof(ppp_header_t), 0);
     TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == SUCCESS,
@@ -1622,9 +1622,9 @@ void test_ppp_decode_frame(FastRG_t *fastrg_ccb)
         "CHAP Failure decoder preserves AUTH_PHASE",
         "got phase %u", decode_ccb.phase);
     TEST_ASSERT(check_auth_result(&decode_ccb) == 1 &&
-        decode_ccb.cp == 0 && decode_ccb.ppp_phase[0].state == S_CLOSING,
+        decode_ccb.cp_id == PPP_CP_LCP && decode_ccb.control_protocol[PPP_CP_LCP].state == S_CLOSING,
         "check_auth_result sends CHAP Failure through LCP E_CLOSE",
-        "cp=%u state=%u", decode_ccb.cp, decode_ccb.ppp_phase[0].state);
+        "cp=%u state=%u", decode_ccb.cp_id, decode_ccb.control_protocol[PPP_CP_LCP].state);
 
     /* Test 8: discovery frames never reach PPP payload parsing */
     printf("Test 8: \"%s\"\n", "discovery frame short-circuits");
@@ -1695,18 +1695,18 @@ void test_ppp_decode_frame_length_validation(FastRG_t *fastrg_ccb)
     printf("Test 1: \"%s\"\n", "forged maximum PPP length rejected");
     U8 existing_options[] = {0xde, 0xad, 0xbe, 0xef};
     decode_ccb_reset(fastrg_ccb, LCP_PHASE);
-    decode_ccb.ppp_phase[0].ppp_options = (ppp_options_t *)existing_options;
+    decode_ccb.control_protocol[PPP_CP_LCP].ppp_options = (ppp_options_t *)existing_options;
     frame_len = build_session_frame(frame, LCP_PROTOCOL, CONFIG_REQUEST,
         UINT16_MAX, 0);
     TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == ERROR,
         "PPP header length 0xffff returns ERROR", NULL);
-    TEST_ASSERT(decode_ccb.ppp_phase[0].ppp_options ==
+    TEST_ASSERT(decode_ccb.control_protocol[PPP_CP_LCP].ppp_options ==
         (ppp_options_t *)existing_options,
         "invalid PPP length leaves the existing options pointer untouched", NULL);
     TEST_ASSERT(existing_options[0] == 0xde && existing_options[1] == 0xad &&
         existing_options[2] == 0xbe && existing_options[3] == 0xef,
         "invalid PPP length leaves existing option bytes untouched", NULL);
-    decode_ccb.ppp_phase[0].ppp_options = NULL;
+    decode_ccb.control_protocol[PPP_CP_LCP].ppp_options = NULL;
 
     /* Test 2: reject the exact off-by-one boundary beyond received bytes. */
     printf("Test 2: \"%s\"\n", "PPP length one byte beyond payload rejected");
@@ -1715,7 +1715,7 @@ void test_ppp_decode_frame_length_validation(FastRG_t *fastrg_ccb)
         sizeof(ppp_header_t) + 1, 0);
     TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == ERROR,
         "PPP header length one byte beyond payload returns ERROR", NULL);
-    TEST_ASSERT(decode_ccb.ppp_phase[0].ppp_options == NULL,
+    TEST_ASSERT(decode_ccb.control_protocol[PPP_CP_LCP].ppp_options == NULL,
         "off-by-one PPP length does not allocate options", NULL);
 
     /* Test 3: an exact fit remains valid and reaches normal PAP decoding. */
@@ -1805,7 +1805,7 @@ void test_ppp_decode_frame_chap(FastRG_t *fastrg_ccb)
 
     printf("Test 4: \"%s\"\n", "CHAP Success is applied by check_auth_result");
     decode_ccb_reset(fastrg_ccb, AUTH_PHASE);
-    decode_ccb.ppp_phase[1].state = S_INIT;
+    decode_ccb.control_protocol[PPP_CP_IPCP].state = S_INIT;
     frame_len = build_session_frame(frame, CHAP_PROTOCOL, CHAP_SUCCESS,
         sizeof(ppp_header_t), 0);
     TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == SUCCESS,
@@ -1814,16 +1814,16 @@ void test_ppp_decode_frame_chap(FastRG_t *fastrg_ccb)
         "CHAP Success decoder leaves phase transition to check_auth_result", "got phase %u", decode_ccb.phase);
     TEST_ASSERT(check_auth_result(&decode_ccb) == 1,
         "check_auth_result consumes CHAP Success", NULL);
-    TEST_ASSERT(decode_ccb.cp == 1 && decode_ccb.phase == IPCP_PHASE,
+    TEST_ASSERT(decode_ccb.cp_id == PPP_CP_IPCP && decode_ccb.phase == IPCP_PHASE,
         "CHAP Success advances to IPCP control protocol and phase",
-        "cp=%u phase=%u", decode_ccb.cp, decode_ccb.phase);
-    TEST_ASSERT(decode_ccb.ppp_phase[1].state == S_STARTING,
+        "cp=%u phase=%u", decode_ccb.cp_id, decode_ccb.phase);
+    TEST_ASSERT(decode_ccb.control_protocol[PPP_CP_IPCP].state == S_STARTING,
         "CHAP Success sends E_OPEN to the NCP FSM",
-        "state=%u", decode_ccb.ppp_phase[1].state);
+        "state=%u", decode_ccb.control_protocol[PPP_CP_IPCP].state);
 
     printf("Test 5: \"%s\"\n", "CHAP Failure is applied by check_auth_result");
     decode_ccb_reset(fastrg_ccb, AUTH_PHASE);
-    decode_ccb.ppp_phase[0].state = S_OPENED;
+    decode_ccb.control_protocol[PPP_CP_LCP].state = S_OPENED;
     frame_len = build_session_frame(frame, CHAP_PROTOCOL, CHAP_FAILURE,
         sizeof(ppp_header_t), 0);
     TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == SUCCESS,
@@ -1832,9 +1832,9 @@ void test_ppp_decode_frame_chap(FastRG_t *fastrg_ccb)
         "CHAP Failure decoder leaves phase transition to check_auth_result", "got phase %u", decode_ccb.phase);
     TEST_ASSERT(check_auth_result(&decode_ccb) == 1,
         "check_auth_result consumes CHAP Failure", NULL);
-    TEST_ASSERT(decode_ccb.cp == 0 && decode_ccb.ppp_phase[0].state == S_CLOSING,
+    TEST_ASSERT(decode_ccb.cp_id == PPP_CP_LCP && decode_ccb.control_protocol[PPP_CP_LCP].state == S_CLOSING,
         "CHAP Failure sends E_CLOSE to the LCP FSM",
-        "cp=%u state=%u", decode_ccb.cp, decode_ccb.ppp_phase[0].state);
+        "cp=%u state=%u", decode_ccb.cp_id, decode_ccb.control_protocol[PPP_CP_LCP].state);
 }
 
 void test_ppp_decode_frame_chap_challenge_phase_guard(FastRG_t *fastrg_ccb)
@@ -1895,9 +1895,9 @@ void test_ppp_decode_config_ack_request_matching(FastRG_t *fastrg_ccb)
 
     decode_env_init(fastrg_ccb);
     decode_ccb_reset(fastrg_ccb, LCP_PHASE);
-    decode_ccb.cp = 0;
+    decode_ccb.cp_id = PPP_CP_LCP;
     decode_ccb.magic_num = rte_cpu_to_be_32(0x01020304);
-    decode_ccb.ppp_phase[0].state = S_ACK_SENT;
+    decode_ccb.control_protocol[PPP_CP_LCP].state = S_ACK_SENT;
 
     build_config_request(frame, &frame_len, &decode_ccb);
     ppp_header_t *ppp_hdr = (ppp_header_t *)(frame + sizeof(struct rte_ether_hdr) +
@@ -1913,9 +1913,9 @@ void test_ppp_decode_config_ack_request_matching(FastRG_t *fastrg_ccb)
         "matching Configure-Ack clears the outstanding request", NULL);
     TEST_ASSERT(PPP_FSM(&timer, &decode_ccb, event) == SUCCESS,
         "matching Configure-Ack is accepted by the FSM", NULL);
-    TEST_ASSERT(decode_ccb.ppp_phase[0].state == S_OPENED,
+    TEST_ASSERT(decode_ccb.control_protocol[PPP_CP_LCP].state == S_OPENED,
         "matching Configure-Ack advances ACK_SENT to OPENED",
-        "state=%u", decode_ccb.ppp_phase[0].state);
+        "state=%u", decode_ccb.control_protocol[PPP_CP_LCP].state);
 
     printf("Test 2: \"stale LCP Configure-Ack is dropped after request completion\"\n");
     event = E_UNKNOWN;
@@ -1923,9 +1923,9 @@ void test_ppp_decode_config_ack_request_matching(FastRG_t *fastrg_ccb)
         "stale Configure-Ack returns ERROR without an FSM event", NULL);
     TEST_ASSERT(event == E_UNKNOWN,
         "stale Configure-Ack leaves the event unchanged", "event=%u", event);
-    TEST_ASSERT(decode_ccb.ppp_phase[0].state == S_OPENED,
+    TEST_ASSERT(decode_ccb.control_protocol[PPP_CP_LCP].state == S_OPENED,
         "stale Configure-Ack leaves the FSM state unchanged",
-        "state=%u", decode_ccb.ppp_phase[0].state);
+        "state=%u", decode_ccb.control_protocol[PPP_CP_LCP].state);
 
     printf("Test 3: \"mismatched LCP Configure-Ack is dropped while request is pending\"\n");
     build_config_request(frame, &frame_len, &decode_ccb);
@@ -1940,9 +1940,9 @@ void test_ppp_decode_config_ack_request_matching(FastRG_t *fastrg_ccb)
         "mismatched Configure-Ack leaves the event unchanged", "event=%u", event);
     TEST_ASSERT(decode_ccb.config_request_pending[0] == TRUE,
         "mismatched Configure-Ack preserves the outstanding request", NULL);
-    TEST_ASSERT(decode_ccb.ppp_phase[0].state == S_OPENED,
+    TEST_ASSERT(decode_ccb.control_protocol[PPP_CP_LCP].state == S_OPENED,
         "mismatched Configure-Ack leaves the FSM state unchanged",
-        "state=%u", decode_ccb.ppp_phase[0].state);
+        "state=%u", decode_ccb.control_protocol[PPP_CP_LCP].state);
 
     codec_cleanup_ppp_ccb(&decode_ccb);
 }
@@ -2444,6 +2444,227 @@ void test_ppp_decode_config_nak_rej_options(FastRG_t *fastrg_ccb)
     codec_cleanup_ppp_ccb(&decode_ccb);
 }
 
+void test_ipv6cp_control_plane(FastRG_t *fastrg_ccb)
+{
+    printf("\nTesting IPV6CP control plane:\n");
+    printf("=========================================\n\n");
+
+    U8 frame[128] = {0};
+    U16 frame_len = 0;
+    U16 event = E_UNKNOWN;
+    U8 *opts;
+    const size_t ppp_protocol_offset = sizeof(struct rte_ether_hdr) +
+        sizeof(vlan_header_t) + sizeof(pppoe_header_t);
+    const size_t ppp_header_offset = ppp_protocol_offset + sizeof(ppp_payload_t);
+    const size_t options_offset = ppp_header_offset + sizeof(ppp_header_t);
+    const U8 local_iid[8] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88};
+    const U8 peer_iid[8] = {0x02, 0xaa, 0xbb, 0xff, 0xfe, 0xcc, 0xdd, 0xee};
+    const U8 zero_iid[8] = {0};
+
+    decode_env_init(fastrg_ccb);
+
+    /* T1: a complete IPV6CP Configure-Request carries the local IID. */
+    printf("Test 1: \"IPV6CP Configure-Request bytes\"\n");
+    decode_ccb_reset(fastrg_ccb, IPCP_PHASE);
+    decode_ccb.cp_id = PPP_CP_IPV6CP;
+    rte_memcpy(decode_ccb.ipv6cp_local_iid, local_iid, sizeof(local_iid));
+    build_config_request(frame, &frame_len, &decode_ccb);
+    const U8 expected_request[] = {
+        0x74, 0x4d, 0x28, 0x8d, 0x00, 0x31,
+        0x9c, 0x69, 0xb4, 0x61, 0x16, 0xdd,
+        0x81, 0x00, 0x00, 0x02, 0x88, 0x64,
+        0x11, 0x00, 0x00, 0x0a, 0x00, 0x10,
+        0x80, 0x57, 0x01, 0x01, 0x00, 0x0e,
+        0x01, 0x0a, 0x11, 0x22, 0x33, 0x44,
+        0x55, 0x66, 0x77, 0x88
+    };
+    TEST_ASSERT(frame_len == sizeof(expected_request) &&
+        memcmp(frame, expected_request, sizeof(expected_request)) == 0,
+        "IPV6CP Configure-Request packet matches expected bytes",
+        "frame_len=%u", frame_len);
+
+    /* T2: a valid peer request is acknowledged and its IID is retained. */
+    printf("Test 2: \"valid peer IPV6CP request stores IID\"\n");
+    codec_cleanup_ppp_ccb(&decode_ccb);
+    decode_ccb_reset(fastrg_ccb, IPCP_PHASE);
+    decode_ccb.ipv6_enabled = TRUE;
+    frame_len = build_session_frame(frame, IPV6CP_PROTOCOL, CONFIG_REQUEST,
+        sizeof(ppp_header_t) + sizeof(ppp_options_t) + sizeof(peer_iid),
+        sizeof(ppp_options_t) + sizeof(peer_iid));
+    opts = frame + options_offset;
+    opts[0] = IPV6CP_OPT_INTERFACE_ID;
+    opts[1] = sizeof(ppp_options_t) + sizeof(peer_iid);
+    rte_memcpy(opts + sizeof(ppp_options_t), peer_iid, sizeof(peer_iid));
+    event = E_UNKNOWN;
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == SUCCESS &&
+        event == E_RECV_GOOD_CONFIG_REQUEST,
+        "valid IPV6CP Configure-Request emits good-request event",
+        "event=%u", event);
+    TEST_ASSERT(memcmp(decode_ccb.ipv6cp_peer_iid, peer_iid, sizeof(peer_iid)) == 0,
+        "valid IPV6CP Configure-Request stores peer IID", "peer IID mismatch");
+
+    /* T3: zero and colliding peer IIDs receive a non-colliding Nak. */
+    printf("Test 3: \"zero and colliding peer IIDs are NAKed\"\n");
+    codec_cleanup_ppp_ccb(&decode_ccb);
+    decode_ccb_reset(fastrg_ccb, IPCP_PHASE);
+    decode_ccb.ipv6_enabled = TRUE;
+    rte_memcpy(decode_ccb.ipv6cp_local_iid, local_iid, sizeof(local_iid));
+    frame_len = build_session_frame(frame, IPV6CP_PROTOCOL, CONFIG_REQUEST,
+        sizeof(ppp_header_t) + sizeof(ppp_options_t) + sizeof(peer_iid),
+        sizeof(ppp_options_t) + sizeof(peer_iid));
+    opts = frame + options_offset;
+    opts[0] = IPV6CP_OPT_INTERFACE_ID;
+    opts[1] = sizeof(ppp_options_t) + sizeof(peer_iid);
+    event = E_UNKNOWN;
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == SUCCESS &&
+        event == E_RECV_BAD_CONFIG_REQUEST &&
+        decode_ccb.control_protocol[PPP_CP_IPV6CP].ppp_hdr.code == CONFIG_NAK,
+        "zero IPV6CP IID produces Configure-Nak", "event=%u code=%u",
+        event, decode_ccb.control_protocol[PPP_CP_IPV6CP].ppp_hdr.code);
+    TEST_ASSERT(memcmp(decode_ccb.control_protocol[PPP_CP_IPV6CP].ppp_options->val, zero_iid,
+            sizeof(zero_iid)) != 0 &&
+        memcmp(decode_ccb.control_protocol[PPP_CP_IPV6CP].ppp_options->val, local_iid,
+            sizeof(local_iid)) != 0,
+        "zero IID Nak suggestion is nonzero and non-colliding", "");
+
+    codec_cleanup_ppp_ccb(&decode_ccb);
+    decode_ccb_reset(fastrg_ccb, IPCP_PHASE);
+    decode_ccb.ipv6_enabled = TRUE;
+    rte_memcpy(decode_ccb.ipv6cp_local_iid, local_iid, sizeof(local_iid));
+    frame_len = build_session_frame(frame, IPV6CP_PROTOCOL, CONFIG_REQUEST,
+        sizeof(ppp_header_t) + sizeof(ppp_options_t) + sizeof(local_iid),
+        sizeof(ppp_options_t) + sizeof(local_iid));
+    opts = frame + options_offset;
+    opts[0] = IPV6CP_OPT_INTERFACE_ID;
+    opts[1] = sizeof(ppp_options_t) + sizeof(local_iid);
+    rte_memcpy(opts + sizeof(ppp_options_t), local_iid, sizeof(local_iid));
+    event = E_UNKNOWN;
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == SUCCESS &&
+        event == E_RECV_BAD_CONFIG_REQUEST &&
+        memcmp(decode_ccb.control_protocol[PPP_CP_IPV6CP].ppp_options->val, local_iid,
+            sizeof(local_iid)) != 0,
+        "colliding IPV6CP IID produces a distinct Nak suggestion",
+        "event=%u", event);
+
+    /* T4: only the Ack for the outstanding IPV6CP request is accepted. */
+    printf("Test 4: \"IPV6CP Configure-Ack request matching\"\n");
+    codec_cleanup_ppp_ccb(&decode_ccb);
+    decode_ccb_reset(fastrg_ccb, IPCP_PHASE);
+    decode_ccb.ipv6_enabled = TRUE;
+    decode_ccb.identifier[PPP_CP_IPV6CP] = 1;
+    decode_ccb.config_request_pending[PPP_CP_IPV6CP] = TRUE;
+    frame_len = build_session_frame(frame, IPV6CP_PROTOCOL, CONFIG_ACK,
+        sizeof(ppp_header_t) + sizeof(ppp_options_t) + sizeof(local_iid),
+        sizeof(ppp_options_t) + sizeof(local_iid));
+    opts = frame + options_offset;
+    opts[0] = IPV6CP_OPT_INTERFACE_ID;
+    opts[1] = sizeof(ppp_options_t) + sizeof(local_iid);
+    rte_memcpy(opts + sizeof(ppp_options_t), local_iid, sizeof(local_iid));
+    event = E_UNKNOWN;
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == SUCCESS &&
+        event == E_RECV_CONFIG_ACK && decode_ccb.config_request_pending[PPP_CP_IPV6CP] == FALSE,
+        "matching IPV6CP Ack clears the outstanding request",
+        "event=%u pending=%u", event, decode_ccb.config_request_pending[PPP_CP_IPV6CP]);
+    decode_ccb.config_request_pending[PPP_CP_IPV6CP] = TRUE;
+    ((ppp_header_t *)(frame + ppp_header_offset))->identifier = 2;
+    event = E_UNKNOWN;
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == ERROR &&
+        decode_ccb.config_request_pending[PPP_CP_IPV6CP] == TRUE,
+        "mismatched IPV6CP Ack is discarded", "event=%u", event);
+
+    /* T5: a matching Nak replaces the local IID for the retry. */
+    printf("Test 5: \"IPV6CP Configure-Nak adopts suggested IID\"\n");
+    codec_cleanup_ppp_ccb(&decode_ccb);
+    decode_ccb_reset(fastrg_ccb, IPCP_PHASE);
+    decode_ccb.ipv6_enabled = TRUE;
+    decode_ccb.identifier[PPP_CP_IPV6CP] = 1;
+    decode_ccb.config_request_pending[PPP_CP_IPV6CP] = TRUE;
+    rte_memcpy(decode_ccb.ipv6cp_local_iid, local_iid, sizeof(local_iid));
+    frame_len = build_session_frame(frame, IPV6CP_PROTOCOL, CONFIG_NAK,
+        sizeof(ppp_header_t) + sizeof(ppp_options_t) + sizeof(peer_iid),
+        sizeof(ppp_options_t) + sizeof(peer_iid));
+    opts = frame + options_offset;
+    opts[0] = IPV6CP_OPT_INTERFACE_ID;
+    opts[1] = sizeof(ppp_options_t) + sizeof(peer_iid);
+    rte_memcpy(opts + sizeof(ppp_options_t), peer_iid, sizeof(peer_iid));
+    event = E_UNKNOWN;
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == SUCCESS &&
+        event == E_RECV_CONFIG_NAK_REJ &&
+        memcmp(decode_ccb.ipv6cp_local_iid, peer_iid, sizeof(peer_iid)) == 0,
+        "IPV6CP Nak updates local IID", "event=%u", event);
+
+    /* T6: the feature flag and phase gates preserve the IPv4-only path. */
+    printf("Test 6: \"IPV6CP feature and phase gates\"\n");
+    codec_cleanup_ppp_ccb(&decode_ccb);
+    decode_ccb_reset(fastrg_ccb, DATA_PHASE);
+    frame_len = build_session_frame(frame, IPV6CP_PROTOCOL, CONFIG_REQUEST,
+        sizeof(ppp_header_t), 0);
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == ERROR,
+        "disabled IPV6CP follows Protocol-Reject path", "");
+
+    decode_ccb_reset(fastrg_ccb, LCP_PHASE);
+    decode_ccb.ipv6_enabled = TRUE;
+    frame_len = build_session_frame(frame, IPV6CP_PROTOCOL, CONFIG_ACK,
+        sizeof(ppp_header_t), 0);
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == ERROR,
+        "enabled IPV6CP is rejected before IPCP phase", "");
+    codec_cleanup_ppp_ccb(&decode_ccb);
+
+    decode_ccb_reset(fastrg_ccb, DATA_PHASE);
+    decode_ccb.ipv6_enabled = TRUE;
+    decode_ccb.identifier[PPP_CP_IPV6CP] = 1;
+    decode_ccb.config_request_pending[PPP_CP_IPV6CP] = TRUE;
+    frame_len = build_session_frame(frame, IPV6CP_PROTOCOL, CONFIG_ACK,
+        sizeof(ppp_header_t), 0);
+    event = E_UNKNOWN;
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == SUCCESS &&
+        event == E_RECV_CONFIG_ACK,
+        "late IPV6CP Ack is accepted in DATA_PHASE", "event=%u", event);
+
+    /* T8: only rejection of IPV6CP is benign to LCP. */
+    printf("Test 8: \"LCP Protocol-Reject classifies IPV6CP as benign\"\n");
+    codec_cleanup_ppp_ccb(&decode_ccb);
+    decode_ccb_reset(fastrg_ccb, DATA_PHASE);
+    decode_ccb.control_protocol[PPP_CP_IPV6CP].state = S_REQUEST_SENT;
+    decode_ccb.config_request_pending[PPP_CP_IPV6CP] = TRUE;
+    decode_ccb.ipv6cp_up = TRUE;
+    frame_len = build_session_frame(frame, LCP_PROTOCOL, PROTO_REJECT,
+        sizeof(ppp_header_t) + sizeof(U16), sizeof(U16));
+    U16 rejected_protocol = rte_cpu_to_be_16(IPV6CP_PROTOCOL);
+    rte_memcpy(frame + options_offset, &rejected_protocol, sizeof(rejected_protocol));
+    event = E_UNKNOWN;
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == SUCCESS &&
+        event == E_RECV_GOOD_CODE_PROTOCOL_REJECT &&
+        decode_ccb.control_protocol[PPP_CP_IPV6CP].state == S_STOPPED &&
+        decode_ccb.config_request_pending[PPP_CP_IPV6CP] == FALSE,
+        "IPV6CP Protocol-Reject stops only IPV6CP",
+        "event=%u state=%u", event, decode_ccb.control_protocol[PPP_CP_IPV6CP].state);
+    codec_cleanup_ppp_ccb(&decode_ccb);
+
+    decode_ccb_reset(fastrg_ccb, DATA_PHASE);
+    frame_len = build_session_frame(frame, LCP_PROTOCOL, PROTO_REJECT,
+        sizeof(ppp_header_t) + sizeof(U16), sizeof(U16));
+    rejected_protocol = rte_cpu_to_be_16(IPCP_PROTOCOL);
+    rte_memcpy(frame + options_offset, &rejected_protocol, sizeof(rejected_protocol));
+    event = E_UNKNOWN;
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == SUCCESS &&
+        event == E_RECV_BAD_CODE_PROTOCOL_REJECT,
+        "IPCP Protocol-Reject remains fatal to LCP", "event=%u", event);
+
+    /* T9: IPV6CP terminate requests use protocol 0x8057. */
+    printf("Test 9: \"IPV6CP Terminate-Request protocol\"\n");
+    codec_cleanup_ppp_ccb(&decode_ccb);
+    decode_ccb_reset(fastrg_ccb, DATA_PHASE);
+    decode_ccb.cp_id = PPP_CP_IPV6CP;
+    build_terminate_request(frame, &frame_len, &decode_ccb);
+    TEST_ASSERT(*(U16 *)(frame + ppp_protocol_offset) ==
+        rte_cpu_to_be_16(IPV6CP_PROTOCOL),
+        "IPV6CP Terminate-Request uses protocol 0x8057",
+        "protocol=0x%04x", rte_be_to_cpu_16(*(U16 *)(frame + ppp_protocol_offset)));
+
+    codec_cleanup_ppp_ccb(&decode_ccb);
+}
+
 void test_ppp_codec(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 {
     printf("\n");
@@ -2478,6 +2699,7 @@ void test_ppp_codec(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_ppp_decode_ipcp_option_hardening(fastrg_ccb);
     test_build_config_request_auth_option(fastrg_ccb);
     test_ppp_decode_config_nak_rej_options(fastrg_ccb);
+    test_ipv6cp_control_plane(fastrg_ccb);
 
     printf("\n");
     printf("╔════════════════════════════════════════════════════════════╗\n");

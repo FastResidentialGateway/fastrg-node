@@ -2,19 +2,10 @@
 #define _KAFKA_PRODUCER_H_
 
 /*
- * Node -> controller telemetry over Kafka (point 5/6).
- *
- * Reports config-apply results, PPPoE state transitions and runtime errors to
- * topic "fastrg.node.events" (partition key = node_uuid).
- *
- * Non-blocking: produce never blocks the data/control plane. Events are written
- * to a durable on-disk WAL (/etc/fastrg/kafka_queue.json) before being produced
- * and removed once delivery is confirmed, so undelivered events survive a node
- * restart and are replayed on the next kafka_producer_init() (slice 15). Only a
- * full WAL (long outage) drops the oldest, counted (telemetry tolerates loss).
- *
- * All kafka_report_* functions are no-ops until kafka_producer_init() succeeds,
- * so call sites can invoke them unconditionally.
+ * Node -> controller telemetry over Kafka, topic "fastrg.node.events".
+ * Non-blocking: events are buffered and retried until confirmed.
+ * Runtime errors are written to disk before the call returns.
+ * Every kafka_report_* is a no-op until kafka_producer_init() succeeds.
  */
 
 #include <common.h>
@@ -34,8 +25,7 @@ typedef enum {
 /**
  * @fn kafka_producer_init
  *
- * @brief initialize the Kafka producer, load the WAL and replay any buffered
- *        events; safe to call once at startup
+ * @brief initialize the producer, load the WAL and replay buffered events
  * @param brokers
  *      comma-separated host:port broker list
  * @param node_uuid
@@ -77,16 +67,24 @@ int kafka_producer_is_ready(void);
  *      gateway IPv4 on "connected" transitions (may be NULL)
  * @param err_msg
  *      error description on abnormal transitions (may be NULL)
+ * @param hsi_ipv6
+ *      WAN IPv6 address on "connected" transitions (may be NULL)
+ * @param hsi_ipv6_pd_prefix
+ *      delegated prefix in CIDR form, e.g. "2001:db8:ab00::/56" (may be NULL)
+ * @param hsi_ipv6_dns
+ *      IPv6 DNS servers, comma-separated without spaces (may be NULL)
  * @return
  *      void
  */
 void kafka_report_pppoe_state(const char *user_id, kafka_pppoe_phase_t phase,
-    const char *hsi_ipv4, const char *hsi_ipv4_gw, const char *err_msg);
+    const char *hsi_ipv4, const char *hsi_ipv4_gw, const char *err_msg,
+    const char *hsi_ipv6, const char *hsi_ipv6_pd_prefix,
+    const char *hsi_ipv6_dns);
 
 /**
- * @fn kafka_report_config_apply
+ * @fn kafka_report_config_apply_result
  *
- * @brief report the result of applying an HSI config
+ * @brief report the result of applying a subscriber config
  * @param user_id
  *      subscriber id string
  * @param action
@@ -98,14 +96,20 @@ void kafka_report_pppoe_state(const char *user_id, kafka_pppoe_phase_t phase,
  * @param err_msg
  *      human-readable error description on failure (may be NULL on success)
  * @param applied_resource_version
- *      metadata.resourceVersion of the config this apply targeted (may be
- *      NULL/empty; the controller falls back to its transitional guard)
+ *      metadata.resourceVersion this apply targeted (may be NULL)
+ * @param republished
+ *      TRUE when the controller requested a republish of this subscriber's
+ *      config. The controller skips the audit record for restates, so a
+ *      republish sweep cannot flood the audit trail.
+ * @param applied_mod_revision
+ *      etcd ModRevision the apply targeted; 0 means unknown
  * @return
  *      void
  */
-void kafka_report_config_apply(const char *user_id, const char *action,
+void kafka_report_config_apply_result(const char *user_id, const char *action,
     BOOL success, const char *err_code, const char *err_msg,
-    const char *applied_resource_version);
+    const char *applied_resource_version, BOOL republished,
+    int64_t applied_mod_revision);
 
 /* Kinds mirroring OfflineEditKind in kafka-events.proto. */
 typedef enum {
@@ -126,16 +130,16 @@ typedef enum {
  * @param config_json
  *      full snapshot JSON of the target key, metadata envelope included
  * @param resource_version
- *      metadata.resourceVersion stamped into config_json (duplicated for the
- *      consumer; must match the value inside the JSON)
+ *      metadata.resourceVersion stamped into config_json; must match the value 
+ *      inside the etcd value
  * @param edited_at
  *      unix time (seconds) of the last offline edit
  * @param edit_summary
  *      accumulated human-readable summary of the edits (may be empty)
  * @return
- *      void
+ *      the event's seq, or 0 when nothing was produced
  */
-void kafka_report_config_offline_edit(kafka_offline_edit_kind_t kind,
+int64_t kafka_report_config_offline_edit(kafka_offline_edit_kind_t kind,
     const char *user_id, const char *config_json, const char *resource_version,
     int64_t edited_at, const char *edit_summary);
 
@@ -155,25 +159,21 @@ void kafka_report_config_offline_edit(kafka_offline_edit_kind_t kind,
  * @param edit_summary
  *      accumulated human-readable summary of the edits (may be empty)
  * @return
- *      void
+ *      the event's seq, or 0 when nothing was produced
  */
-void kafka_report_config_offline_delete(kafka_offline_edit_kind_t kind,
+int64_t kafka_report_config_offline_delete(kafka_offline_edit_kind_t kind,
     const char *user_id, const char *resource_version, int64_t edited_at,
     const char *edit_summary);
 
 /**
  * @fn kafka_report_offline_edits
  *
- * @brief report every dirty snapshot entry (offline edits and delete
- *        tombstones) to the controller. Diffs each entry against the etcd
- *        current value first. MUST run BEFORE any path that mirrors etcd 
- *        values into the snapshot (boot-time load, state reconcile): 
- *        mirror writes clear the dirty flag and would silently swallow a 
- *        pending proposal (report-before-mirror)
+ * @brief Run before boot-load/reconcile copies etcd into the snapshot: that
+ *        copy clears dirty flag in snapshot record and would silently drop 
+ *        unreported edits.
  * @return
- *      TRUE when every dirty entry was handled; FALSE when etcd is
- *      unreachable or some entry is still pending (transient read failure)
- *      and will be retried on the next etcd watchdog tick
+ *      TRUE when every dirty entry was reported; FALSE when etcd is
+ *      unreachable or an entry is still pending, retried on the next tick.
  */
 BOOL kafka_report_offline_edits(void);
 

@@ -7,6 +7,7 @@
 #include <rte_errno.h>
 
 #include "../fastrg.h"
+#include "../init.h"
 #include "../dbg.h"
 #include "dhcp_fsm.h"
 
@@ -107,6 +108,9 @@ void dhcp_init_by_user(dhcp_ccb_t *dhcp_ccb, U16 ccb_id,
     /* Default before any HSI config is applied; overridden per-subscriber
      * by apply_hsi_config() using dns_proxy_enable from etcd. */
     dhcp_ccb->dns_state.dns_proxy_enabled = TRUE;
+    /* Static DNS records belong to the subscriber config, so the table is
+     * created once with the CCB */
+    dns_static_init(&dhcp_ccb->dns_state.static_table);
 
     // critical section
     dhcp_pool_init_by_user(dhcp_ccb, 0, 0, 0, 0); //initialize with empty pool
@@ -263,13 +267,27 @@ void dhcpd_cleanup_ccb(FastRG_t *fastrg_ccb)
         "DHCP cleanup completed");
 }
 
+void dhcp_get_subscriber_real_size(ccb_memory_info_t *out)
+{
+    if (out == NULL)
+        return;
+
+    memset(out, 0, sizeof(*out));
+    out->plain_bytes_per_sub =
+        (uint64_t)DHCP_MAX_POOL_SIZE_PER_USER * sizeof(dhcp_ccb_per_lan_user_t *) +
+        sizeof(dhcp_ccb_t *);
+    out->n_pools = 2;
+    out->pools[0].objs_per_sub = 1;
+    out->pools[0].elt_size = sizeof(dhcp_ccb_t);
+    out->pools[1].objs_per_sub = DHCP_MAX_POOL_SIZE_PER_USER;
+    out->pools[1].elt_size = sizeof(dhcp_ccb_per_lan_user_t);
+}
+
 STATUS dhcp_init(FastRG_t *fastrg_ccb)
 {
-    unsigned int mempool_size = 1U << (31 - __builtin_clz(fastrg_ccb->max_user_count) + 1);
-
     fastrg_ccb->dhcp_ccb_mp = rte_mempool_create(
         "dhcp_ccb_pool",                     /* name */
-        mempool_size,                        /* user count */
+        fastrg_ccb->max_user_count,          /* user count */
         sizeof(dhcp_ccb_t),                  /* dhcp_ccb size */
         /* No per-lcore cache: every object is taken exactly once at init and
          * returned only at shutdown. */

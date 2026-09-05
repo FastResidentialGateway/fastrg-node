@@ -79,6 +79,7 @@ typedef struct mac_table {
 typedef struct arp_pending_pkt {
     struct rte_mbuf *mbuf;          /**< queued packet (fully prepared except dst MAC) */
     U32              target_ip;     /**< destination IP we are resolving (net order) */
+    U16              tx_queue;      /**< LAN TX queue the packet was heading for */
 } arp_pending_pkt_t;
 
 /**
@@ -332,11 +333,15 @@ void arp_pending_cleanup_queue(arp_pending_queue_t *q, struct rte_mempool *mp);
  *      Packet to queue (ownership transferred on success)
  * @param target_ip
  *      Destination IP being resolved (network byte order)
+ * @param tx_queue
+ *      LAN TX queue the packet was originally received on. Kept because the 
+ *      drain runs on a different lcore and has to send it back through that 
+ *      queue's owner.
  * @return
  *      SUCCESS on success, ERROR on mempool exhaustion
  */
 STATUS arp_pending_enqueue(struct rte_mempool *mp, arp_pending_queue_t *q,
-    struct rte_mbuf *mbuf, U32 target_ip);
+    struct rte_mbuf *mbuf, U32 target_ip, U16 tx_queue);
 
 /**
  * @fn arp_pending_drain
@@ -357,6 +362,8 @@ STATUS arp_pending_enqueue(struct rte_mempool *mp, arp_pending_queue_t *q,
  *      Resolved MAC address
  * @param tx_pkts
  *      Output array to collect ready-to-send mbufs
+ * @param tx_queues
+ *      Output array, same indices as tx_pkts, holding each packet's TX queue
  * @param tx_count
  *      [in/out] current count in tx_pkts
  * @param tx_max
@@ -364,7 +371,7 @@ STATUS arp_pending_enqueue(struct rte_mempool *mp, arp_pending_queue_t *q,
  */
 void arp_pending_drain(struct rte_mempool *mp, arp_pending_queue_t *q,
     U32 resolved_ip, const struct rte_ether_addr *mac,
-    struct rte_mbuf **tx_pkts, U16 *tx_count, U16 tx_max);
+    struct rte_mbuf **tx_pkts, U16 tx_queues[], U16 *tx_count, U16 tx_max);
 
 /**
  * @fn arp_pending_flush
@@ -418,10 +425,12 @@ U16 encode_arp_request(U8 *buf, const struct rte_ether_addr *src_mac, U32 src_ip
  *      Subscriber VLAN tag (host byte order)
  * @param tx_q
  *      LAN TX queue id
+ * @param pool
+ *      Mempool to allocate the request from; each queue should use corresponding pool
  * @return
  *      SUCCESS on success, ERROR on failure
  */
 STATUS send_arp_request(const struct rte_ether_addr *src_mac, U32 src_ip,
-    U32 target_ip, U16 vlan_id, U16 tx_q);
+    U32 target_ip, U16 vlan_id, U16 tx_q, struct rte_mempool *pool);
 
 #endif /* _MAC_TABLE_H_ */

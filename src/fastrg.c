@@ -4,6 +4,7 @@
 #include <grpc/grpc.h>
 
 #include <common.h>
+#include <ip_codec.h>
 
 #include <rte_eal.h>
 #include <rte_ethdev.h>
@@ -20,6 +21,7 @@
 #include <rte_distributor.h>
 #include <rte_errno.h>
 
+#include "etcd_event.h"
 #include "pppd/fsm.h"
 #include "dp.h"
 #include "dbg.h"
@@ -27,10 +29,12 @@
 #include "dp_flow.h"
 #include "dhcpd/dhcpd.h"
 #include "dnsd/dnsd.h"
-#include <ip_codec.h>
+#include "nd6/nd6.h"
 #include "config.h"
 #include "controller.h"
 #include "etcd_integration.h"
+#include "northbound.h"
+#include "cli_request.h"
 #include "kafka_producer.h"
 #include "config_snapshot.h"
 #include "utils.h"
@@ -145,8 +149,8 @@ void fastrg_cleanup_pppoes_stats(FastRG_t *fastrg_ccb)
     }
 }
 
-STATUS fastrg_gen_northbound_event(FastRG_t *fastrg_ccb, fastrg_event_type_t event_type,
-    U8 cmd_type, U16 ccb_id)
+static STATUS northbound_event_post(FastRG_t *fastrg_ccb, fastrg_event_type_t event_type,
+    U8 cmd_type, U16 ccb_id, void *payload, U32 seq)
 {
     /* Try to get a free mail slot from free_mail_ring */
     tFastRG_MBX *slot = NULL;
@@ -154,10 +158,11 @@ STATUS fastrg_gen_northbound_event(FastRG_t *fastrg_ccb, fastrg_event_type_t eve
 
     /* Get a free mail slot */
     if (rte_ring_dequeue(fastrg_ccb->free_mail_ring, (void **)&slot) == 0) {
-        /* Deep copy packet data to slot's refp buffer to avoid data buffer being overwritten by rx_burst */
-        northbound_msg = (fastrg_event_northbound_msg_t *)slot->refp;
+        northbound_msg = &slot->northbound_msg;
         northbound_msg->cmd = cmd_type;
         northbound_msg->ccb_id = ccb_id;
+        northbound_msg->seq = seq;
+        northbound_msg->payload = payload;
         slot->type = event_type;
         slot->len = sizeof(fastrg_event_northbound_msg_t);
         /* cp_q is full: return slot to free_mail_ring */
@@ -170,10 +175,44 @@ STATUS fastrg_gen_northbound_event(FastRG_t *fastrg_ccb, fastrg_event_type_t eve
     return ERROR;
 }
 
+STATUS fastrg_gen_northbound_event(FastRG_t *fastrg_ccb, fastrg_event_type_t event_type,
+    U8 cmd_type, U16 ccb_id, void *payload)
+{
+    /* seq 0: fire and forget, no caller waits for a verdict. */
+    return northbound_event_post(fastrg_ccb, event_type, cmd_type, ccb_id, payload, 0);
+}
+
+STATUS fastrg_gen_cli_request(FastRG_t *fastrg_ccb, fastrg_event_type_t event_type,
+    U8 cmd_type, U16 ccb_id, void *payload, U32 seq)
+{
+    return northbound_event_post(fastrg_ccb, event_type, cmd_type, ccb_id, payload, seq);
+}
+
+STATUS fastrg_gen_etcd_event(FastRG_t *fastrg_ccb, etcd_event_t *ev)
+{
+    tFastRG_MBX *slot = NULL;
+
+    if (fastrg_ccb == NULL || ev == NULL)
+        return ERROR;
+    if (rte_ring_dequeue(fastrg_ccb->free_mail_ring, (void **)&slot) != 0)
+        return ERROR;
+
+    slot->type = EV_ETCD;
+    slot->etcd_ev = ev;
+    slot->len = 0;              /* the event carries its own payload */
+    /* cp_q is full: return the slot and leave the event with the caller. */
+    if (rte_ring_enqueue(fastrg_ccb->cp_q, slot) != 0) {
+        slot->etcd_ev = NULL;
+        rte_ring_enqueue(fastrg_ccb->free_mail_ring, slot);
+        return ERROR;
+    }
+    return SUCCESS;
+}
+
 void link_disconnect(__attribute__((unused)) struct rte_timer *tim, FastRG_t *fastrg_ccb)
 {
     for(int i=0; i<fastrg_ccb->user_count; i++)
-        fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_PPPoE, PPPoE_CMD_FORCE_DISABLE, i);
+        fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_PPPoE, PPPoE_CMD_FORCE_DISABLE, i, NULL);
 }
 
 /***************************************************************
@@ -189,6 +228,11 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
     uint64_t prev_tsc = fastrg_get_cur_cycles(), cur_tsc = 0, diff_tsc = 0;
     uint64_t timer_resolution_cycles = fastrg_get_cycles_in_sec() / 10; /* check every 100ms */
 
+    /* Boot loads config straight from the main lcore, so stay parked until it
+     * sets start_flag; that keeps CCB writes single-threaded during startup. */
+    while(rte_atomic16_read(&start_flag) == 0)
+        rte_pause();
+
     fastrg_ccb->lcore_usage[rte_lcore_id()].role = "ctrl";
     while(rte_atomic16_read(&stop_flag) == 0) {
         uint64_t _t0 = fastrg_get_cur_cycles();
@@ -198,13 +242,66 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
             switch(recv_type) {
             case EV_NORTHBOUND_PPPoE: {
                 /* process cli command */
-                fastrg_event_northbound_msg_t *pppoe_msg = (fastrg_event_northbound_msg_t *)mail[i]->refp;
+                fastrg_event_northbound_msg_t *pppoe_msg = &mail[i]->northbound_msg;
+                /* Commands that validate the ccb id themselves run ahead of the
+                 * lookup below, so an out-of-range id still frees the payload and
+                 * answers the waiting gRPC thread. */
+                if (pppoe_msg->cmd == PPPoE_CMD_APPLY_CONFIG) {
+                    hsi_config_t *cfg = (hsi_config_t *)pppoe_msg->payload;
+                    STATUS apply_ret;
+
+                    if (cli_request_dropped(fastrg_ccb, pppoe_msg, cfg) == TRUE) {
+                        rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
+                        break;
+                    }
+                    /* is_update FALSE: a CLI apply always writes the whole config. */
+                    apply_ret = apply_hsi_config(fastrg_ccb, pppoe_msg->ccb_id, cfg, FALSE);
+                    if (apply_ret == SUCCESS)
+                        reconcile_pppoe_desire(fastrg_ccb, pppoe_msg->ccb_id, cfg->desire_status);
+                    free(cfg);
+                    /* Publishing the verdict releases the waiter, so it comes last. */
+                    cli_request_publish(fastrg_ccb, pppoe_msg->seq, apply_ret);
+                    rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
+                    break;
+                }
+                if (pppoe_msg->cmd == PPPoE_CMD_SNAT_SET ||
+                        pppoe_msg->cmd == PPPoE_CMD_SNAT_REMOVE) {
+                    snat_fwd_req_t *req = (snat_fwd_req_t *)pppoe_msg->payload;
+                    STATUS snat_ret = ERROR;
+
+                    if (cli_request_dropped(fastrg_ccb, pppoe_msg, req) == TRUE) {
+                        rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
+                        break;
+                    }
+                    if (req != NULL) {
+                        snat_ret = (pppoe_msg->cmd == PPPoE_CMD_SNAT_SET) ?
+                            set_snat_port_fwd(fastrg_ccb, pppoe_msg->ccb_id, req->eport,
+                                req->dip, req->iport) :
+                            remove_snat_port_fwd(fastrg_ccb, pppoe_msg->ccb_id, req->eport);
+                        free(req);
+                    }
+                    cli_request_publish(fastrg_ccb, pppoe_msg->seq, snat_ret);
+                    rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
+                    break;
+                }
+                if (pppoe_msg->cmd == PPPoE_CMD_REMOVE_CONFIG) {
+                    if (cli_request_dropped(fastrg_ccb, pppoe_msg, NULL) == TRUE) {
+                        rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
+                        break;
+                    }
+                    STATUS remove_ret = remove_hsi_config(fastrg_ccb, pppoe_msg->ccb_id);
+
+                    cli_request_publish(fastrg_ccb, pppoe_msg->seq, remove_ret);
+                    rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
+                    break;
+                }
                 /* pppd_get_ccb() indexes the pointer array without a bound check, so the
                  * range must be validated before the fetch. The array is RCU-protected and
                  * a slot may be transiently NULL while a config change (re)allocates it. */
                 if (pppoe_msg->ccb_id >= fastrg_ccb->user_count) {
                     FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Drop pppoe event with out of range ccb id %d\n",
                         pppoe_msg->ccb_id);
+                    cli_request_publish(fastrg_ccb, pppoe_msg->seq, ERROR);
                     rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
                     break;
                 }
@@ -212,6 +309,7 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
                 if (ppp_ccb == NULL) {
                     FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Drop pppoe event, user %d ppp ccb is not initialized\n",
                         pppoe_msg->ccb_id + 1);
+                    cli_request_publish(fastrg_ccb, pppoe_msg->seq, ERROR);
                     rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
                     break;
                 }
@@ -221,7 +319,7 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
                         /* PPPoE "disconnecting" transition → controller via Kafka. */
                         char uid[8];
                         snprintf(uid, sizeof(uid), "%u", pppoe_msg->ccb_id + 1);
-                        kafka_report_pppoe_state(uid, KAFKA_PPPOE_DISCONNECTING, NULL, NULL, NULL);
+                        kafka_report_pppoe_state(uid, KAFKA_PPPOE_DISCONNECTING, NULL, NULL, NULL, NULL, NULL, NULL);
                     }
                 } else if (pppoe_msg->cmd == PPPoE_CMD_ENABLE) {
                     FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "User %d pppoe is spawning\n", pppoe_msg->ccb_id + 1);
@@ -229,22 +327,49 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
                         /* PPPoE "connecting" transition → controller via Kafka. */
                         char uid[8];
                         snprintf(uid, sizeof(uid), "%u", pppoe_msg->ccb_id + 1);
-                        kafka_report_pppoe_state(uid, KAFKA_PPPOE_CONNECTING, NULL, NULL, NULL);
+                        kafka_report_pppoe_state(uid, KAFKA_PPPOE_CONNECTING, NULL, NULL, NULL, NULL, NULL, NULL);
                     }
                 } else if (pppoe_msg->cmd == PPPoE_CMD_FORCE_DISABLE) {
                     FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "User %d pppoe is force terminating\n", pppoe_msg->ccb_id + 1);
                     fastrg_force_terminate_hsi(ppp_ccb);
+                } else if (pppoe_msg->cmd == PPPoE_CMD_IPV6_CHANGED) {
+                    if (is_ppp_ipv6_need_redial(TRUE, ppp_ccb->phase,
+                            ppp_ccb->ppp_processing) == TRUE) {
+                        ppp_ipv6_redial(ppp_ccb);
+                    } else {
+                        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                            "User %d ipv6_enable changed without redial, phase %u, ppp_processing %u\n",
+                            pppoe_msg->ccb_id + 1, ppp_ccb->phase, ppp_ccb->ppp_processing);
+                    }
+                } else if (pppoe_msg->cmd == PPPoE_CMD_TCP_CONNTRACK_ENABLE ||
+                        pppoe_msg->cmd == PPPoE_CMD_TCP_CONNTRACK_DISABLE) {
+                    if (cli_request_dropped(fastrg_ccb, pppoe_msg, NULL) == FALSE) {
+                        STATUS conntrack_ret = set_tcp_conntrack_enable(fastrg_ccb,
+                            pppoe_msg->ccb_id,
+                            pppoe_msg->cmd == PPPoE_CMD_TCP_CONNTRACK_ENABLE ? TRUE : FALSE);
+
+                        cli_request_publish(fastrg_ccb, pppoe_msg->seq, conntrack_ret);
+                    }
+                } else if (pppoe_msg->cmd == PPPoE_CMD_IPV6_ENABLE ||
+                        pppoe_msg->cmd == PPPoE_CMD_IPV6_DISABLE) {
+                    if (cli_request_dropped(fastrg_ccb, pppoe_msg, NULL) == FALSE) {
+                        STATUS ipv6_ret = set_ipv6_enable(fastrg_ccb, pppoe_msg->ccb_id,
+                            pppoe_msg->cmd == PPPoE_CMD_IPV6_ENABLE ? TRUE : FALSE);
+
+                        cli_request_publish(fastrg_ccb, pppoe_msg->seq, ipv6_ret);
+                    }
                 }
                 rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
                 break;
             }
             case EV_NORTHBOUND_DHCP: {
-                fastrg_event_northbound_msg_t *dhcp_msg = (fastrg_event_northbound_msg_t *)mail[i]->refp;
+                fastrg_event_northbound_msg_t *dhcp_msg = &mail[i]->northbound_msg;
                 /* Same as the PPPoE branch: bound check before the unchecked array index,
                  * then NULL check on the RCU-protected slot. */
                 if (dhcp_msg->ccb_id >= fastrg_ccb->user_count) {
                     FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Drop dhcp event with out of range ccb id %d\n",
                         dhcp_msg->ccb_id);
+                    cli_request_publish(fastrg_ccb, dhcp_msg->seq, ERROR);
                     rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
                     break;
                 }
@@ -252,6 +377,7 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
                 if (dhcp_ccb == NULL) {
                     FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Drop dhcp event, user %d dhcp ccb is not initialized\n",
                         dhcp_msg->ccb_id + 1);
+                    cli_request_publish(fastrg_ccb, dhcp_msg->seq, ERROR);
                     rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
                     break;
                 }
@@ -267,14 +393,147 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
                 rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
                 break;
             }
+            case EV_NORTHBOUND_DNS: {
+                fastrg_event_northbound_msg_t *dns_msg = &mail[i]->northbound_msg;
+                /* DNS_CMD_RECORD_ADD and DNS_CMD_RECORD_REMOVE contain payload 
+                dns_record_req_t and others don't, so we need to deal with it alone. */
+                if (dns_msg->cmd == DNS_CMD_RECORD_ADD ||
+                        dns_msg->cmd == DNS_CMD_RECORD_REMOVE) {
+                    dns_record_req_t *req = (dns_record_req_t *)dns_msg->payload;
+                    STATUS record_ret = ERROR;
+
+                    if (cli_request_dropped(fastrg_ccb, dns_msg, req) == TRUE) {
+                        rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
+                        break;
+                    }
+                    if (req != NULL) {
+                        if (is_valid_ccb_id(fastrg_ccb, dns_msg->ccb_id)) {
+                            dns_static_table_t *table =
+                                &DHCPD_GET_CCB(fastrg_ccb, dns_msg->ccb_id)->dns_state.static_table;
+
+                            record_ret = (dns_msg->cmd == DNS_CMD_RECORD_ADD) ?
+                                dns_static_add(table, req->domain, req->ip_addr, req->ttl) :
+                                dns_static_remove(table, req->domain);
+                        }
+                        free(req);
+                    }
+                    cli_request_publish(fastrg_ccb, dns_msg->seq, record_ret);
+                    rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
+                    break;
+                }
+                if (dns_msg->ccb_id >= fastrg_ccb->user_count) {
+                    FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Drop dns event with out of range ccb id %d\n",
+                        dns_msg->ccb_id);
+                    cli_request_publish(fastrg_ccb, dns_msg->seq, ERROR);
+                    rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
+                    break;
+                }
+                dhcp_ccb_t *dns_owner_ccb = DHCPD_GET_CCB(fastrg_ccb, dns_msg->ccb_id);
+                if (dns_owner_ccb == NULL) {
+                    FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Drop dns event, user %d dhcp ccb is not initialized\n",
+                        dns_msg->ccb_id + 1);
+                    cli_request_publish(fastrg_ccb, dns_msg->seq, ERROR);
+                    rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
+                    break;
+                }
+                if (dns_msg->cmd == DNS_CMD_PROXY_ENABLE ||
+                        dns_msg->cmd == DNS_CMD_PROXY_DISABLE) {
+                    if (cli_request_dropped(fastrg_ccb, dns_msg, NULL) == FALSE) {
+                        STATUS dns_proxy_ret = set_dns_proxy_enable(fastrg_ccb, dns_msg->ccb_id,
+                            dns_msg->cmd == DNS_CMD_PROXY_ENABLE ? TRUE : FALSE);
+
+                        cli_request_publish(fastrg_ccb, dns_msg->seq, dns_proxy_ret);
+                    }
+                } else if (dns_msg->cmd == DNS_CMD_CACHE_FLUSH) {
+                    dns_cache_flush_t *req = (dns_cache_flush_t *)dns_msg->payload;
+
+                    if (cli_request_dropped(fastrg_ccb, dns_msg, NULL) == FALSE) {
+                        STATUS flush_ret = ERROR;
+
+                        if (req != NULL) {
+                            req->flushed = dns_cache_flush(&dns_owner_ccb->dns_state.cache);
+                            flush_ret = SUCCESS;
+                        }
+                        cli_request_publish(fastrg_ccb, dns_msg->seq, flush_ret);
+                    }
+                } else if (dns_msg->cmd == DNS_CMD_CACHE_DUMP) {
+                    dns_cache_dump_t *dump = (dns_cache_dump_t *)dns_msg->payload;
+                    if (cli_request_dropped(fastrg_ccb, dns_msg, NULL) == FALSE) {
+                        STATUS dump_ret = ERROR;
+                        if (dump != NULL) {
+                            /* Size the array to what the cache holds right now, so
+                             * caller side doesn't need to guess. */
+                            U32 entries = dns_owner_ccb->dns_state.cache.entry_count;
+
+                            dump->entries = entries != 0 ?
+                                malloc((size_t)entries * sizeof(*dump->entries)) : NULL;
+                            if (entries == 0 || dump->entries != NULL) {
+                                dump->count = dns_cache_dump(&dns_owner_ccb->dns_state.cache,
+                                    dump->entries, entries);
+                                dump_ret = SUCCESS;
+                            }
+                        }
+                        cli_request_publish(fastrg_ccb, dns_msg->seq, dump_ret);
+                    }
+                } else if (dns_msg->cmd == DNS_CMD_STATIC_DUMP) {
+                    dns_static_dump_t *dump = (dns_static_dump_t *)dns_msg->payload;
+
+                    if (cli_request_dropped(fastrg_ccb, dns_msg, NULL) == FALSE) {
+                        STATUS dump_ret = ERROR;
+
+                        if (dump != NULL) {
+                            U32 records = dns_owner_ccb->dns_state.static_table.count;
+
+                            dump->records = records != 0 ?
+                                malloc((size_t)records * sizeof(*dump->records)) : NULL;
+                            if (records == 0 || dump->records != NULL) {
+                                dump->count = dns_static_dump(
+                                    &dns_owner_ccb->dns_state.static_table,
+                                    dump->records, records);
+                                dump_ret = SUCCESS;
+                            }
+                        }
+                        cli_request_publish(fastrg_ccb, dns_msg->seq, dump_ret);
+                    }
+                }
+                rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
+                break;
+            }
+            case EV_NORTHBOUND_NODE: {
+                fastrg_event_northbound_msg_t *node_msg = &mail[i]->northbound_msg;
+                if (node_msg->cmd == NODE_CMD_SET_USER_COUNT) {
+                    user_count_config_t *cfg = (user_count_config_t *)node_msg->payload;
+                    STATUS count_ret = ERROR;
+
+                    if (cli_request_dropped(fastrg_ccb, node_msg, cfg) == TRUE) {
+                        rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
+                        break;
+                    }
+                    if (cfg != NULL) {
+                        count_ret = user_count_changed_callback("", cfg, HSI_ACTION_UPDATE,
+                            0, fastrg_ccb);
+                        free(cfg);
+                    }
+                    cli_request_publish(fastrg_ccb, node_msg->seq, count_ret);
+                }
+                rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
+                break;
+            }
+            case EV_ETCD: {
+                etcd_event_dispatch(fastrg_ccb, mail[i]->etcd_ev);
+                etcd_event_free(mail[i]->etcd_ev);
+                mail[i]->etcd_ev = NULL;
+                rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
+                break;
+            }
             case EV_LINK: {
                 FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "Recv Link Up/Down event");
-                U16 link_port = *(U16 *)&(mail[i]->refp[1]);
+                U16 link_port = mail[i]->link.port;
                 /* Update per-port link state cache for Prometheus metrics. Count a flap
                  * whenever the state actually transitions (caught even if it toggles
                  * faster than the scrape interval). */
                 if (link_port < PORT_AMOUNT) {
-                    U8 new_up = (mail[i]->refp[0] == LINK_UP) ? 1 : 0;
+                    U8 new_up = (mail[i]->link.up_down == LINK_UP) ? 1 : 0;
                     U8 old_up = __atomic_exchange_n(&fastrg_ccb->nic_link_up[link_port],
                         new_up, __ATOMIC_RELAXED);
                     if (old_up != new_up)
@@ -291,7 +550,7 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
                     }
                 }
                 if (link_port == 1) {
-                    if (mail[i]->refp[0] == LINK_DOWN) {
+                    if (mail[i]->link.up_down == LINK_DOWN) {
                         if (rte_timer_reset(&fastrg_ccb->link,
                                 LINK_DOWN_TIMEOUT * fastrg_get_cycles_in_sec(), // 10 seconds
                                 SINGLE, fastrg_ccb->lcore.timer_thread,
@@ -303,7 +562,7 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
                             FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
                                 "Link-down timer rearm skipped: its disconnect callback is running on another lcore and already handling this link down");
                         }
-                    } else if (mail[i]->refp[0] == LINK_UP) {
+                    } else if (mail[i]->link.up_down == LINK_UP) {
                         rte_timer_stop(&fastrg_ccb->link);
                     }
                 }
@@ -366,21 +625,29 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
                 rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
                 break;
             }
+            case EV_DP_ICMP6: {
+                U16 ccb_id = mail[i]->ccb_id;
+                U8 *pkt_data = rte_pktmbuf_mtod(mail[i]->mbuf, U8 *);
+
+                nd6_lan_input(fastrg_ccb, ccb_id, pkt_data, mail[i]->len);
+                rte_pktmbuf_free(mail[i]->mbuf);
+                rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
+                break;
+            }
+            case EV_DP_ND6_MISS: {
+                U16 ccb_id = mail[i]->ccb_id;
+                U8 *pkt_data = rte_pktmbuf_mtod(mail[i]->mbuf, U8 *);
+
+                nd6_wan_miss_input(fastrg_ccb, ccb_id, pkt_data, mail[i]->len);
+                rte_pktmbuf_free(mail[i]->mbuf);
+                rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
+                break;
+            }
             default:
                 /* Return unknown type slot to free_mail_ring */
                 rte_ring_enqueue(fastrg_ccb->free_mail_ring, mail[i]);
             }
             mail[i] = NULL;
-        }
-
-        /* Drain etcd config events. Applying them here (and nowhere else)
-         * makes the control-plane loop the single writer of CCB state. */
-        etcd_event_t *etcd_evs[RING_BURST_SIZE];
-        U16 etcd_burst = rte_ring_dequeue_burst(fastrg_ccb->etcd_event_q,
-            (void **)etcd_evs, RING_BURST_SIZE, NULL);
-        for(int i=0; i<etcd_burst; i++) {
-            etcd_event_dispatch(fastrg_ccb, etcd_evs[i]);
-            etcd_event_free(etcd_evs[i]);
         }
 
         cur_tsc = fastrg_get_cur_cycles();
@@ -392,7 +659,7 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
 
         uint64_t _elapsed = fastrg_get_cur_cycles() - _t0;
         fastrg_ccb->lcore_usage[rte_lcore_id()].total_cycles += _elapsed;
-        if (burst_size > 0 || etcd_burst > 0)
+        if (burst_size > 0)
             fastrg_ccb->lcore_usage[rte_lcore_id()].busy_cycles += _elapsed;
     }
 
@@ -443,6 +710,46 @@ STATUS northbound(FastRG_t *fastrg_ccb)
         return ERROR;
     }
 
+    unlink(fastrg_ccb->unix_sock_path);
+
+    fastrg_ccb->metrics_thread_started = FALSE;
+    fastrg_ccb->grpc_thread_started = FALSE;
+    fastrg_ccb->metrics_server.listen_fd = -1;
+    rte_atomic16_set(&fastrg_ccb->metrics_stop_requested, 0);
+
+    /* Startup is gated on the /metrics listener coming up; a scrape that fails
+     * later is not fatal. */
+    if (fastrg_create_pthread("fastrg_metrics",
+        metrics_server_run, fastrg_ccb, rte_lcore_id(), &fastrg_ccb->metrics_thread) != SUCCESS) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+            "Metrics HTTP server thread failed to start; shutting down");
+        return ERROR;
+    }
+    fastrg_ccb->metrics_thread_started = TRUE;
+
+    if (metrics_server_wait_ready() != 0) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+            "Metrics HTTP server failed to start on %s; shutting down",
+            fastrg_ccb->metrics_ip_port);
+        fastrg_stop_northbound_threads(fastrg_ccb);
+        return ERROR;
+    }
+
+    if (fastrg_create_pthread("fastrg_grpc",
+        fastrg_grpc_server_run, fastrg_ccb, rte_lcore_id(), &fastrg_ccb->grpc_thread) != SUCCESS) {
+        fastrg_stop_northbound_threads(fastrg_ccb);
+        return ERROR;
+    }
+    fastrg_ccb->grpc_thread_started = TRUE;
+
+    if (fastrg_grpc_server_wait_ready() != 0) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+            "gRPC server failed to start on %s / %s; shutting down",
+            fastrg_ccb->unix_sock_path, fastrg_ccb->node_grpc_ip_port);
+        fastrg_stop_northbound_threads(fastrg_ccb);
+        return ERROR;
+    }
+
     BOOL is_standalone = FALSE;
     // Register this node with the controller, if fails, switch to standalone mode
     if (controller_register_this_node(fastrg_ccb) != 0) {
@@ -485,39 +792,12 @@ STATUS northbound(FastRG_t *fastrg_ccb)
             controller_cleanup(fastrg_ccb);
             return ERROR;
         }
+
+        U32 startup_events = ppp_report_all_connection_status(fastrg_ccb);
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "Startup PPPoE state self-report produced %u event(s)", startup_events);
     }
 
-    unlink(fastrg_ccb->unix_sock_path);
-
-    fastrg_ccb->metrics_thread_started = FALSE;
-    fastrg_ccb->grpc_thread_started = FALSE;
-    fastrg_ccb->metrics_server.listen_fd = -1;
-    rte_atomic16_set(&fastrg_ccb->metrics_stop_requested, 0);
-
-    /* Start the Prometheus /metrics HTTP server so Prometheus can scrape this node
-     * directly. Non-fatal on failure — metrics are observability, not core function. */
-    if (fastrg_create_pthread("fastrg_metrics",
-        metrics_server_run, fastrg_ccb, rte_lcore_id(), &fastrg_ccb->metrics_thread) != SUCCESS) {
-        FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
-            "Metrics HTTP server thread failed to start; Prometheus scrape disabled");
-    } else {
-        fastrg_ccb->metrics_thread_started = TRUE;
-    }
-
-    if (fastrg_create_pthread("fastrg_grpc",
-        fastrg_grpc_server_run, fastrg_ccb, rte_lcore_id(), &fastrg_ccb->grpc_thread) != SUCCESS) {
-        fastrg_stop_northbound_threads(fastrg_ccb);
-        return ERROR;
-    }
-    fastrg_ccb->grpc_thread_started = TRUE;
-
-    if (fastrg_grpc_server_wait_ready() != 0) {
-        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
-            "gRPC server failed to start on %s / %s; shutting down",
-            fastrg_ccb->unix_sock_path, fastrg_ccb->node_grpc_ip_port);
-        fastrg_stop_northbound_threads(fastrg_ccb);
-        return ERROR;
-    }
     return SUCCESS;
 }
 
@@ -525,6 +805,9 @@ void fastrg_stop()
 {
     FastRG_LOG(INFO, fastrg_ccb.fp, NULL, NULL, "FastRG system stopping...");
     rte_eal_mp_wait_lcore();
+    /* Must follow rte_eal_mp_wait_lcore(): only then can the callback no
+     * longer be running. */
+    rte_timer_stop(&fastrg_ccb.nd6_age_timer);
     fastrg_stop_northbound_threads(&fastrg_ccb);
     // Cleanup Kafka producer (flush pending telemetry)
     kafka_producer_cleanup();
@@ -537,15 +820,6 @@ void fastrg_stop()
     if (fastrg_ccb.controller_address)
         controller_cleanup(&fastrg_ccb);
 
-    /* Drain any etcd events left unconsumed (their payloads are only freeable
-     * via etcd_event_free); the ring itself is freed by sys_cleanup below. The
-     * producers (etcd watcher threads) were stopped by etcd_integration_cleanup
-     * above, so nothing can enqueue after this drain. */
-    etcd_event_t *ev;
-    if (fastrg_ccb.etcd_event_q) {
-        while (rte_ring_dequeue(fastrg_ccb.etcd_event_q, (void **)&ev) == 0)
-            etcd_event_free(ev);
-    }
     if (fastrg_ccb.unix_sock_fd > 0)
         close(fastrg_ccb.unix_sock_fd);
     fastrg_ccb.user_count = 0;
@@ -577,11 +851,12 @@ void fastrg_stop()
      * sys_cleanup below. Placed after PORT_CLOSE: the LSC callback (the last
      * possible producer, running on the interrupt thread) is unregistered
      * there, so nothing can enqueue after this drain. EV_DP_* mails own an
-     * mbuf that must be freed; EV_LINK mails are individually allocated (see
-     * lsi_event_callback) and are freed here. Every other mail is a borrowed
-     * pool slot: hand it back to free_mail_ring so cleanup_ring (via
-     * sys_cleanup) frees every slot in one place. The ring holds all 31
-     * slots, so the give-back cannot fail. */
+     * mbuf that must be freed; EV_ETCD mails own a heap etcd event that only
+     * etcd_event_free can release; EV_LINK mails are individually allocated
+     * (see lsi_event_callback) and are freed here. Every other mail is a
+     * borrowed pool slot: hand it back to free_mail_ring so cleanup_ring (via
+     * sys_cleanup) frees every slot in one place. free_mail_ring is sized for
+     * the whole pool, so the give-back cannot fail. */
     if (fastrg_ccb.cp_q) {
         tFastRG_MBX *left_mail;
         while (rte_ring_dequeue(fastrg_ccb.cp_q, (void **)&left_mail) == 0) {
@@ -589,8 +864,15 @@ void fastrg_stop()
             case EV_DP_PPPoE:
             case EV_DP_DNS:
             case EV_DP_DHCP:
+            case EV_DP_ICMP6:
+            case EV_DP_ND6_MISS:
                 if (left_mail->mbuf)
                     rte_pktmbuf_free(left_mail->mbuf);
+                rte_ring_enqueue(fastrg_ccb.free_mail_ring, left_mail);
+                break;
+            case EV_ETCD:
+                etcd_event_free(left_mail->etcd_ev);
+                left_mail->etcd_ev = NULL;
                 rte_ring_enqueue(fastrg_ccb.free_mail_ring, left_mail);
                 break;
             case EV_LINK:
@@ -613,8 +895,8 @@ void fastrg_stop()
     /* Single-owner teardown of everything sys_init created: the stats rows
      * (already NULL after the two cleanups above, so the guarded loops are
      * no-ops), the arp_pending pool (its per-ccb queues were returned by
-     * pppd_cleanup_ccb above), node_uuid, lcore_usage, all three rings
-     * (cp_q / etcd_event_q / free_mail_ring including the 31 mail slots) and
+     * pppd_cleanup_ccb above), node_uuid, lcore_usage, the applied-revision
+     * table, both rings (cp_q / free_mail_ring including every mail slot) and
      * the mbuf pools. Must precede rte_eal_cleanup(): the rings and pools
      * live in EAL hugepage memory. */
     sys_cleanup(&fastrg_ccb);
@@ -694,6 +976,7 @@ int fastrg_start(int argc, char **argv)
     fastrg_ccb.log_path = strdup(fastrg_cfg.log_path);
     fastrg_ccb.unix_sock_path = strdup(fastrg_cfg.unix_sock_path);
     fastrg_ccb.node_grpc_ip_port = strdup(fastrg_cfg.node_grpc_ip_port);
+    fastrg_ccb.node_grpc_port = fastrg_cfg.node_grpc_port;
     fastrg_ccb.controller_address = strdup(fastrg_cfg.controller_address);
     fastrg_ccb.etcd_endpoints = strdup(fastrg_cfg.etcd_endpoints);
     fastrg_ccb.kafka_brokers = strdup(fastrg_cfg.kafka_brokers);
@@ -715,7 +998,6 @@ int fastrg_start(int argc, char **argv)
         FastRG_LOG(WARN, stdout, NULL, NULL, "Failed to open log file %s, using stdout", fastrg_cfg.log_path);
         fastrg_ccb.fp = stdout;
     }
-
 
     /* init users and ports info */
     /* vlan 1 is mapped to index 0. However, vlan 1 is not assigned to any user by default, 
@@ -820,15 +1102,22 @@ int fastrg_start(int argc, char **argv)
             num_dq, num_dq, num_dq);
         for(U16 i=0; i<num_dq; i++) {
             U16 queue_id = i + 1;  /* RSS queues start at 1 */
+            U16 wan_tx_q = get_tx_queue_id_for_sender(FASTRG_TX_SENDER_WAN_DATA, i, LAN_PORT, num_dq);
+            U16 lan_tx_q = get_tx_queue_id_for_sender(FASTRG_TX_SENDER_LAN_DATA, i, WAN_PORT, num_dq);
+            if (wan_tx_q == FASTRG_TX_QUEUE_NONE || lan_tx_q == FASTRG_TX_QUEUE_NONE) {
+                FastRG_LOG(ERR, fastrg_ccb.fp, NULL, NULL,
+                    "Data queue %u has no TX queue in the layout", i);
+                goto err;
+            }
             wan_data_args[i].fastrg_ccb = &fastrg_ccb;
             wan_data_args[i].rx_queue_id = queue_id;
-            wan_data_args[i].tx_queue_id = queue_id;
+            wan_data_args[i].tx_queue_id = wan_tx_q;
             rte_eal_remote_launch((lcore_function_t *)wan_data_rx,
                 (void *)&wan_data_args[i], fastrg_ccb.lcore.wan_data_threads[i]);
 
             lan_data_args[i].fastrg_ccb = &fastrg_ccb;
             lan_data_args[i].rx_queue_id = queue_id;
-            lan_data_args[i].tx_queue_id = queue_id;
+            lan_data_args[i].tx_queue_id = lan_tx_q;
             rte_eal_remote_launch((lcore_function_t *)lan_data_rx,
                 (void *)&lan_data_args[i], fastrg_ccb.lcore.lan_data_threads[i]);
         }
@@ -854,17 +1143,24 @@ int fastrg_start(int argc, char **argv)
         FastRG_LOG(INFO, fastrg_ccb.fp, NULL, NULL,
             "Launching %u wan_dist_worker + %u lan_dist_worker threads", num_dq, num_dq);
         for(U16 i=0; i<num_dq; i++) {
+            U16 wan_tx_q = get_tx_queue_id_for_sender(FASTRG_TX_SENDER_WAN_DATA, i, LAN_PORT, num_dq);
+            U16 lan_tx_q = get_tx_queue_id_for_sender(FASTRG_TX_SENDER_LAN_DATA, i, WAN_PORT, num_dq);
+            if (wan_tx_q == FASTRG_TX_QUEUE_NONE || lan_tx_q == FASTRG_TX_QUEUE_NONE) {
+                FastRG_LOG(ERR, fastrg_ccb.fp, NULL, NULL,
+                    "Worker %u has no TX queue in the layout", i);
+                goto err;
+            }
             wan_worker_args[i].fastrg_ccb = &fastrg_ccb;
             wan_worker_args[i].dist = fastrg_ccb.wan_dist;
             wan_worker_args[i].worker_id = i;
-            wan_worker_args[i].tx_queue_id = i + 1;
+            wan_worker_args[i].tx_queue_id = wan_tx_q;
             rte_eal_remote_launch((lcore_function_t *)wan_dist_worker,
                 (void *)&wan_worker_args[i], fastrg_ccb.lcore.wan_data_threads[i]);
 
             lan_worker_args[i].fastrg_ccb = &fastrg_ccb;
             lan_worker_args[i].dist = fastrg_ccb.lan_dist;
             lan_worker_args[i].worker_id = i;
-            lan_worker_args[i].tx_queue_id = i + 1;
+            lan_worker_args[i].tx_queue_id = lan_tx_q;
             rte_eal_remote_launch((lcore_function_t *)lan_dist_worker,
                 (void *)&lan_worker_args[i], fastrg_ccb.lcore.lan_data_threads[i]);
         }
@@ -874,6 +1170,12 @@ int fastrg_start(int argc, char **argv)
         FastRG_LOG(ERR, fastrg_ccb.fp, NULL, NULL, "Northbound initialization failed");
         goto err;
     }
+
+    /* Aging must run on the control-plane lcore: it is the nd6 table's only
+     * writer. */
+    rte_timer_reset(&fastrg_ccb.nd6_age_timer,
+        (U64)ND6_AGE_SCAN_SEC * fastrg_get_cycles_in_sec(), PERIODICAL,
+        fastrg_ccb.lcore.ctrl_thread, nd6_age_timer_cb, &fastrg_ccb);
 
     rte_atomic16_set(&start_flag, 1);
 

@@ -13,6 +13,7 @@
 #include <linux/ethtool.h>
 
 #include "protocol.h"
+#include "etcd_event.h"
 
 #define RING_BURST_SIZE 64
 
@@ -21,15 +22,22 @@ extern rte_atomic16_t stop_flag;
 typedef enum {
     EV_NORTHBOUND_PPPoE,
     EV_NORTHBOUND_DHCP,
+    EV_NORTHBOUND_DNS,
+    EV_NORTHBOUND_NODE,
+    EV_ETCD,
     EV_DP_PPPoE,
     EV_DP_DNS,
     EV_DP_DHCP,
     EV_LINK,
+    EV_DP_ICMP6,
+    EV_DP_ND6_MISS,
 } fastrg_event_type_t;
 
 typedef struct {
     U8 cmd;
     U16 ccb_id;
+    U32 seq;        /* CLI request sequence to publish the verdict with; 0 = no waiter */
+    void *payload;
 } fastrg_event_northbound_msg_t;
 
 /**
@@ -37,7 +45,12 @@ typedef struct {
  */
 typedef struct {
     fastrg_event_type_t type;
-    U8                  refp[ETH_JUMBO];
+    fastrg_event_northbound_msg_t northbound_msg; /* EV_NORTHBOUND_PPPoE / _DHCP / _DNS / _NODE */
+    struct {
+        U8  up_down;                /* LINK_UP / LINK_DOWN */
+        U16 port;
+    } link;                         /* EV_LINK */
+    struct etcd_event   *etcd_ev;   /* EV_ETCD: heap event, freed after dispatch */
     int                 len;
     U16                 ccb_id;     /* subscriber CCB ID (used by EV_DP_DNS / EV_DP_DHCP) */
     U8                  port_id;    /* source port: LAN_PORT(0) or WAN_PORT(1) */
@@ -53,8 +66,25 @@ typedef struct {
 
 /* Memory operation wrappers */
 #ifdef UNIT_TEST
-#define fastrg_malloc(type, size, aligned) (type *)malloc(size)
-#define fastrg_calloc(type, num, size, aligned) (type *)calloc(num, size)
+static inline void *_fastrg_test_alloc(size_t size, unsigned int aligned, int zero)
+{
+    void *ptr = NULL;
+    size_t want = (aligned != 0) ? aligned : RTE_CACHE_LINE_SIZE;
+    size_t align = sizeof(void *);
+
+    if (size == 0)
+        return NULL;
+    while (align < want)
+        align <<= 1;
+    if (posix_memalign(&ptr, align, size) != 0)
+        return NULL;
+    if (zero)
+        memset(ptr, 0, size);
+    return ptr;
+}
+
+#define fastrg_malloc(type, size, aligned) (type *)_fastrg_test_alloc(size, aligned, 0)
+#define fastrg_calloc(type, num, size, aligned) (type *)_fastrg_test_alloc((num)*(size), aligned, 1)
 #define fastrg_realloc(type, ptr, size, aligned) (type *)realloc(ptr, size)
 #define fastrg_mfree(ptr) free(ptr)
 #else
@@ -106,7 +136,7 @@ static inline uint64_t simulate_get_timer_hz(void)
 #define fastrg_get_cur_cycles rte_rdtsc
 #endif
 
-#define MAX_DATA_QUEUES 16
+#define MAX_DATA_QUEUES 128
 
 /**
  * Data-plane mode, selected once at init based on NIC capability + core count.
@@ -390,5 +420,17 @@ STATUS fastrg_parse_pci_ids(const char *path, U16 vendor_id, U16 device_id,
  *      SUCCESS on success (including hex fallback), ERROR on failure to read IDs
  */
 STATUS fastrg_get_nic_model(U16 port_id, char *model, size_t model_len);
+
+/**
+ * @fn ipv6_addr_is_unset
+ * 
+ * @brief Check if an IPv6 address is unset (all zeros)
+ * 
+ * @param addr
+ *      Pointer to the IPv6 address (16 bytes)
+ * @return
+ *      TRUE if the address is unset (all zeros), FALSE otherwise
+ */
+BOOL ipv6_addr_is_unset(const U8 *addr);
 
 #endif

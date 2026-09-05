@@ -12,20 +12,149 @@
 # GetFastrgSystemStats gRPC before and after each injection, and confirming
 # the delta is ≥ 1.
 # ---------------------------------------------------------------------------
+# Drill: point the WAN capture at an interface the NAT flow never crosses, so
+# the source-port discovery finds nothing. The step must report that it could
+# not capture, rather than carrying an empty port forward.
+_P45_SAVED_WAN_NIC=""
+
+_p45_inject_capture_wrong_interface() {
+    _P45_SAVED_WAN_NIC="$WAN_NIC"
+    WAN_NIC=lo
+}
+
+_p45_cleanup_capture_wrong_interface() {
+    WAN_NIC="$_P45_SAVED_WAN_NIC"
+}
+
+case_validation_register tcp_spi_capture_wrong_interface phase4_5_tcp_spi \
+    _p45_inject_capture_wrong_interface _p45_cleanup_capture_wrong_interface \
+    'Phase 4\.5: TCP SPI'
+
+# WAN is port index 1 in the node's stats, the same index the per-user drop
+# counter is read from.
+_P45_WAN_PORT_INDEX=1
+
+# e2e_spi_stats_fields RAW USER_ID — "<WAN rx_packets> <subscriber
+# dropped_packets>" out of one GetFastrgSystemStats answer.
+#
+# Fails unless the answer carries both numbers, the missing subscriber row
+# included: what the node is not reporting is unknown, not zero. Turning either
+# into a 0 makes a read that never happened look exactly like a link that
+# dropped nothing, and no assertion downstream can tell them apart again.
+e2e_spi_stats_fields() {
+    local _raw="${1:-}" _user="${2:-}" _rx _drops
+
+    _rx=$(printf '%s' "$_raw" \
+        | jq -r ".stats[${_P45_WAN_PORT_INDEX}].rx_packets // empty" 2>/dev/null \
+        | tr -d '[:space:]')
+    _drops=$(printf '%s' "$_raw" \
+        | jq -r ".stats[${_P45_WAN_PORT_INDEX}].per_user_stats[]?
+                 | select((.user_id | tostring) == \"${_user}\")
+                 | .dropped_packets" 2>/dev/null \
+        | head -1 | tr -d '[:space:]')
+    e2e_is_uint "$_rx" || return 1
+    e2e_is_uint "$_drops" || return 1
+    printf '%s %s' "$_rx" "$_drops"
+}
+
+local_validation_register spi_stats_fields e2e_spi_stats_fields \
+    spi_stats_fields_good spi_stats_fields_legitimate_zeros \
+    spi_stats_fields_empty_input spi_stats_fields_error_answer \
+    spi_stats_fields_user_row_absent spi_stats_fields_port_missing
+
 phase4_5_tcp_spi() {
     bold "═══════════════════════════════════════════════════════"
     bold " Phase 4.5 — Reverse-direction TCP SPI"
     bold "═══════════════════════════════════════════════════════"
 
     # ------------------------------------------------------------------
-    # Helper: read WAN dropped_packets for USER_ID via gRPC stats.
-    # Returns a plain integer; 0 on any error.
+    # Helper: one stats read for both numbers this phase watches — the
+    # subscriber's WAN drop counter and the WAN port's receive counter. They
+    # come out of the same snapshot, so nothing happens on the bench between
+    # them and the read costs the single round trip it always did.
+    #
+    # Prints "<WAN rx_packets> <subscriber dropped_packets>". Both numbers
+    # travel out through stdout rather than through a variable, because every
+    # caller reads this through $( ), and what a subshell assigns is gone the
+    # moment it exits. On any other outcome it prints what came back instead
+    # and returns 1, so the caller reports a read it could not make as a read
+    # it could not make.
     # ------------------------------------------------------------------
-    _spi_drop_count() {
-        fastrg_grpc get_user_drop_count "${USER_ID}" 1 2>/dev/null \
-            | jq -r '.dropped_packets // 0' 2>/dev/null \
-            | tr -d '[:space:]' \
-            || echo 0
+    _spi_stats_read() {
+        local _raw _err _errfile _rc=0 _fields
+
+        _errfile=$(mktemp 2>/dev/null) || _errfile=/dev/null
+        _raw=$(python3 "${GRPC_CLIENT_DIR}/fastrg_grpc_client.py" \
+            --node "${FASTRG_NODE}:${FASTRG_GRPC_PORT}" \
+            get_system_stats 2>"$_errfile") || _rc=$?
+        _err=$(tr '\n' ' ' < "$_errfile" 2>/dev/null || true)
+        [[ "$_errfile" != /dev/null ]] && rm -f "$_errfile"
+
+        if _fields=$(e2e_spi_stats_fields "$_raw" "${USER_ID}"); then
+            printf '%s' "$_fields"
+            return 0
+        fi
+        printf 'stats read failed (rc=%s) stdout=%s stderr=%s' \
+            "$_rc" "${_raw:0:150}" "${_err:0:150}"
+        return 1
+    }
+
+    # Read the counters into _P45_DROP / _P45_RX, or record the step as failed
+    # and say so.
+    _spi_read_drop_or_fail() {
+        local _step="$1" _answer
+
+        if _answer=$(_spi_stats_read); then
+            _P45_RX="${_answer%% *}"
+            _P45_DROP="${_answer##* }"
+            return 0
+        fi
+        fail "$_step" "$_answer"
+        return 1
+    }
+
+    # Evidence for a red Step 13 or 14, gathered only once the step is already
+    # recorded as failed. One zero delta is compatible with three different
+    # stories — the count landed late, the packets were counted somewhere else,
+    # or they never reached the node — and these readings are what tell them
+    # apart. RX_BEFORE/RX_AFTER bracket the injection window.
+    _p45_drop_evidence() {
+        local _label="$1" _rx_before="${2:-}" _rx_after="${3:-}"
+        local _i _answer _body _raw _err _errfile _rc=0
+
+        if e2e_is_uint "$_rx_before" && e2e_is_uint "$_rx_after"; then
+            info "  ${_label} evidence: node WAN port rx_packets ${_rx_before} -> ${_rx_after} (delta=$(( _rx_after - _rx_before )))"
+        else
+            info "  ${_label} evidence: node WAN port rx_packets unavailable (before='${_rx_before}' after='${_rx_after}')"
+        fi
+
+        info "  ${_label} evidence: re-reading the counters once a second..."
+        for _i in 1 2 3 4 5; do
+            sleep 1
+            if _answer=$(_spi_stats_read); then
+                info "    +${_i}s dropped_packets=${_answer##* } wan_rx_packets=${_answer%% *}"
+            else
+                info "    +${_i}s ${_answer}"
+            fi
+        done
+
+        _body=$(e2e_metrics_body)
+        if [[ -n "$_body" ]]; then
+            info "    /metrics per-user WAN dropped: $(e2e_metric_value "$_body" \
+                fastrg_node_per_user_dropped_packets_total nic_index=1 user_id=${USER_ID})"
+            info "    /metrics unknown-user WAN dropped: $(e2e_metric_value "$_body" \
+                fastrg_node_unknown_user_dropped_packets_total nic_index=1)"
+        else
+            info "    /metrics did not answer, so it says nothing here"
+        fi
+
+        _errfile=$(mktemp 2>/dev/null) || _errfile=/dev/null
+        _raw=$(python3 "${GRPC_CLIENT_DIR}/fastrg_grpc_client.py" \
+            --node "${FASTRG_NODE}:${FASTRG_GRPC_PORT}" \
+            get_user_drop_count "${USER_ID}" 1 2>"$_errfile") || _rc=$?
+        _err=$(tr '\n' ' ' < "$_errfile" 2>/dev/null || true)
+        [[ "$_errfile" != /dev/null ]] && rm -f "$_errfile"
+        info "    raw get_user_drop_count rc=${_rc} stdout=${_raw:0:200} stderr=${_err:0:200}"
     }
 
     # ------------------------------------------------------------------
@@ -119,56 +248,71 @@ phase4_5_tcp_spi() {
     # 5. Step 13 — SYN→ESTABLISHED flag mismatch
     #    Snapshot drop counter, inject SYN, verify delta ≥ 1.
     # ------------------------------------------------------------------
-    local DROP_BEFORE DROP_AFTER DROP_DELTA
+    local DROP_BEFORE DROP_AFTER DROP_DELTA _P45_DROP="" _P45_RX=""
+    local _P45_RX_BEFORE="" _P45_RX_AFTER=""
 
-    DROP_BEFORE=$(_spi_drop_count)
-    info "  WAN dropped_packets before SYN injection: ${DROP_BEFORE}"
+    if _spi_read_drop_or_fail "Step 13: SYN→ESTABLISHED dropped"; then
+        DROP_BEFORE="$_P45_DROP"
+        _P45_RX_BEFORE="$_P45_RX"
+        info "  WAN dropped_packets before SYN injection: ${DROP_BEFORE}"
 
-    info "Injecting SYN to ESTABLISHED 4-tuple (flag mismatch)..."
-    ssh_wan "python3 -c \"
+        info "Injecting SYN to ESTABLISHED 4-tuple (flag mismatch)..."
+        ssh_wan "python3 -c \"
 from scapy.all import Ether,IP,TCP,sendp
 pkt = Ether(dst='${FASTRG_NODE_WAN_MAC}', src='${WAN_HOST_MAC}') \
     / IP(src='${WAN_IP}', dst='${FASTRG_PUB_IP}', ttl=64) \
     / TCP(sport=${SRV_PORT}, dport=${NAT_PORT}, flags='S', seq=0x12345678)
 sendp(pkt, iface='${WAN_NIC}', verbose=0)
 \" 2>&1 || true"
-    sleep 2
+        sleep 2
 
-    DROP_AFTER=$(_spi_drop_count)
-    DROP_DELTA=$(( DROP_AFTER - DROP_BEFORE ))
-    info "  WAN dropped_packets after SYN injection: ${DROP_AFTER} (delta=${DROP_DELTA})"
+        if _spi_read_drop_or_fail "Step 13: SYN→ESTABLISHED dropped"; then
+            DROP_AFTER="$_P45_DROP"
+            _P45_RX_AFTER="$_P45_RX"
+            DROP_DELTA=$(( DROP_AFTER - DROP_BEFORE ))
+            info "  WAN dropped_packets after SYN injection: ${DROP_AFTER} (delta=${DROP_DELTA})"
 
-    if [[ "$DROP_DELTA" -ge 1 ]]; then
-        pass "Step 13: SYN→ESTABLISHED dropped" "WAN drop counter delta=${DROP_DELTA}"
-    else
-        fail "Step 13: SYN→ESTABLISHED dropped" "Expected WAN drop counter to increase by ≥1, delta=${DROP_DELTA}"
+            if [[ "$DROP_DELTA" -ge 1 ]]; then
+                pass "Step 13: SYN→ESTABLISHED dropped" "WAN drop counter delta=${DROP_DELTA}"
+            else
+                fail "Step 13: SYN→ESTABLISHED dropped" "Expected WAN drop counter to increase by ≥1, delta=${DROP_DELTA}"
+                _p45_drop_evidence "Step 13" "$_P45_RX_BEFORE" "$_P45_RX_AFTER"
+            fi
+        fi
     fi
 
     # ------------------------------------------------------------------
     # 6. Step 14 — out-of-window seq
     #    Snapshot drop counter, inject ACK with bogus seq, verify delta ≥ 1.
     # ------------------------------------------------------------------
-    DROP_BEFORE=$(_spi_drop_count)
-    info "  WAN dropped_packets before seq injection: ${DROP_BEFORE}"
+    if _spi_read_drop_or_fail "Step 14: Out-of-window seq dropped"; then
+        DROP_BEFORE="$_P45_DROP"
+        _P45_RX_BEFORE="$_P45_RX"
+        info "  WAN dropped_packets before seq injection: ${DROP_BEFORE}"
 
-    info "Injecting ACK with out-of-window seq (inject_seq=${INJECT_SEQ})..."
-    ssh_wan "python3 -c \"
+        info "Injecting ACK with out-of-window seq (inject_seq=${INJECT_SEQ})..."
+        ssh_wan "python3 -c \"
 from scapy.all import Ether,IP,TCP,sendp
 pkt = Ether(dst='${FASTRG_NODE_WAN_MAC}', src='${WAN_HOST_MAC}') \
     / IP(src='${WAN_IP}', dst='${FASTRG_PUB_IP}', ttl=64) \
     / TCP(sport=${SRV_PORT}, dport=${NAT_PORT}, flags='A', seq=${INJECT_SEQ}, ack=0xCAFEBABE)
 sendp(pkt, iface='${WAN_NIC}', verbose=0)
 \" 2>&1 || true"
-    sleep 5
+        sleep 5
 
-    DROP_AFTER=$(_spi_drop_count)
-    DROP_DELTA=$(( DROP_AFTER - DROP_BEFORE ))
-    info "  WAN dropped_packets after seq injection: ${DROP_AFTER} (delta=${DROP_DELTA})"
+        if _spi_read_drop_or_fail "Step 14: Out-of-window seq dropped"; then
+            DROP_AFTER="$_P45_DROP"
+            _P45_RX_AFTER="$_P45_RX"
+            DROP_DELTA=$(( DROP_AFTER - DROP_BEFORE ))
+            info "  WAN dropped_packets after seq injection: ${DROP_AFTER} (delta=${DROP_DELTA})"
 
-    if [[ "$DROP_DELTA" -ge 1 ]]; then
-        pass "Step 14: Out-of-window seq dropped" "WAN drop counter delta=${DROP_DELTA}"
-    else
-        fail "Step 14: Out-of-window seq dropped" "Expected WAN drop counter to increase by ≥1, delta=${DROP_DELTA}"
+            if [[ "$DROP_DELTA" -ge 1 ]]; then
+                pass "Step 14: Out-of-window seq dropped" "WAN drop counter delta=${DROP_DELTA}"
+            else
+                fail "Step 14: Out-of-window seq dropped" "Expected WAN drop counter to increase by ≥1, delta=${DROP_DELTA}"
+                _p45_drop_evidence "Step 14" "$_P45_RX_BEFORE" "$_P45_RX_AFTER"
+            fi
+        fi
     fi
 
     # ------------------------------------------------------------------
@@ -241,30 +385,34 @@ sendp(pkt, iface='${WAN_NIC}', verbose=0)
     fastrg_grpc set_tcp_conntrack "${USER_ID}" true 2>&1 || true
     sleep 1
 
-    DROP_BEFORE=$(_spi_drop_count)
-    info "  WAN dropped_packets before SYN injection (conntrack ON): ${DROP_BEFORE}"
+    if _spi_read_drop_or_fail "Step 15b: SYN dropped when conntrack re-enabled"; then
+        DROP_BEFORE="$_P45_DROP"
+        info "  WAN dropped_packets before SYN injection (conntrack ON): ${DROP_BEFORE}"
 
-    info "Injecting 2x SYN with tcp_conntrack re-enabled (ESTABLISHED state → should drop)..."
-    ssh_wan "python3 -c \"
+        info "Injecting 2x SYN with tcp_conntrack re-enabled (ESTABLISHED state → should drop)..."
+        ssh_wan "python3 -c \"
 from scapy.all import Ether,IP,TCP,sendp
 pkt = Ether(dst='${FASTRG_NODE_WAN_MAC}', src='${WAN_HOST_MAC}') \
     / IP(src='${WAN_IP}', dst='${FASTRG_PUB_IP}', ttl=64) \
     / TCP(sport=${SRV_PORT}, dport=${NAT_PORT}, flags='S', seq=0x12345678)
 sendp(pkt, iface='${WAN_NIC}', verbose=0, count=2)
 \" 2>&1 || true"
-    sleep 2
+        sleep 2
 
-    DROP_AFTER=$(_spi_drop_count)
-    DROP_DELTA=$(( DROP_AFTER - DROP_BEFORE ))
-    info "  WAN dropped_packets after SYN injection (conntrack ON): ${DROP_AFTER} (delta=${DROP_DELTA})"
+        if _spi_read_drop_or_fail "Step 15b: SYN dropped when conntrack re-enabled"; then
+            DROP_AFTER="$_P45_DROP"
+            DROP_DELTA=$(( DROP_AFTER - DROP_BEFORE ))
+            info "  WAN dropped_packets after SYN injection (conntrack ON): ${DROP_AFTER} (delta=${DROP_DELTA})"
 
-    # Require delta >= 2: both injected SYNs are dropped by ESTABLISHED state check.
-    # tcp_state stayed ESTABLISHED because the conntrack FSM was not updated while
-    # conntrack was disabled.
-    if [[ "$DROP_DELTA" -ge 2 ]]; then
-        pass "Step 15b: SYN dropped when conntrack re-enabled" "WAN drop counter delta=${DROP_DELTA}"
-    else
-        fail "Step 15b: SYN dropped when conntrack re-enabled" "Expected delta ≥2, got ${DROP_DELTA}"
+            # Require delta >= 2: both injected SYNs are dropped by ESTABLISHED
+            # state check. tcp_state stayed ESTABLISHED because the conntrack FSM
+            # was not updated while conntrack was disabled.
+            if [[ "$DROP_DELTA" -ge 2 ]]; then
+                pass "Step 15b: SYN dropped when conntrack re-enabled" "WAN drop counter delta=${DROP_DELTA}"
+            else
+                fail "Step 15b: SYN dropped when conntrack re-enabled" "Expected delta ≥2, got ${DROP_DELTA}"
+            fi
+        fi
     fi
 
     # ------------------------------------------------------------------

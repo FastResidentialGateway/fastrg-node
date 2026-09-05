@@ -19,9 +19,10 @@
 // Historical note: cases 1-5 covered the retired cas_put offline-queue flush
 // primitive and were removed together with it (user-approved retirement).
 
-// etcd_client.o references these from its watcher-thread self-event filter;
-// the real definitions live in src/etcd_integration.c. This standalone test
-// links etcd_client.o only for field_merge, so provide minimal stand-ins.
+// etcd_client.o references these from its watcher-thread self-event filter and
+// its event hand-off; the real definitions live in src/etcd_integration.c and
+// src/fastrg.c. This standalone test links etcd_client.o only for field_merge,
+// so provide minimal stand-ins.
 extern "C" {
 int parse_user_id(const char *user_id_str, int max_count)
 {
@@ -34,6 +35,15 @@ int parse_user_id(const char *user_id_str, int max_count)
         return -1;
     int ccb_id = (int)val - 1;
     return ccb_id < 0 ? -1 : ccb_id;
+}
+
+// No control-plane loop here: take ownership and drop the event, which is what
+// the loop does once it has dispatched one.
+STATUS fastrg_gen_etcd_event(FastRG_t *fastrg_ccb, etcd_event_t *ev)
+{
+    (void)fastrg_ccb;
+    etcd_event_free(ev);
+    return SUCCESS;
 }
 
 }
@@ -823,6 +833,121 @@ static void test_snapshot_watch_update_dirty_skip()
     free(v);
 }
 
+static void test_hsi_ipv6_parse_defaults()
+{
+    std::cout << "Case 21: HSI IPv6 parsing keeps legacy defaults" << std::endl;
+    hsi_config_t config = { 0 };
+    BOOL is_enabled = TRUE;
+
+    expect_equal("case 21 legacy HSI parses", SUCCESS,
+        etcd_client_parse_hsi_config(MERGE_SEED_HSI, &config, &is_enabled));
+    expect_equal("case 21 ipv6 defaults false", FALSE, config.ipv6_enable);
+    expect_equal("case 21 dns proxy defaults true", TRUE, config.dns_proxy_enable);
+    expect_equal("case 21 conntrack defaults true", TRUE, config.tcp_conntrack_enable);
+    hsi_config_free_port_mappings(&config);
+
+    const char *missing_flags = "{\"config\":{\"user_id\":\"8\"}}";
+    config = hsi_config_t{ 0 };
+    expect_equal("case 21 missing flags HSI parses", SUCCESS,
+        etcd_client_parse_hsi_config(missing_flags, &config, NULL));
+    expect_equal("case 21 missing ipv6 defaults false", FALSE, config.ipv6_enable);
+    expect_equal("case 21 missing dns proxy defaults true", TRUE, config.dns_proxy_enable);
+    expect_equal("case 21 missing conntrack defaults true", TRUE, config.tcp_conntrack_enable);
+}
+
+static void expect_ipv6_parse(const std::string& assertion, const char *json, BOOL expected)
+{
+    hsi_config_t config = { 0 };
+    expect_equal(assertion + " parses", SUCCESS,
+        etcd_client_parse_hsi_config(json, &config, NULL));
+    expect_equal(assertion + " value", expected, config.ipv6_enable);
+    hsi_config_free_port_mappings(&config);
+}
+
+static void test_hsi_ipv6_parse_explicit_values()
+{
+    std::cout << "Case 22: HSI IPv6 parsing accepts bool, string, and integer values" << std::endl;
+    expect_ipv6_parse("case 22 bool true", "{\"config\":{\"ipv6_enable\":true}}", TRUE);
+    expect_ipv6_parse("case 22 bool false", "{\"config\":{\"ipv6_enable\":false}}", FALSE);
+    expect_ipv6_parse("case 22 string true", "{\"config\":{\"ipv6_enable\":\"true\"}}", TRUE);
+    expect_ipv6_parse("case 22 string false", "{\"config\":{\"ipv6_enable\":\"false\"}}", FALSE);
+    expect_ipv6_parse("case 22 integer one", "{\"config\":{\"ipv6_enable\":1}}", TRUE);
+    expect_ipv6_parse("case 22 integer zero", "{\"config\":{\"ipv6_enable\":0}}", FALSE);
+}
+
+static void expect_ipv6_round_trip(const std::string& assertion, BOOL expected)
+{
+    hsi_config_t source = { 0 };
+    source.dns_proxy_enable = TRUE;
+    source.tcp_conntrack_enable = TRUE;
+    source.ipv6_enable = expected;
+
+    char *rendered = etcd_client_render_hsi_config("cas-test-node", &source);
+    expect_true(assertion + " renders", rendered != NULL);
+    if (!rendered)
+        return;
+
+    Json::Value root;
+    expect_true(assertion + " rendered JSON parses", parse_json(rendered, root));
+    expect_true(assertion + " rendered field exists",
+        root["config"].isMember("ipv6_enable"));
+    expect_equal(assertion + " rendered value", expected == TRUE,
+        root["config"]["ipv6_enable"].asBool());
+
+    hsi_config_t parsed = { 0 };
+    expect_equal(assertion + " parses back", SUCCESS,
+        etcd_client_parse_hsi_config(rendered, &parsed, NULL));
+    expect_equal(assertion + " round-trip value", expected, parsed.ipv6_enable);
+    hsi_config_free_port_mappings(&parsed);
+    free(rendered);
+}
+
+static void test_hsi_ipv6_render_round_trip()
+{
+    std::cout << "Case 23: HSI IPv6 render round-trip preserves both values" << std::endl;
+    expect_ipv6_round_trip("case 23 true", TRUE);
+    expect_ipv6_round_trip("case 23 false", FALSE);
+}
+
+static void test_field_merge_ipv6()
+{
+    std::cout << "Case 24: field merge flips ipv6_enable" << std::endl;
+
+    // The seed carries no ipv6_enable at all (the legacy shape): the merge must
+    // create the field rather than fail, so an offline toggle works on configs
+    // written before IPv6 existed.
+    std::string enabled = run_merge("case 24 ipv6 on", SNAPSHOT_FIELD_KIND_IPV6,
+        MERGE_SEED_HSI, "true");
+    Json::Value root;
+    expect_true("case 24 enable parses", parse_json(enabled, root));
+    const Json::Value& cfg = root["config"];
+    expect_equal("case 24 ipv6 enabled", true, cfg["ipv6_enable"].asBool());
+    expect_equal("case 24 dns flag preserved", true, cfg["dns_proxy_enable"].asBool());
+    expect_equal("case 24 tcp flag preserved", true, cfg["tcp_conntrack_enable"].asBool());
+    expect_equal("case 24 vlan preserved", std::string("123"), cfg["vlan_id"].asString());
+    expect_equal("case 24 desire_status preserved", std::string("connect"),
+        cfg["desire_status"].asString());
+    expect_equal("case 24 mapping count preserved", 1u, cfg["port-mapping"].size());
+    expect_equal("case 24 metadata preserved", std::string("seed"),
+        root["metadata"]["updatedBy"].asString());
+
+    // Toggling back off must write false, not drop the field.
+    Json::Value root2;
+    expect_true("case 24 disable parses", parse_json(
+        run_merge("case 24 ipv6 off", SNAPSHOT_FIELD_KIND_IPV6,
+            enabled.c_str(), "false"), root2));
+    expect_true("case 24 disabled field exists",
+        root2["config"].isMember("ipv6_enable"));
+    expect_equal("case 24 ipv6 disabled", false,
+        root2["config"]["ipv6_enable"].asBool());
+
+    // HSI kinds require an existing config: absent key must fail.
+    char *out = NULL;
+    expect_equal("case 24 absent config fails", ERROR,
+        config_snapshot_field_merge(SNAPSHOT_FIELD_KIND_IPV6, NULL, "true", &out));
+    free(out);
+}
+
 int main()
 {
     // Point the snapshot at a scratch file so the test never touches the
@@ -853,6 +978,10 @@ int main()
     test_snapshot_clear_dirty_delete_race();
     test_snapshot_persist_failure_and_recovery(path);
     test_snapshot_watch_update_dirty_skip();
+    test_hsi_ipv6_parse_defaults();
+    test_hsi_ipv6_parse_explicit_values();
+    test_hsi_ipv6_render_round_trip();
+    test_field_merge_ipv6();
 
     config_snapshot_cleanup();
     std::remove(path);

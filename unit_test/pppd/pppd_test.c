@@ -100,8 +100,8 @@ static void pppd_ccb_reset(void)
     rte_atomic16_init(&test_ppp_ccb.ppp_bool);
     rte_atomic16_init(&test_ppp_ccb.dp_start_bool);
     rte_atomic16_init(&test_ppp_ccb.redial_pending);
-    test_ppp_ccb.ppp_phase[0].state = S_INIT;
-    test_ppp_ccb.ppp_phase[1].state = S_INIT;
+    test_ppp_ccb.control_protocol[PPP_CP_LCP].state = S_INIT;
+    test_ppp_ccb.control_protocol[PPP_CP_IPCP].state = S_INIT;
     test_ppp_ccb.phase = END_PHASE;
     test_ppp_ccb.pppoe_phase.pppoe_header_tag = g_padr_tag_buf;
 
@@ -116,7 +116,7 @@ static int pppd_drain_pppoe_enable_events(void)
     int found = 0;
     while (rte_ring_dequeue(g_pppd_fastrg_ccb->cp_q, (void **)&mail) == 0) {
         if (mail->type == EV_NORTHBOUND_PPPoE) {
-            fastrg_event_northbound_msg_t *msg = (fastrg_event_northbound_msg_t *)mail->refp;
+            fastrg_event_northbound_msg_t *msg = &mail->northbound_msg;
             if (msg->cmd == PPPoE_CMD_ENABLE && msg->ccb_id == 0)
                 found++;
         }
@@ -192,7 +192,7 @@ static void test_ppp_disconnect_normal(void)
     TEST_ASSERT(ret == SUCCESS, "normal disconnect returns SUCCESS", "got %d", ret);
     TEST_ASSERT(test_ppp_ccb.ppp_processing == TRUE,
         "PPP_bye's LCP_PHASE branch marks ppp_processing (delegates to PPP_bye)", "");
-    TEST_ASSERT(test_ppp_ccb.cp == 0, "cp reset to LCP", "");
+    TEST_ASSERT(test_ppp_ccb.cp_id == PPP_CP_LCP, "cp reset to LCP", "");
 }
 
 /* ---- PPP_bye state walk-down ---- */
@@ -236,15 +236,15 @@ static void test_ppp_bye_lcp_phase(void)
 
     pppd_ccb_reset();
     test_ppp_ccb.phase = LCP_PHASE;
-    test_ppp_ccb.cp = 1;
-    test_ppp_ccb.ppp_phase[1].state = S_OPENED;
+    test_ppp_ccb.cp_id = PPP_CP_IPCP;
+    test_ppp_ccb.control_protocol[PPP_CP_IPCP].state = S_OPENED;
 
     PPP_bye(&test_ppp_ccb);
 
     TEST_ASSERT(test_ppp_ccb.ppp_processing == TRUE, "LCP_PHASE marks ppp_processing", "");
-    TEST_ASSERT(test_ppp_ccb.cp == 0, "cp forced back to LCP (0)", "");
-    TEST_ASSERT(test_ppp_ccb.ppp_phase[1].state == S_INIT,
-        "NCP state force-reset to S_INIT", "got %u", test_ppp_ccb.ppp_phase[1].state);
+    TEST_ASSERT(test_ppp_ccb.cp_id == PPP_CP_LCP, "cp forced back to LCP (0)", "");
+    TEST_ASSERT(test_ppp_ccb.control_protocol[PPP_CP_IPCP].state == S_INIT,
+        "NCP state force-reset to S_INIT", "got %u", test_ppp_ccb.control_protocol[PPP_CP_IPCP].state);
 }
 
 static void test_ppp_bye_data_phase_downgrades_to_lcp(void)
@@ -255,7 +255,7 @@ static void test_ppp_bye_data_phase_downgrades_to_lcp(void)
     pppd_ccb_reset();
     test_ppp_ccb.phase = DATA_PHASE;
     rte_atomic16_set(&test_ppp_ccb.dp_start_bool, 1);
-    test_ppp_ccb.cp = 1;
+    test_ppp_ccb.cp_id = PPP_CP_IPCP;
 
     PPP_bye(&test_ppp_ccb);
 
@@ -263,7 +263,7 @@ static void test_ppp_bye_data_phase_downgrades_to_lcp(void)
         "DATA_PHASE downgrades to LCP_PHASE (RFC 1661 SS3.7 -- LCP close is sufficient)",
         "got %u", test_ppp_ccb.phase);
     TEST_ASSERT(rte_atomic16_read(&test_ppp_ccb.dp_start_bool) == 0, "dp_start_bool cleared", "");
-    TEST_ASSERT(test_ppp_ccb.cp == 0, "cp forced back to LCP (0)", "");
+    TEST_ASSERT(test_ppp_ccb.cp_id == PPP_CP_LCP, "cp forced back to LCP (0)", "");
 }
 
 /* ---- exit_ppp ---- */
@@ -276,8 +276,8 @@ static void test_exit_ppp_resets_fields(void)
     pppd_ccb_reset();
     test_ppp_ccb.phase = LCP_PHASE;
     rte_atomic16_set(&test_ppp_ccb.ppp_bool, 1);
-    test_ppp_ccb.ppp_phase[0].state = S_OPENED;
-    test_ppp_ccb.ppp_phase[1].state = S_OPENED;
+    test_ppp_ccb.control_protocol[PPP_CP_LCP].state = S_OPENED;
+    test_ppp_ccb.control_protocol[PPP_CP_IPCP].state = S_OPENED;
     test_ppp_ccb.pppoe_phase.active = TRUE;
     test_ppp_ccb.hsi_ipv4 = 0xC0A80101;
     test_ppp_ccb.hsi_ipv4_gw = 0xC0A80001;
@@ -288,7 +288,7 @@ static void test_exit_ppp_resets_fields(void)
 
     TEST_ASSERT(rte_atomic16_read(&test_ppp_ccb.ppp_bool) == 0, "ppp_bool cleared", "");
     TEST_ASSERT(test_ppp_ccb.phase == END_PHASE, "phase set to END_PHASE", "");
-    TEST_ASSERT(test_ppp_ccb.ppp_phase[0].state == S_INIT && test_ppp_ccb.ppp_phase[1].state == S_INIT,
+    TEST_ASSERT(test_ppp_ccb.control_protocol[PPP_CP_LCP].state == S_INIT && test_ppp_ccb.control_protocol[PPP_CP_IPCP].state == S_INIT,
         "both cp states reset to S_INIT", "");
     TEST_ASSERT(test_ppp_ccb.pppoe_phase.active == FALSE, "pppoe_phase.active cleared", "");
     TEST_ASSERT(test_ppp_ccb.hsi_ipv4 == 0 && test_ppp_ccb.hsi_ipv4_gw == 0,
@@ -535,6 +535,358 @@ static void test_dp_gate_open_tracks_flag(void)
         "open gate reports TRUE", "");
 }
 
+/* ---- mid-session ipv6_enable convergence ---- */
+
+/* One row of the is_ppp_ipv6_need_redial() matrix. */
+struct ipv6_apply_decide_case {
+    const char              *name;
+    BOOL                     ipv6_changed;
+    U8                       phase;
+    BOOL                     ppp_processing;
+    BOOL                     expected;
+};
+
+/* Put the fixture in the state a fully connected session reaches. */
+static void pppd_ccb_reset_connected(void)
+{
+    pppd_ccb_reset();
+    test_ppp_ccb.control_protocol[PPP_CP_LCP].state = S_OPENED;
+    test_ppp_ccb.control_protocol[PPP_CP_IPCP].state = S_OPENED;
+    test_ppp_ccb.phase = DATA_PHASE;
+    test_ppp_ccb.ppp_processing = FALSE;
+    rte_atomic16_set(&test_ppp_ccb.ppp_bool, 1);
+    rte_atomic16_set(&test_ppp_ccb.dp_start_bool, 1);
+}
+
+/* Mirrors both call sites: gate first, redial only when the gate says so. */
+static void ipv6_redial_if_needed(BOOL ipv6_changed)
+{
+    if (is_ppp_ipv6_need_redial(ipv6_changed, test_ppp_ccb.phase,
+            test_ppp_ccb.ppp_processing) == TRUE)
+        ppp_ipv6_redial(&test_ppp_ccb);
+}
+
+static void test_is_ppp_ipv6_need_redial(void)
+{
+    printf("\nTesting is_ppp_ipv6_need_redial:\n");
+    printf("=========================================\n\n");
+
+    static const struct ipv6_apply_decide_case cases[] = {
+        /* A connected session is the only one that has to be reconnected. */
+        { "changed on a connected session -> REDIAL",
+          TRUE, DATA_PHASE, FALSE, TRUE },
+
+        /* Rewriting the same value must never disturb a working session —
+         * the periodic config reconcile re-applies configs constantly. */
+        { "unchanged on a connected session -> NONE",
+          FALSE, DATA_PHASE, FALSE, FALSE },
+        { "unchanged on an idle session -> NONE",
+          FALSE, END_PHASE, FALSE, FALSE },
+
+        /* Nothing to reconnect: these all read the flag when they dial. */
+        { "changed while still negotiating IPCP -> NONE",
+          TRUE, IPCP_PHASE, FALSE, FALSE },
+        { "changed while authenticating -> NONE",
+          TRUE, AUTH_PHASE, FALSE, FALSE },
+        { "changed while only LCP is up -> NONE",
+          TRUE, LCP_PHASE, FALSE, FALSE },
+        { "changed on a session that is down -> NONE",
+          TRUE, END_PHASE, FALSE, FALSE },
+        { "changed on an unconfigured subscriber -> NONE",
+          TRUE, NOT_CONFIGURED, FALSE, FALSE },
+
+        /* Already going down: the teardown in flight owns the session. */
+        { "changed while the session is tearing down -> NONE",
+          TRUE, DATA_PHASE, TRUE, FALSE },
+    };
+
+    for(unsigned i=0; i<RTE_DIM(cases); i++) {
+        BOOL got = is_ppp_ipv6_need_redial(cases[i].ipv6_changed, cases[i].phase, cases[i].ppp_processing);
+        TEST_ASSERT(got == cases[i].expected, cases[i].name,
+            "expected=%d got=%d", cases[i].expected, got);
+    }
+
+    /* Driven through the call-site helper: a held gate must leave the CCB alone. */
+    pppd_ccb_reset_connected();
+    ipv6_redial_if_needed(FALSE);
+    TEST_ASSERT(test_ppp_ccb.ppp_processing == FALSE &&
+        rte_atomic16_read(&test_ppp_ccb.redial_pending) == 0 &&
+        test_ppp_ccb.control_protocol[PPP_CP_LCP].state == S_OPENED,
+        "rewriting the same value leaves the session alone",
+        "processing=%u redial=%d lcp_state=%u", test_ppp_ccb.ppp_processing,
+        rte_atomic16_read(&test_ppp_ccb.redial_pending),
+        test_ppp_ccb.control_protocol[PPP_CP_LCP].state);
+
+    pppd_ccb_reset();
+    ipv6_redial_if_needed(TRUE);
+    TEST_ASSERT(rte_atomic16_read(&test_ppp_ccb.redial_pending) == 0 &&
+        test_ppp_ccb.ppp_processing == FALSE,
+        "a session that is not connected is left to pick the flag up when it dials",
+        "redial=%d processing=%u", rte_atomic16_read(&test_ppp_ccb.redial_pending),
+        test_ppp_ccb.ppp_processing);
+}
+
+/*
+ * IPV6CP is only negotiated while a session comes up, so a mid-session change
+ * is applied by reconnecting. The redial has to be parked before the hangup,
+ * or the session would go down and stay down.
+ */
+static void test_ppp_ipv6_redial(void)
+{
+    printf("\nTesting ppp_ipv6_redial on a connected session:\n");
+    printf("=========================================\n\n");
+
+    pppd_ccb_reset_connected();
+
+    ppp_ipv6_redial(&test_ppp_ccb);
+
+    TEST_ASSERT(test_ppp_ccb.ppp_processing == TRUE,
+        "the redial starts the teardown", "ppp_processing=%u",
+        test_ppp_ccb.ppp_processing);
+    TEST_ASSERT(rte_atomic16_read(&test_ppp_ccb.redial_pending) == 1,
+        "the session is parked to dial again once it is down",
+        "redial_pending=%d", rte_atomic16_read(&test_ppp_ccb.redial_pending));
+    TEST_ASSERT(test_ppp_ccb.control_protocol[PPP_CP_LCP].state == S_CLOSING,
+        "the teardown is the graceful LCP one", "lcp_state=%u",
+        test_ppp_ccb.control_protocol[PPP_CP_LCP].state);
+}
+
+/* ---- IPv6 northbound string formatting ---- */
+
+/* 2001:db8:ab00:: */
+static const U8 test_pd_prefix[16] = { 0x20, 0x01, 0x0d, 0xb8, 0xab, 0x00 };
+/* 2001:4860:4860::8888 */
+static const U8 test_dns1[16] = { 0x20, 0x01, 0x48, 0x60, 0x48, 0x60, 0, 0,
+                                  0, 0, 0, 0, 0, 0, 0x88, 0x88 };
+/* 2606:4700:4700::1111 */
+static const U8 test_dns2[16] = { 0x26, 0x06, 0x47, 0x00, 0x47, 0x00, 0, 0,
+                                  0, 0, 0, 0, 0, 0, 0x11, 0x11 };
+static const U8 test_local_iid[8] = { 0x00, 0x11, 0x22, 0xff,
+                                      0xfe, 0x33, 0x44, 0x55 };
+
+static void test_ipv6_report_strings_full_lease(void)
+{
+    char addr[PPPD_IPV6_ADDR_STRLEN];
+    char prefix[PPPD_IPV6_PREFIX_STRLEN];
+    char dns[PPPD_IPV6_DNS_STRLEN];
+
+    printf("\nTesting pppd_ipv6_report_strings with a full lease:\n");
+    printf("=========================================\n\n");
+
+    pppd_ccb_reset();
+    memcpy(test_ppp_ccb.ipv6cp_local_iid, test_local_iid,
+        sizeof(test_local_iid));
+    memcpy(test_ppp_ccb.hsi_ipv6_pd_prefix, test_pd_prefix,
+        sizeof(test_pd_prefix));
+    test_ppp_ccb.hsi_ipv6_pd_plen = 56;
+    memcpy(test_ppp_ccb.hsi_ipv6_dns[0], test_dns1, sizeof(test_dns1));
+    memcpy(test_ppp_ccb.hsi_ipv6_dns[1], test_dns2, sizeof(test_dns2));
+
+    pppd_ipv6_report_strings(&test_ppp_ccb, addr, sizeof(addr), prefix,
+        sizeof(prefix), dns, sizeof(dns));
+
+    TEST_ASSERT(strcmp(addr, "fe80::11:22ff:fe33:4455") == 0,
+        "WAN address is the IPV6CP interface identifier under fe80::",
+        "got %s", addr);
+    TEST_ASSERT(strcmp(prefix, "2001:db8:ab00::/56") == 0,
+        "delegated prefix is reported in CIDR form", "got %s", prefix);
+    TEST_ASSERT(strcmp(dns, "2001:4860:4860::8888,2606:4700:4700::1111") == 0,
+        "two DNS servers are comma-separated without spaces", "got %s", dns);
+}
+
+static void test_ipv6_report_strings_single_dns(void)
+{
+    char addr[PPPD_IPV6_ADDR_STRLEN];
+    char prefix[PPPD_IPV6_PREFIX_STRLEN];
+    char dns[PPPD_IPV6_DNS_STRLEN];
+
+    printf("\nTesting pppd_ipv6_report_strings with one DNS server:\n");
+    printf("=========================================\n\n");
+
+    pppd_ccb_reset();
+    memcpy(test_ppp_ccb.ipv6cp_local_iid, test_local_iid,
+        sizeof(test_local_iid));
+    memcpy(test_ppp_ccb.hsi_ipv6_pd_prefix, test_pd_prefix,
+        sizeof(test_pd_prefix));
+    test_ppp_ccb.hsi_ipv6_pd_plen = 60;
+    memcpy(test_ppp_ccb.hsi_ipv6_dns[0], test_dns1, sizeof(test_dns1));
+    /* hsi_ipv6_dns[1] is left all zero -- an unused server slot. */
+
+    pppd_ipv6_report_strings(&test_ppp_ccb, addr, sizeof(addr), prefix,
+        sizeof(prefix), dns, sizeof(dns));
+
+    TEST_ASSERT(strcmp(prefix, "2001:db8:ab00::/60") == 0,
+        "prefix length is reported as delegated, not assumed to be 56",
+        "got %s", prefix);
+    TEST_ASSERT(strcmp(dns, "2001:4860:4860::8888") == 0,
+        "an unused DNS slot adds no separator", "got %s", dns);
+}
+
+static void test_ipv6_report_strings_no_dns(void)
+{
+    char addr[PPPD_IPV6_ADDR_STRLEN];
+    char prefix[PPPD_IPV6_PREFIX_STRLEN];
+    char dns[PPPD_IPV6_DNS_STRLEN];
+
+    printf("\nTesting pppd_ipv6_report_strings with no DNS server:\n");
+    printf("=========================================\n\n");
+
+    pppd_ccb_reset();
+    memcpy(test_ppp_ccb.ipv6cp_local_iid, test_local_iid,
+        sizeof(test_local_iid));
+    memcpy(test_ppp_ccb.hsi_ipv6_pd_prefix, test_pd_prefix,
+        sizeof(test_pd_prefix));
+    test_ppp_ccb.hsi_ipv6_pd_plen = 56;
+
+    pppd_ipv6_report_strings(&test_ppp_ccb, addr, sizeof(addr), prefix,
+        sizeof(prefix), dns, sizeof(dns));
+
+    TEST_ASSERT(dns[0] == '\0',
+        "a lease without DNS servers reports an empty string", "got %s", dns);
+    TEST_ASSERT(strcmp(addr, "fe80::11:22ff:fe33:4455") == 0,
+        "address is still reported when DNS is absent", "got %s", addr);
+}
+
+/* ---- PPPoE state report built from the control block ---- */
+
+/* Put the fixture in the data phase with a full IPv4 + IPv6 session, which is
+ * what every "connected" report is built from. */
+static void state_report_ccb_connected(void)
+{
+    pppd_ccb_reset();
+    test_ppp_ccb.phase = DATA_PHASE;
+    test_ppp_ccb.hsi_ipv4 = htonl(0x0a000002);    /* 10.0.0.2 */
+    test_ppp_ccb.hsi_ipv4_gw = htonl(0x0a000001); /* 10.0.0.1 */
+    memcpy(test_ppp_ccb.ipv6cp_local_iid, test_local_iid,
+        sizeof(test_local_iid));
+    memcpy(test_ppp_ccb.hsi_ipv6_pd_prefix, test_pd_prefix,
+        sizeof(test_pd_prefix));
+    test_ppp_ccb.hsi_ipv6_pd_plen = 56;
+    memcpy(test_ppp_ccb.hsi_ipv6_dns[0], test_dns1, sizeof(test_dns1));
+    memcpy(test_ppp_ccb.hsi_ipv6_dns[1], test_dns2, sizeof(test_dns2));
+    test_ppp_ccb.ipv6_enabled = TRUE;
+    test_ppp_ccb.ipv6cp_up = TRUE;
+    test_ppp_ccb.dhcp6_pd_ready = TRUE;
+    pppd_ipv6_dp_gate_update(&test_ppp_ccb);
+}
+
+static void test_state_report_connected_with_ipv6(void)
+{
+    ppp_state_report_t report;
+
+    printf("\nTesting ppp_build_state_report in the data phase with IPv6:\n");
+    printf("=========================================\n\n");
+
+    state_report_ccb_connected();
+    ppp_build_state_report(&test_ppp_ccb, &report);
+
+    TEST_ASSERT(report.phase == PPP_REPORT_CONNECTED,
+        "a data-phase session reports the connected phase", "got %d",
+        (int)report.phase);
+    TEST_ASSERT(strcmp(report.user_id, "1") == 0,
+        "the subscriber id is reported as a decimal string", "got %s",
+        report.user_id);
+    TEST_ASSERT(strcmp(report.ipv4, "10.0.0.2") == 0,
+        "the assigned IPv4 address is reported", "got %s", report.ipv4);
+    TEST_ASSERT(strcmp(report.ipv4_gw, "10.0.0.1") == 0,
+        "the IPv4 gateway is reported", "got %s", report.ipv4_gw);
+    TEST_ASSERT(strcmp(report.ipv6_addr, "fe80::11:22ff:fe33:4455") == 0,
+        "the WAN IPv6 address is reported", "got %s", report.ipv6_addr);
+    TEST_ASSERT(strcmp(report.ipv6_pd_prefix, "2001:db8:ab00::/56") == 0,
+        "the delegated prefix is reported", "got %s", report.ipv6_pd_prefix);
+    TEST_ASSERT(strcmp(report.ipv6_dns,
+            "2001:4860:4860::8888,2606:4700:4700::1111") == 0,
+        "the IPv6 DNS servers are reported", "got %s", report.ipv6_dns);
+}
+
+static void test_state_report_connected_ipv6_gate_closed(void)
+{
+    ppp_state_report_t report;
+
+    printf("\nTesting ppp_build_state_report with the IPv6 gate closed:\n");
+    printf("=========================================\n\n");
+
+    state_report_ccb_connected();
+    /* A lease being renewed closes the gate while the lease fields still hold
+     * the previous values. */
+    test_ppp_ccb.dhcp6_pd_ready = FALSE;
+    pppd_ipv6_dp_gate_update(&test_ppp_ccb);
+    ppp_build_state_report(&test_ppp_ccb, &report);
+
+    TEST_ASSERT(report.phase == PPP_REPORT_CONNECTED,
+        "IPv4 stays connected while IPv6 is unavailable", "got %d",
+        (int)report.phase);
+    TEST_ASSERT(strcmp(report.ipv4, "10.0.0.2") == 0,
+        "the IPv4 address is still reported", "got %s", report.ipv4);
+    TEST_ASSERT(report.ipv6_addr[0] == '\0' &&
+            report.ipv6_pd_prefix[0] == '\0' && report.ipv6_dns[0] == '\0',
+        "a closed IPv6 gate reports no IPv6 fields",
+        "got %s / %s / %s", report.ipv6_addr, report.ipv6_pd_prefix,
+        report.ipv6_dns);
+}
+
+static void test_state_report_disconnected(void)
+{
+    ppp_state_report_t report;
+
+    printf("\nTesting ppp_build_state_report after a session ended:\n");
+    printf("=========================================\n\n");
+
+    state_report_ccb_connected();
+    test_ppp_ccb.phase = END_PHASE;
+    ppp_build_state_report(&test_ppp_ccb, &report);
+
+    TEST_ASSERT(report.phase == PPP_REPORT_DISCONNECTED,
+        "a subscriber with no session reports the disconnected phase",
+        "got %d", (int)report.phase);
+    TEST_ASSERT(report.ipv4[0] == '\0' && report.ipv4_gw[0] == '\0',
+        "no IPv4 address is reported without a session",
+        "got %s / %s", report.ipv4, report.ipv4_gw);
+    TEST_ASSERT(report.ipv6_addr[0] == '\0' &&
+            report.ipv6_pd_prefix[0] == '\0' && report.ipv6_dns[0] == '\0',
+        "no IPv6 fields are reported without a session",
+        "got %s / %s / %s", report.ipv6_addr, report.ipv6_pd_prefix,
+        report.ipv6_dns);
+}
+
+static void test_state_report_not_configured(void)
+{
+    ppp_state_report_t report;
+
+    printf("\nTesting ppp_build_state_report for an unconfigured subscriber:\n");
+    printf("=========================================\n\n");
+
+    pppd_ccb_reset();
+    test_ppp_ccb.phase = NOT_CONFIGURED;
+    test_ppp_ccb.user_num = 7;
+    ppp_build_state_report(&test_ppp_ccb, &report);
+
+    TEST_ASSERT(report.phase == PPP_REPORT_DISCONNECTED,
+        "an unconfigured subscriber reports the disconnected phase",
+        "got %d", (int)report.phase);
+    TEST_ASSERT(strcmp(report.user_id, "7") == 0,
+        "the subscriber id follows user_num", "got %s", report.user_id);
+}
+
+static void test_state_report_negotiating(void)
+{
+    ppp_state_report_t report;
+
+    printf("\nTesting ppp_build_state_report while the session is negotiating:\n");
+    printf("=========================================\n\n");
+
+    state_report_ccb_connected();
+    test_ppp_ccb.phase = IPCP_PHASE;
+    ppp_build_state_report(&test_ppp_ccb, &report);
+
+    TEST_ASSERT(report.phase == PPP_REPORT_CONNECTING,
+        "a session still negotiating reports the connecting phase", "got %d",
+        (int)report.phase);
+    TEST_ASSERT(report.ipv4[0] == '\0' && report.ipv6_addr[0] == '\0',
+        "no addresses are reported before the session carries data",
+        "got %s / %s", report.ipv4, report.ipv6_addr);
+}
+
 void test_pppd(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 {
     printf("\n");
@@ -578,6 +930,19 @@ void test_pppd(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_port_fwd_entry_packing();
 
     test_dp_gate_open_tracks_flag();
+
+    test_is_ppp_ipv6_need_redial();
+    test_ppp_ipv6_redial();
+
+    test_ipv6_report_strings_full_lease();
+    test_ipv6_report_strings_single_dns();
+    test_ipv6_report_strings_no_dns();
+
+    test_state_report_connected_with_ipv6();
+    test_state_report_connected_ipv6_gate_closed();
+    test_state_report_disconnected();
+    test_state_report_not_configured();
+    test_state_report_negotiating();
 
     /* Leave no armed timer behind, and restore the shared ccb slot other
      * suites expect to find untouched. */

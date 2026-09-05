@@ -1,7 +1,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-#include <pthread.h>
 #include <time.h>
 #include <rte_cycles.h>
 
@@ -16,7 +15,7 @@
 #include "dhcpd/dhcpd.h"
 #include "northbound.h"
 
-STATUS etcd_integration_init(FastRG_t *fastrg_ccb) 
+STATUS etcd_integration_init(FastRG_t *fastrg_ccb)
 {
     if (!fastrg_ccb)
         return ERROR;
@@ -53,26 +52,29 @@ STATUS etcd_integration_start(FastRG_t *fastrg_ccb)
 
     // Load existing HSI configs from etcd before starting the watcher
     FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "Loading existing HSI configs for node: %s", fastrg_ccb->node_uuid);
+    /* Safe to apply straight from this lcore: fastrg_loop and the data-plane
+     * lcores all wait on start_flag, which is set only after this returns. */
     etcd_status_t load_status = etcd_client_load_existing_configs(
         fastrg_ccb->node_uuid,
         hsi_config_changed_callback,
         user_count_changed_callback,
-        NULL, // No need to load DNS records here since they are loaded while PPPoE connections are established
+        dns_record_changed_callback, // static DNS records are applied here, like the HSI configs
         fastrg_ccb);
 
     if (load_status != ETCD_SUCCESS) {
         /* etcd unreachable at boot: operate from the persisted snapshot as the
-         * base — apply its subscriber count and HSI configs
-         * through the same callbacks the etcd load would have used. The
-         * watcher below still recovers live sync once etcd returns. */
+         * base — apply its subscriber count, HSI configs and static DNS
+         * records through the same callbacks the etcd load would have used.
+         * The watcher below still recovers live sync once etcd returns. */
         FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
             "Failed to load configs from etcd; operating from the local snapshot");
         config_snapshot_apply_all(fastrg_ccb->node_uuid,
-            hsi_config_changed_callback, user_count_changed_callback, fastrg_ccb);
+            hsi_config_changed_callback, user_count_changed_callback,
+            dns_record_changed_callback, fastrg_ccb);
     }
 
     // Start etcd watching. Watch/reconcile events are delivered to fastrg_loop
-    // via FastRG_t.etcd_event_q; only sync_request_callback is passed through.
+    // via FastRG_t.cp_q; only sync_request_callback is passed through.
     etcd_status_t status = etcd_client_start_watch(
         fastrg_ccb->node_uuid, sync_request_callback);
 
@@ -235,6 +237,16 @@ BOOL hsi_config_matches_local(const char *user_id,
         return FALSE;
     }
 
+    BOOL local_ipv6_enable = ppp_ccb->ipv6_enabled;
+    BOOL etcd_ipv6_enable = etcd_config->ipv6_enable;
+    if (local_ipv6_enable != etcd_ipv6_enable) {
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "Sync match[%s]: ipv6_enable mismatch local=%s etcd=%s",
+            user_id, local_ipv6_enable ? "true" : "false",
+            etcd_ipv6_enable ? "true" : "false");
+        return FALSE;
+    }
+
     int local_active = 0;
     for(int i=0; i<PORT_FWD_TABLE_SIZE; i++) {
         if (rte_atomic16_read(&ppp_ccb->port_fwd_table[i].is_active) == 1)
@@ -258,10 +270,10 @@ BOOL hsi_config_matches_local(const char *user_id,
         }
         /* Pairs with port_fwd_add() before comparing the published fields. */
         rte_atomic_thread_fence(rte_memory_order_acquire);
-        if (e->iport != pm->dport) {
+        if (rte_be_to_cpu_16(e->iport) != pm->dport) {
             FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
                 "Sync match[%s]: port_fwd[%u] iport mismatch local=%u etcd=%u",
-                user_id, pm->eport, e->iport, pm->dport);
+                user_id, pm->eport, rte_be_to_cpu_16(e->iport), pm->dport);
             return FALSE;
         }
         U32 etcd_dip;
@@ -307,19 +319,11 @@ BOOL dns_record_matches_local(const char *user_id,
     return TRUE;
 }
 
-/* Reconcile the live PPPoE session of a subscriber toward its desired state.
- * desire_status ("connect"/"disconnect"; empty treated as disconnect) is the only
- * source of PPPoE intent, set exclusively by the CLI/controller. Idempotent:
- * execute_pppoe_dial/hangup skip when the session is already in the target state.
- *
- * TODO(slice 13): add dial-rate limiting (stagger) so a node restart that loads
- * many desire_status=connect subscribers does not issue all PADIs at once.
- */
 /* Minimum spacing between PPPoE dials, to avoid a PADI storm when a node
  * restart loads many desire_status=connect subscribers at once (slice 13). */
 #define PPPOE_DIAL_MIN_GAP_US 50000   /* 50 ms */
 
-static void reconcile_pppoe_desire(FastRG_t *fastrg_ccb, int ccb_id, const char *desire_status)
+void reconcile_pppoe_desire(FastRG_t *fastrg_ccb, int ccb_id, const char *desire_status)
 {
     static uint64_t s_last_dial_cycles = 0;   /* control-plane thread only */
 
@@ -369,6 +373,43 @@ static void reconcile_pppoe_desire(FastRG_t *fastrg_ccb, int ccb_id, const char 
          * to do, and no deferred redial should linger. */
         rte_atomic16_set(&ppp_ccb->redial_pending, 0);
     }
+}
+
+static S64 hsi_get_subscriber_last_revision(const FastRG_t *fastrg_ccb, int ccb_id)
+{
+    if (fastrg_ccb->hsi_subscriber_last_revision == NULL || ccb_id < 0 ||
+            ccb_id >= (int)fastrg_ccb->max_user_count)
+        return 0;
+    return fastrg_ccb->hsi_subscriber_last_revision[ccb_id];
+}
+
+static void hsi_set_subscriber_last_revision(FastRG_t *fastrg_ccb, int ccb_id, S64 revision)
+{
+    if (fastrg_ccb->hsi_subscriber_last_revision == NULL || ccb_id < 0 ||
+            ccb_id >= (int)fastrg_ccb->max_user_count)
+        return;
+    fastrg_ccb->hsi_subscriber_last_revision[ccb_id] = revision;
+}
+
+BOOL is_hsi_etcd_revision_newest(S64 subscriber_last_revision, const etcd_event_t *ev)
+{
+    if (ev == NULL)
+        return FALSE;
+    /* Live watch events are always the newest keys */
+    if (ev->from_reconcile == FALSE)
+        return TRUE;
+    return (ev->revision < subscriber_last_revision) ? FALSE : TRUE;
+}
+
+BOOL is_sweep_may_remove(S64 subscriber_last_revision, S64 reconcile_revision)
+{
+    /* subscriber_last_revision = 0 means it is not from etcd(e.g. CLI config). 
+    * reconcile_revision = 0 means sweep(reconcile deletion) does not have a 
+    * revision(e.g. legacy event). Both scenarios mean the subscriber config 
+    * is removable. */
+    if (subscriber_last_revision == 0 || reconcile_revision == 0)
+        return TRUE;
+    return (subscriber_last_revision <= reconcile_revision) ? TRUE : FALSE;
 }
 
 STATUS hsi_config_changed_callback(const char *node_id, const char *user_id,
@@ -437,6 +478,7 @@ STATUS hsi_config_changed_callback(const char *node_id, const char *user_id,
                  * execute_pppoe_dial/hangup are idempotent (skip when already
                  * in the target state). */
                 reconcile_pppoe_desire(fastrg_ccb, ccb_id, config->desire_status);
+                hsi_set_subscriber_last_revision(fastrg_ccb, ccb_id, revision);
             }
             break;
 
@@ -446,6 +488,10 @@ STATUS hsi_config_changed_callback(const char *node_id, const char *user_id,
 
             // Remove HSI configuration
             ret = remove_hsi_config(fastrg_ccb, ccb_id);
+            /* Keep the delete's revision so in case older etcd event arrives
+            won't override the delete */
+            if (ret == SUCCESS)
+                hsi_set_subscriber_last_revision(fastrg_ccb, ccb_id, revision);
             break;
 
         default:
@@ -455,6 +501,67 @@ STATUS hsi_config_changed_callback(const char *node_id, const char *user_id,
     }
 
     return ret;
+}
+
+STATUS etcd_integration_republish_config_status(FastRG_t *fastrg_ccb, U32 *out_event_count)
+{
+    U32 count = 0;
+
+    if (fastrg_ccb == NULL || out_event_count == NULL)
+        return ERROR;
+    if (fastrg_ccb->is_standalone == TRUE || etcd_client_is_connected() == 0)
+        return ERROR;
+
+    for(U16 ccb_id=0; ccb_id<fastrg_ccb->user_count; ccb_id++) {
+        char              user_id[16];
+        hsi_config_full_t full;
+        etcd_status_t     st;
+        etcd_event_t     *ev;
+
+        snprintf(user_id, sizeof(user_id), "%d", ccb_id + 1);
+
+        memset(&full, 0, sizeof(full));
+        st = etcd_client_get_hsi_config(fastrg_ccb->node_uuid, user_id, &full);
+        if (st != ETCD_SUCCESS)
+            continue;   /* unconfigured, or a transient read the caller retries */
+
+        ev = fastrg_alloc_etcd_event(ETCD_EVENT_HSI);
+        if (ev == NULL) {
+            hsi_config_free_port_mappings(&full.config);
+            continue;
+        }
+        ev->action         = HSI_ACTION_UPDATE;
+        ev->revision       = full.mod_revision;
+        ev->from_reconcile = FALSE;
+        ev->from_republish = TRUE;
+        strncpy(ev->node_id, fastrg_ccb->node_uuid, sizeof(ev->node_id) - 1);
+        strncpy(ev->user_id, user_id, sizeof(ev->user_id) - 1);
+        /* Hands the port_mappings allocation to the event; the loop frees it. */
+        ev->event_data.hsi.config         = full.config;
+        ev->event_data.hsi.desire_connect =
+            (strcmp(full.config.desire_status, "connect") == 0) ? TRUE : FALSE;
+        /* The event carries a shorter field than the etcd read does, so the
+         * precision bounds the copy and leaves it NUL-terminated. */
+        snprintf(ev->event_data.hsi.resource_version,
+            sizeof(ev->event_data.hsi.resource_version), "%.*s",
+            (int)(sizeof(ev->event_data.hsi.resource_version) - 1),
+            full.resource_version);
+
+        if (fastrg_gen_etcd_event(fastrg_ccb, ev) != SUCCESS) {
+            /* Dropping one is safe: the controller's confirmation loop asks
+             * again when the row it is waiting for does not arrive. */
+            FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
+                "Config status republish: control queue full, skipping user %s", user_id);
+            etcd_event_free(ev);
+            continue;
+        }
+        count++;
+    }
+
+    FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+        "Config status republish queued %u subscriber(s) for re-check", count);
+    *out_event_count = count;
+    return SUCCESS;
 }
 
 STATUS user_count_changed_callback(const char *node_id, 
@@ -602,7 +709,8 @@ STATUS dns_record_changed_callback(const char *node_id, const char *user_id,
 
 /* Reconcile sweep: remove subscribers active locally but no longer present in
  * etcd. Runs on the control-plane loop, so reading CCB state here is race-free. */
-static void etcd_reconcile_sweep(FastRG_t *fastrg_ccb, const int *present, int count)
+static void etcd_reconcile_sweep(FastRG_t *fastrg_ccb, const int *present, int count,
+    S64 reconcile_revision)
 {
     for(int ccb_id=0; ccb_id<fastrg_ccb->user_count; ccb_id++) {
         ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
@@ -616,12 +724,18 @@ static void etcd_reconcile_sweep(FastRG_t *fastrg_ccb, const int *present, int c
                 break;
             }
         }
-        if (in_etcd == FALSE) {
-            FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
-                "Reconcile sweep: user %d active locally but absent from etcd, removing",
-                ccb_id + 1);
-            remove_hsi_config(fastrg_ccb, ccb_id);
-        }
+        if (in_etcd == TRUE)
+            continue;
+        if (is_sweep_may_remove(hsi_get_subscriber_last_revision(fastrg_ccb, ccb_id),
+                reconcile_revision) == FALSE)
+            continue;
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "Reconcile sweep: user %d active locally but absent from etcd, removing",
+            ccb_id + 1);
+        remove_hsi_config(fastrg_ccb, ccb_id);
+        /* Record the revision of the delete event so it doesn't get overridden 
+        if there is an older event comes. */
+        hsi_set_subscriber_last_revision(fastrg_ccb, ccb_id, reconcile_revision);
     }
 }
 
@@ -634,6 +748,28 @@ void etcd_event_dispatch(FastRG_t *fastrg_ccb, etcd_event_t *ev)
         case ETCD_EVENT_HSI: {
             const hsi_config_t *cfg =
                 (ev->action == HSI_ACTION_DELETE) ? NULL : &ev->event_data.hsi.config;
+            int gate_ccb_id = parse_user_id(ev->user_id, fastrg_ccb->user_count);
+
+            /* Sometimes reconcile events may arrive in delay. We must check if the event is 
+             * still relevant. */
+            if (is_hsi_etcd_revision_newest(hsi_get_subscriber_last_revision(fastrg_ccb, gate_ccb_id),
+                    ev) == FALSE) {
+                FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                    "Reconcile: HSI user %s revision %" PRId64 " is older than the applied "
+                    "%" PRId64 ", skipping stale reconcile", ev->user_id, ev->revision,
+                    hsi_get_subscriber_last_revision(fastrg_ccb, gate_ccb_id));
+                break;
+            }
+
+            /* A republish whose state already matches is confirmed as-is, so
+             * the consumer refreshes its view without recording a transition
+             * that never happened. */
+            if (ev->from_republish && cfg != NULL &&
+                    hsi_config_matches_local(ev->user_id, cfg, fastrg_ccb)) {
+                kafka_report_config_apply_result(ev->user_id, "update", TRUE, NULL, NULL,
+                    ev->event_data.hsi.resource_version, TRUE, ev->revision);
+                break;
+            }
 
             /* Reconcile events skip re-applying configs whose local state already
              * matches, but still reconcile the PPPoE session toward desire_status
@@ -652,22 +788,19 @@ void etcd_event_dispatch(FastRG_t *fastrg_ccb, etcd_event_t *ev)
             STATUS ret = hsi_config_changed_callback(ev->node_id, ev->user_id, cfg,
                 ev->action, ev->revision, fastrg_ccb);
 
-            /* Report the apply result to the controller via Kafka for live watch
-             * events only (reconcile/startup-load re-applies would be noise). The
-             * etcd failed_events/ namespace is removed. */
-            if (ev->from_reconcile == FALSE) {
-                const char *action_str = (ev->action == HSI_ACTION_CREATE) ? "create"
-                                       : (ev->action == HSI_ACTION_DELETE) ? "delete" : "update";
-                if (ret == SUCCESS) {
-                    kafka_report_config_apply(ev->user_id, action_str, TRUE, NULL, NULL,
-                        ev->event_data.hsi.resource_version);
-                } else {
-                    FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
-                        "HSI %s apply failed for user %s (reported via Kafka)", action_str, ev->user_id);
-                    kafka_report_config_apply(ev->user_id, action_str, FALSE,
-                        "apply_failed", "node failed to apply HSI config",
-                        ev->event_data.hsi.resource_version);
-                }
+            /* Reaching here means the config was really applied: matching
+             * reconciles returned above, so this reports state changes only. */
+            const char *action_str = (ev->action == HSI_ACTION_CREATE) ? "create"
+                                   : (ev->action == HSI_ACTION_DELETE) ? "delete" : "update";
+            if (ret == SUCCESS) {
+                kafka_report_config_apply_result(ev->user_id, action_str, TRUE, NULL, NULL,
+                    ev->event_data.hsi.resource_version, FALSE, ev->revision);
+            } else {
+                FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+                    "HSI %s apply failed for user %s (reported via Kafka)", action_str, ev->user_id);
+                kafka_report_config_apply_result(ev->user_id, action_str, FALSE,
+                    "apply_failed", "node failed to apply HSI config",
+                    ev->event_data.hsi.resource_version, FALSE, ev->revision);
             }
             break;
         }
@@ -689,7 +822,8 @@ void etcd_event_dispatch(FastRG_t *fastrg_ccb, etcd_event_t *ev)
             break;
 
         case ETCD_EVENT_HSI_SWEEP:
-            etcd_reconcile_sweep(fastrg_ccb, ev->event_data.sweep.present_ccb_ids, ev->event_data.sweep.count);
+            etcd_reconcile_sweep(fastrg_ccb, ev->event_data.sweep.present_ccb_ids,
+                ev->event_data.sweep.count, ev->event_data.sweep.reconcile_revision);
             break;
 
         default:

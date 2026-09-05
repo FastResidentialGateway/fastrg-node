@@ -85,6 +85,8 @@ STATUS apply_hsi_config(FastRG_t *fastrg_ccb, int ccb_id, const hsi_config_t *co
         return ERROR;
     }
 
+    BOOL ipv6_was_enabled = ppp_ccb->ipv6_enabled;
+
     U16 ori_ppp_status = rte_atomic16_exchange((volatile uint16_t *)&ppp_ccb->ppp_bool.cnt, 0);
     U16 ori_dp_status = rte_atomic16_exchange((volatile uint16_t *)&ppp_ccb->dp_start_bool.cnt, 0);
     U16 ori_dhcp_status = rte_atomic16_exchange((volatile uint16_t *)&dhcp_ccb->dhcp_bool.cnt, 0);
@@ -198,11 +200,17 @@ STATUS apply_hsi_config(FastRG_t *fastrg_ccb, int ccb_id, const hsi_config_t *co
     /* Per-subscriber TCP conntrack (SPI) enable is sourced from etcd HSI config */
     ppp_ccb->tcp_conntrack_enabled = config->tcp_conntrack_enable;
 
+    /* Per-subscriber IPv6 enable is sourced from etcd HSI config */
+    ppp_ccb->ipv6_enabled = config->ipv6_enable;
+    pppd_ipv6_dp_gate_update(ppp_ccb);
+
     FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
-        "Applied HSI config for user %d: DHCP enabled with pool %s, dns_proxy_enable=%s, tcp_conntrack_enable=%s",
+        "Applied HSI config for user %d: DHCP enabled with pool %s, dns_proxy_enable=%s, "
+        "tcp_conntrack_enable=%s, ipv6_enable=%s",
         ccb_id + 1, config->dhcp_addr_pool,
         config->dns_proxy_enable ? "true" : "false",
-        config->tcp_conntrack_enable ? "true" : "false");
+        config->tcp_conntrack_enable ? "true" : "false",
+        config->ipv6_enable ? "true" : "false");
 
     ret = SUCCESS;
     goto out;
@@ -220,6 +228,10 @@ out:
     rte_atomic16_set(&ppp_ccb->ppp_bool, ori_ppp_status);
     rte_atomic16_set(&ppp_ccb->dp_start_bool, ori_dp_status);
     rte_atomic16_set(&dhcp_ccb->dhcp_bool, ori_dhcp_status);
+
+    if (ret == SUCCESS && ppp_ccb->ipv6_enabled != ipv6_was_enabled)
+        fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_PPPoE,
+            PPPoE_CMD_IPV6_CHANGED, ccb_id, NULL);
 
     return ret;
 }
@@ -252,6 +264,7 @@ STATUS remove_hsi_config(FastRG_t *fastrg_ccb, int ccb_id)
     // Remove DHCP and PPPoE configuration
     ppp_cleanup_config_by_user(ppp_ccb, ccb_id);
     dhcp_pool_init_by_user(dhcp_ccb, 0, 0, 0, 0); //initialize with empty pool
+    dns_static_cleanup(&dhcp_ccb->dns_state.static_table);
 
     FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "Removed HSI config for user %d", ccb_id + 1);
 
@@ -282,16 +295,16 @@ STATUS execute_pppoe_dial(FastRG_t *fastrg_ccb, int ccb_id)
     }
 
     if (is_pppoe_enabled == FALSE && 
-            fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_PPPoE, PPPoE_CMD_ENABLE, ccb_id) == ERROR) {
+            fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_PPPoE, PPPoE_CMD_ENABLE, ccb_id, NULL) == ERROR) {
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Failed to generate PPPoE enable event for user %d", ccb_id + 1);
         return ERROR;
     }
 
     if (is_dhcp_enabled == FALSE && 
-            fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_DHCP, DHCP_CMD_ENABLE, ccb_id) == ERROR) {
+            fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_DHCP, DHCP_CMD_ENABLE, ccb_id, NULL) == ERROR) {
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Failed to generate DHCP enable event for user %d", ccb_id + 1);
         if (is_pppoe_enabled == FALSE && 
-                fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_PPPoE, PPPoE_CMD_DISABLE, ccb_id) == ERROR) {
+                fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_PPPoE, PPPoE_CMD_DISABLE, ccb_id, NULL) == ERROR) {
             FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Failed to generate PPPoE disable event for user %d", ccb_id + 1);
             return ERROR;
         }
@@ -322,65 +335,15 @@ STATUS execute_pppoe_hangup(FastRG_t *fastrg_ccb, int ccb_id)
     if (rte_atomic16_read(&dhcp_ccb->dhcp_bool) == 0)
         FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL, "DHCP is already disabled for user %d", ccb_id + 1);
 
-    if (fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_PPPoE, PPPoE_CMD_DISABLE, ccb_id) == ERROR) {
+    if (fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_PPPoE, PPPoE_CMD_DISABLE, ccb_id, NULL) == ERROR) {
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Failed to generate PPPoE disable event for user %d", ccb_id + 1);
         return ERROR;
     }
 
-    if (fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_DHCP, DHCP_CMD_DISABLE, ccb_id) == ERROR) {
+    if (fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_DHCP, DHCP_CMD_DISABLE, ccb_id, NULL) == ERROR) {
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Failed to generate DHCP disable event for user %d", ccb_id + 1);
         return ERROR;
     }
-
-    return SUCCESS;
-}
-
-STATUS set_snat_port_fwd(FastRG_t *fastrg_ccb, U16 ccb_id, U16 eport,
-    const char *dip, U16 iport)
-{
-    if (!is_valid_ccb_id(fastrg_ccb, ccb_id) || dip == NULL)
-        return ERROR;
-
-    ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
-    if (ppp_ccb->phase != DATA_PHASE) {
-        FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
-            "User %u has not established PPPoE connection, SNAT port forwarding will be set but not applied",
-            ccb_id + 1);
-    }
-
-    U32 dip_be;
-    if (parse_ip(dip, &dip_be) == ERROR) {
-        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
-            "Invalid destination IP: %s", dip);
-        return ERROR;
-    }
-
-    port_fwd_add(ppp_ccb->port_fwd_table, eport, dip_be, iport);
-
-    FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
-        "User %u: SNAT port forward added eport=%u -> %s:%u",
-        ccb_id + 1, eport, dip, iport);
-
-    return SUCCESS;
-}
-
-STATUS remove_snat_port_fwd(FastRG_t *fastrg_ccb, U16 ccb_id, U16 eport)
-{
-    if (!is_valid_ccb_id(fastrg_ccb, ccb_id))
-        return ERROR;
-
-    ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
-
-    if (port_fwd_remove(ppp_ccb->port_fwd_table, eport) == ERROR) {
-        FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
-            "Port forwarding rule not found for user %u, eport=%u",
-            ccb_id + 1, eport);
-        return ERROR;
-    }
-
-    FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
-        "User %u: SNAT port forward removed eport=%u",
-        ccb_id + 1, eport);
 
     return SUCCESS;
 }
@@ -431,10 +394,6 @@ STATUS reconcile_port_mapping(FastRG_t *fastrg_ccb, int ccb_id,
         }
         port_fwd_entry_t *entry = &ppp_ccb->port_fwd_table[mappings[i].eport];
         U16 is_active = rte_atomic16_read(&entry->is_active);
-        if (is_active != 0) {
-            /* Pairs with port_fwd_add() before comparing the published fields. */
-            rte_atomic_thread_fence(rte_memory_order_acquire);
-        }
         if (is_active == 0) {
             /* Entry missing locally — add it */
             port_fwd_add(ppp_ccb->port_fwd_table, mappings[i].eport, dip_be, mappings[i].dport);
@@ -442,16 +401,21 @@ STATUS reconcile_port_mapping(FastRG_t *fastrg_ccb, int ccb_id,
                 "User %u: port-mapping reconcile: added mapping for eport=%u -> %s:%u",
                 ccb_id + 1, mappings[i].eport, mappings[i].dip, mappings[i].dport);
             added++;
-        } else if (entry->dip != dip_be || entry->iport != mappings[i].dport) {
-            /* Same eport exists but dip/dport has changed — update it */
-            port_fwd_remove(ppp_ccb->port_fwd_table, mappings[i].eport);
-            port_fwd_add(ppp_ccb->port_fwd_table, mappings[i].eport, dip_be, mappings[i].dport);
-            FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
-                "User %u: port-mapping reconcile: updated mapping for eport=%u -> %s:%u",
-                ccb_id + 1, mappings[i].eport, mappings[i].dip, mappings[i].dport);
-            updated++;
+        } else {
+            /* Pairs with port_fwd_add() before comparing the published fields. */
+            rte_atomic_thread_fence(rte_memory_order_acquire);
+            if (entry->dip != dip_be ||
+                rte_be_to_cpu_16(entry->iport) != mappings[i].dport) {
+                /* Same eport exists but dip/dport has changed — update it */
+                port_fwd_remove(ppp_ccb->port_fwd_table, mappings[i].eport);
+                port_fwd_add(ppp_ccb->port_fwd_table, mappings[i].eport, dip_be, mappings[i].dport);
+                FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                    "User %u: port-mapping reconcile: updated mapping for eport=%u -> %s:%u",
+                    ccb_id + 1, mappings[i].eport, mappings[i].dip, mappings[i].dport);
+                updated++;
+            }
+            /* else: exact match, no-op */
         }
-        /* else: exact match, no-op */
     }
 
     FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,

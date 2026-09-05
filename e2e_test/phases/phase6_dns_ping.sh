@@ -3,6 +3,41 @@
 # ---------------------------------------------------------------------------
 # Phase 6 — DNS Static Record + Reverse Ping
 # ---------------------------------------------------------------------------
+
+# What one `dig +short` output says about an address: "answered" when a whole
+# line of it is that address, "silent" when no such answer came back, "err"
+# when the query could not be made at all.
+#
+# The address is matched whole-line, so 192.168.201.110 cannot read as an
+# answer of 192.168.201.11. A dig that timed out prints its own error text and
+# reads as silent, which is what a dropped query looks like.
+e2e_dns_answer_verdict() {
+    local _out="${1:-}" _ip="${2:-}"
+
+    if [[ -z "$_ip" ]]; then
+        printf 'err'
+        return 1
+    fi
+    if printf '%s\n' "$_out" | grep -qE 'command not found|No such file or directory'; then
+        printf 'err'
+        return 1
+    fi
+    if printf '%s\n' "$_out" | grep -qxF "$_ip"; then
+        printf 'answered'
+        return 0
+    fi
+    printf 'silent'
+    return 0
+}
+
+local_validation_register dns_answer_verdict e2e_dns_answer_verdict \
+    dns_answer_answered \
+    dns_answer_prefix_of_longer_ip \
+    dns_answer_timed_out \
+    dns_answer_empty_output \
+    dns_answer_dig_missing \
+    dns_answer_no_ip_asked
+
 phase6_dns_ping() {
     bold "═══════════════════════════════════════════════════════"
     bold " Phase 6 — DNS Static + Reverse Ping (Steps 16-18b)"
@@ -67,13 +102,14 @@ phase6_dns_ping() {
     info "  [18a] Querying www.fastrg.org directly from fastrg DNS (${_P6_GW}) with proxy OFF; expecting no answer..."
     _DIG_OFF=$(ssh_lan "timeout 10 dig @${_P6_GW} +time=3 +tries=1 +short www.fastrg.org 2>&1" || true)
     info "  dig output (proxy OFF): '${_DIG_OFF}'"
+    _DIG_OFF_VERDICT=$(e2e_dns_answer_verdict "$_DIG_OFF" "${WAN_IP}" || true)
 
-    if printf '%s' "$_DIG_OFF" | grep -qF "${WAN_IP}"; then
-        fail "Step 18a: DNS proxy toggle — proxy OFF" \
-            "fastrg DNS at ${_P6_GW} returned ${WAN_IP} even though DNS proxy is disabled"
-    else
+    if [[ "$_DIG_OFF_VERDICT" == "silent" ]]; then
         pass "Step 18a: DNS proxy toggle — proxy OFF" \
             "fastrg DNS returned no answer for www.fastrg.org (proxy off)"
+    else
+        fail "Step 18a: DNS proxy toggle — proxy OFF" \
+            "fastrg DNS at ${_P6_GW} verdict '${_DIG_OFF_VERDICT}' for ${WAN_IP}, want silent"
     fi
 
     # --- 18b: re-enable DNS proxy and verify ping succeeds ---

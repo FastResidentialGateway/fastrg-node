@@ -236,6 +236,54 @@ void fastrg_grpc_get_port_fwd_info(U16 user_id) {
     }
 }
 
+static std::string nat_proto_name(U32 proto) {
+    switch (proto) {
+        case IPPROTO_TCP:  return "TCP";
+        case IPPROTO_UDP:  return "UDP";
+        case IPPROTO_ICMP: return "ICMP";
+        default:           return std::to_string(proto);
+    }
+}
+
+void fastrg_grpc_get_nat_entries(U16 user_id) {
+    std::cout << "grpc client getting nat sessions" << std::endl;
+    NatEntriesRequest request;
+    NatEntriesReply reply;
+    request.set_user_id(user_id);
+    ClientContext context;
+    Status status = fastrg_client->stub_->GetNatEntries(&context, request, &reply);
+    if (status.ok()) {
+        std::cout << "NAT sessions for User " << reply.user_id()
+                  << " (" << reply.entries_size() << " entries):" << std::endl;
+        if (reply.entries_size() == 0) {
+            std::cout << "  (no entries)" << std::endl;
+        } else {
+            std::cout << "  " << std::left
+                      << std::setw(8)  << "Proto"
+                      << std::setw(24) << "LAN Source"
+                      << std::setw(24) << "WAN Destination"
+                      << std::setw(12) << "NAT Port"
+                      << std::setw(12) << "TCP State"
+                      << std::endl;
+            std::cout << "  " << std::string(80, '-') << std::endl;
+            for(int i=0; i<reply.entries_size(); i++) {
+                const NatEntryInfo& entry = reply.entries(i);
+                std::cout << "  " << std::left
+                          << std::setw(8)  << nat_proto_name(entry.proto())
+                          << std::setw(24) << (entry.src_ip() + ":" + std::to_string(entry.src_port()))
+                          << std::setw(24) << (entry.dst_ip() + ":" + std::to_string(entry.dst_port()))
+                          << std::setw(12) << entry.nat_port()
+                          << std::setw(12) << entry.tcp_state()
+                          << std::endl;
+            }
+        }
+    } else {
+        std::cout << "grpc client get nat sessions failed: " << std::endl;
+        std::cout << "  Error code: " << status.error_code() << std::endl;
+        std::cout << "  Error message: " << status.error_message() << std::endl;
+    }
+}
+
 void fastrg_grpc_get_arp_table(U16 user_id, U32 max_count) {
     ArpTableRequest request;
     ArpTableReply reply;
@@ -487,6 +535,15 @@ void fastrg_grpc_get_hsi_info() {
                     std::cout << ", ";
             }
             std::cout << std::endl;
+            std::cout << "    IPv6 address: " << hsi_info.ipv6_addr() << std::endl;
+            std::cout << "    IPv6 PD prefix: " << hsi_info.ipv6_pd_prefix() << std::endl;
+            std::cout << "    IPv6 DNS servers: ";
+            for(int j=0; j<hsi_info.ipv6_dnss_size(); j++) {
+                std::cout << hsi_info.ipv6_dnss(j);
+                if (j < hsi_info.ipv6_dnss_size() - 1)
+                    std::cout << ", ";
+            }
+            std::cout << std::endl;
         }
     } else {
         std::cout << "grpc client get hsi info failed: " << std::endl;
@@ -694,6 +751,21 @@ void fastrg_grpc_set_tcp_conntrack(U16 user_id, bool enable) {
                   << " for user " << user_id << std::endl;
     } else {
         std::cout << "Failed to set tcp_conntrack: " << status.error_message() << std::endl;
+    }
+}
+
+void fastrg_grpc_set_ipv6(U16 user_id, bool enable) {
+    SetIpv6Request request;
+    SetIpv6Reply reply;
+    request.set_user_id(user_id);
+    request.set_enable(enable);
+    ClientContext context;
+    Status status = fastrg_client->stub_->SetIpv6(&context, request, &reply);
+    if (status.ok()) {
+        std::cout << "ipv6 " << (enable ? "enabled" : "disabled")
+                  << " for user " << user_id << std::endl;
+    } else {
+        std::cout << "Failed to set ipv6: " << status.error_message() << std::endl;
     }
 }
 

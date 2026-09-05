@@ -194,3 +194,15 @@ void cli_dispatch_set_tcp_conntrack(U16 user_id, bool enable)
     }
     fastrg_grpc_set_tcp_conntrack(user_id, enable);
 }
+
+void cli_dispatch_set_ipv6(U16 user_id, bool enable)
+{
+    int stop = 0;
+    if (controller_ready(&stop) != 0) {
+        if (after_controller(cli_controller_set_ipv6(user_id, enable ? 1 : 0), "set ipv6"))
+            return;
+    } else if (stop != 0) {
+        return;
+    }
+    fastrg_grpc_set_ipv6(user_id, enable);
+}

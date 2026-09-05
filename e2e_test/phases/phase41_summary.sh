@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # ---------------------------------------------------------------------------
-# Phase 35 — Summary
+# Phase 41 — Summary
 # ---------------------------------------------------------------------------
-phase35_summary() {
+phase41_summary() {
     local total=${#STEP_NAMES[@]}
     local pass_count=0 fail_count=0 skip_count=0
 
@@ -42,6 +42,10 @@ phase35_summary() {
     printf "${RED}Fail: %d${NC}   " "$fail_count"
     printf "${YELLOW}Skip: %d${NC}\n" "$skip_count"
     printf "\n"
+
+    # How long the run and each of its phases took. Printed before the RESULT
+    # line so that line stays the last thing on screen.
+    e2e_print_phase_timings
 
     if [[ $fail_count -gt 0 ]]; then
         bold "  RESULT: ${RED}FAILED${NC} (${fail_count} step(s) failed)"

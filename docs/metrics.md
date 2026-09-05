@@ -59,7 +59,8 @@ Prometheus also adds `instance` (the scraped `host:port`) and `job` automaticall
 | `fastrg_node_start_time_seconds` | gauge | `node_uuid` | Unix time (seconds) the process started; changes on restart. |
 | `fastrg_node_restart_total` | counter | `node_uuid` | Cumulative process start count, persisted across restarts (`/var/lib/fastrg/restart_count`) — crashloop detection. |
 | `fastrg_node_snapshot_persist_ok` | gauge | `node_uuid` | `1` when the last config snapshot persist to disk succeeded (also `1` at boot before any persist happened), `0` while the last persist attempt failed — surfaces disk-full snapshot failures on the dashboard. |
-| `fastrg_node_max_user_count` | gauge | `node_uuid` | Maximum subscriber capacity computed at startup from free hugepage memory after a 512 MiB reserve, using 175 MiB per subscriber. |
+| `fastrg_node_max_user_count` | gauge | `node_uuid` | Maximum subscriber capacity computed at startup from free hugepage memory after a 512 MiB reserve, using the measured per-subscriber cost. |
+| `fastrg_node_subscriber_cost_bytes` | gauge | `node_uuid` | Per subscriber hugepage usage, measured at startup by building one subscriber and adding its share of the memory pools; free hugepage memory divided by this gives max_user_count. |
 
 ```promql
 increase(fastrg_node_restart_total[15m]) > 2      # crashlooping
@@ -130,6 +131,26 @@ Labels: `node_uuid`, `nic_index`. Traffic that did not map to a known subscriber
 | `fastrg_node_unknown_user_dropped_packets_total` | gauge |
 | `fastrg_node_unknown_user_dropped_bytes_total` | gauge |
 
+### TX queue shortfalls
+
+Labels: `node_uuid`, `nic_index`, `queue`.
+
+A shortfall is `rte_eth_tx_burst()` taking fewer packets than it was offered;
+the dropped packets are already counted in the per-subscriber dropped packet counters.
+Per-queue stats are needed so that when a single lcore gets stuck, it can be located.
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `fastrg_node_tx_queue_full_total` | gauge | Packet count refused by the NIC queue. |
+| `fastrg_node_tx_queue_burst_short_total` | gauge | Count of `rte_eth_tx_burst()` calls that did not send all packets. |
+| `fastrg_node_tx_handoff_dropped_total` | gauge | Packet count dropped during handoff between lcores. |
+
+A handoff can drop packets when the ring is full; this keeps a slow consumer
+from stalling the producer.
+
+When `rte_eth_tx_burst()` leaves packets unsent, only the first occurrence on
+each queue writes an INFO log line; this avoids log flooding.
+
 ## 5. PPPoE sessions
 
 ### Phase tallies — labels: `node_uuid`
@@ -162,6 +183,27 @@ Labels: `node_uuid`, `nic_index`. Traffic that did not map to a known subscriber
 | `fastrg_node_per_user_nat_alloc_fail_total` | gauge | NAT learning failures: ports exhausted, entry pool dry or hash full. A non-zero rate means new flows are being dropped. Resets on subscriber re-init as well as node restart. |
 | `fastrg_node_per_user_nat_gc_reclaimed_total` | gauge | Expired NAT mappings reclaimed by the amortized data-lcore GC. Resets on subscriber re-init as well as node restart. |
 
+### Per-subscriber IPv6 firewall pool health — labels: `node_uuid`, `user_id`
+
+IPv6 is routed, not NAT translated, so a stateful session table supplies the
+protection NAT gives IPv4 for free: an inbound packet is denied unless it
+answers a session a LAN host opened. Each subscriber owns one, holding up to
+65536 sessions; the five `_total` rows reset on subscriber re-init as well as
+node restart.
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `fastrg_node_per_user_ipv6_firewall_entries_used` | gauge | Live IPv6 firewall sessions held by this subscriber. |
+| `fastrg_node_per_user_ipv6_firewall_alloc_fail_total` | gauge | Sessions that could not be opened: pool dry or hash full. The packet is forwarded anyway, so only its reply is denied. |
+| `fastrg_node_per_user_ipv6_firewall_gc_reclaimed_total` | gauge | Expired sessions removed by the periodic cleanup. |
+| `fastrg_node_per_user_ipv6_firewall_evicted_total` | gauge | Live sessions evicted, least recently used first, to make room for a new one. |
+| `fastrg_node_per_user_ipv6_firewall_icmp6_err_passed_total` | gauge | ICMPv6 error notifications (e.g. "packet too big") from the WAN, original packet is in ipv6 firewall session table. |
+| `fastrg_node_per_user_ipv6_firewall_icmp6_err_dropped_total` | gauge | ICMPv6 error notifications from the WAN, original packet is not in ipv6 firewall session table or is malformed. |
+
+A non-zero eviction rate means the subscriber holds more concurrent sessions
+than the pool fits. Every packet the firewall denies is counted in
+`fastrg_node_per_user_dropped_packets_total` for the WAN port.
+
 ## 6. DHCP
 
 ### Per-subscriber leases — labels: `node_uuid`, `user_id` (emitted only for configured pools)
@@ -169,7 +211,7 @@ Labels: `node_uuid`, `nic_index`. Traffic that did not map to a known subscriber
 | Metric | Type | Description |
 |--------|------|-------------|
 | `fastrg_node_per_user_dhcp_cur_lease_count` | gauge | Currently leased addresses in the subscriber's pool. |
-| `fastrg_node_per_user_dhcp_max_lease_count` | gauge | Pool capacity (number of addresses). |
+| `fastrg_node_per_user_dhcp_max_lease_count` | gauge | Leasable pool capacity (addresses, excluding .0/.255). |
 
 ### Server status tallies — labels: `node_uuid`
 

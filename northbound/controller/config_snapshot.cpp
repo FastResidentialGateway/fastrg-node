@@ -278,6 +278,11 @@ void config_snapshot_watch_update(snapshot_kind_t kind, const char *user_id,
             key.c_str());
         return;
     }
+    // Reconcile mirrors every key each tick; when the value (or the deleted
+    // state) is already what we hold, skip the file rewrite.
+    if (it != g_entries.end() && it->second.exists == (value_json != nullptr) &&
+            it->second.value == (value_json ? value_json : ""))
+        return;
     Entry &e = g_entries[key];
     e.value = value_json ? value_json : "";
     e.exists = (value_json != nullptr);
@@ -565,6 +570,8 @@ static STATUS field_merge_impl(const char *kind, const char *current_json,
         cfg["desire_status"] = value;
     } else if (strcmp(kind, SNAPSHOT_FIELD_KIND_TCP_CONNTRACK) == 0) {
         cfg["tcp_conntrack_enable"] = (strcmp(value, "true") == 0);
+    } else if (strcmp(kind, SNAPSHOT_FIELD_KIND_IPV6) == 0) {
+        cfg["ipv6_enable"] = (strcmp(value, "true") == 0);
     } else if (strcmp(kind, SNAPSHOT_FIELD_KIND_SNAT_UPSERT) == 0) {
         Json::Value entry;
         if (!reader.parse(value, entry) || !entry.isMember("eport"))
@@ -616,8 +623,9 @@ struct SnapshotApplyCtx {
     const char *node_id;
     hsi_config_callback_t hsi_cb;
     user_count_changed_callback_t count_cb;
+    dns_record_callback_t dns_cb;
     void *user_data;
-    bool count_pass;
+    snapshot_kind_t pass;   // family this sweep applies; other kinds are skipped
 };
 
 static void snapshot_apply_cb(snapshot_kind_t kind, const char *user_id,
@@ -627,8 +635,11 @@ static void snapshot_apply_cb(snapshot_kind_t kind, const char *user_id,
     (void)resource_version; (void)edited_at; (void)edit_summary; (void)edit_seq;
     SnapshotApplyCtx *ctx = (SnapshotApplyCtx *)user_data;
 
-    if (ctx->count_pass) {
-        if (kind != SNAPSHOT_KIND_COUNT || !ctx->count_cb)
+    if (kind != ctx->pass)
+        return;
+
+    if (kind == SNAPSHOT_KIND_COUNT) {
+        if (!ctx->count_cb)
             return;
         Json::Value root;
         Json::Reader reader;
@@ -637,32 +648,60 @@ static void snapshot_apply_cb(snapshot_kind_t kind, const char *user_id,
             return;
         user_count_config_t cfg;
         cfg.user_count = atoi(root["subscriber_count"].asString().c_str());
+        /* The snapshot only keeps the controller's resourceVersion,
+         * which is not an etcd ModRevision so we use 0 here */
         if (cfg.user_count > 0)
             ctx->count_cb(ctx->node_id, &cfg, HSI_ACTION_UPDATE, 0, ctx->user_data);
         return;
     }
 
-    if (kind != SNAPSHOT_KIND_HSI || !ctx->hsi_cb)
+    if (kind == SNAPSHOT_KIND_HSI) {
+        if (!ctx->hsi_cb)
+            return;
+        hsi_config_t cfg;
+        memset(&cfg, 0, sizeof(cfg));
+        if (etcd_client_parse_hsi_config(value_json, &cfg, NULL) != SUCCESS)
+            return;
+        /* The snapshot only keeps the controller's resourceVersion,
+         * which is not an etcd ModRevision so we use 0 here */
+        ctx->hsi_cb(ctx->node_id, user_id, &cfg, HSI_ACTION_UPDATE, 0, ctx->user_data);
+        hsi_config_free_port_mappings(&cfg);
         return;
-    hsi_config_t cfg;
-    memset(&cfg, 0, sizeof(cfg));
-    if (etcd_client_parse_hsi_config(value_json, &cfg, NULL) != SUCCESS)
+    }
+
+    if (!ctx->dns_cb)
         return;
-    ctx->hsi_cb(ctx->node_id, user_id, &cfg, HSI_ACTION_UPDATE, 0, ctx->user_data);
-    hsi_config_free_port_mappings(&cfg);
+    Json::Value records;
+    if (!parse_dns_records_envelope(value_json, &records))
+        return;
+    for (const Json::Value &entry : records) {
+        dns_record_config_t rec;
+        if (!parse_dns_record_from_json(entry, &rec))
+            continue;
+        /* The snapshot only keeps the controller's resourceVersion,
+         * which is not an etcd ModRevision so we use 0 here */
+        ctx->dns_cb(ctx->node_id, user_id, &rec, HSI_ACTION_UPDATE, 0,
+            ctx->user_data);
+    }
 }
 
 void config_snapshot_apply_all(const char *node_id,
     hsi_config_callback_t hsi_callback,
     user_count_changed_callback_t user_count_callback,
+    dns_record_callback_t dns_callback,
     void *user_data)
 {
     if (!node_id)
         return;
-    SnapshotApplyCtx ctx{node_id, hsi_callback, user_count_callback, user_data, true};
-    config_snapshot_foreach(snapshot_apply_cb, &ctx);   // count first
-    ctx.count_pass = false;
-    config_snapshot_foreach(snapshot_apply_cb, &ctx);   // then HSI configs
+    /* Count bounds the valid subscriber ids and HSI creates the subscriber, so
+     * both must land before the DNS records that attach to it. */
+    SnapshotApplyCtx ctx{node_id, hsi_callback, user_count_callback, dns_callback,
+        user_data, SNAPSHOT_KIND_COUNT};
+    config_snapshot_foreach(snapshot_apply_cb, &ctx);
+    ctx.pass = SNAPSHOT_KIND_HSI;
+    config_snapshot_foreach(snapshot_apply_cb, &ctx);
+    ctx.pass = SNAPSHOT_KIND_DNS;
+    config_snapshot_foreach(snapshot_apply_cb, &ctx);
 }
 
 } // extern "C"

@@ -9,7 +9,9 @@
 #ifndef _PPPD_H_
 #define _PPPD_H_
 
+#include <assert.h>
 #include <stdatomic.h>
+#include <netinet/in.h>
 
 #include <common.h>
 
@@ -21,7 +23,10 @@
 
 #include "header.h"
 #include "../fastrg.h"
+#include "../init.h"
 #include "../mac_table.h"
+
+struct nd6_table;
 
 #define PPP_MSG_BUF_LEN	        128
 
@@ -32,10 +37,19 @@
  * was a multiple of 4 and hashing quality suffered 4x clustering. */
 #define MAX_NAT_ENTRIES         (TOTAL_SOCK_PORT << 2)
 #define PORT_FWD_TABLE_SIZE     TOTAL_SOCK_PORT  /* direct-indexed by eport (0..65535) */
+/* IPv6 firewall sessions preallocated per subscriber. */
+#define IPV6_FIREWALL_MAX_ENTRIES     TOTAL_SOCK_PORT
 
 #define PPPoE_CMD_DISABLE       0
 #define PPPoE_CMD_FORCE_DISABLE 1
 #define PPPoE_CMD_ENABLE        2
+/* ipv6_enable changed on a live session: reconnect so the new value takes effect. */
+#define PPPoE_CMD_IPV6_CHANGED  3
+
+/* Buffer sizes for pppd_ipv6_report_strings(). */
+#define PPPD_IPV6_ADDR_STRLEN   INET6_ADDRSTRLEN            /* "fe80::1"          */
+#define PPPD_IPV6_PREFIX_STRLEN (INET6_ADDRSTRLEN + 4)      /* address + "/128"   */
+#define PPPD_IPV6_DNS_STRLEN    (2 * INET6_ADDRSTRLEN + 2)  /* two servers + ','  */
 
 /**
  * @brief SNAT port forwarding entry (direct-indexed by eport)
@@ -50,7 +64,7 @@
  */
 typedef struct port_fwd_entry {
     U32            dip;         /**< destination IP on LAN (network byte order) */
-    U16            iport;       /**< internal port on LAN (host byte order) */
+    U16            iport;       /**< internal port on LAN (network byte order) */
     rte_atomic16_t is_active;   /**< 1 = active, 0 = free */
     rte_atomic64_t hit_count;   /**< number of packets matched by this rule */
 } port_fwd_entry_t;
@@ -59,11 +73,12 @@ typedef struct port_fwd_entry {
  */
 typedef struct addr_table {
     struct rte_ether_addr mac_addr;
-    U32                   src_ip; // original src ip from LAN user (e.g. 192.168.0.100)
-    U32                   dst_ip; // dst ip where LAN user wants to visit (e.g. public ip)
-    U16                   src_port; // original src port from LAN user
-    U16                   dst_port; // dst port where LAN user wants to visit
-    U16                   nat_port;
+    U32                   src_ip; // original src ip from LAN user (e.g. 192.168.0.100), network order
+    U32                   dst_ip; // dst ip where LAN user wants to visit (e.g. public ip), network order
+    U16                   src_port; // original src port from LAN user, network order
+    U16                   dst_port; // dst port where LAN user wants to visit, network order(no order for ICMP type field)
+    U16                   nat_port; // translated port, network order
+    U8                    proto;     // IPPROTO_TCP / IPPROTO_UDP / IPPROTO_ICMP of the learned flow
     U8                    tcp_state; // TCP conntrack state (tcp_conntrack_state_t), 0 = NONE
     U8                    tcp_fin_flags; // bitmask: bit0 = LAN FIN, bit1 = WAN FIN
     rte_atomic16_t        is_fill;   // is this entry filled or not
@@ -80,6 +95,46 @@ typedef struct addr_table {
     U16                   max_win_lan;     // last advertised window from LAN (no scaling)
     U16                   max_win_wan;     // same from WAN
 }__rte_cache_aligned addr_table_t;
+
+/**
+ * @brief IPv6 firewall session key, always written LAN side first so both
+ *        directions of a flow share one hash entry.
+ *
+ *        rte_hash compares raw key bytes, padding included, so every builder
+ *        must zero the whole struct before filling it.
+ */
+typedef struct ipv6_firewall_key {
+    U8  lan_addr[16];    /* subscriber-side address */
+    U8  remote_addr[16]; /* internet-side address */
+    U16 lan_port;        /* TCP/UDP: LAN port; ICMPv6 echo: identifier */
+    U16 remote_port;     /* TCP/UDP: remote port; ICMPv6 echo: 0 */
+    U8  proto;           /* IPPROTO_TCP / IPPROTO_UDP / IPPROTO_ICMPV6 */
+    U8  pad[3];          /* explicitly zeroed, part of the compared bytes */
+} ipv6_firewall_key_t;
+
+/**
+ * @brief One IPv6 firewall session, exactly one cache line.
+ *
+ *        The expiry deadline and the LRU recency stamp live in the ppp_ccb
+ *        structure-of-arrays instead of here.
+ */
+typedef struct ipv6_firewall_entry {
+    ipv6_firewall_key_t  key;             /* also the delete key on GC / eviction */
+    rte_atomic16_t is_fill;         /* IPV6_FIREWALL_ENTRY_FREE / _READY */
+    U8             tcp_state;       /* tcp_conntrack_state_t; NONE for non-TCP */
+    U8             tcp_fin_flags;   /* TCP_FIN_FLAG_LAN / _WAN bitmask */
+    /* TCP seq/ack window tracking (host order), same meaning as the equally
+     * named addr_table_t fields. */
+    U32            max_seq_end_lan; /* highest (seq + payload + SYN/FIN) from LAN */
+    U32            max_seq_end_wan; /* same from WAN */
+    U32            max_ack_lan;     /* highest ack from LAN */
+    U32            max_ack_wan;     /* same from WAN */
+    U16            max_win_lan;     /* last advertised window from LAN (no scaling) */
+    U16            max_win_wan;     /* same from WAN */
+}__rte_cache_aligned ipv6_firewall_entry_t;
+
+static_assert(sizeof(ipv6_firewall_entry_t) == RTE_CACHE_LINE_SIZE,
+    "ipv6_firewall_entry_t must stay one cache line");
 
 /* Coalescing threshold for expire refreshes.  NAT/conntrack timeouts are
  * seconds-granular, so a refresh that would move the deadline by less than
@@ -137,18 +192,19 @@ typedef struct {
     struct rte_ether_hdr  eth_hdr;
     vlan_header_t         vlan_header __rte_aligned(sizeof(vlan_header_t));
     pppoe_header_t        pppoe_header __rte_aligned(sizeof(vlan_header_t));
-    ppp_phase_t           ppp_phase[2];      /* store lcp and ipcp info, index 0 means lcp, index 1 means ipcp */
+    control_protocol_t    control_protocol[PPP_CP_COUNT]; /* per-control-protocol negotiation automata;
+                                                           * connection stage is stored in phase */
     pppoe_phase_t         pppoe_phase;       /* store pppoe info */
-    U8                    cp:1;              /* cp is "control protocol", means we need to determine cp is LCP or NCP after parsing packet */
-    U8                    phase:7;           /* pppoe connection phase */
+    U8                    cp_id;             /* current control protocol: PPP_CP_* */
+    U8                    phase;             /* pppoe connection phase */
     U16                   session_id;        /* pppoe session id */
     struct rte_ether_addr PPP_dst_mac;       /* pppoe server mac addr */
     U32                   hsi_ipv4;          /* ip addr pppoe server assign to pppoe client */
     U32                   hsi_ipv4_gw;       /* ip addr gateway pppoe server assign to pppoe client */
     U32                   hsi_primary_dns;   /* 1st dns addr pppoe server assign to pppoe client */
     U32                   hsi_secondary_dns; /* 2nd dns addr pppoe server assign to pppoe client */
-    U8                    identifier[2];     /* per-CP (LCP=0/IPCP=1) Configure-Request id; auth frames reuse [0] */
-    BOOL                  config_request_pending[2]; /* outstanding LCP/IPCP Configure-Request */
+    U8                    identifier[PPP_CP_COUNT]; /* per-CP Configure-Request id; auth frames reuse LCP [0] */
+    BOOL                  config_request_pending[PPP_CP_COUNT]; /* outstanding per-CP Configure-Request */
     U32                   magic_num;         /* ppp pkt magic number, in network order */
     U16                   mru;               /* MRU we propose in LCP Configure-Request, host order; 0 = default */
     BOOL                  lcp_auth_rejected; /* peer Configure-Rejected our authentication-protocol option */
@@ -198,6 +254,53 @@ typedef struct {
      * by data-plane cores. 1-byte aligned store/load is atomic on x86 (TSO);
      * volatile blocks the compiler from hoisting/caching the load. */
     volatile BOOL         tcp_conntrack_enabled;
+    /* Per-subscriber IPv6 enable, written only by the control plane and
+     * folded into ipv6_dp_bool by pppd_ipv6_dp_gate_update(). Same 1-byte
+     * atomicity rule as tcp_conntrack_enabled above. */
+    volatile BOOL         ipv6_enabled;
+    /* ---- IPv6 stateful firewall (per subscriber, mirrors the NAT block) ---- */
+    ipv6_firewall_entry_t ipv6_firewall_table[IPV6_FIREWALL_MAX_ENTRIES]; /* session pool (slots referenced by the hash) */
+    U64                   ipv6_firewall_expire_at[IPV6_FIREWALL_MAX_ENTRIES];  /* SoA expiry deadline, parallel to the pool; 0 = slot free */
+    U64                   ipv6_firewall_last_used[IPV6_FIREWALL_MAX_ENTRIES];  /* SoA last-hit stamp for LRU eviction; 0 = slot free */
+    U64                   ipv6_firewall_enospc;          /* sessions not created: pool dry or hash full (RELAXED add) */
+    U64                   ipv6_firewall_gc_reclaimed;    /* sessions reclaimed by GC scans (RELAXED add) */
+    U64                   ipv6_firewall_evicted;         /* sessions dropped by LRU to make room (RELAXED add) */
+    U64                   ipv6_firewall_icmp6_err_passed;  /* inbound ICMPv6 errors matching a live session (RELAXED add) */
+    U64                   ipv6_firewall_icmp6_err_dropped; /* inbound ICMPv6 errors matching nothing (RELAXED add) */
+    struct rte_hash       *ipv6_firewall_hash;      /* ipv6_firewall_key_t -> pool slot idx, both directions;
+                                               * owns slot reclaim via its RCU dq callback */
+    struct rte_ring       *ipv6_firewall_free_ring; /* free-list of pool slot indices (MPMC) */
+    U32                   ipv6_firewall_gc_counter; /* amortized expired-slot scan position (approximate, racy by design) */
+    rte_spinlock_t        ipv6_firewall_insert_lock; /* serializes miss-path inserts and LRU eviction for this subscriber */
+    struct rte_timer      ppp_ipv6cp;         /* IPV6CP retransmit timer */
+    U8                    ipv6cp_local_iid[8]; /* negotiated local interface identifier */
+    U8                    ipv6cp_peer_iid[8];  /* negotiated peer interface identifier */
+    /* IPV6CP readiness, written only by the control plane. */
+    volatile BOOL         ipv6cp_up;
+    /* DHCPv6-PD client state, owned by the control plane. */
+    U8                    dhcp6_state;
+    U8                    dhcp6_xid[3];
+    U8                    dhcp6_server_duid[130];
+    U16                   dhcp6_server_duid_len;
+    U32                   dhcp6_t1;
+    U8                    dhcp6_retry;
+    struct rte_timer      dhcp6_timer;
+    U8                    hsi_ipv6_pd_prefix[16];
+    U8                    hsi_ipv6_pd_plen;
+    U8                    hsi_ipv6_lan_prefix[16];
+    U8                    hsi_ipv6_dns[2][16];
+    volatile BOOL         dhcp6_pd_ready;
+    /* Data-plane IPv6 forwarding gate: the AND of ipv6_enabled, ipv6cp_up and
+     * dhcp6_pd_ready, recomputed by the control plane (its only writer) via
+     * pppd_ipv6_dp_gate_update(). Independent of dp_start_bool. */
+    rte_atomic16_t        ipv6_dp_bool;
+    /* Cycle stamp of the last WAN->LAN neighbor-cache miss handed to the
+     * control plane. Data lcores must claim a new stamp with a relaxed
+     * compare-exchange before escalating. */
+    U64                   nd6_miss_last_cycles;
+    struct nd6_table      *nd6_table;       /* single-writer IPv6 neighbor cache */
+    struct rte_timer      ra_timer;         /* periodic LAN router advertisement for IPv6 */
+    U64                   last_rs_ra_cycles; /* last RS-triggered RA, for rate limiting in IPv6 */
 }__rte_cache_aligned ppp_ccb_t;
 
 /**
@@ -222,6 +325,189 @@ static __always_inline BOOL pppd_dp_gate_open(const ppp_ccb_t *ppp_ccb)
     rte_smp_rmb();
     return TRUE;
 }
+
+static inline struct rte_timer *ppp_cp_timer(ppp_ccb_t *ppp_ccb)
+{
+    return ppp_ccb->cp_id == PPP_CP_IPV6CP ? &ppp_ccb->ppp_ipv6cp : &ppp_ccb->ppp;
+}
+
+/**
+ * @fn pppd_ipv6_dp_gate_update
+ *
+ * @brief Recompute a subscriber's IPv6 data-plane gate from ipv6_enabled,
+ *        ipv6cp_up and dhcp6_pd_ready.
+ *
+ *        Caller must be the control plane, and must call after every write to
+ *        any of those three flags.
+ *
+ *        Opening publishes a write barrier first, so a data lcore observing
+ *        the gate open also observes the fields written before the call;
+ *        closing needs no barrier.
+ *
+ * @param ppp_ccb
+ *      Subscriber control block (NULL tolerated)
+ * @return
+ *      void
+ */
+void pppd_ipv6_dp_gate_update(ppp_ccb_t *ppp_ccb);
+
+/**
+ * @fn is_ppp_ipv6_need_redial
+ *
+ * @brief Decide whether a PPPoE session needs to be redialed because of a 
+ *        change to ipv6_enable.
+ *
+ * @param ipv6_changed
+ *      TRUE when ipv6_enable actually moved
+ * @param phase
+ *      Subscriber's PPPoE connection phase
+ * @param ppp_processing
+ *      TRUE while the session is already tearing down
+ * @return
+ *      TRUE when ipv6_enable is changed and the session is connected, FALSE otherwise
+ */
+BOOL is_ppp_ipv6_need_redial(BOOL ipv6_changed, U8 phase,
+    BOOL ppp_processing);
+
+/**
+ * @fn ppp_ipv6_redial
+ *
+ * @brief Redial the session so ipv6_enable is renegotiated.
+ *
+ * @param ppp_ccb
+ *      Subscriber control block
+ * @return
+ *      void
+ */
+void ppp_ipv6_redial(ppp_ccb_t *ppp_ccb);
+
+/**
+ * @fn pppd_ipv6_report_strings
+ *
+ * @brief Format a subscriber's IPv6 session state for northbound reporting.
+ *
+ *        Every output buffer is written; one with nothing to report is left
+ *        as an empty string.
+ *
+ *        Caller must decide whether the fields are ready to be read: the
+ *        control plane reads the three IPv6 flags in program order, other
+ *        threads use pppd_ipv6_dp_gate_open().
+ *
+ * @param ppp_ccb
+ *      Subscriber control block (NULL tolerated)
+ * @param addr_str
+ *      Receives the WAN link-local address built from the IPV6CP interface
+ *      identifier, e.g. "fe80::1"
+ * @param addr_len
+ *      Size of addr_str, at least PPPD_IPV6_ADDR_STRLEN
+ * @param prefix_str
+ *      Receives the whole delegated prefix in CIDR form, e.g.
+ *      "2001:db8:ab00::/56"
+ * @param prefix_len
+ *      Size of prefix_str, at least PPPD_IPV6_PREFIX_STRLEN
+ * @param dns_str
+ *      Receives the DNS servers separated by ',' without spaces; unused
+ *      server slots are skipped
+ * @param dns_len
+ *      Size of dns_str, at least PPPD_IPV6_DNS_STRLEN
+ * @return
+ *      void
+ */
+void pppd_ipv6_report_strings(const ppp_ccb_t *ppp_ccb, char *addr_str,
+    U32 addr_len, char *prefix_str, U32 prefix_len, char *dns_str,
+    U32 dns_len);
+
+/**
+ * @fn pppd_ipv6_dp_gate_open
+ *
+ * @brief Report whether IPv6 forwarding is open, ordering the read against
+ *        the fields the control plane published before opening the gate.
+ *
+ * @param ppp_ccb
+ *      Subscriber control block
+ * @return
+ *      TRUE when IPv6 forwarding fields may be read, FALSE otherwise
+ */
+static __always_inline BOOL pppd_ipv6_dp_gate_open(const ppp_ccb_t *ppp_ccb)
+{
+    if (rte_atomic16_read(&ppp_ccb->ipv6_dp_bool) == (S16)0)
+        return FALSE;
+    /* Pairs with the rte_smp_wmb() in pppd_ipv6_dp_gate_update(). */
+    rte_smp_rmb();
+    return TRUE;
+}
+
+typedef enum {
+    PPP_REPORT_CONNECTED = 1,
+    PPP_REPORT_CONNECTING,
+    PPP_REPORT_DISCONNECTED
+} ppp_report_phase_t;
+
+/** One subscriber's PPPoE state, ready to be reported northbound. A field with
+ *  nothing to report is an empty string. */
+typedef struct {
+    ppp_report_phase_t phase;
+    char user_id[8];
+    char ipv4[INET_ADDRSTRLEN];
+    char ipv4_gw[INET_ADDRSTRLEN];
+    char ipv6_addr[PPPD_IPV6_ADDR_STRLEN];
+    char ipv6_pd_prefix[PPPD_IPV6_PREFIX_STRLEN];
+    char ipv6_dns[PPPD_IPV6_DNS_STRLEN];
+} ppp_state_report_t;
+
+/**
+ * @fn ppp_build_state_report
+ *
+ * @brief fill a state report from the subscriber's current control block: the
+ *      PPPoE phase, and for a session carrying data the assigned IPv4 address
+ *      and gateway plus the IPv6 address, delegated prefix and DNS servers.
+ *      Reads the IPv6 fields only while the IPv6 is enabled.
+ *
+ * @param ppp_ccb
+ *      PPP control block pointer
+ * @param report
+ *      receives the report; every field is written
+ *
+ * @return
+ *      void
+ */
+void ppp_build_state_report(const ppp_ccb_t *ppp_ccb, ppp_state_report_t *report);
+
+/**
+ * @fn ppp_report_connection_status
+ *
+ * @brief report the subscriber's current PPPoE state to the controller over
+ *      Kafka: build the report from the control block, then send it. The
+ *      controller overwrites its whole row per event, so the event always
+ *      carries the complete state rather than a partial one.
+ *
+ *      Call it from the control plane whenever the reportable state changes,
+ *      and from the northbound path to restate what the subscriber looks like
+ *      right now.
+ *
+ * @param ppp_ccb
+ *      PPP control block pointer
+ *
+ * @return
+ *      SUCCESS when the event was handed to the Kafka producer, ERROR in
+ *      standalone mode (no controller to report to) or on a bad argument
+ */
+STATUS ppp_report_connection_status(ppp_ccb_t *ppp_ccb);
+
+/**
+ * @fn ppp_report_all_connection_status
+ *
+ * @brief report every configured subscriber's current PPPoE state to the
+ *      controller, one event each.
+ *
+ * @param fastrg_ccb
+ *      FastRG control block pointer
+ *
+ * @return
+ *      how many events were handed to the Kafka producer; 0 in standalone
+ *      mode or on a bad argument
+ */
+U32 ppp_report_all_connection_status(FastRG_t *fastrg_ccb);
 
 void   exit_ppp(ppp_ccb_t *ppp_ccb);
 
@@ -320,5 +606,20 @@ void pppd_cleanup_ccb(FastRG_t *fastrg_ccb);
  */
 #define PPPD_GET_CCB(fastrg_ccb_ptr, ccb_id) \
     ((ppp_ccb_t *)(fastrg_ccb_ptr)->ppp_ccb[(ccb_id)])
+
+/**
+ * @fn pppd_get_subscriber_real_size
+ *
+ * @brief Calculate per ccb memory usage, store per mempool size and directly 
+ *        allocated memory size info in out
+ *
+ * @param fastrg_ccb
+ *      FastRG control block
+ * @param out
+ *      [out] Size info, filled only on success
+ * @return
+ *      SUCCESS when the measurement completed and the heap was restored exactly
+ */
+STATUS pppd_get_subscriber_real_size(FastRG_t *fastrg_ccb, ccb_memory_info_t *out);
 
 #endif

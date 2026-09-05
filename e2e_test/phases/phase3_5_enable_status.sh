@@ -31,12 +31,21 @@ phase3_5_enable_status() {
 
     if [[ "$_35_cur_status" == "connect" ]]; then
         info "Step 7: desire_status is currently connect — hangup to reset connection..."
-        fastrg_grpc disconnect_hsi "${USER_ID}" >/dev/null 2>&1 || true
-        pass "Step 7: HangupPPPoE USER_ID=${USER_ID}" "Hangup issued via controller"
+        _35_hangup_rc=0
+        _35_hangup_out=$(fastrg_grpc disconnect_hsi "${USER_ID}" 2>&1) || _35_hangup_rc=$?
+        if [[ "$_35_hangup_rc" -eq 0 ]]; then
+            pass "Step 7: HangupPPPoE USER_ID=${USER_ID}" "Hangup accepted by the controller"
+        else
+            fail "Step 7: HangupPPPoE USER_ID=${USER_ID}" \
+                "controller rejected the hangup (rc=${_35_hangup_rc}): $(printf '%s' "$_35_hangup_out" | tr '\n' ' ' | cut -c 1-200)"
+        fi
         sleep 3
-    else
+    elif [[ -n "$_35_cur_status" ]]; then
         pass "Step 7: Read desire_status" \
-            "desire_status=${_35_cur_status:-<empty>} — no hangup needed"
+            "desire_status=${_35_cur_status} — no hangup needed"
+    else
+        fail "Step 7: Read desire_status" \
+            "configs/${NODE_UUID}/hsi/${USER_ID} carries no desire_status"
     fi
 
     # ------------------------------------------------------------------

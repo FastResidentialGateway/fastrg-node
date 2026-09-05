@@ -1,10 +1,12 @@
 #include <stdlib.h>
 #include <string.h>
+#include <inttypes.h>
 
 #include <rte_lcore.h>
 #include <rte_rcu_qsbr.h>
 
 #include "../src/fastrg.h"
+#include "../src/dp.h"
 #include "../src/dhcpd/dhcpd.h"
 #include "../src/metrics.h"
 #include "../src/pppd/header.h"
@@ -209,6 +211,26 @@ static void test_max_user_count_gauge(FastRG_t *fastrg_ccb)
     lighthttp_buf_free(&out);
 }
 
+static void test_subscriber_cost_gauge(FastRG_t *fastrg_ccb)
+{
+    lighthttp_buf_t out = {0};
+    const char *content_type = NULL;
+    char *saved_uuid = fastrg_ccb->node_uuid;
+    U64 saved_cost = fastrg_ccb->subscriber_cost_bytes;
+
+    fastrg_ccb->node_uuid = NULL;
+    fastrg_ccb->subscriber_cost_bytes = 123456789;
+    metrics_build(&out, &content_type, fastrg_ccb);
+    TEST_ASSERT(strstr(out.data, "# TYPE fastrg_node_subscriber_cost_bytes gauge\n") != NULL,
+        "subscriber cost gauge family is declared", "missing TYPE line");
+    TEST_ASSERT(strstr(out.data, "fastrg_node_subscriber_cost_bytes{node_uuid=\"\"} 123456789\n") != NULL,
+        "subscriber cost gauge exposes the measured cost", "sample missing or wrong value");
+
+    fastrg_ccb->subscriber_cost_bytes = saved_cost;
+    fastrg_ccb->node_uuid = saved_uuid;
+    lighthttp_buf_free(&out);
+}
+
 static void test_per_user_stats(FastRG_t *fastrg_ccb)
 {
     unsigned int lcore_id = rte_get_main_lcore();
@@ -247,6 +269,168 @@ static void test_per_user_stats(FastRG_t *fastrg_ccb)
 
     memset(&stats[0], 0, sizeof(stats[0]));
     fastrg_ccb->node_uuid = saved_uuid;
+    lighthttp_buf_free(&out);
+}
+
+/* The reader sums one TX queue across lcores, and every queue the port has is
+ * published so a quiet one reads 0 instead of vanishing. */
+/* Start-up sizes the per-lcore rows from the queues a port really got; this
+ * fixture stands in for that, and puts counts on two lcores so a sum has
+ * something to add. */
+struct tx_queue_fixture {
+    unsigned int lcore_id;
+    unsigned int other;
+    U16          queue_count;
+    U16          saved_count[PORT_AMOUNT];
+    struct tx_queue_stats *saved_rows[PORT_AMOUNT];
+    struct tx_queue_stats *saved_other;
+    char        *saved_uuid;
+    uint64_t     want_full;
+    uint64_t     want_short;
+};
+
+static BOOL tx_queue_fixture_install(FastRG_t *fastrg_ccb, struct tx_queue_fixture *fx)
+{
+    unsigned int l;
+
+    fx->lcore_id = rte_get_main_lcore();
+    fx->other = LCORE_ID_ANY;
+    fx->queue_count = 4;
+    fx->saved_other = NULL;
+    fx->want_full = 7;
+    fx->want_short = 3;
+
+    /* A second enabled lcore is what makes the sum a sum. Where the test host
+     * offers only one, the single-lcore reading is still checked. */
+    RTE_LCORE_FOREACH(l) {
+        if (l != fx->lcore_id) {
+            fx->other = l;
+            break;
+        }
+    }
+
+    for(int p=0; p<PORT_AMOUNT; p++) {
+        fx->saved_count[p] = fastrg_ccb->tx_queue_count[p];
+        fx->saved_rows[p] = fastrg_ccb->tx_queue_stats[fx->lcore_id][p];
+        fastrg_ccb->tx_queue_count[p] = fx->queue_count;
+        fastrg_ccb->tx_queue_stats[fx->lcore_id][p] =
+            calloc(fx->queue_count, sizeof(struct tx_queue_stats));
+    }
+    if (fx->other != LCORE_ID_ANY) {
+        fx->saved_other = fastrg_ccb->tx_queue_stats[fx->other][WAN_PORT];
+        fastrg_ccb->tx_queue_stats[fx->other][WAN_PORT] =
+            calloc(fx->queue_count, sizeof(struct tx_queue_stats));
+    }
+    if (fastrg_ccb->tx_queue_stats[fx->lcore_id][WAN_PORT] == NULL)
+        return FALSE;
+
+    fx->saved_uuid = fastrg_ccb->node_uuid;
+    fastrg_ccb->node_uuid = NULL;
+    fastrg_ccb->tx_queue_stats[fx->lcore_id][WAN_PORT][2].full_packets = 7;
+    fastrg_ccb->tx_queue_stats[fx->lcore_id][WAN_PORT][2].short_bursts = 3;
+    if (fx->other != LCORE_ID_ANY && fastrg_ccb->tx_queue_stats[fx->other][WAN_PORT] != NULL) {
+        fastrg_ccb->tx_queue_stats[fx->other][WAN_PORT][2].full_packets = 5;
+        fastrg_ccb->tx_queue_stats[fx->other][WAN_PORT][2].short_bursts = 1;
+        fx->want_full = 12;
+        fx->want_short = 4;
+    }
+    return TRUE;
+}
+
+static void tx_queue_fixture_restore(FastRG_t *fastrg_ccb, struct tx_queue_fixture *fx)
+{
+    for(int p=0; p<PORT_AMOUNT; p++) {
+        free(fastrg_ccb->tx_queue_stats[fx->lcore_id][p]);
+        fastrg_ccb->tx_queue_stats[fx->lcore_id][p] = fx->saved_rows[p];
+        fastrg_ccb->tx_queue_count[p] = fx->saved_count[p];
+    }
+    if (fx->other != LCORE_ID_ANY) {
+        free(fastrg_ccb->tx_queue_stats[fx->other][WAN_PORT]);
+        fastrg_ccb->tx_queue_stats[fx->other][WAN_PORT] = fx->saved_other;
+    }
+    fastrg_ccb->node_uuid = fx->saved_uuid;
+}
+
+static void test_fastrg_sum_tx_queue_stats(FastRG_t *fastrg_ccb)
+{
+    struct tx_queue_fixture fx;
+    struct tx_queue_stats sum;
+
+    TEST_ASSERT(tx_queue_fixture_install(fastrg_ccb, &fx) == TRUE,
+        "TX queue counter fixture", "calloc failed");
+    if (fastrg_ccb->tx_queue_stats[fx.lcore_id][WAN_PORT] == NULL)
+        return;
+
+    fastrg_sum_tx_queue_stats(fastrg_ccb, WAN_PORT, 2, &sum);
+    TEST_ASSERT(sum.full_packets == fx.want_full,
+        "TX queue refused packets are summed across lcores",
+        "expected %" PRIu64 ", got %" PRIu64, fx.want_full, sum.full_packets);
+    TEST_ASSERT(sum.short_bursts == fx.want_short,
+        "TX queue short bursts are summed across lcores",
+        "expected %" PRIu64 ", got %" PRIu64, fx.want_short, sum.short_bursts);
+
+    fastrg_sum_tx_queue_stats(fastrg_ccb, WAN_PORT, 3, &sum);
+    TEST_ASSERT(sum.full_packets == 0 && sum.short_bursts == 0,
+        "a queue that never dropped reads as zero",
+        "got full=%" PRIu64 " short=%" PRIu64, sum.full_packets, sum.short_bursts);
+
+    fastrg_sum_tx_queue_stats(fastrg_ccb, LAN_PORT, 2, &sum);
+    TEST_ASSERT(sum.full_packets == 0 && sum.short_bursts == 0,
+        "the other port keeps its own counters",
+        "got full=%" PRIu64 " short=%" PRIu64, sum.full_packets, sum.short_bursts);
+
+    /* One past the queues this port has: the read must stop rather than run
+     * off the end of the row. */
+    sum.full_packets = 99; sum.short_bursts = 99; sum.handoff_dropped = 99;
+    fastrg_sum_tx_queue_stats(fastrg_ccb, WAN_PORT, fx.queue_count, &sum);
+    TEST_ASSERT(sum.full_packets == 0 && sum.short_bursts == 0 && sum.handoff_dropped == 0,
+        "a queue the port does not have reads as zero",
+        "got full=%" PRIu64 " short=%" PRIu64 " handoff=%" PRIu64,
+        sum.full_packets, sum.short_bursts, sum.handoff_dropped);
+
+    tx_queue_fixture_restore(fastrg_ccb, &fx);
+}
+
+static void test_metrics_build(FastRG_t *fastrg_ccb)
+{
+    struct tx_queue_fixture fx;
+    lighthttp_buf_t out = {0};
+    const char *content_type = NULL;
+    char sample[192];
+
+    TEST_ASSERT(tx_queue_fixture_install(fastrg_ccb, &fx) == TRUE,
+        "TX queue counter fixture", "calloc failed");
+    if (fastrg_ccb->tx_queue_stats[fx.lcore_id][WAN_PORT] == NULL)
+        return;
+
+    metrics_build(&out, &content_type, fastrg_ccb);
+    TEST_ASSERT(strstr(out.data, "# TYPE fastrg_node_tx_queue_full_total gauge\n") != NULL,
+        "TX queue full family is declared", "missing TYPE line");
+    snprintf(sample, sizeof(sample),
+        "fastrg_node_tx_queue_full_total{node_uuid=\"\",nic_index=\"%d\",queue=\"2\"} %" PRIu64 "\n",
+        WAN_PORT, fx.want_full);
+    TEST_ASSERT(strstr(out.data, sample) != NULL,
+        "TX queue refused packets are summed across lcores", "missing sample=%s", sample);
+    snprintf(sample, sizeof(sample),
+        "fastrg_node_tx_queue_burst_short_total{node_uuid=\"\",nic_index=\"%d\",queue=\"2\"} %" PRIu64 "\n",
+        WAN_PORT, fx.want_short);
+    TEST_ASSERT(strstr(out.data, sample) != NULL,
+        "TX queue short bursts are summed across lcores", "missing sample=%s", sample);
+    snprintf(sample, sizeof(sample),
+        "fastrg_node_tx_queue_full_total{node_uuid=\"\",nic_index=\"%d\",queue=\"3\"} 0\n", WAN_PORT);
+    TEST_ASSERT(strstr(out.data, sample) != NULL,
+        "a queue that never dropped is published as zero", "missing sample=%s", sample);
+    snprintf(sample, sizeof(sample),
+        "fastrg_node_tx_queue_full_total{node_uuid=\"\",nic_index=\"%d\",queue=\"2\"} 0\n", LAN_PORT);
+    TEST_ASSERT(strstr(out.data, sample) != NULL,
+        "the other port keeps its own counters", "missing sample=%s", sample);
+    snprintf(sample, sizeof(sample),
+        "fastrg_node_tx_queue_full_total{node_uuid=\"\",nic_index=\"%d\",queue=\"%u\"}",
+        WAN_PORT, fx.queue_count);
+    TEST_ASSERT(strstr(out.data, sample) == NULL,
+        "queues the port does not have are not published", "found sample=%s", sample);
+
+    tx_queue_fixture_restore(fastrg_ccb, &fx);
     lighthttp_buf_free(&out);
 }
 
@@ -367,6 +551,9 @@ void test_metrics(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_per_user_stats(fastrg_ccb);
     test_snapshot_persist_gauge(fastrg_ccb);
     test_max_user_count_gauge(fastrg_ccb);
+    test_subscriber_cost_gauge(fastrg_ccb);
+    test_fastrg_sum_tx_queue_stats(fastrg_ccb);
+    test_metrics_build(fastrg_ccb);
     test_lcore_traffic_stats(fastrg_ccb);
 
     fastrg_ccb->node_uuid = saved_uuid;

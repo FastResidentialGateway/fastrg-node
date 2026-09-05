@@ -21,13 +21,12 @@
 #include "../dbg.h"
 #include "../fastrg.h"
 #include "../dp.h"
-#include "kafka_producer.h"
 #include "nat.h"
 #include "fsm.h"
+#include "../dhcpd6/dhcpd6.h"
 #include "../dhcpd/dhcpd.h"
 #include "../dnsd/dnsd.h"
 #include "../etcd_integration.h"
-#include "../../northbound/controller/etcd_client.h"
 
 static STATUS A_this_layer_start(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
 static STATUS A_send_config_request(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
@@ -48,6 +47,12 @@ static STATUS A_send_echo_reply(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_cc
 static STATUS A_zero_restart_count(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
 static STATUS A_send_padt(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
 static STATUS A_create_close_to_lower_layer(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb);
+static void send_config_request_lcp(struct rte_timer *ppp_timer, void *arg);
+static void send_config_request_ipcp(struct rte_timer *ppp_timer, void *arg);
+static void send_config_request_ipv6cp(struct rte_timer *ppp_timer, void *arg);
+static void send_terminate_request_lcp(struct rte_timer *ppp_timer, void *arg);
+static void send_terminate_request_ipcp(struct rte_timer *ppp_timer, void *arg);
+static void send_terminate_request_ipv6cp(struct rte_timer *ppp_timer, void *arg);
 
 tPPP_STATE_TBL  ppp_fsm_tbl_lcp[] = { 
 /*//////////////////////////////////////////////////////////////////////////////////
@@ -648,8 +653,16 @@ tPPP_STATE_TBL ppp_fsm_tbl_ncp[] = {
 
 tPPP_STATE_TBL *ppp_fsm_tbl[] = {
     ppp_fsm_tbl_lcp,
+    ppp_fsm_tbl_ncp,
     ppp_fsm_tbl_ncp
 };
+
+static const char *ppp_cp_name(U8 cp_id)
+{
+    static const char *names[PPP_CP_COUNT] = {"LCP", "IPCP", "IPV6CP"};
+
+    return cp_id < PPP_CP_COUNT ? names[cp_id] : "UNKNOWN";
+}
 
 STATUS PPP_FSM(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb, U16 event)
 {	
@@ -662,15 +675,15 @@ STATUS PPP_FSM(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb, U16 event)
     FastRG_t *fastrg_ccb = s_ppp_ccb->fastrg_ccb;
 
     /* Find a matched state */
-    for(i=0; ppp_fsm_tbl[s_ppp_ccb->cp][i].state!=S_INVLD; i++)
-        if (ppp_fsm_tbl[s_ppp_ccb->cp][i].state == s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].state)
+    for(i=0; ppp_fsm_tbl[s_ppp_ccb->cp_id][i].state!=S_INVLD; i++)
+        if (ppp_fsm_tbl[s_ppp_ccb->cp_id][i].state == s_ppp_ccb->control_protocol[s_ppp_ccb->cp_id].state)
             break;
 
-    FastRG_LOG(DBG, fastrg_ccb->fp, (U8 *)s_ppp_ccb, PPPLOGMSG, "Current state is %s, event is %s", PPP_state2str(ppp_fsm_tbl[s_ppp_ccb->cp][i].state), PPP_event2str(event));
+    FastRG_LOG(DBG, fastrg_ccb->fp, (U8 *)s_ppp_ccb, PPPLOGMSG, "Current state is %s, event is %s", PPP_state2str(ppp_fsm_tbl[s_ppp_ccb->cp_id][i].state), PPP_event2str(event));
 
-    if (ppp_fsm_tbl[s_ppp_ccb->cp][i].state == S_INVLD) {
+    if (ppp_fsm_tbl[s_ppp_ccb->cp_id][i].state == S_INVLD) {
         FastRG_LOG(ERR, fastrg_ccb->fp, (U8 *)s_ppp_ccb, PPPLOGMSG, "Error! user %" PRIu16 " unknown state(%d) specified for the event(%d), current ppp fsm state is %s",
-        	s_ppp_ccb->user_num, s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].state,event, PPP_state2str(ppp_fsm_tbl[s_ppp_ccb->cp][i].state));
+            s_ppp_ccb->user_num, s_ppp_ccb->control_protocol[s_ppp_ccb->cp_id].state,event, PPP_state2str(ppp_fsm_tbl[s_ppp_ccb->cp_id][i].state));
         return ERROR;
     }
 
@@ -678,31 +691,31 @@ STATUS PPP_FSM(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb, U16 event)
      * Find a matched event in a specific state.
      * Note : a state can accept several events.
      */
-    for(;ppp_fsm_tbl[s_ppp_ccb->cp][i].state==s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].state; i++)
-        if (ppp_fsm_tbl[s_ppp_ccb->cp][i].event == event)
+    for(;ppp_fsm_tbl[s_ppp_ccb->cp_id][i].state==s_ppp_ccb->control_protocol[s_ppp_ccb->cp_id].state; i++)
+        if (ppp_fsm_tbl[s_ppp_ccb->cp_id][i].event == event)
             break;
 
-    if (ppp_fsm_tbl[s_ppp_ccb->cp][i].state != s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].state) { /* search until meet the next state */
+    if (ppp_fsm_tbl[s_ppp_ccb->cp_id][i].state != s_ppp_ccb->control_protocol[s_ppp_ccb->cp_id].state) { /* search until meet the next state */
         FastRG_LOG(INFO, fastrg_ccb->fp, (U8 *)s_ppp_ccb, PPPLOGMSG, "Error! user %" PRIu16 " invalid event(%s) in state(%s)",
-            s_ppp_ccb->user_num, PPP_event2str(event), PPP_state2str(s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].state));
+            s_ppp_ccb->user_num, PPP_event2str(event), PPP_state2str(s_ppp_ccb->control_protocol[s_ppp_ccb->cp_id].state));
   		return SUCCESS; /* still pass to endpoint */
     }
 
     /* Correct state found */
-    if (s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].state != ppp_fsm_tbl[s_ppp_ccb->cp][i].next_state) {
-        str1 = PPP_state2str(s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].state);
-        str2 = PPP_state2str(ppp_fsm_tbl[s_ppp_ccb->cp][i].next_state);
+    if (s_ppp_ccb->control_protocol[s_ppp_ccb->cp_id].state != ppp_fsm_tbl[s_ppp_ccb->cp_id][i].next_state) {
+        str1 = PPP_state2str(s_ppp_ccb->control_protocol[s_ppp_ccb->cp_id].state);
+        str2 = PPP_state2str(ppp_fsm_tbl[s_ppp_ccb->cp_id][i].next_state);
         FastRG_LOG(DBG, fastrg_ccb->fp, (U8 *)s_ppp_ccb, PPPLOGMSG,"User %" 
             PRIu16 " %s state changed from %s to %s.", s_ppp_ccb->user_num, 
-            (s_ppp_ccb->cp == 1 ? "IPCP" : "LCP"), str1, str2);
-        s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].state = ppp_fsm_tbl[s_ppp_ccb->cp][i].next_state;
+            ppp_cp_name(s_ppp_ccb->cp_id), str1, str2);
+        s_ppp_ccb->control_protocol[s_ppp_ccb->cp_id].state = ppp_fsm_tbl[s_ppp_ccb->cp_id][i].next_state;
     }
 
     /* Execute actions */
-    for(int j=0; ppp_fsm_tbl[s_ppp_ccb->cp][i].hdl[j]; j++) {
-    	s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].timer_counter = 10;
+    for(int j=0; ppp_fsm_tbl[s_ppp_ccb->cp_id][i].hdl[j]; j++) {
+        s_ppp_ccb->control_protocol[s_ppp_ccb->cp_id].timer_counter = 10;
 #ifndef UNIT_TEST // in unit test, we do not execute the action functions to avoid complex dependencies
-       	if ((*ppp_fsm_tbl[s_ppp_ccb->cp][i].hdl[j])(ppp_timer, s_ppp_ccb) == ERROR)  
+        if ((*ppp_fsm_tbl[s_ppp_ccb->cp_id][i].hdl[j])(ppp_timer, s_ppp_ccb) == ERROR)
             return ERROR;
 #endif
     }
@@ -720,6 +733,9 @@ STATUS A_this_layer_start(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb)
 
 STATUS A_this_layer_finish(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb)
 {
+    if (s_ppp_ccb->cp_id == PPP_CP_IPV6CP)
+        return A_create_close_to_lower_layer(ppp_timer, s_ppp_ccb);
+
     PPP_FSM(ppp_timer, s_ppp_ccb, E_DOWN);
 
     return SUCCESS;
@@ -757,9 +773,14 @@ STATUS lcp_layer_up(ppp_ccb_t *s_ppp_ccb)
             "User %" PRIu16 " LCP connection establish successfully.", s_ppp_ccb->user_num);
         FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
             "User %" PRIu16 " peer rejected authentication; skipping AUTH phase.", s_ppp_ccb->user_num);
-        s_ppp_ccb->cp = 1;
+        s_ppp_ccb->cp_id = PPP_CP_IPCP;
         s_ppp_ccb->phase = IPCP_PHASE;
         PPP_FSM(&s_ppp_ccb->ppp, s_ppp_ccb, E_OPEN);
+        if (s_ppp_ccb->ipv6_enabled == TRUE) {
+            ppp_ipv6cp_iid_init(s_ppp_ccb);
+            s_ppp_ccb->cp_id = PPP_CP_IPV6CP;
+            PPP_FSM(&s_ppp_ccb->ppp_ipv6cp, s_ppp_ccb, E_OPEN);
+        }
         return SUCCESS;
     }
     if (s_ppp_ccb->auth_method == PAP_PROTOCOL) {
@@ -820,33 +841,54 @@ STATUS ipcp_layer_up(ppp_ccb_t *s_ppp_ccb)
         return ERROR;
     }
     FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " HSI module is spawned.\n", s_ppp_ccb->user_num);
-    if (fastrg_ccb->is_standalone == FALSE) {
-        char user_id_str[6];
-        snprintf(user_id_str, sizeof(user_id_str), "%u", s_ppp_ccb->user_num);
-        /* PPPoE "connected" transition → controller via Kafka (with assigned
-         * IP/gateway). Status is no longer written to etcd. */
-        struct in_addr ip = { .s_addr = s_ppp_ccb->hsi_ipv4 };
-        struct in_addr gw = { .s_addr = s_ppp_ccb->hsi_ipv4_gw };
-        char ip_str[INET_ADDRSTRLEN] = { 0 }, gw_str[INET_ADDRSTRLEN] = { 0 };
-        inet_ntop(AF_INET, &ip, ip_str, sizeof(ip_str));
-        inet_ntop(AF_INET, &gw, gw_str, sizeof(gw_str));
-        kafka_report_pppoe_state(user_id_str, KAFKA_PPPOE_CONNECTED, ip_str, gw_str, NULL);
-
-        /* Static DNS records are still loaded from etcd (read-only) now that
-         * the session is up. */
-        etcd_client_load_dns_records(fastrg_ccb->node_uuid, user_id_str,
-            dns_record_changed_callback, fastrg_ccb);
-    }
+    /* dhcp6_process_message() re-reports once prefix delegation finishes. */
+    ppp_report_connection_status(s_ppp_ccb);
 
     return SUCCESS;
 }
 
+STATUS ipv6cp_layer_up(ppp_ccb_t *s_ppp_ccb)
+{
+    FastRG_t *fastrg_ccb = s_ppp_ccb->fastrg_ccb;
+
+    s_ppp_ccb->ipv6cp_up = TRUE;
+    pppd_ipv6_dp_gate_update(s_ppp_ccb);
+    FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+        "User %" PRIu16 " IPV6CP connection established (local IID "
+        "%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x, peer IID "
+        "%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x).",
+        s_ppp_ccb->user_num,
+        s_ppp_ccb->ipv6cp_local_iid[0], s_ppp_ccb->ipv6cp_local_iid[1],
+        s_ppp_ccb->ipv6cp_local_iid[2], s_ppp_ccb->ipv6cp_local_iid[3],
+        s_ppp_ccb->ipv6cp_local_iid[4], s_ppp_ccb->ipv6cp_local_iid[5],
+        s_ppp_ccb->ipv6cp_local_iid[6], s_ppp_ccb->ipv6cp_local_iid[7],
+        s_ppp_ccb->ipv6cp_peer_iid[0], s_ppp_ccb->ipv6cp_peer_iid[1],
+        s_ppp_ccb->ipv6cp_peer_iid[2], s_ppp_ccb->ipv6cp_peer_iid[3],
+        s_ppp_ccb->ipv6cp_peer_iid[4], s_ppp_ccb->ipv6cp_peer_iid[5],
+        s_ppp_ccb->ipv6cp_peer_iid[6], s_ppp_ccb->ipv6cp_peer_iid[7]);
+
+    dhcp6_pd_start(s_ppp_ccb);
+    return SUCCESS;
+}
+
+void ipv6cp_stop(ppp_ccb_t *s_ppp_ccb)
+{
+    dhcp6_pd_stop(s_ppp_ccb);
+    rte_timer_stop(&s_ppp_ccb->ppp_ipv6cp);
+    s_ppp_ccb->config_request_pending[PPP_CP_IPV6CP] = FALSE;
+    s_ppp_ccb->ipv6cp_up = FALSE;
+    pppd_ipv6_dp_gate_update(s_ppp_ccb);
+    s_ppp_ccb->control_protocol[PPP_CP_IPV6CP].state = S_STOPPED;
+}
+
 static STATUS A_this_layer_up(__attribute__((unused)) struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb)
 {
-    if (s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].ppp_payload.ppp_protocol == rte_cpu_to_be_16(LCP_PROTOCOL))
+    if (s_ppp_ccb->control_protocol[s_ppp_ccb->cp_id].ppp_payload.ppp_protocol == rte_cpu_to_be_16(LCP_PROTOCOL))
         return lcp_layer_up(s_ppp_ccb);
-    if (s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].ppp_payload.ppp_protocol == rte_cpu_to_be_16(IPCP_PROTOCOL))
+    if (s_ppp_ccb->control_protocol[s_ppp_ccb->cp_id].ppp_payload.ppp_protocol == rte_cpu_to_be_16(IPCP_PROTOCOL))
         return ipcp_layer_up(s_ppp_ccb);
+    if (s_ppp_ccb->control_protocol[s_ppp_ccb->cp_id].ppp_payload.ppp_protocol == rte_cpu_to_be_16(IPV6CP_PROTOCOL))
+        return ipv6cp_layer_up(s_ppp_ccb);
 
     return SUCCESS;
 }
@@ -864,13 +906,25 @@ STATUS A_this_layer_down(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb)
 {
     FastRG_t *fastrg_ccb = s_ppp_ccb->fastrg_ccb;
 
-    if (s_ppp_ccb->cp == 1) {
+    if (s_ppp_ccb->cp_id == PPP_CP_IPV6CP) {
+        FastRG_LOG(DBG, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "IPV6CP layer is down");
+        dhcp6_pd_stop(s_ppp_ccb);
+        s_ppp_ccb->ipv6cp_up = FALSE;
+        pppd_ipv6_dp_gate_update(s_ppp_ccb);
+        PPP_FSM(ppp_timer, s_ppp_ccb, E_CLOSE);
+    } else if (s_ppp_ccb->cp_id == PPP_CP_IPCP) {
         FastRG_LOG(DBG, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "IPCP layer is down");
         PPP_FSM(ppp_timer, s_ppp_ccb, E_CLOSE);
         rte_atomic16_set(&s_ppp_ccb->dp_start_bool, (S16)0);
-    } else if (s_ppp_ccb->cp == 0) {
+    } else if (s_ppp_ccb->cp_id == PPP_CP_LCP) {
         rte_atomic16_set(&s_ppp_ccb->dp_start_bool, (S16)0);
-        s_ppp_ccb->ppp_phase[1].state = S_INIT;
+        s_ppp_ccb->control_protocol[PPP_CP_IPCP].state = S_INIT;
+        s_ppp_ccb->control_protocol[PPP_CP_IPV6CP].state = S_INIT;
+        s_ppp_ccb->config_request_pending[PPP_CP_IPV6CP] = FALSE;
+        dhcp6_pd_stop(s_ppp_ccb);
+        s_ppp_ccb->ipv6cp_up = FALSE;
+        pppd_ipv6_dp_gate_update(s_ppp_ccb);
+        rte_timer_stop(&s_ppp_ccb->ppp_ipv6cp);
         PPP_FSM(ppp_timer, s_ppp_ccb, E_CLOSE);
         FastRG_LOG(DBG, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "LCP layer is down");
     }
@@ -893,9 +947,14 @@ STATUS A_init_restart_config(struct rte_timer *ppp_timer, __attribute__((unused)
 
     FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " init config req timer start.\n", s_ppp_ccb->user_num);
     rte_timer_stop(ppp_timer);
-    s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].timer_counter = 9;
+    s_ppp_ccb->control_protocol[s_ppp_ccb->cp_id].timer_counter = 9;
+    rte_timer_cb_t callback = send_config_request_lcp;
+    if (s_ppp_ccb->cp_id == PPP_CP_IPCP)
+        callback = send_config_request_ipcp;
+    else if (s_ppp_ccb->cp_id == PPP_CP_IPV6CP)
+        callback = send_config_request_ipv6cp;
     rte_timer_reset(ppp_timer, 3*fastrg_get_cycles_in_sec(), PERIODICAL, fastrg_ccb->lcore.ctrl_thread, 
-        (rte_timer_cb_t)A_send_config_request, s_ppp_ccb);
+        callback, s_ppp_ccb);
 
     return SUCCESS;
 }
@@ -906,9 +965,14 @@ STATUS A_init_restart_termin(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb)
 
     FastRG_LOG(DBG, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " init termin req timer start.\n", s_ppp_ccb->user_num);
     rte_timer_stop(ppp_timer);
-    s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].timer_counter = 9;
-    rte_timer_reset(ppp_timer, 3*fastrg_get_cycles_in_sec(), PERIODICAL, fastrg_ccb->lcore.ctrl_thread, 
-        (rte_timer_cb_t)A_send_terminate_request, s_ppp_ccb);
+    s_ppp_ccb->control_protocol[s_ppp_ccb->cp_id].timer_counter = 9;
+    rte_timer_cb_t callback = send_terminate_request_lcp;
+    if (s_ppp_ccb->cp_id == PPP_CP_IPCP)
+        callback = send_terminate_request_ipcp;
+    else if (s_ppp_ccb->cp_id == PPP_CP_IPV6CP)
+        callback = send_terminate_request_ipv6cp;
+    rte_timer_reset(ppp_timer, 3*fastrg_get_cycles_in_sec(), PERIODICAL, fastrg_ccb->lcore.ctrl_thread,
+        callback, s_ppp_ccb);
 
     return SUCCESS;
 }
@@ -919,7 +983,7 @@ STATUS A_send_config_request(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb)
     unsigned char buffer[PPP_MSG_BUF_LEN];
     U16 mulen = 0;
 
-    if (s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].timer_counter == 0) {
+    if (s_ppp_ccb->control_protocol[s_ppp_ccb->cp_id].timer_counter == 0) {
     	rte_timer_stop(ppp_timer);
         FastRG_LOG(DBG, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " config request timeout.\n", s_ppp_ccb->user_num);
     	PPP_FSM(ppp_timer, s_ppp_ccb, E_TIMEOUT_COUNTER_EXPIRED);
@@ -927,7 +991,7 @@ STATUS A_send_config_request(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb)
     }
     build_config_request(buffer, &mulen, s_ppp_ccb);
     wan_ctrl_tx(fastrg_ccb, s_ppp_ccb->user_num - 1, buffer, mulen);
-    s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].timer_counter--;
+    s_ppp_ccb->control_protocol[s_ppp_ccb->cp_id].timer_counter--;
 
     return SUCCESS;
 }
@@ -962,7 +1026,7 @@ STATUS A_send_terminate_request(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_cc
     unsigned char buffer[PPP_MSG_BUF_LEN];
     U16 mulen = 0;
 
-    if (s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].timer_counter == 0) {
+    if (s_ppp_ccb->control_protocol[s_ppp_ccb->cp_id].timer_counter == 0) {
     	rte_timer_stop(ppp_timer);
         FastRG_LOG(DBG, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16 " terminate request timeout.\n", s_ppp_ccb->user_num);
     	PPP_FSM(ppp_timer, s_ppp_ccb, E_TIMEOUT_COUNTER_EXPIRED);
@@ -970,9 +1034,57 @@ STATUS A_send_terminate_request(struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_cc
     }
     build_terminate_request(buffer, &mulen, s_ppp_ccb);
     wan_ctrl_tx(fastrg_ccb, s_ppp_ccb->user_num - 1, buffer, mulen);
-    s_ppp_ccb->ppp_phase[s_ppp_ccb->cp].timer_counter--;
+    s_ppp_ccb->control_protocol[s_ppp_ccb->cp_id].timer_counter--;
 
     return SUCCESS;
+}
+
+static void send_config_request_lcp(struct rte_timer *ppp_timer, void *arg)
+{
+    ppp_ccb_t *s_ppp_ccb = arg;
+
+    s_ppp_ccb->cp_id = PPP_CP_LCP;
+    A_send_config_request(ppp_timer, s_ppp_ccb);
+}
+
+static void send_config_request_ipcp(struct rte_timer *ppp_timer, void *arg)
+{
+    ppp_ccb_t *s_ppp_ccb = arg;
+
+    s_ppp_ccb->cp_id = PPP_CP_IPCP;
+    A_send_config_request(ppp_timer, s_ppp_ccb);
+}
+
+static void send_config_request_ipv6cp(struct rte_timer *ppp_timer, void *arg)
+{
+    ppp_ccb_t *s_ppp_ccb = arg;
+
+    s_ppp_ccb->cp_id = PPP_CP_IPV6CP;
+    A_send_config_request(ppp_timer, s_ppp_ccb);
+}
+
+static void send_terminate_request_lcp(struct rte_timer *ppp_timer, void *arg)
+{
+    ppp_ccb_t *s_ppp_ccb = arg;
+
+    s_ppp_ccb->cp_id = PPP_CP_LCP;
+    A_send_terminate_request(ppp_timer, s_ppp_ccb);
+}
+
+static void send_terminate_request_ipcp(struct rte_timer *ppp_timer, void *arg)
+{
+    ppp_ccb_t *s_ppp_ccb = arg;
+
+    s_ppp_ccb->cp_id = PPP_CP_IPCP;
+    A_send_terminate_request(ppp_timer, s_ppp_ccb);
+}
+
+static void send_terminate_request_ipv6cp(struct rte_timer *ppp_timer, void *arg)
+{
+    ppp_ccb_t *s_ppp_ccb = arg;
+
+    s_ppp_ccb->cp_id = PPP_CP_IPV6CP;
+    A_send_terminate_request(ppp_timer, s_ppp_ccb);
 }
 
 STATUS A_send_terminate_ack(__attribute__((unused)) struct rte_timer *ppp_timer, ppp_ccb_t *s_ppp_ccb)
@@ -1064,9 +1176,14 @@ STATUS A_create_close_to_lower_layer(struct rte_timer *ppp_timer, ppp_ccb_t *s_p
 {
     FastRG_t *fastrg_ccb = s_ppp_ccb->fastrg_ccb;
 
+    if (s_ppp_ccb->cp_id == PPP_CP_IPV6CP) {
+        ipv6cp_stop(s_ppp_ccb);
+        return SUCCESS;
+    }
+
     FastRG_LOG(INFO, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "User %" PRIu16
         " notify lower layer to close connection.\n", s_ppp_ccb->user_num);
-    s_ppp_ccb->cp = 0;
+    s_ppp_ccb->cp_id = PPP_CP_LCP;
     ppp_phase_rollback(s_ppp_ccb);
     rte_timer_stop(&(s_ppp_ccb->ppp_alive));
     PPP_FSM(ppp_timer, s_ppp_ccb, E_CLOSE);

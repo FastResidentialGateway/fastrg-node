@@ -147,6 +147,9 @@ hsi = {
     "user_id": "2", "vlan_id": "3", "account_name": "the", "password": "admin",
     "dhcp_addr_pool": "192.168.4.2-192.168.4.10",
     "dhcp_subnet": "255.255.255.0", "dhcp_gateway": "192.168.4.1",
+    # Spelled out on purpose: the controller keeps the stored value for a field
+    # the request omits, so leaving it out would not clear a stale true.
+    "ipv6_enable": False,
     # Controller HSIConfig expects the hyphenated "port-mapping" key with
     # index/dip/dport/eport fields; an underscore key is silently dropped, which
     # leaves etcd with no port-mapping and makes the DNAT test (Step 16) skip.
@@ -183,6 +186,7 @@ hsi1 = {
     "user_id": "1", "vlan_id": "5", "account_name": "the", "password": "admin",
     "dhcp_addr_pool": "192.168.5.2-192.168.5.10",
     "dhcp_subnet": "255.255.255.0", "dhcp_gateway": "192.168.5.1",
+    "ipv6_enable": False,
 }
 st, body = call("POST", f"/api/config/{NODE}/hsi", hsi1, tok)
 if st == 409 or "exist" in body.lower():

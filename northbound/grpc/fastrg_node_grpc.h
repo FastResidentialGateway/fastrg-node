@@ -25,6 +25,7 @@ class FastRGNodeServiceImpl final : public fastrgnodeservice::FastrgService::Ser
     ::grpc::Status GetFastrgHsiInfo(::grpc::ServerContext* context, const ::google::protobuf::Empty* request, ::fastrgnodeservice::FastrgHsiInfo* response) override;
     ::grpc::Status GetFastrgDhcpInfo(::grpc::ServerContext* context, const ::google::protobuf::Empty* request, ::fastrgnodeservice::FastrgDhcpInfo* response) override;
     ::grpc::Status GetPortFwdInfo(::grpc::ServerContext* context, const ::fastrgnodeservice::PortFwdInfoRequest* request, ::fastrgnodeservice::PortFwdInfoReply* response) override;
+    ::grpc::Status GetNatEntries(::grpc::ServerContext* context, const ::fastrgnodeservice::NatEntriesRequest* request, ::fastrgnodeservice::NatEntriesReply* response) override;
     ::grpc::Status GetArpTable(::grpc::ServerContext* context, const ::fastrgnodeservice::ArpTableRequest* request, ::fastrgnodeservice::ArpTableReply* response) override;
     ::grpc::Status GetNodeStatus(::grpc::ServerContext* context, const ::google::protobuf::Empty* request, ::fastrgnodeservice::NodeStatus* response) override;
     ::grpc::Status AddDnsRecord(::grpc::ServerContext* context, const ::fastrgnodeservice::DnsRecordRequest* request, ::fastrgnodeservice::DnsRecordReply* response) override;
@@ -34,8 +35,11 @@ class FastRGNodeServiceImpl final : public fastrgnodeservice::FastrgService::Ser
     ::grpc::Status FlushDnsCache(::grpc::ServerContext* context, const ::fastrgnodeservice::DnsCacheFlushRequest* request, ::fastrgnodeservice::DnsCacheFlushReply* response) override;
     ::grpc::Status SetDnsProxy(::grpc::ServerContext* context, const ::fastrgnodeservice::SetDnsProxyRequest* request, ::fastrgnodeservice::SetDnsProxyReply* response) override;
     ::grpc::Status SetTcpConntrack(::grpc::ServerContext* context, const ::fastrgnodeservice::SetTcpConntrackRequest* request, ::fastrgnodeservice::SetTcpConntrackReply* response) override;
+    ::grpc::Status SetIpv6(::grpc::ServerContext* context, const ::fastrgnodeservice::SetIpv6Request* request, ::fastrgnodeservice::SetIpv6Reply* response) override;
     ::grpc::Status PdumpStart(::grpc::ServerContext* context, const ::fastrgnodeservice::PdumpRequest* request, ::fastrgnodeservice::PdumpReply* response) override;
     ::grpc::Status PdumpStop(::grpc::ServerContext* context, const ::fastrgnodeservice::PdumpRequest* request, ::fastrgnodeservice::PdumpReply* response) override;
+    ::grpc::Status RepublishPPPoEStatus(::grpc::ServerContext* context, const ::google::protobuf::Empty* request, ::fastrgnodeservice::RepublishPPPoEStatusReply* response) override;
+    ::grpc::Status RepublishConfigStatus(::grpc::ServerContext* context, const ::google::protobuf::Empty* request, ::fastrgnodeservice::RepublishConfigStatusReply* response) override;
 
     private:
     FastRG_t* fastrg_ccb;

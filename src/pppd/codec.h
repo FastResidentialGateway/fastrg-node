@@ -58,6 +58,10 @@ STATUS PPP_decode_frame(U8 *pkt_buf, int pkt_len, U16 *event,
  */
 void build_config_request(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb);
 
+STATUS decode_ipv6cp(U16 ppp_hdr_len, U16 *event, struct rte_timer *tim,
+    ppp_ccb_t *s_ppp_ccb);
+void ppp_ipv6cp_iid_init(ppp_ccb_t *s_ppp_ccb);
+
 /**
  * @fn build_config_ack
  *
@@ -117,15 +121,15 @@ void build_terminate_ack(U8 *buffer, U16 *mulen, ppp_ccb_t *s_ppp_ccb);
  * @fn build_code_reject
  *
  * @brief Build a Code-Reject (RFC 1661 §5.6) for the offending packet stashed
- *        in ppp_phase[cp] by PPP_decode_frame when the Code field is unknown.
- *        Sent within the same protocol (LCP or IPCP) the bad packet arrived on.
+ *        in control_protocol[cp_id] when the Code field is unknown.
+ *        Sent within the same control protocol the bad packet arrived on.
  *
  * @param buffer
  *      Frame buffer to fill (eth + vlan + pppoe + cp + body); at least
  *      PPP_MSG_BUF_LEN bytes — the Rejected-Packet copy is truncated to fit.
  * @param s_ppp_ccb
  *      Subscriber control block — supplies MAC / VLAN / session and the
- *      stashed rejected packet (ppp_phase[cp].ppp_hdr / .ppp_options).
+ *      stashed rejected packet in control_protocol[cp_id].
  * @param mulen
  *      [out] Total bytes written into buffer.
  *

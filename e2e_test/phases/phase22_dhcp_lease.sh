@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # ---------------------------------------------------------------------------
-# Phase 22 — DHCP lease lifecycle with an isolated virtual client (Steps 94-97)
+# Phase 22 — DHCP lease lifecycle with an isolated virtual client (Steps 95-98)
 # ---------------------------------------------------------------------------
 
 _P22_REMOTE_CLIENT=/tmp/fastrg_dhcp_client_sim.py
@@ -183,7 +183,7 @@ _cleanup_phase22_dhcp_lease() {
 
 phase22_dhcp_lease() {
     bold "═══════════════════════════════════════════════════════"
-    bold " Phase 22 — DHCP Lease Lifecycle (Steps 94-97)"
+    bold " Phase 22 — DHCP Lease Lifecycle (Steps 95-98)"
     bold "═══════════════════════════════════════════════════════"
 
     local _hsi="" _vlan="" _pool="" _pool_start="" _pool_end=""
@@ -307,9 +307,9 @@ PY
 
     if [[ $_step91_ok -eq 1 ]]; then
         _detail="baseline metric=${_baseline_metric} ips=${_baseline_ips}; mac-reg='${_P22_MAC_REG_PATH}'; offer='$(_p22_snippet "$_offer")'; ack='$(_p22_snippet "$_ack")'; T1=${_renewal_time}, T2=${_rebinding_time}; observed metric=${_P22_OBS_METRIC} ips=${_P22_OBS_IPS}"
-        pass "Step 94: virtual DHCP DORA" "$_detail"
+        pass "Step 95: virtual DHCP DORA" "$_detail"
     else
-        fail "Step 94: virtual DHCP DORA" \
+        fail "Step 95: virtual DHCP DORA" \
             "baseline metric='${_baseline_metric}' ips='${_baseline_ips}'; iface='${_P22_LAN_IFACE}' pool='${_pool}'; mac-reg='${_P22_MAC_REG_PATH:-none}' on $(_p22_topology_detail), attempts: ${_P22_MAC_REG_LOG:-none}; offer='$(_p22_snippet "$_offer")'; ack='$(_p22_snippet "$_ack")'; observed metric='${_P22_OBS_METRIC:-}' ips='${_P22_OBS_IPS:-}'"
     fi
 
@@ -343,11 +343,11 @@ PY
     fi
 
     if [[ $_step92_ok -eq 1 ]]; then
-        pass "Step 95: DHCP renew and rebind" \
+        pass "Step 96: DHCP renew and rebind" \
             "unicast delivered via '${_P22_MAC_REG_PATH}' ($(_p22_topology_detail)); renew='$(_p22_snippet "$_renew")'; rebind='$(_p22_snippet "$_rebind")'; metric=${_P22_OBS_METRIC} ips=${_P22_OBS_IPS}"
     else
-        fail "Step 95: DHCP renew and rebind" \
-            "Step 94 ready=${_step91_ok}; virtual MAC ${_P22_VIRTUAL_MAC} on $(_p22_topology_detail); registration path='${_P22_MAC_REG_PATH:-none}'; attempts: ${_P22_MAC_REG_LOG:-none}; renew='$(_p22_snippet "$_renew")'; rebind='$(_p22_snippet "$_rebind")'; metric='${_P22_OBS_METRIC:-}' ips='${_P22_OBS_IPS:-}'"
+        fail "Step 96: DHCP renew and rebind" \
+            "Step 95 ready=${_step91_ok}; virtual MAC ${_P22_VIRTUAL_MAC} on $(_p22_topology_detail); registration path='${_P22_MAC_REG_PATH:-none}'; attempts: ${_P22_MAC_REG_LOG:-none}; renew='$(_p22_snippet "$_renew")'; rebind='$(_p22_snippet "$_rebind")'; metric='${_P22_OBS_METRIC:-}' ips='${_P22_OBS_IPS:-}'"
     fi
 
     if [[ $_step91_ok -eq 1 ]]; then
@@ -378,10 +378,10 @@ PY
     fi
 
     if [[ $_step93_ok -eq 1 ]]; then
-        pass "Step 96: out-of-pool REQUEST rejected (NAK)" \
+        pass "Step 97: out-of-pool REQUEST rejected (NAK)" \
             "server NAKed out-of-pool ${_bogus_ip}; response='$(_p22_snippet "$_bogus")'; lease metric=${_P22_OBS_METRIC} ips=${_P22_OBS_IPS} unchanged"
     else
-        fail "Step 96: out-of-pool REQUEST rejected (NAK)" \
+        fail "Step 97: out-of-pool REQUEST rejected (NAK)" \
             "expected NAK for bogus='${_bogus_ip}'; response='$(_p22_snippet "$_bogus")'; metric='${_P22_OBS_METRIC:-}' ips='${_P22_OBS_IPS:-}'"
     fi
 
@@ -397,11 +397,11 @@ PY
     fi
 
     if [[ $_step94_ok -eq 1 ]]; then
-        pass "Step 97: DHCP RELEASE and isolation" \
+        pass "Step 98: DHCP RELEASE and isolation" \
             "release='$(_p22_snippet "$_release")'; metric=${_P22_OBS_METRIC} ips=${_P22_OBS_IPS}; real lease ${_P22_REAL_LEASE} and gateway ping intact"
         _P22_LEASE_IP=""
     else
-        fail "Step 97: DHCP RELEASE and isolation" \
+        fail "Step 98: DHCP RELEASE and isolation" \
             "release='$(_p22_snippet "$_release")'; metric='${_P22_OBS_METRIC:-}' ips='${_P22_OBS_IPS:-}'; real lease=${_P22_REAL_LEASE} iface='${_P22_LAN_IFACE}'"
     fi
 

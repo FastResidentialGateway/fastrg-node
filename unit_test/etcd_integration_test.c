@@ -10,6 +10,7 @@
 #include "../northbound/controller/etcd_client.h"
 #include "../src/dhcpd/dhcpd.h"
 #include "../src/etcd_integration.h"
+#include "../src/cli_request.h"
 #include "../src/fastrg.h"
 #include "../src/pppd/pppd.h"
 #include "test_helper.h"
@@ -141,6 +142,94 @@ static void test_reconcile_sweep(void)
     free_sweep_fixture(fastrg_ccb);
 }
 
+static void test_etcd_event_dispatch(void)
+{
+    FastRG_t *fastrg_ccb = make_sweep_fixture();
+    etcd_event_t *ev = calloc(1, sizeof(*ev));
+    assert(ev != NULL);
+
+    /* user 9 is outside the fixture's subscriber count, so the apply fails —
+     * the case where a stray verdict would be most visible. */
+    ev->kind = ETCD_EVENT_HSI;
+    ev->action = HSI_ACTION_UPDATE;
+    strncpy(ev->node_id, "node", sizeof(ev->node_id) - 1);
+    strncpy(ev->user_id, "9", sizeof(ev->user_id) - 1);
+    strncpy(ev->event_data.hsi.config.user_id, "9",
+        sizeof(ev->event_data.hsi.config.user_id) - 1);
+
+    rte_atomic32_init(&fastrg_ccb->cli_request_result);
+    rte_atomic32_set(&fastrg_ccb->cli_request_result, CLI_REQUEST_NONE);
+    etcd_event_dispatch(fastrg_ccb, ev);
+    /*
+     * The gRPC ApplyConfig waiter is released by the cp_q apply command alone, so an
+     * etcd-side HSI event passing through at the same time must not answer for it.
+     */
+    TEST_ASSERT(rte_atomic32_read(&fastrg_ccb->cli_request_result) == CLI_REQUEST_NONE,
+        "an etcd HSI event leaves the CLI apply verdict untouched", "got %d",
+        rte_atomic32_read(&fastrg_ccb->cli_request_result));
+
+    etcd_event_free(ev);
+    free_sweep_fixture(fastrg_ccb);
+}
+
+static void test_is_hsi_etcd_revision_newest(void)
+{
+    etcd_event_t ev;
+
+    memset(&ev, 0, sizeof(ev));
+    ev.kind = ETCD_EVENT_HSI;
+    ev.action = HSI_ACTION_UPDATE;
+
+    ev.from_reconcile = FALSE;
+    ev.revision = 5;
+    TEST_ASSERT(is_hsi_etcd_revision_newest(90, &ev) == TRUE,
+        "a live watch event applies over a newer applied revision", "");
+
+    ev.from_reconcile = TRUE;
+    TEST_ASSERT(is_hsi_etcd_revision_newest(90, &ev) == FALSE,
+        "a reconcile older than the applied revision is skipped", "");
+    ev.revision = 90;
+    TEST_ASSERT(is_hsi_etcd_revision_newest(90, &ev) == TRUE,
+        "a reconcile at the applied revision still applies", "");
+    ev.revision = 91;
+    TEST_ASSERT(is_hsi_etcd_revision_newest(90, &ev) == TRUE,
+        "a reconcile newer than the applied revision applies", "");
+    ev.revision = 1;
+    TEST_ASSERT(is_hsi_etcd_revision_newest(0, &ev) == TRUE,
+        "any reconcile applies when no etcd event ever touched the subscriber", "");
+
+    /* A removal records its own revision, so a reconcile that was queued before
+     * the delete cannot bring the subscriber back. */
+    ev.from_reconcile = TRUE;
+    ev.action = HSI_ACTION_UPDATE;
+    ev.revision = 40;
+    TEST_ASSERT(is_hsi_etcd_revision_newest(50, &ev) == FALSE,
+        "a reconcile older than the delete does not re-create the subscriber", "");
+    ev.revision = 60;
+    TEST_ASSERT(is_hsi_etcd_revision_newest(50, &ev) == TRUE,
+        "a reconcile newer than the delete re-creates the subscriber", "");
+    ev.from_reconcile = FALSE;
+    ev.revision = 40;
+    TEST_ASSERT(is_hsi_etcd_revision_newest(50, &ev) == TRUE,
+        "a live event after the delete applies whatever its revision", "");
+
+    TEST_ASSERT(is_hsi_etcd_revision_newest(0, NULL) == FALSE, "a NULL event is rejected", "");
+}
+
+static void test_is_sweep_may_remove(void)
+{
+    TEST_ASSERT(is_sweep_may_remove(90, 100) == TRUE,
+        "a subscriber older than the reconcile revision is removable", "");
+    TEST_ASSERT(is_sweep_may_remove(100, 100) == TRUE,
+        "a subscriber at the reconcile revision is removable", "");
+    TEST_ASSERT(is_sweep_may_remove(101, 100) == FALSE,
+        "a subscriber configured after the reconcile read etcd is kept", "");
+    TEST_ASSERT(is_sweep_may_remove(0, 100) == TRUE,
+        "a subscriber no etcd event ever touched stays removable", "");
+    TEST_ASSERT(is_sweep_may_remove(90, 0) == TRUE,
+        "a sweep with no reconcile revision removes as before", "");
+}
+
 void test_etcd_integration(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 {
     (void)fastrg_ccb;
@@ -149,6 +238,9 @@ void test_etcd_integration(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pa
 
     test_parse_user_id_contract();
     test_reconcile_sweep();
+    test_etcd_event_dispatch();
+    test_is_hsi_etcd_revision_newest();
+    test_is_sweep_may_remove();
 
     *total_tests += test_count;
     *total_pass += pass_count;

@@ -25,7 +25,7 @@ void free_ccb(FastRG_t *ccb)
 
 FastRG_t *init_ccb(int user_count)
 {
-    FastRG_t *ccb = fastrg_malloc(FastRG_t, user_count * sizeof(FastRG_t), 0);
+    FastRG_t *ccb = fastrg_calloc(FastRG_t, user_count, sizeof(FastRG_t), 0);
     if (ccb == NULL) {
         puts("Failed to allocate memory for FastRG CCB");
         return NULL;
@@ -111,11 +111,15 @@ int main()
 
     signal(SIGCHLD, SIG_IGN);
 
-    /* Minimal EAL so DPDK objects (rte_hash / rte_ring, used by the NAT
-     * suite) can be created without hugepages. */
-    char *eal_argv[] = {"unit-tester", "--no-huge", "--iova-mode=va", "-m", "256",
-        "-l", "0", "--log-level=lib.eal:error"};
-    if (rte_eal_init(8, eal_argv) < 0) {
+    /* Minimal EAL so DPDK objects (rte_hash / rte_ring, used by the NAT and
+     * IPv6 firewall suites) can be created without hugepages. The heap has to
+     * hold every subscriber fixture the suites build at once, and each
+     * subscriber owns two NAT hashes plus a firewall hash and their rings.
+     * The private file prefix keeps the runtime files separate from a running
+     * fastrg node. */
+    char *eal_argv[] = {"unit-tester", "--no-huge", "--iova-mode=va", "-m", "768",
+        "-l", "0", "--file-prefix=unittest", "--log-level=lib.eal:error"};
+    if (rte_eal_init(9, eal_argv) < 0) {
         puts("rte_eal_init failed");
         return 1;
     }
@@ -157,6 +161,14 @@ int main()
     test_dhcpd(fastrg_ccb, &total_tests, &total_pass);
     puts("ok!");
 
+    puts("====================test dhcpd6/dhcpd6.c====================");
+    test_dhcp6(fastrg_ccb, &total_tests, &total_pass);
+    puts("ok!");
+
+    puts("====================test nd6/nd6.c====================");
+    test_nd6(fastrg_ccb, &total_tests, &total_pass);
+    puts("ok!");
+
     puts("====================test utils.c====================");
     test_utils(fastrg_ccb, &total_tests, &total_pass);
     puts("ok!");
@@ -167,6 +179,10 @@ int main()
 
     puts("====================test pppd/nat.h====================");
     test_nat(fastrg_ccb, &total_tests, &total_pass);
+    puts("ok!");
+
+    puts("====================test pppd/ipv6_firewall.h====================");
+    test_ipv6_firewall(fastrg_ccb, &total_tests, &total_pass);
     puts("ok!");
 
     puts("====================test dp_codec.h====================");
@@ -183,6 +199,10 @@ int main()
 
     puts("====================test northbound.c====================");
     test_northbound(fastrg_ccb, &total_tests, &total_pass);
+    puts("ok!");
+
+    puts("====================test cli_request.c====================");
+    test_cli_request(fastrg_ccb, &total_tests, &total_pass);
     puts("ok!");
 
     puts("====================test etcd_integration.c====================");
@@ -221,12 +241,20 @@ int main()
     test_dp(fastrg_ccb, &total_tests, &total_pass);
     puts("ok!");
 
+    puts("====================test dp_ipv6.h====================");
+    test_dp_ipv6(fastrg_ccb, &total_tests, &total_pass);
+    puts("ok!");
+
     puts("====================test northbound/cmdline/ip_pool_range.c====================");
     test_cmdline(fastrg_ccb, &total_tests, &total_pass);
     puts("ok!");
 
     puts("====================test northbound/grpc/fastrg_grpc_server.cpp====================");
     test_grpc_server(fastrg_ccb, &total_tests, &total_pass);
+    puts("ok!");
+
+    puts("====================test metrics server startup====================");
+    test_metrics_server(fastrg_ccb, &total_tests, &total_pass);
     puts("ok!");
 
     printf("\n====================Unit Test Summary====================\n\n");

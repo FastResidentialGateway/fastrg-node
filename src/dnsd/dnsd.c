@@ -31,8 +31,6 @@ STATUS dns_proxy_init(dns_proxy_state_t *state, U32 primary_dns, U32 secondary_d
 
     if (dns_cache_init(&state->cache) != SUCCESS)
         return ERROR;
-    if (dns_static_init(&state->static_table) != SUCCESS)
-        return ERROR;
 
     state->primary_dns = primary_dns;
     state->secondary_dns = secondary_dns;
@@ -50,7 +48,6 @@ void dns_proxy_cleanup(dns_proxy_state_t *state)
         return;
 
     dns_cache_cleanup(&state->cache);
-    dns_static_cleanup(&state->static_table);
     memset(state->pending, 0, sizeof(state->pending));
 }
 
@@ -122,8 +119,8 @@ dns_pending_query_t *find_pending_by_upstream_id(dns_proxy_state_t *state, U16 u
 }
 
 /* ================================================================
- * Control-plane versions — work on raw packet buffers (tFastRG_MBX.refp)
- * and send via lan_ctrl_tx() / wan_ctrl_tx() from the ctrl_thread.
+ * Control-plane DNS senders: rewrite the event mbuf in place and transmit
+ * through lan_ctrl_tx() / wan_ctrl_tx() from the ctrl_thread.
  * ================================================================ */
 
 /**

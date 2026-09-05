@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # ---------------------------------------------------------------------------
-# Phase 20 — NAT idle expiry and amortized GC metrics (Steps 80-82)
+# Phase 20 — NAT idle expiry and amortized GC metrics (Steps 81-83)
 # ---------------------------------------------------------------------------
 
 _P20_LAN_IPERF_PID=/tmp/e2e_nat_gc_iperf.pid
@@ -12,8 +12,50 @@ _P20_LAN_LISTENER_PID=/tmp/e2e_nat_expiry_listener.pid
 _P20_LAN_LISTENER_OUT=/tmp/e2e_nat_expiry_listener.out
 _P20_LAN_LISTENER_READY=/tmp/e2e_nat_expiry_listener.ready
 _P20_LAN_LISTENER_RECV=/tmp/e2e_nat_expiry_listener.recv
+# Drill: point the WAN capture at an interface the flows never cross. tcpdump
+# still starts and still reports silence, so only Step 83's positive control
+# can tell this apart from NAT genuinely rejecting the inbound datagram.
+_P20_SAVED_WAN_NIC=""
+
+_p20_inject_capture_wrong_interface() {
+    _P20_SAVED_WAN_NIC="$WAN_NIC"
+    WAN_NIC=lo
+}
+
+_p20_cleanup_capture_wrong_interface() {
+    WAN_NIC="$_P20_SAVED_WAN_NIC"
+}
+
+case_validation_register nat_expiry_capture_wrong_interface phase20_nat_expiry \
+    _p20_inject_capture_wrong_interface _p20_cleanup_capture_wrong_interface \
+    'Step 83:'
+
+# Drill: empty the capture file just before the phase reads it, so the parsing
+# below works on a genuinely empty artifact. The file is named literally, so no
+# phase command can be steered somewhere it should not write.
+_p20_inject_capture_output_lost() {
+    sabotage_copy_function _p20_get_wan_capture _p20_get_wan_capture_real
+    sabotage_override_function _p20_get_wan_capture \
+        'ssh_wan "truncate -s 0 /tmp/e2e_nat_expiry_tcpdump.out" >/dev/null 2>&1 || true
+         _p20_get_wan_capture_real'
+}
+
+_p20_cleanup_capture_output_lost() {
+    restore_phase_functions phase20_nat_expiry.sh
+}
+
+case_validation_register nat_expiry_capture_output_lost phase20_nat_expiry \
+    _p20_inject_capture_output_lost _p20_cleanup_capture_output_lost \
+    'Step 83:'
+
 _P20_WAN_TCPDUMP_PID=/tmp/e2e_nat_expiry_tcpdump.pid
 _P20_WAN_TCPDUMP_OUT=/tmp/e2e_nat_expiry_tcpdump.out
+
+# The running capture's text. Separated from the parsing below so a drill can
+# break the artifact without touching how it is read.
+_p20_get_wan_capture() {
+    ssh_wan "cat '${_P20_WAN_TCPDUMP_OUT}' 2>/dev/null" || true
+}
 
 _p20_stop_remote_pid() {
     local _ssh_fn="$1"
@@ -47,9 +89,11 @@ _cleanup_phase20_nat_expiry() {
 
     ssh_lan "rm -f '${_P20_LAN_IPERF_PID}' '${_P20_LAN_IPERF_OUT}' \
         '${_P20_LAN_LISTENER_PID}' '${_P20_LAN_LISTENER_OUT}' \
-        '${_P20_LAN_LISTENER_READY}' '${_P20_LAN_LISTENER_RECV}'" >/dev/null 2>&1 || true
+        '${_P20_LAN_LISTENER_READY}' '${_P20_LAN_LISTENER_RECV}'" > /dev/null 2>&1 || true
+    # Literal paths: a destructive command must never read a variable a drill
+    # can point somewhere else.
     ssh_wan "rm -f '${_P20_WAN_IPERF_PID}' '${_P20_WAN_IPERF_OUT}' \
-        '${_P20_WAN_TCPDUMP_PID}' '${_P20_WAN_TCPDUMP_OUT}'" >/dev/null 2>&1 || true
+        '/tmp/e2e_nat_expiry_tcpdump.pid' '/tmp/e2e_nat_expiry_tcpdump.out'" > /dev/null 2>&1 || true
     return 0
 }
 
@@ -76,7 +120,7 @@ _p20_metrics_are_uints() {
 
 phase20_nat_expiry() {
     bold "═══════════════════════════════════════════════════════"
-    bold " Phase 20 — NAT idle expiry + GC metrics (Steps 80-82)"
+    bold " Phase 20 — NAT idle expiry + GC metrics (Steps 81-83)"
     bold "═══════════════════════════════════════════════════════"
 
     local _flow_count=20
@@ -97,7 +141,7 @@ phase20_nat_expiry() {
     _gc_base=$(_p20_metric_from_body "$_body" "fastrg_node_per_user_nat_gc_reclaimed_total")
     _alloc_base=$(_p20_metric_from_body "$_body" "fastrg_node_per_user_nat_alloc_fail_total")
 
-    info "Step 80: creating ${_flow_count} UDP mappings with distinct LAN source ports..."
+    info "Step 81: creating ${_flow_count} UDP mappings with distinct LAN source ports..."
     if _p20_metrics_are_uints "$_entries_base" "$_gc_base" "$_alloc_base" && \
        ssh_lan "python3 - <<'PY'
 import socket
@@ -124,16 +168,16 @@ PY"; then
 
     if [[ $_step77_ok -eq 1 && "$_alloc_cur" == "$_alloc_base" ]]; then
         _entries_peak=$_entries_cur
-        pass "Step 80: NAT entry creation metrics" \
+        pass "Step 81: NAT entry creation metrics" \
             "entries delta=$(( _entries_cur - _entries_base )) (target>=${_flow_count}); alloc_fail delta=0"
     else
-        fail "Step 80: NAT entry creation metrics" \
+        fail "Step 81: NAT entry creation metrics" \
             "baseline(entries/gc/alloc)=${_entries_base:-NA}/${_gc_base:-NA}/${_alloc_base:-NA}; current(entries/alloc)=${_entries_cur:-NA}/${_alloc_cur:-NA}"
         _p20_metrics_are_uints "$_entries_cur" && _entries_peak=$_entries_cur
     fi
 
     # Keep one TCP NAT mapping active while the UDP mappings remain idle.
-    info "Step 81: starting sustained iperf3 traffic while idle UDP mappings expire..."
+    info "Step 82: starting sustained iperf3 traffic while idle UDP mappings expire..."
     local _server_ready=0 _client_ready=0 _gc_ok=0 _throughput_ok=0
     local _client_stopped=0 _server_stopped=0
     local _gc_delta=0 _entry_drop=0 _iperf_out=""
@@ -192,17 +236,17 @@ PY"; then
 
     if [[ $_gc_ok -eq 1 && $_throughput_ok -eq 1 && \
           $_client_stopped -eq 1 && $_server_stopped -eq 1 ]]; then
-        pass "Step 81: idle GC under mixed traffic" \
+        pass "Step 82: idle GC under mixed traffic" \
             "entries=${_entries_peak}->${_entries_cur} (baseline=${_entries_base}); gc_reclaimed delta=${_gc_delta}; active TCP throughput observed"
     else
-        fail "Step 81: idle GC under mixed traffic" \
+        fail "Step 82: idle GC under mixed traffic" \
             "server/client=${_server_ready}/${_client_ready}; entries=${_entries_peak}->${_entries_cur:-NA} baseline=${_entries_base:-NA}; gc_delta=${_gc_delta}; throughput=${_throughput_ok}; stopped=${_client_stopped}/${_server_stopped}"
     fi
 
     # UDP has no TCP conntrack/SPI gate in decaps_udp.  The reverse key is the
     # allocated NAT port plus the WAN source IP and source port, so the injected
     # packets below deliberately preserve the original remote tuple.
-    info "Step 82: checking live UDP inbound control and expired inbound rejection..."
+    info "Step 83: checking live UDP inbound control and expired inbound rejection..."
     local _ppp_ip="" _listener_port=42079 _remote_port=40079 _nat_port=""
     local _capture_ready=0 _listener_ready=0 _positive_ok=0 _negative_seen=0
     local _listener_alive=1 _listener_stopped=0 _tcpdump_stopped=0
@@ -218,7 +262,8 @@ PY"; then
         _capture_ready=0
         _listener_ready=0
         _nat_port=""
-        ssh_wan "rm -f '${_P20_WAN_TCPDUMP_PID}' '${_P20_WAN_TCPDUMP_OUT}'; \
+        # Literal paths here too, for the same reason as the cleanup above.
+        ssh_wan "rm -f '/tmp/e2e_nat_expiry_tcpdump.pid' '/tmp/e2e_nat_expiry_tcpdump.out'; \
             nohup tcpdump -l -nn -i '${WAN_NIC}' -c 1 \
             'udp and src host ${_ppp_ip} and dst host ${WAN_IP} and dst port ${_remote_port}' \
             >'${_P20_WAN_TCPDUMP_OUT}' 2>&1 < /dev/null & echo \$! >'${_P20_WAN_TCPDUMP_PID}'" || true
@@ -282,7 +327,7 @@ echo \$! >'${_P20_LAN_LISTENER_PID}'" || true
         _ppp_ip_re=${_ppp_ip//./\\.}
         _wan_ip_re=${WAN_IP//./\\.}
         for _i in $(seq 1 12); do
-            _cap=$(ssh_wan "cat '${_P20_WAN_TCPDUMP_OUT}' 2>/dev/null" || true)
+            _cap=$(_p20_get_wan_capture)
             _nat_port=$(printf '%s\n' "$_cap" | sed -nE \
                 "s/.*${_ppp_ip_re}\.([0-9]+) > ${_wan_ip_re}\.${_remote_port}:.*/\\1/p" | head -1)
             [[ "$_nat_port" =~ ^[0-9]+$ ]] && break
@@ -345,10 +390,10 @@ echo \$! >'${_P20_LAN_LISTENER_PID}'" || true
     _p20_stop_remote_pid ssh_lan "$_P20_LAN_LISTENER_PID" "Phase 20 UDP listener" && _listener_stopped=1
     if [[ $_positive_ok -eq 1 && $_negative_seen -eq 0 && $_listener_alive -eq 1 && \
           $_listener_stopped -eq 1 && $_tcpdump_stopped -eq 1 && -z "$_step79_issue" ]]; then
-        pass "Step 82: expired UDP inbound rejected" \
+        pass "Step 83: expired UDP inbound rejected" \
             "NAT port=${_nat_port}; live tuple reached LAN:${_listener_port}; same tuple rejected after 15s idle"
     else
-        fail "Step 82: expired UDP inbound rejected" \
+        fail "Step 83: expired UDP inbound rejected" \
             "${_step79_issue# } nat_port=${_nat_port:-NA}; positive=${_positive_ok}; expired_received=${_negative_seen}; listener_alive/stopped=${_listener_alive}/${_listener_stopped}; tcpdump_stopped=${_tcpdump_stopped}"
     fi
 

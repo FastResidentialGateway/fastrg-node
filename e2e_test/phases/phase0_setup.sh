@@ -6,6 +6,25 @@
 _FASTRG_DAEMON="/root/fastrg/fastrg-node/fastrg"
 _FASTRG_START_CMD="${_FASTRG_DAEMON} -l 1-8 -n 4 --socket-mem 17408 -a 0000:07:00.0 -a 0000:08:00.0"
 
+# Start fastrg on the node. Every start gets its own timestamped stdout/stderr
+# file and /var/log/fastrg.log is pointed at it, so a node that dies on boot no
+# longer erases the previous attempt's output; the last 20 files are kept.
+# Readers keep using /var/log/fastrg.log and always see the newest start.
+e2e_start_node() {
+    ssh_node "ts=\$(date +%Y%m%d-%H%M%S); \
+        nohup ${_FASTRG_START_CMD} >/var/log/fastrg.\${ts}.log 2>&1 & \
+        ln -sfn /var/log/fastrg.\${ts}.log /var/log/fastrg.log; \
+        ls -t /var/log/fastrg.2*.log 2>/dev/null | tail -n +21 | xargs -r rm -f"
+}
+
+# Phase 0 bounces the LAN subscriber connection to force a DHCP renew. An
+# interrupt landing between the down and the up would leave the interface down
+# for every later run, so bring it back whatever happened. Idempotent.
+_cleanup_phase0_setup() {
+    ssh_lan "nmcli con up netplan-vlan3 >/dev/null 2>&1 || netplan apply >/dev/null 2>&1; true" \
+        >/dev/null 2>&1 || true
+}
+
 phase0_setup() {
     bold "═══════════════════════════════════════════════════════"
     bold " Phase 0 — Prerequisite Checks"
@@ -118,7 +137,14 @@ phase0_setup() {
     # node picks it up on boot (must happen BEFORE the daemon starts).
     # ------------------------------------------------------------------
     info "Checking etcd HSI fixture for USER_ID=${USER_ID}..."
-    _seed_hsi=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/${USER_ID}" 2>/dev/null || true)
+    # An unreachable endpoint reads as an empty value, which would look like a
+    # missing fixture and send the whole run chasing the wrong problem. Stop on
+    # the real cause instead.
+    if ! _seed_hsi=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/${USER_ID}"); then
+        error "Cannot reach etcd at ${ETCD_ENDPOINT} to read the HSI fixture."
+        error "The suite reads its configuration from etcd; fix connectivity before rerunning."
+        exit 1
+    fi
     # Validate the fixture: it must exist AND have a non-zero vlan_id (vlan=0 means
     # a previous run left a bad/un-rolled-back test config — reseed in that case too).
     _seed_vlan=$(printf '%s' "$_seed_hsi" | jq -r '.config.vlan_id // empty' 2>/dev/null || true)
@@ -129,7 +155,12 @@ phase0_setup() {
             warn "etcd HSI config for USER_ID=${USER_ID} is corrupt/stale (vlan=${_seed_vlan:-empty}) — reseeding..."
         fi
         ssh_node "bash /root/fastrg/fastrg-node/e2e_test/restore_etcd_config.sh --force" 2>&1 | sed 's/^/    /'
-        _seed_hsi=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/${USER_ID}" 2>/dev/null || true)
+        # Seeding writes through the controller REST API but this reads etcd
+        # directly, so the two can disagree; say which one failed.
+        if ! _seed_hsi=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/${USER_ID}"); then
+            error "Seeded the HSI fixture, but etcd at ${ETCD_ENDPOINT} is unreachable for the read-back."
+            exit 1
+        fi
         if [[ -z "$_seed_hsi" ]]; then
             error "Failed to seed etcd HSI fixture for USER_ID=${USER_ID}."
             exit 1
@@ -138,6 +169,22 @@ phase0_setup() {
     else
         info "etcd HSI fixture present (vlan=${_seed_vlan})."
     fi
+
+    # ------------------------------------------------------------------
+    # The canonical fixture is IPv4-only. A controller config write that
+    # omits ipv6_enable keeps whatever is stored, so an interrupted IPv6 test
+    # can leave it on — and phase 29 would then watch IPV6CP get negotiated
+    # instead of rejected. Turn it back off before the node reads the config.
+    # ------------------------------------------------------------------
+    local _seed_uid _seed_ipv6
+    for _seed_uid in "${SUB_IDS[@]}"; do
+        _seed_ipv6=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/${_seed_uid}" \
+            2>/dev/null | jq -r '.config.ipv6_enable' 2>/dev/null || true)
+        if [[ "$_seed_ipv6" == "true" ]]; then
+            info "Preflight: user ${_seed_uid} carries ipv6_enable=true — restoring the IPv4-only fixture."
+            fastrg_grpc set_ipv6 "${_seed_uid}" false >/dev/null 2>&1 || true
+        fi
+    done
 
     # ------------------------------------------------------------------
     # Preflight: remove HSI keys whose user_id is beyond the canonical
@@ -275,7 +322,7 @@ phase0_setup() {
 
         warn "fastrg is NOT running — attempting to start..."
         info "Starting: ${_FASTRG_START_CMD}"
-        ssh_node "nohup ${_FASTRG_START_CMD} >/var/log/fastrg.log 2>&1 &"
+        e2e_start_node
         _FASTRG_STARTED_BY_SCRIPT=1
 
         # Wait up to 120 s for fastrg gRPC + HSI data for USER_ID to be ready

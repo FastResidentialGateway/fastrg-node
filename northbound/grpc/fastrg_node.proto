@@ -36,6 +36,7 @@ service FastrgService {
   rpc GetFastrgHsiInfo(google.protobuf.Empty) returns(FastrgHsiInfo) {}
   rpc GetFastrgDhcpInfo(google.protobuf.Empty) returns(FastrgDhcpInfo) {}
   rpc GetPortFwdInfo(PortFwdInfoRequest) returns(PortFwdInfoReply) {}
+  rpc GetNatEntries(NatEntriesRequest) returns(NatEntriesReply) {}
   rpc GetArpTable(ArpTableRequest) returns(ArpTableReply) {}
   rpc GetNodeStatus(google.protobuf.Empty) returns(NodeStatus) {}
   rpc AddDnsRecord(DnsRecordRequest) returns(DnsRecordReply) {}
@@ -45,8 +46,11 @@ service FastrgService {
   rpc FlushDnsCache(DnsCacheFlushRequest) returns(DnsCacheFlushReply) {}
   rpc SetDnsProxy(SetDnsProxyRequest) returns(SetDnsProxyReply) {}
   rpc SetTcpConntrack(SetTcpConntrackRequest) returns(SetTcpConntrackReply) {}
+  rpc SetIpv6(SetIpv6Request) returns(SetIpv6Reply) {}
   rpc PdumpStart(PdumpRequest) returns(PdumpReply) {}
   rpc PdumpStop(PdumpRequest) returns(PdumpReply) {}
+  rpc RepublishPPPoEStatus(google.protobuf.Empty) returns(RepublishPPPoEStatusReply) {}
+  rpc RepublishConfigStatus(google.protobuf.Empty) returns(RepublishConfigStatusReply) {}
 }
 
 message ConfigRequest {
@@ -208,6 +212,9 @@ message HsiInfo {
   uint64 pppoes_tx_packets = 11;
   uint64 pppoes_rx_bytes = 12;
   uint64 pppoes_tx_bytes = 13;
+  string ipv6_addr = 14;          // WAN link-local negotiated by IPV6CP; empty until IPv6 is up
+  string ipv6_pd_prefix = 15;     // full delegated prefix in CIDR form, e.g. "2001:db8:ab00::/56"
+  repeated string ipv6_dnss = 16; // IPv6 DNS servers learned from DHCPv6-PD
 }
 
 message FastrgHsiInfo {
@@ -235,13 +242,34 @@ message PortFwdInfoRequest {
 message PortFwdEntry {
   uint32 eport = 1;
   string dip = 2;
-  uint32 iport = 3;
+  uint32 iport = 3; // host order
   uint64 hit_count = 4;
 }
 
 message PortFwdInfoReply {
   uint32 user_id = 1;
   repeated PortFwdEntry entries = 2;
+}
+
+message NatEntriesRequest {
+  uint32 user_id = 1;
+}
+
+// Active NAT entry info. ICMP flows reuse the port fields: src_port
+// carries the echo identifier and dst_port the ICMP type.
+message NatEntryInfo {
+  uint32 proto = 1;     // IPPROTO_* value of the learned flow
+  string src_ip = 2;    // LAN device ip
+  string dst_ip = 3;    // WAN destination ip
+  uint32 src_port = 4;  // TCP/UDP: LAN device source port, ICMP: echo identifier; host order
+  uint32 dst_port = 5;  // TCP/UDP: WAN destination port, ICMP: ICMP type; host order
+  uint32 nat_port = 6;  // translated port, or translated identifier for ICMP; host order
+  uint32 tcp_state = 7; // tcp_conntrack_state_t, 0 = none
+}
+
+message NatEntriesReply {
+  uint32 user_id = 1;
+  repeated NatEntryInfo entries = 2;
 }
 
 message ArpTableRequest {
@@ -334,6 +362,15 @@ message SetTcpConntrackReply {
   string status = 1;
 }
 
+message SetIpv6Request {
+  uint32 user_id = 1;
+  bool enable = 2;
+}
+
+message SetIpv6Reply {
+  string status = 1;
+}
+
 // Per-subscriber packet capture (exec pdump start/stop)
 message PdumpRequest {
   uint32 direction = 1;     // 0 = ALL, 1 = WAN, 2 = LAN
@@ -345,4 +382,19 @@ message PdumpRequest {
 message PdumpReply {
   string status = 1;
   string pcap_file = 2;  // active capture file path (start only)
+}
+
+// RepublishPPPoEStatusReply reports how many PPPoE state events the node
+// emitted to Kafka, one per configured subscriber.
+message RepublishPPPoEStatusReply {
+  uint32 event_count = 1;
+}
+
+// RepublishConfigStatusReply reports how many subscribers's status the node is 
+// reporting. The node reads etcd for each subscriber, and compares the etcd 
+// config with its own config to determine if a CONFIG_APPLY_OK event should be 
+// emitted to Kafka. The node will try to reapply the config if it is different 
+// from the local config and trigger normal kafka report path. 
+message RepublishConfigStatusReply {
+  uint32 event_count = 1;
 }

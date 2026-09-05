@@ -132,7 +132,7 @@ BOOL fastrg_help_requested(int argc, char **argv)
     if (argv == NULL)
         return FALSE;
 
-    for (int i = 1; i < argc; i++) {
+    for(int i=1; i<argc; i++) {
         if (argv[i] == NULL)
             continue;
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0)
@@ -617,4 +617,11 @@ STATUS fastrg_get_nic_model(U16 port_id, char *model, size_t model_len)
         snprintf(model, model_len, "%04x:%04x", vendor_id, device_id);
 
     return SUCCESS;
+}
+
+BOOL ipv6_addr_is_unset(const U8 *addr)
+{
+    static const U8 zero[16] = { 0 };
+
+    return memcmp(addr, zero, sizeof(zero)) == 0 ? TRUE : FALSE;
 }

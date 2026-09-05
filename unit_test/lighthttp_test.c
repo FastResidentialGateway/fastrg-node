@@ -233,6 +233,64 @@ static void test_stop(void)
         s.listen_fd, fd_status, errno);
 }
 
+/* ---- errno contract on lighthttp_init() failure ----
+ * The caller logs why the listener could not come up, so errno has to survive
+ * the fprintf and close() that run before the failure return. Distinguishing
+ * EADDRINUSE from EACCES is what tells "somebody holds the port" apart from
+ * "we are not allowed to bind it". */
+static void test_init_failure_errno(void)
+{
+    printf("\nTesting lighthttp_init failure errno:\n");
+
+    /* Hold an ephemeral port so the bind below has to fail. Never a fixed
+     * port: a real node's endpoint must not be disturbed. */
+    int busy_fd = socket(AF_INET, SOCK_STREAM, 0);
+    TEST_ASSERT(busy_fd >= 0, "open a socket to occupy a port", "errno=%d", errno);
+    if (busy_fd < 0)
+        return;
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    socklen_t addr_len = sizeof(addr);
+    int occupied = bind(busy_fd, (struct sockaddr *)&addr, addr_len) == 0 &&
+                   getsockname(busy_fd, (struct sockaddr *)&addr, &addr_len) == 0 &&
+                   listen(busy_fd, 1) == 0;
+    TEST_ASSERT(occupied, "occupy a loopback port", "errno=%d", errno);
+    if (!occupied) {
+        close(busy_fd);
+        return;
+    }
+
+    char busy_addr[64];
+    snprintf(busy_addr, sizeof(busy_addr), "127.0.0.1:%u", ntohs(addr.sin_port));
+
+    lighthttp_server_t s;
+    errno = 0;
+    int ret = lighthttp_init(&s, busy_addr);
+    int busy_errno = errno;
+    TEST_ASSERT(ret == -1 && busy_errno == EADDRINUSE,
+        "an occupied port fails with EADDRINUSE",
+        "ret=%d errno=%d", ret, busy_errno);
+    close(busy_fd);
+
+    errno = 0;
+    ret = lighthttp_init(&s, "not-a-port");
+    int parse_errno = errno;
+    TEST_ASSERT(ret == -1 && parse_errno == EINVAL,
+        "an unparsable address fails with EINVAL",
+        "ret=%d errno=%d", ret, parse_errno);
+
+    errno = 0;
+    ret = lighthttp_init(&s, "999.999.999.999:8080");
+    int host_errno = errno;
+    TEST_ASSERT(ret == -1 && host_errno == EINVAL,
+        "an invalid host fails with EINVAL",
+        "ret=%d errno=%d", ret, host_errno);
+}
+
 void test_lighthttp(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 {
     (void)fastrg_ccb;
@@ -248,6 +306,7 @@ void test_lighthttp(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_parse_request_line();
     test_match();
     test_stop();
+    test_init_failure_errno();
 
     printf("\n");
     printf("╔════════════════════════════════════════════════════════════╗\n");

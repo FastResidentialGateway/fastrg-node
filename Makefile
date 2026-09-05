@@ -9,7 +9,9 @@ CC = gcc
 INCLUDE = -Inorthbound/grpc -Inorthbound/controller
 
 BUILD_TIME := $(shell date '+%Y/%b/%d %H:%M:%S %Z')
-GIT_COMMIT := $(shell git describe --always --dirty --tags)
+# Release containers check DPDK out by tag, so the submodule HEAD never matches
+# the gitlink; a plain copy without .git has nothing to describe at all.
+GIT_COMMIT := $(shell git -c submodule.lib/dpdk.ignore=all -c submodule.lib/libutil.ignore=all describe --always --dirty --tags || echo unknown)
 
 DPDK_CFLAGS := $(shell pkg-config --cflags libdpdk)
 CFLAGS = $(INCLUDE) -Wall -Werror -g $(DPDK_CFLAGS) -O3 -DALLOW_EXPERIMENTAL_API -DTEST_MODE #-Wextra -fsanitize=address
@@ -28,7 +30,7 @@ LDFLAGS = $(shell pkg-config --static --libs libdpdk) -lutils -lconfig -luuid -W
 
 TARGET = fastrg
 VERSION_H = src/version.h
-SRC = $(wildcard src/*.c) $(wildcard src/pppd/*.c) $(wildcard src/dhcpd/*.c) $(wildcard src/dnsd/*.c)
+SRC = $(wildcard src/*.c) $(wildcard src/pppd/*.c) $(wildcard src/dhcpd/*.c) $(wildcard src/dhcpd6/*.c) $(wildcard src/nd6/*.c) $(wildcard src/dnsd/*.c)
 OBJ = $(SRC:.c=.o)
 
 GRPCDIR = northbound/grpc

@@ -20,6 +20,7 @@ void fastrg_grpc_dhcp_server_stop(U16 user_id);
 void fastrg_grpc_hsi_snat_set(U16 user_id, U16 eport, char *dip, U16 iport);
 void fastrg_grpc_hsi_snat_unset(U16 user_id, U16 eport);
 void fastrg_grpc_get_port_fwd_info(U16 user_id);
+void fastrg_grpc_get_nat_entries(U16 user_id);
 void fastrg_grpc_get_arp_table(U16 user_id, U32 max_count);
 void fastrg_grpc_get_system_info();
 void fastrg_grpc_get_system_stats();
@@ -36,6 +37,7 @@ void fastrg_grpc_get_dns_static(U16 user_id);
 void fastrg_grpc_flush_dns_cache(U16 user_id);
 void fastrg_grpc_set_dns_proxy(U16 user_id, bool enable);
 void fastrg_grpc_set_tcp_conntrack(U16 user_id, bool enable);
+void fastrg_grpc_set_ipv6(U16 user_id, bool enable);
 void fastrg_grpc_pdump_start(U16 direction, U16 subscriber, const char *filter, U32 size_mb);
 void fastrg_grpc_pdump_stop(U16 direction, U16 subscriber);
 

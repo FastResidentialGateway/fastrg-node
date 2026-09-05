@@ -1,0 +1,853 @@
+# Case correctness local validation fixtures, one block per case.
+# A case runs from its '==== fixture: <name>' line to the next one or EOF.
+# A body line may therefore never start with '==== fixture: '.
+==== fixture: all_uint_empty_input
+# expect-status: 1
+---
+
+==== fixture: all_uint_good
+# invoke: args-only
+# args: 1 2 3
+# expect-status: 0
+---
+
+==== fixture: all_uint_one_non_numeric
+# invoke: args-only
+# args: 1 NA 3
+# expect-status: 1
+---
+
+==== fixture: capture_window_empty_input
+# args: vlan3
+# expect-output: err
+---
+
+==== fixture: capture_window_good
+# args: vlan3
+# expect-output: 2 0
+---
+tcpdump: verbose output suppressed, use -v[v]... for full protocol decode
+listening on vlan3, link-type EN10MB (Ethernet), capture size 262144 bytes
+12:00:01.000000 IP6 fe80::1 > ff02::1: ICMP6, neighbor solicitation, who has fe80::dead:beef, length 32
+12:00:02.000000 IP6 fe80::1 > ff02::1: ICMP6, neighbor solicitation, who has fe80::dead:beef, length 32
+==== fixture: capture_window_never_listened
+# args: vlan3
+# expect-output: err
+---
+tcpdump: vlan3: You do not have permission to capture on that device
+==== fixture: capture_window_no_control
+# args: vlan3
+# expect-output: 0 0
+---
+tcpdump: verbose output suppressed, use -v[v]... for full protocol decode
+listening on vlan3, link-type EN10MB (Ethernet), capture size 262144 bytes
+==== fixture: capture_window_ra_present
+# args: vlan3
+# expect-output: 1 3
+---
+tcpdump: verbose output suppressed, use -v[v]... for full protocol decode
+listening on vlan3, link-type EN10MB (Ethernet), capture size 262144 bytes
+12:00:01.000000 IP6 fe80::1 > ff02::1: ICMP6, neighbor solicitation, who has fe80::dead:beef, length 32
+12:00:03.000000 IP6 fe80::2 > ff02::1: ICMP6, router advertisement, length 64
+12:00:04.000000 IP6 fe80::2 > ff02::1: ICMP6, router advertisement, length 64
+12:00:05.000000 IP6 fe80::2 > ff02::1: ICMP6, router advertisement, length 64
+==== fixture: capture_window_wrong_interface
+# args: vlan3
+# expect-output: err
+---
+tcpdump: verbose output suppressed, use -v[v]... for full protocol decode
+listening on lo, link-type EN10MB (Ethernet), capture size 262144 bytes
+12:00:01.000000 IP6 fe80::1 > ff02::1: ICMP6, neighbor solicitation, who has fe80::dead:beef, length 32
+==== fixture: eta_seconds_empty_list
+# invoke: args-only
+# args: 10
+# expect-output: 0 0
+---
+
+==== fixture: eta_seconds_good
+# invoke: args-only
+# args: 10 30,,60
+# expect-output: 100 1
+---
+
+==== fixture: eta_seconds_no_history
+# invoke: args-only
+# args: 0 ,,
+# expect-output: 0 3
+---
+
+==== fixture: eta_seconds_non_numeric
+# invoke: args-only
+# args: 10 abc,20
+# expect-output: 30 1
+---
+
+==== fixture: icmp_nat_ident_background_only
+# args: 192.168.201.11
+# expect-output: none
+# expect-status: 1
+---
+{"user_id":1,"entries":[{"proto":17,"src_ip":"192.168.5.10","dst_ip":"192.168.201.11","src_port":40000,"dst_port":5902,"nat_port":33001,"tcp_state":0},{"proto":6,"src_ip":"192.168.5.10","dst_ip":"192.168.201.11","src_port":40001,"dst_port":80,"nat_port":33002,"tcp_state":3}]}
+==== fixture: icmp_nat_ident_empty_input
+# args: 192.168.201.11
+# expect-output: err
+# expect-status: 1
+---
+
+==== fixture: icmp_nat_ident_good
+# args: 192.168.201.11
+# expect-output: 33005
+# expect-status: 0
+---
+{"user_id":1,"entries":[{"proto":17,"src_ip":"192.168.5.10","dst_ip":"192.168.201.11","src_port":40000,"dst_port":5902,"nat_port":33001,"tcp_state":0},{"proto":1,"src_ip":"192.168.5.10","dst_ip":"192.168.201.11","src_port":4242,"dst_port":8,"nat_port":33005,"tcp_state":0},{"proto":1,"src_ip":"192.168.5.10","dst_ip":"8.8.8.8","src_port":4243,"dst_port":8,"nat_port":33006,"tcp_state":0}]}
+==== fixture: icmp_nat_ident_missing_nat_port
+# args: 192.168.201.11
+# expect-output: err
+# expect-status: 1
+---
+{"user_id":1,"entries":[{"proto":1,"src_ip":"192.168.5.10","dst_ip":"192.168.201.11","src_port":4242,"dst_port":8,"tcp_state":0}]}
+==== fixture: icmp_nat_ident_no_destination
+# args:
+# expect-output: err
+# expect-status: 1
+---
+{"user_id":1,"entries":[{"proto":1,"src_ip":"192.168.5.10","dst_ip":"192.168.201.11","src_port":4242,"dst_port":8,"nat_port":33005,"tcp_state":0}]}
+==== fixture: icmp_nat_ident_other_destination
+# args: 192.168.201.11
+# expect-output: none
+# expect-status: 1
+---
+{"user_id":1,"entries":[{"proto":1,"src_ip":"192.168.5.10","dst_ip":"8.8.8.8","src_port":4243,"dst_port":8,"nat_port":33006,"tcp_state":0}]}
+==== fixture: icmp_nat_ident_two_matches
+# args: 192.168.201.11
+# expect-output: multi
+# expect-status: 1
+---
+{"user_id":1,"entries":[{"proto":1,"src_ip":"192.168.5.10","dst_ip":"192.168.201.11","src_port":4242,"dst_port":8,"nat_port":33005,"tcp_state":0},{"proto":1,"src_ip":"192.168.5.11","dst_ip":"192.168.201.11","src_port":4244,"dst_port":8,"nat_port":33007,"tcp_state":0}]}
+==== fixture: icmp_nat_ident_unreadable
+# args: 192.168.201.11
+# expect-output: err
+# expect-status: 1
+---
+this is not json
+==== fixture: is_uint_empty_input
+# expect-status: 1
+---
+
+==== fixture: is_uint_good
+# expect-status: 0
+---
+900
+==== fixture: is_uint_negative
+# expect-status: 1
+---
+-1
+==== fixture: is_uint_non_numeric
+# expect-status: 1
+---
+NA
+==== fixture: median_of_lines_empty_input
+# expect-status: 1
+---
+
+==== fixture: median_of_lines_even_count
+# expect-output: 2
+---
+1
+2
+3
+4
+==== fixture: median_of_lines_good
+# expect-output: 2
+---
+3
+1
+2
+==== fixture: median_of_lines_non_numeric_lines
+# expect-output: 5
+---
+abc
+5
+NA
+==== fixture: median_of_lines_numeric_order
+# expect-output: 10
+---
+9
+10
+11
+==== fixture: metric_label_absent_label
+# args: fastrg_nic_info absent_label port=0
+# expect-output:
+---
+fastrg_node_rx_packets_total_dropped{node_uuid="u1",port="0"} 555
+fastrg_node_per_user_rx_packets_total{node_uuid="u1",user_id="1",nic_index="0"} 7
+fastrg_nic_info{node_uuid="u1",port="2",model="fastrg_node_rx_packets_total"} 2
+fastrg_node_rx_packets_total{node_uuid="u1",port="0"} 900
+fastrg_node_rx_packets_total{node_uuid="u1",port="1"} 100
+fastrg_nic_info{node_uuid="u1",port="0",model="Intel Corporation Ethernet Controller X710 for 10GbE SFP+"} 1
+fastrg_node_snapshot_persist_ok{node_uuid="u1"} 0
+==== fixture: metric_label_empty_input
+# args: fastrg_nic_info model
+# expect-output:
+---
+
+==== fixture: metric_label_good
+# args: fastrg_nic_info model port=0
+# expect-output: Intel Corporation Ethernet Controller X710 for 10GbE SFP+
+---
+fastrg_node_rx_packets_total_dropped{node_uuid="u1",port="0"} 555
+fastrg_node_per_user_rx_packets_total{node_uuid="u1",user_id="1",nic_index="0"} 7
+fastrg_nic_info{node_uuid="u1",port="2",model="fastrg_node_rx_packets_total"} 2
+fastrg_node_rx_packets_total{node_uuid="u1",port="0"} 900
+fastrg_node_rx_packets_total{node_uuid="u1",port="1"} 100
+fastrg_nic_info{node_uuid="u1",port="0",model="Intel Corporation Ethernet Controller X710 for 10GbE SFP+"} 1
+fastrg_node_snapshot_persist_ok{node_uuid="u1"} 0
+==== fixture: metric_label_values_empty_input
+# args: fastrg_node_rx_packets_total port
+# expect-output:
+---
+
+==== fixture: metric_label_values_good
+# args: fastrg_node_rx_packets_total port port=1
+# expect-output: 1
+---
+fastrg_node_rx_packets_total_dropped{node_uuid="u1",port="0"} 555
+fastrg_node_per_user_rx_packets_total{node_uuid="u1",user_id="1",nic_index="0"} 7
+fastrg_nic_info{node_uuid="u1",port="2",model="fastrg_node_rx_packets_total"} 2
+fastrg_node_rx_packets_total{node_uuid="u1",port="0"} 900
+fastrg_node_rx_packets_total{node_uuid="u1",port="1"} 100
+fastrg_nic_info{node_uuid="u1",port="0",model="Intel Corporation Ethernet Controller X710 for 10GbE SFP+"} 1
+fastrg_node_snapshot_persist_ok{node_uuid="u1"} 0
+==== fixture: metric_label_values_no_matching_rows
+# args: fastrg_node_absent_family port
+# expect-output:
+---
+fastrg_node_rx_packets_total_dropped{node_uuid="u1",port="0"} 555
+fastrg_node_per_user_rx_packets_total{node_uuid="u1",user_id="1",nic_index="0"} 7
+fastrg_nic_info{node_uuid="u1",port="2",model="fastrg_node_rx_packets_total"} 2
+fastrg_node_rx_packets_total{node_uuid="u1",port="0"} 900
+fastrg_node_rx_packets_total{node_uuid="u1",port="1"} 100
+fastrg_nic_info{node_uuid="u1",port="0",model="Intel Corporation Ethernet Controller X710 for 10GbE SFP+"} 1
+fastrg_node_snapshot_persist_ok{node_uuid="u1"} 0
+==== fixture: metric_rows_empty_input
+# args: fastrg_node_rx_packets_total
+# expect-output:
+---
+
+==== fixture: metric_rows_good
+# args: fastrg_node_rx_packets_total
+# expect-output: 2
+---
+fastrg_node_rx_packets_total_dropped{node_uuid="u1",port="0"} 555
+fastrg_node_per_user_rx_packets_total{node_uuid="u1",user_id="1",nic_index="0"} 7
+fastrg_nic_info{node_uuid="u1",port="2",model="fastrg_node_rx_packets_total"} 2
+fastrg_node_rx_packets_total{node_uuid="u1",port="0"} 900
+fastrg_node_rx_packets_total{node_uuid="u1",port="1"} 100
+fastrg_nic_info{node_uuid="u1",port="0",model="Intel Corporation Ethernet Controller X710 for 10GbE SFP+"} 1
+fastrg_node_snapshot_persist_ok{node_uuid="u1"} 0
+==== fixture: metric_rows_no_matching_rows
+# args: fastrg_node_absent_family
+# expect-output:
+---
+fastrg_node_rx_packets_total_dropped{node_uuid="u1",port="0"} 555
+fastrg_node_per_user_rx_packets_total{node_uuid="u1",user_id="1",nic_index="0"} 7
+fastrg_nic_info{node_uuid="u1",port="2",model="fastrg_node_rx_packets_total"} 2
+fastrg_node_rx_packets_total{node_uuid="u1",port="0"} 900
+fastrg_node_rx_packets_total{node_uuid="u1",port="1"} 100
+fastrg_nic_info{node_uuid="u1",port="0",model="Intel Corporation Ethernet Controller X710 for 10GbE SFP+"} 1
+fastrg_node_snapshot_persist_ok{node_uuid="u1"} 0
+==== fixture: metric_scan_empty_input
+# args: fastrg_node_rx_packets_total sum
+# expect-output:
+---
+
+==== fixture: metric_scan_good
+# args: fastrg_node_rx_packets_total first
+# expect-output: 900
+---
+fastrg_node_rx_packets_total_dropped{node_uuid="u1",port="0"} 555
+fastrg_node_per_user_rx_packets_total{node_uuid="u1",user_id="1",nic_index="0"} 7
+fastrg_nic_info{node_uuid="u1",port="2",model="fastrg_node_rx_packets_total"} 2
+fastrg_node_rx_packets_total{node_uuid="u1",port="0"} 900
+fastrg_node_rx_packets_total{node_uuid="u1",port="1"} 100
+fastrg_nic_info{node_uuid="u1",port="0",model="Intel Corporation Ethernet Controller X710 for 10GbE SFP+"} 1
+fastrg_node_snapshot_persist_ok{node_uuid="u1"} 0
+==== fixture: metric_scan_no_matching_rows
+# args: fastrg_node_absent_family count
+# expect-output:
+---
+fastrg_node_rx_packets_total_dropped{node_uuid="u1",port="0"} 555
+fastrg_node_per_user_rx_packets_total{node_uuid="u1",user_id="1",nic_index="0"} 7
+fastrg_nic_info{node_uuid="u1",port="2",model="fastrg_node_rx_packets_total"} 2
+fastrg_node_rx_packets_total{node_uuid="u1",port="0"} 900
+fastrg_node_rx_packets_total{node_uuid="u1",port="1"} 100
+fastrg_nic_info{node_uuid="u1",port="0",model="Intel Corporation Ethernet Controller X710 for 10GbE SFP+"} 1
+fastrg_node_snapshot_persist_ok{node_uuid="u1"} 0
+==== fixture: metric_sum_empty_input
+# args: fastrg_node_rx_packets_total
+# expect-output:
+---
+
+==== fixture: metric_sum_family_prefix_collision
+# args: fastrg_node_rx_packets_total
+# expect-output: 1000
+---
+fastrg_node_rx_packets_total_dropped{node_uuid="u1",port="0"} 555
+fastrg_node_per_user_rx_packets_total{node_uuid="u1",user_id="1",nic_index="0"} 7
+fastrg_nic_info{node_uuid="u1",port="2",model="fastrg_node_rx_packets_total"} 2
+fastrg_node_rx_packets_total{node_uuid="u1",port="0"} 900
+fastrg_node_rx_packets_total{node_uuid="u1",port="1"} 100
+fastrg_nic_info{node_uuid="u1",port="0",model="Intel Corporation Ethernet Controller X710 for 10GbE SFP+"} 1
+fastrg_node_snapshot_persist_ok{node_uuid="u1"} 0
+==== fixture: metric_sum_good
+# args: fastrg_node_rx_packets_total port=0
+# expect-output: 900
+---
+fastrg_node_rx_packets_total_dropped{node_uuid="u1",port="0"} 555
+fastrg_node_per_user_rx_packets_total{node_uuid="u1",user_id="1",nic_index="0"} 7
+fastrg_nic_info{node_uuid="u1",port="2",model="fastrg_node_rx_packets_total"} 2
+fastrg_node_rx_packets_total{node_uuid="u1",port="0"} 900
+fastrg_node_rx_packets_total{node_uuid="u1",port="1"} 100
+fastrg_nic_info{node_uuid="u1",port="0",model="Intel Corporation Ethernet Controller X710 for 10GbE SFP+"} 1
+fastrg_node_snapshot_persist_ok{node_uuid="u1"} 0
+==== fixture: metric_sum_no_matching_rows
+# args: fastrg_node_absent_family
+# expect-output:
+---
+fastrg_node_rx_packets_total_dropped{node_uuid="u1",port="0"} 555
+fastrg_node_per_user_rx_packets_total{node_uuid="u1",user_id="1",nic_index="0"} 7
+fastrg_nic_info{node_uuid="u1",port="2",model="fastrg_node_rx_packets_total"} 2
+fastrg_node_rx_packets_total{node_uuid="u1",port="0"} 900
+fastrg_node_rx_packets_total{node_uuid="u1",port="1"} 100
+fastrg_nic_info{node_uuid="u1",port="0",model="Intel Corporation Ethernet Controller X710 for 10GbE SFP+"} 1
+fastrg_node_snapshot_persist_ok{node_uuid="u1"} 0
+==== fixture: metric_value_empty_input
+# args: fastrg_node_rx_packets_total
+# expect-output:
+---
+
+==== fixture: metric_value_family_prefix_collision
+# args: fastrg_node_rx_packets_total
+# expect-output: 900
+---
+fastrg_node_rx_packets_total_dropped{node_uuid="u1",port="0"} 555
+fastrg_node_per_user_rx_packets_total{node_uuid="u1",user_id="1",nic_index="0"} 7
+fastrg_nic_info{node_uuid="u1",port="2",model="fastrg_node_rx_packets_total"} 2
+fastrg_node_rx_packets_total{node_uuid="u1",port="0"} 900
+fastrg_node_rx_packets_total{node_uuid="u1",port="1"} 100
+fastrg_nic_info{node_uuid="u1",port="0",model="Intel Corporation Ethernet Controller X710 for 10GbE SFP+"} 1
+fastrg_node_snapshot_persist_ok{node_uuid="u1"} 0
+==== fixture: metric_value_good
+# args: fastrg_node_rx_packets_total port=1
+# expect-output: 100
+---
+fastrg_node_rx_packets_total_dropped{node_uuid="u1",port="0"} 555
+fastrg_node_per_user_rx_packets_total{node_uuid="u1",user_id="1",nic_index="0"} 7
+fastrg_nic_info{node_uuid="u1",port="2",model="fastrg_node_rx_packets_total"} 2
+fastrg_node_rx_packets_total{node_uuid="u1",port="0"} 900
+fastrg_node_rx_packets_total{node_uuid="u1",port="1"} 100
+fastrg_nic_info{node_uuid="u1",port="0",model="Intel Corporation Ethernet Controller X710 for 10GbE SFP+"} 1
+fastrg_node_snapshot_persist_ok{node_uuid="u1"} 0
+==== fixture: metric_value_legitimate_zero
+# args: fastrg_node_snapshot_persist_ok
+# expect-output: 0
+---
+fastrg_node_rx_packets_total_dropped{node_uuid="u1",port="0"} 555
+fastrg_node_per_user_rx_packets_total{node_uuid="u1",user_id="1",nic_index="0"} 7
+fastrg_nic_info{node_uuid="u1",port="2",model="fastrg_node_rx_packets_total"} 2
+fastrg_node_rx_packets_total{node_uuid="u1",port="0"} 900
+fastrg_node_rx_packets_total{node_uuid="u1",port="1"} 100
+fastrg_nic_info{node_uuid="u1",port="0",model="Intel Corporation Ethernet Controller X710 for 10GbE SFP+"} 1
+fastrg_node_snapshot_persist_ok{node_uuid="u1"} 0
+==== fixture: metric_value_value_in_last_field
+# args: fastrg_nic_info port=0
+# expect-output: 1
+---
+fastrg_node_rx_packets_total_dropped{node_uuid="u1",port="0"} 555
+fastrg_node_per_user_rx_packets_total{node_uuid="u1",user_id="1",nic_index="0"} 7
+fastrg_nic_info{node_uuid="u1",port="2",model="fastrg_node_rx_packets_total"} 2
+fastrg_node_rx_packets_total{node_uuid="u1",port="0"} 900
+fastrg_node_rx_packets_total{node_uuid="u1",port="1"} 100
+fastrg_nic_info{node_uuid="u1",port="0",model="Intel Corporation Ethernet Controller X710 for 10GbE SFP+"} 1
+fastrg_node_snapshot_persist_ok{node_uuid="u1"} 0
+==== fixture: phase_step_ok_good
+# invoke: args-only
+# args: 5 5
+# expect-status: 0
+---
+
+==== fixture: phase_step_ok_jump_back
+# invoke: args-only
+# args: 16 3
+# expect-status: 1
+---
+
+==== fixture: phase_step_ok_non_numeric
+# invoke: args-only
+# args: 5 x
+# expect-status: 1
+---
+
+==== fixture: phase_step_ok_repeat
+# invoke: args-only
+# args: 5 4
+# expect-status: 1
+---
+
+==== fixture: phase_step_ok_skipped
+# invoke: args-only
+# args: 2 3
+# expect-status: 1
+---
+
+==== fixture: pppoe_expected_phase_connected
+# expect-output: connected
+# expect-status: 0
+---
+Data phase
+==== fixture: pppoe_expected_phase_connecting
+# expect-output: connecting
+# expect-status: 0
+---
+IPCP phase
+==== fixture: pppoe_expected_phase_disconnected
+# expect-output: disconnected
+# expect-status: 0
+---
+not configured
+==== fixture: pppoe_expected_phase_empty_input
+# expect-output:
+# expect-status: 1
+---
+
+==== fixture: pppoe_expected_phase_unknown_status
+# expect-output:
+# expect-status: 1
+---
+unknown status
+==== fixture: pppoe_row_fresh_empty_input
+# args: 2026-08-24T05:00:00Z connected
+# expect-output: err
+# expect-status: 1
+---
+
+==== fixture: pppoe_row_fresh_first_row
+# args: - connected
+# expect-output: ok
+# expect-status: 0
+---
+{"node_uuid":"u1","user_id":"1","phase":"connected","updated_at":"2026-08-24T05:00:10.5Z"}
+==== fixture: pppoe_row_fresh_good
+# args: 2026-08-24T05:00:00Z connected
+# expect-output: ok
+# expect-status: 0
+---
+{"node_uuid":"u1","user_id":"1","phase":"connected","event_time":"2026-08-24T05:00:09Z","updated_at":"2026-08-24T05:00:10.5Z"}
+==== fixture: pppoe_row_fresh_no_row
+# args: 2026-08-24T05:00:00Z connected
+# expect-output: err
+# expect-status: 1
+---
+{"error":"No PPPoE status recorded for this user"}
+==== fixture: pppoe_row_fresh_stale
+# args: 2026-08-24T05:00:10.5Z connected
+# expect-output: stale
+# expect-status: 1
+---
+{"node_uuid":"u1","user_id":"1","phase":"connected","event_time":"2026-08-24T05:00:09Z","updated_at":"2026-08-24T05:00:10.5Z"}
+==== fixture: pppoe_row_fresh_unmapped_node_phase
+# args: 2026-08-24T05:00:00Z
+# expect-output: err
+# expect-status: 1
+---
+{"node_uuid":"u1","user_id":"1","phase":"connected","updated_at":"2026-08-24T05:00:10.5Z"}
+==== fixture: pppoe_row_fresh_wrong_phase
+# args: 2026-08-24T05:00:00Z connected
+# expect-output: phase
+# expect-status: 1
+---
+{"node_uuid":"u1","user_id":"1","phase":"disconnected","updated_at":"2026-08-24T05:00:10.5Z"}
+==== fixture: registration_grpc_port_field_missing
+# expect-output:
+---
+{"node_uuid":"u1","ip":"192.168.10.212","status":"online"}
+==== fixture: registration_grpc_port_field_misspelled
+# expect-output:
+---
+{"node_uuid":"u1","grpcport":"50052","status":"online"}
+==== fixture: registration_grpc_port_good
+# expect-output: 50052
+---
+{"node_uuid":"u1","ip":"192.168.10.212","grpc_port":"50052","status":"online"}
+==== fixture: registration_grpc_port_legitimate_zero
+# expect-output: 0
+---
+{"node_uuid":"u1","grpc_port":0,"status":"online"}
+==== fixture: registration_grpc_port_wrong_value
+# expect-output: 50051
+---
+{"node_uuid":"u1","grpc_port":"50051","status":"online"}
+==== fixture: config_republish_count_ok_good
+# args: 2
+# expect-output: ok
+# expect-status: 0
+---
+2
+==== fixture: config_republish_count_ok_short
+# args: 2
+# expect-output: short
+# expect-status: 1
+---
+1
+==== fixture: config_republish_count_ok_over
+# args: 2
+# expect-output: over
+# expect-status: 1
+---
+3
+==== fixture: config_republish_count_ok_not_a_number
+# args: 2
+# expect-output: err
+# expect-status: 1
+---
+x
+==== fixture: config_republish_count_ok_empty_input
+# args: 2
+# expect-output: err
+# expect-status: 1
+---
+
+==== fixture: republish_event_count_empty_input
+# expect-output:
+# expect-status: 1
+---
+
+==== fixture: republish_event_count_error_reply
+# expect-output:
+# expect-status: 1
+---
+{"error":"Failed to dial target host \"192.168.10.201:50052\": connection refused"}
+==== fixture: republish_event_count_field_missing
+# expect-output:
+# expect-status: 1
+---
+{}
+==== fixture: republish_event_count_good
+# expect-output: 2
+# expect-status: 0
+---
+{"event_count":2}
+==== fixture: republish_event_count_legitimate_zero
+# expect-output: 0
+# expect-status: 0
+---
+{"event_count":0}
+==== fixture: spi_stats_fields_empty_input
+# args: 2
+# expect-status: 1
+---
+
+==== fixture: spi_stats_fields_error_answer
+# args: 2
+# expect-status: 1
+---
+{"error": "Failed to dial target host \"192.168.10.211:50052\": connection refused"}
+==== fixture: spi_stats_fields_good
+# args: 2
+# expect-output: 48210 7
+# expect-status: 0
+---
+{"stats":[{"rx_packets":"11","per_user_stats":[{"user_id":2,"dropped_packets":"3"}]},{"rx_packets":"48210","per_user_stats":[{"user_id":1,"dropped_packets":"5"},{"user_id":2,"dropped_packets":"7"}]}]}
+==== fixture: spi_stats_fields_legitimate_zeros
+# args: 2
+# expect-output: 0 0
+# expect-status: 0
+---
+{"stats":[{"rx_packets":"0","per_user_stats":[]},{"rx_packets":"0","per_user_stats":[{"user_id":2,"dropped_packets":"0"}]}]}
+==== fixture: spi_stats_fields_port_missing
+# args: 2
+# expect-status: 1
+---
+{"stats":[{"rx_packets":"11","per_user_stats":[{"user_id":2,"dropped_packets":"7"}]}]}
+==== fixture: spi_stats_fields_user_row_absent
+# args: 2
+# expect-status: 1
+---
+{"stats":[{"rx_packets":"11","per_user_stats":[]},{"rx_packets":"48210","per_user_stats":[{"user_id":1,"dropped_packets":"5"}]}]}
+==== fixture: wal_durable_count_absent_file
+# expect-output: 0
+# expect-status: 0
+---
+
+==== fixture: wal_durable_count_empty_array
+# expect-output: 0
+# expect-status: 0
+---
+[]
+==== fixture: wal_durable_count_garbage
+# expect-output:
+# expect-status: 1
+---
+this is not json
+==== fixture: wal_durable_count_good
+# expect-output: 2
+# expect-status: 0
+---
+[{"seq":7,"payload":"1a2b0a0a757365725f636f756e741211434f554e545f455843454544535f4d4158"},{"seq":8,"payload":"41"}]
+==== fixture: wal_durable_count_not_an_array
+# expect-output:
+# expect-status: 1
+---
+{"seq":1,"payload":"41"}
+==== fixture: wal_durable_count_odd_payload
+# expect-output:
+# expect-status: 1
+---
+[{"seq":1,"payload":"4"}]
+==== fixture: wal_durable_count_seq_missing
+# expect-output:
+# expect-status: 1
+---
+[{"payload":"41"}]
+==== fixture: wal_holds_error_code_corrupt
+# args: COUNT_EXCEEDS_MAX
+# expect-output: err
+# expect-status: 1
+---
+this is not json
+==== fixture: wal_holds_error_code_empty_wal
+# args: COUNT_EXCEEDS_MAX
+# expect-output: empty
+# expect-status: 1
+---
+[]
+==== fixture: wal_holds_error_code_good
+# args: COUNT_EXCEEDS_MAX
+# expect-output: ok
+# expect-status: 0
+---
+[{"seq":7,"payload":"1a2b0a0a757365725f636f756e741211434f554e545f455843454544535f4d4158"}]
+==== fixture: wal_holds_error_code_no_code
+# args:
+# expect-output: err
+# expect-status: 1
+---
+[{"seq":7,"payload":"1a2b0a0a757365725f636f756e741211434f554e545f455843454544535f4d4158"}]
+==== fixture: wal_holds_error_code_other_code
+# args: COUNT_EXCEEDS_MAX
+# expect-output: absent
+# expect-status: 1
+---
+[{"seq":7,"payload":"1a2b0a0a757365725f636f756e74120e4e41545f5441424c455f46554c4c"}]
+==== fixture: wal_holds_error_code_uppercase_payload
+# args: COUNT_EXCEEDS_MAX
+# expect-output: ok
+# expect-status: 0
+---
+[{"seq":7,"payload":"1A2B0A0A757365725F636F756E741211434F554E545F455843454544535F4D4158"}]
+==== fixture: p36_ping_loss_zero
+# args: 0
+# expect-status: 0
+---
+4 packets transmitted, 4 received, 0% packet loss, time 3005ms
+rtt min/avg/max/mdev = 0.201/0.244/0.301/0.038 ms
+==== fixture: p36_ping_loss_within_ceiling
+# args: 2
+# expect-status: 0
+---
+50 packets transmitted, 49 received, 2% packet loss, time 49075ms
+rtt min/avg/max/mdev = 0.198/0.251/0.402/0.041 ms
+==== fixture: p36_ping_loss_over_ceiling
+# args: 2
+# expect-status: 1
+---
+50 packets transmitted, 48 received, 4% packet loss, time 49080ms
+rtt min/avg/max/mdev = 0.203/0.249/0.377/0.036 ms
+==== fixture: p36_ping_loss_total_loss
+# args: 2
+# expect-status: 1
+---
+50 packets transmitted, 0 received, 100% packet loss, time 49999ms
+==== fixture: p36_ping_loss_fractional_over
+# args: 2
+# expect-status: 1
+---
+1000 packets transmitted, 974 received, 2.6% packet loss, time 999123ms
+rtt min/avg/max/mdev = 0.199/0.257/0.511/0.044 ms
+==== fixture: p36_ping_loss_no_output
+# args: 2
+# expect-status: 1
+---
+ping: connect: Network is unreachable
+==== fixture: ping_verdict_zero_loss
+# expect-output: pass
+# expect-status: 0
+---
+PING 2001:db8:201::11(2001:db8:201::11) 56 data bytes
+64 bytes from 2001:db8:201::11: icmp_seq=1 ttl=63 time=0.421 ms
+4 packets transmitted, 4 received, 0% packet loss, time 3004ms
+rtt min/avg/max/mdev = 0.401/0.437/0.482/0.031 ms
+==== fixture: ping_verdict_total_loss
+# expect-output: blocked
+# expect-status: 0
+---
+PING 2001:db8:201::11(2001:db8:201::11) 56 data bytes
+3 packets transmitted, 0 received, 100% packet loss, time 2043ms
+==== fixture: ping_verdict_partial_loss
+# expect-output: partial
+# expect-status: 0
+---
+4 packets transmitted, 2 received, 50% packet loss, time 3012ms
+rtt min/avg/max/mdev = 0.410/0.455/0.500/0.045 ms
+==== fixture: ping_verdict_fractional_loss
+# expect-output: partial
+# expect-status: 0
+---
+1000 packets transmitted, 995 received, 0.5% packet loss, time 999123ms
+rtt min/avg/max/mdev = 0.199/0.257/0.511/0.044 ms
+==== fixture: ping_verdict_no_output
+# expect-output: err
+# expect-status: 1
+---
+
+==== fixture: ping_verdict_unreachable
+# expect-output: err
+# expect-status: 1
+---
+ping: connect: Network is unreachable
+==== fixture: ping_verdict_zero_inside_hundred
+# expect-output: blocked
+# expect-status: 0
+---
+PING 2001:db8:201::11(2001:db8:201::11) 56 data bytes
+From 2001:db8:6400::1 icmp_seq=1 Destination unreachable: Address unreachable
+3 packets transmitted, 0 received, +3 errors, 100% packet loss, time 2050ms
+==== fixture: dns_answer_answered
+# args: 192.168.201.11
+# expect-output: answered
+# expect-status: 0
+---
+192.168.201.11
+==== fixture: dns_answer_prefix_of_longer_ip
+# args: 192.168.201.11
+# expect-output: silent
+# expect-status: 0
+---
+192.168.201.110
+==== fixture: dns_answer_timed_out
+# args: 192.168.201.11
+# expect-output: silent
+# expect-status: 0
+---
+;; communications error to 192.168.4.1#53: timed out
+==== fixture: dns_answer_empty_output
+# args: 192.168.201.11
+# expect-output: silent
+# expect-status: 0
+---
+
+==== fixture: dns_answer_dig_missing
+# args: 192.168.201.11
+# expect-output: err
+# expect-status: 1
+---
+bash: line 1: dig: command not found
+==== fixture: dns_answer_no_ip_asked
+# expect-output: err
+# expect-status: 1
+---
+192.168.201.11
+==== fixture: redial_verdict_enabled
+# args: 1234 on
+# expect-output: pass
+# expect-status: 0
+---
+4660 2001:db8:6400:100::/56 fe80::1
+==== fixture: redial_verdict_disabled
+# args: 1234 off
+# expect-output: pass
+# expect-status: 0
+---
+4660
+==== fixture: redial_verdict_same_session
+# args: 1234 on
+# expect-output: same_session
+# expect-status: 1
+---
+1234 2001:db8:6400:100::/56 fe80::1
+==== fixture: redial_verdict_no_prefix
+# args: 1234 on
+# expect-output: no_prefix
+# expect-status: 1
+---
+4660 2001:db8:6400::/48 fe80::1
+==== fixture: redial_verdict_no_addr
+# args: 1234 on
+# expect-output: no_addr
+# expect-status: 1
+---
+4660 2001:db8:6400:100::/56 2001:db8:6400:100::1
+==== fixture: redial_verdict_still_has_ipv6
+# args: 1234 off
+# expect-output: ipv6_present
+# expect-status: 1
+---
+4660 2001:db8:6400:100::/56 fe80::1
+==== fixture: redial_verdict_unreadable
+# args: 1234 on
+# expect-output: err
+# expect-status: 1
+---
+err
+==== fixture: redial_verdict_no_session_before
+# expect-output: err
+# expect-status: 1
+---
+4660 2001:db8:6400:100::/56 fe80::1
+==== fixture: redial_verdict_session_absent
+# args: 1234 off
+# expect-output: err
+# expect-status: 1
+---
+null
+==== fixture: rss_spread_good
+# invoke: args-only
+# args: 3 4 800 12 16 16
+# expect-output: pass
+# expect-status: 0
+---
+==== fixture: rss_spread_no_rows
+# invoke: args-only
+# args: 0 1 0 0 0 16
+# expect-output: no_rows
+# expect-status: 1
+---
+==== fixture: rss_spread_probe_broken
+# invoke: args-only
+# args: 0 4 0 0 11 16
+# expect-output: probe_broken
+# expect-status: 1
+---
+==== fixture: rss_spread_single_queue
+# invoke: args-only
+# args: 1 4 640 0 16 16
+# expect-output: single_queue
+# expect-status: 1
+---
+==== fixture: rss_spread_queue0
+# invoke: args-only
+# args: 2 4 100 40 16 16
+# expect-output: queue0
+# expect-status: 1
+---
+==== fixture: rss_spread_unreadable_rows
+# invoke: args-only
+# args: err 4 err 0 16 16
+# expect-output: err
+# expect-status: 1
+---
+==== fixture: rss_spread_empty_input
+# invoke: args-only
+# expect-output: err
+# expect-status: 1
+---

@@ -21,6 +21,7 @@ extern "C" {
 #include "utils.h"
 #include "init.h"
 #include "lighthttp.h"
+#include "etcd_event.h"
 
 #define MAX_VLAN_ID 4000
 #define MIN_VLAN_ID 2
@@ -93,6 +94,14 @@ struct lcore_usage_counter {
     const char *role;
 } __rte_cache_aligned;
 
+/* Each lcore writes only its own row with a plain +=; readers sum the rows
+ * with RELAXED loads. */
+struct tx_queue_stats {
+    uint64_t full_packets;    /* packets the queue refused */
+    uint64_t short_bursts;    /* bursts in which it refused at least one */
+    uint64_t handoff_dropped; /* packets dropped because the owner's ring was full */
+};
+
 /* FastRG system data structure */
 typedef struct FastRG {
     U8                      loglvl;         /* FastRG loglvl */
@@ -106,6 +115,9 @@ typedef struct FastRG {
     char                    *log_path;      /* FastRG log file path (pcap captures go in its dir) */
     char                    *unix_sock_path;/* FastRG unix socket file path */
     char                    *node_grpc_ip_port; /* FastRG node grpc ip:port */
+    U16                     node_grpc_port;    /* same port as a number, reported to the controller
+                                                * at registration */
+    U64                     subscriber_cost_bytes; /* measured hugepage cost of one subscriber */
     int                     unix_sock_fd;   /* FastRG unix socket file descriptor */
     FILE                    *fp;            /* FastRG log file pointer */
     char                    *node_uuid;     /* FastRG node uuid */
@@ -138,6 +150,12 @@ typedef struct FastRG {
      * rows are allocated; each lcore writes only its own row, readers sum
      * across rows. */
     struct per_ccb_stats    *per_subscriber_stats[RTE_MAX_LCORE][PORT_AMOUNT];
+
+    U16                     tx_queue_count[PORT_AMOUNT]; /* Tx queue count per port */
+    struct tx_queue_stats   *tx_queue_stats[RTE_MAX_LCORE][PORT_AMOUNT]; /* TX queue statistics per lcore */
+    struct rte_ring         **tx_handoff_ring[PORT_AMOUNT]; /* Per queue ring for packet handoff */
+    /* Log flag while tx queue is full to ensure no duplicate logging */
+    U8                      *tx_full_logged_flag[PORT_AMOUNT];
     /* pdump_rcu does not protect a data pointer. It marks intervals
      * where data-plane lcores may be inside RX/TX bursts and therefore pdump
      * callbacks. Callback removal does not wait for callbacks already in
@@ -149,14 +167,18 @@ typedef struct FastRG {
     struct pppoes_lcore_stats *pppoes_stats[RTE_MAX_LCORE];
     struct rte_timer        link;           /* for physical link checking timer */
     struct rte_timer        heartbeat_timer;/* for controller heartbeat timer */
+    struct rte_timer        nd6_age_timer;  /* periodic IPv6 neighbor cache aging sweep */
     datapath_mode_t         datapath_mode;    /* RSS multi-queue vs software distributor */
-    U16                     dp_ctrl_txq_self; /* data core self-port control packet TX queue (N+1) */
-    U16                     dp_ctrl_txq_opposite;/* data core opposite-port control packet TX queue (N+2) */
+    U16                     dp_ctrl_txq_self[PORT_AMOUNT]; /* Tx queue self own(N+1) */
+    U16                     dp_ctrl_txq_opposite[PORT_AMOUNT];/* Tx queue opposite port own(N+2) */
+    U16                     dp_ctrl_txq_cp[PORT_AMOUNT]; /* control thread TX queue per port */
     struct rte_distributor  *wan_dist;        /* WAN ingress software distributor (DP_MODE_DISTRIBUTOR) */
     struct rte_distributor  *lan_dist;        /* LAN ingress software distributor (DP_MODE_DISTRIBUTOR) */
     struct rte_ring         *cp_q;            /* data/ctrl plane -> control loop event ring */
     struct rte_ring         *free_mail_ring;  /* pre-allocated tFastRG_MBX slot pool */
-    struct rte_ring         *etcd_event_q;    /* etcd watcher threads -> control loop event ring */
+    /* Per subscriber, the revision of the etcd event that last applied or
+     * removed its HSI config; 0 = no etcd event ever touched it. */
+    S64                     *hsi_subscriber_last_revision;
     struct lcore_usage_counter *lcore_usage;  /* per-lcore busy/total cycle counters, index by lcore_id */
     char                    *metrics_ip_port; /* Prometheus /metrics HTTP listen addr, e.g. "0.0.0.0:9101" */
     pthread_t               metrics_thread;   /* joinable Prometheus HTTP server thread */
@@ -169,6 +191,12 @@ typedef struct FastRG {
      * the pthread_join in fastrg_stop(). The thread re-checks this flag right
      * after lighthttp_init() (under rte_smp_mb()) and closes its own fd. */
     rte_atomic16_t          metrics_stop_requested;
+    /* Verdict slot shared by the gRPC handlers waiting on the control thread:
+     * one CLI request at a time. */
+    rte_atomic32_t          cli_request_result;
+    /* Seq of a CLI request whose caller stopped waiting; 0 = none. One slot is
+     * enough because cli_request_mutex keeps a single request in flight. */
+    rte_atomic32_t          cli_request_abandoned;
     lighthttp_server_t      metrics_server;
     pthread_t               grpc_thread;      /* joinable northbound gRPC server thread */
     BOOL                    grpc_thread_started;
@@ -183,7 +211,49 @@ typedef struct FastRG {
 STATUS fastrg_disable_subscriber_stats(FastRG_t *fastrg_ccb, U16 disable_count, 
     U16 old_count);
 STATUS fastrg_gen_northbound_event(FastRG_t *fastrg_ccb, fastrg_event_type_t event_type,
-    U8 cmd_type, U16 ccb_id);
+    U8 cmd_type, U16 ccb_id, void *payload);
+
+/**
+ * @fn fastrg_gen_cli_request
+ *
+ * @brief Post a northbound event that a CLI caller waits on, tagged with seq.
+ *        On SUCCESS the payload belongs to the control thread.
+ *
+ * @param fastrg_ccb
+ *      Pointer to FastRG control block
+ * @param event_type
+ *      EV_NORTHBOUND_PPPoE, EV_NORTHBOUND_DHCP, EV_NORTHBOUND_DNS or
+ *      EV_NORTHBOUND_NODE
+ * @param cmd_type
+ *      Command carried by the event
+ * @param ccb_id
+ *      User ID (0-based index)
+ * @param payload
+ *      Heap payload for the command, NULL when it needs none
+ * @param seq
+ *      Sequence the verdict is published with; must not be 0
+ *
+ * @return
+ *      SUCCESS when the event is queued, ERROR otherwise
+ */
+STATUS fastrg_gen_cli_request(FastRG_t *fastrg_ccb, fastrg_event_type_t event_type,
+    U8 cmd_type, U16 ccb_id, void *payload, U32 seq);
+
+/**
+ * @fn fastrg_gen_etcd_event
+ *
+ * @brief Post an etcd config event to the control thread.
+ *
+ * @param fastrg_ccb
+ *      Pointer to FastRG control block
+ * @param ev
+ *      Malloc'd etcd event; still owned by the caller when this returns ERROR.
+ *      If SUCCESS, the control thread owns it and frees it after processing.
+ *
+ * @return
+ *      SUCCESS when the event is queued, ERROR otherwise
+ */
+STATUS fastrg_gen_etcd_event(FastRG_t *fastrg_ccb, etcd_event_t *ev);
 
 /**
  * @fn FASTRG_GET_PER_SUBSCRIBER_STATS

@@ -6,7 +6,7 @@
 
 _cleanup_phase19_node_restart() {
     local _p19_cleanup_stopped=0
-    # Step 79 safety: never leave the node's etcd path blocked.
+    # Step 80 safety: never leave the node's etcd path blocked.
     if [[ "${_P19_ETCD_BLOCKED:-0}" -eq 1 ]] && [[ -n "${ETCD_ENDPOINT:-}" ]]; then
         ssh_node "iptables -D OUTPUT -p tcp -d ${ETCD_ENDPOINT%%:*} --dport ${ETCD_ENDPOINT##*:} -j REJECT --reject-with tcp-reset 2>/dev/null || true" \
             >/dev/null 2>&1 || true
@@ -35,7 +35,7 @@ _cleanup_phase19_node_restart() {
         fi
     fi
 
-    ssh_node "nohup ${_FASTRG_START_CMD} >/var/log/fastrg.log 2>&1 &" >/dev/null 2>&1 || true
+    e2e_start_node >/dev/null 2>&1 || true
     _FASTRG_STARTED_BY_SCRIPT=1
     for _i in $(seq 1 15); do
         if [[ "$(_p19_process_state)" == "running" ]]; then
@@ -111,6 +111,13 @@ phase19_node_restart() {
     local _vlan1_after=""
     local _vlan2_after=""
     local _p19_metrics=""
+    local _p19_dns_started_at=0
+    local _p19_dns_elapsed=0
+    local _p19_dns_checked=0
+    local _p19_dns_raw=""
+    local _p19_dns_records=""
+    local _p19_dns_detail=""
+    local _p19_primary_status=""
     local _p19_restart_before=""
     local _p19_restart_after=""
     local _p19_start_before=""
@@ -129,14 +136,14 @@ phase19_node_restart() {
     local _i
 
     bold "═══════════════════════════════════════════════════════"
-    bold " Phase 19 — Node Restart Recovery (Steps 75-79)"
+    bold " Phase 19 — Node Restart Recovery (Steps 76-80)"
     bold "═══════════════════════════════════════════════════════"
 
     # ------------------------------------------------------------------
-    # Step 75 — Snapshot the read-only recovery inputs, then stop the node
-    # gracefully. No etcd write is permitted from this point through Step 78.
+    # Step 76 — Snapshot the read-only recovery inputs, then stop the node
+    # gracefully. No etcd write is permitted from this point through Step 79.
     # ------------------------------------------------------------------
-    info "Step 75: Waiting for users 1 and 2 to be ready before the restart snapshot..."
+    info "Step 76: Waiting for users 1 and 2 to be ready before the restart snapshot..."
     for _i in $(seq 1 30); do
         _hsi_before=$(fastrg_grpc get_hsi_info 2>/dev/null || true)
         _status1_before=$(printf '%s' "$_hsi_before" | \
@@ -209,18 +216,19 @@ phase19_node_restart() {
     fi
 
     if [[ -z "$_step73_issue" ]]; then
-        pass "Step 75: Snapshot + graceful shutdown" \
+        pass "Step 76: Snapshot + graceful shutdown" \
             "users 1/2 Data phase; desire_status=connect; revisions=${_hsi1_rev_before}/${_hsi2_rev_before}/${_count_rev_before}; clean SIGTERM exit"
     else
-        fail "Step 75: Snapshot + graceful shutdown" "${_step73_issue# }"
+        fail "Step 76: Snapshot + graceful shutdown" "${_step73_issue# }"
     fi
 
     # ------------------------------------------------------------------
-    # Step 76 — Cold-start the exact phase0 command and wait for both users
+    # Step 77 — Cold-start the exact phase0 command and wait for both users
     # to recover from the etcd desire_status without any dial/config call.
     # ------------------------------------------------------------------
-    info "Step 76: Cold-starting fastrg and waiting up to 150s for autonomous recovery..."
-    if ssh_node "nohup ${_FASTRG_START_CMD} >/var/log/fastrg.log 2>&1 &" >/dev/null 2>&1; then
+    info "Step 77: Cold-starting fastrg and waiting up to 150s for autonomous recovery..."
+    _p19_dns_started_at=$(date +%s)
+    if e2e_start_node >/dev/null 2>&1; then
         _restart_launched=1
     else
         _step74_issue="startup_command=failed"
@@ -243,6 +251,23 @@ phase19_node_restart() {
                 jq -r '.hsi_infos[] | select(.user_id == 1) | .vlan_id // empty' 2>/dev/null || true)
             _vlan2_after=$(printf '%s' "$_hsi_after" | \
                 jq -r '.hsi_infos[] | select(.user_id == 2) | .vlan_id // empty' 2>/dev/null || true)
+            # Static DNS records are applied when a subscriber's config is
+            # loaded, not when its session comes up, so they have to be there
+            # the moment the primary subscriber reaches Data phase. Read once,
+            # as early as possible: the 60s reconcile refills the table later
+            # and would hide a boot path that never applied them.
+            if [[ "$USER_ID" == "1" ]]; then
+                _p19_primary_status="$_status1_after"
+            else
+                _p19_primary_status="$_status2_after"
+            fi
+            if [[ $_p19_dns_checked -eq 0 && "$_p19_primary_status" == "Data phase" ]]; then
+                _p19_dns_elapsed=$(( $(date +%s) - _p19_dns_started_at ))
+                _p19_dns_raw=$(fastrg_grpc get_dns_static "${USER_ID}" 2>/dev/null || true)
+                _p19_dns_records=$(printf '%s' "$_p19_dns_raw" | \
+                    jq -r '.entries[]?.domain' 2>/dev/null || true)
+                _p19_dns_checked=1
+            fi
             if [[ "$_status1_after" == "Data phase" && "$_status2_after" == "Data phase" && \
                   -n "$_account1_after" && -n "$_account2_after" ]]; then
                 _recovery_ready=1
@@ -279,15 +304,34 @@ phase19_node_restart() {
         fi
     fi
 
-    if [[ -z "$_step74_issue" ]]; then
-        pass "Step 76: Cold restart autonomous recovery" \
-            "users 1/2 returned to Data phase with etcd account/vlan, without dial or config writes; restart_total ${_p19_restart_before}->${_p19_restart_after}, start_time ${_p19_start_before}->${_p19_start_after}"
+    if [[ $_p19_dns_checked -ne 1 ]]; then
+        _p19_dns_detail="static DNS records not read (the primary subscriber never reached Data phase)"
+    elif [[ "$_p19_dns_elapsed" -ge 55 ]]; then
+        # Past the 60s reconcile the table says nothing about the boot path,
+        # either way, so this reading is reported and not asserted on.
+        _p19_dns_detail="dns check inconclusive (${_p19_dns_elapsed}s after start)"
+    elif [[ -z "$_p19_dns_raw" ]]; then
+        # An empty answer is the RPC failing, not an empty table: say so
+        # rather than reporting a record that was never actually looked for.
+        _step74_issue="${_step74_issue} dns_static_unreadable=${_p19_dns_elapsed}s"
+        _p19_dns_detail="get_dns_static answered nothing ${_p19_dns_elapsed}s after start"
+    elif printf '%s\n' "$_p19_dns_records" | grep -qxF 'www.fastrg.org'; then
+        _p19_dns_detail="www.fastrg.org already in the static records ${_p19_dns_elapsed}s after start"
     else
-        fail "Step 76: Cold restart autonomous recovery" "${_step74_issue# }"
+        _step74_issue="${_step74_issue} dns_static_missing=${_p19_dns_elapsed}s records='${_p19_dns_records//$'\n'/,}'"
+        _p19_dns_detail="www.fastrg.org missing from the static records ${_p19_dns_elapsed}s after start"
+    fi
+
+    if [[ -z "$_step74_issue" ]]; then
+        pass "Step 77: Cold restart autonomous recovery" \
+            "users 1/2 returned to Data phase with etcd account/vlan, without dial or config writes; restart_total ${_p19_restart_before}->${_p19_restart_after}, start_time ${_p19_start_before}->${_p19_start_after}; ${_p19_dns_detail}"
+    else
+        fail "Step 77: Cold restart autonomous recovery" \
+            "${_step74_issue# }; ${_p19_dns_detail}"
     fi
 
     # ------------------------------------------------------------------
-    # Step 77 — Verify lazy DNS-static reload and data-plane forwarding.
+    # Step 78 — Verify lazy DNS-static reload and data-plane forwarding.
     # ------------------------------------------------------------------
     if [[ "$USER_ID" == "1" ]]; then
         _gateway="$_hsi1_gateway"
@@ -295,7 +339,7 @@ phase19_node_restart() {
         _gateway="$_hsi2_gateway"
     fi
 
-    info "Step 77: Checking DNS static and ping after restart (gateway=${_gateway:-unknown})..."
+    info "Step 78: Checking DNS static and ping after restart (gateway=${_gateway:-unknown})..."
     if [[ -n "$_gateway" ]]; then
         _dig=$(ssh_lan \
             "timeout 10 dig @${_gateway} +time=3 +tries=1 +short www.fastrg.org A" \
@@ -304,17 +348,17 @@ phase19_node_restart() {
     _ping=$(ssh_lan "timeout 25 ping -c 4 -W 5 www.fastrg.org 2>&1" 2>/dev/null || true)
 
     if [[ "$_dig" == "${WAN_IP}" ]] && printf '%s' "$_ping" | grep -q "from ${WAN_IP}"; then
-        pass "Step 77: Post-restart data plane" \
+        pass "Step 78: Post-restart data plane" \
             "dig @${_gateway}=${WAN_IP}; LAN ping received reply from ${WAN_IP}"
     else
-        fail "Step 77: Post-restart data plane" \
+        fail "Step 78: Post-restart data plane" \
             "dig='${_dig:-empty}' gateway='${_gateway:-empty}'; ping_reply=$(printf '%s' "$_ping" | grep -oE 'from [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
     fi
 
     # ------------------------------------------------------------------
-    # Step 78 — Re-read only: startup must not mutate HSI or count keys.
+    # Step 79 — Re-read only: startup must not mutate HSI or count keys.
     # ------------------------------------------------------------------
-    info "Step 78: Re-reading etcd revisions and system subscriber count..."
+    info "Step 79: Re-reading etcd revisions and system subscriber count..."
     _hsi1_after=$(_p19_etcd_snapshot "$_hsi1_key")
     _hsi2_after=$(_p19_etcd_snapshot "$_hsi2_key")
     _count_after=$(_p19_etcd_snapshot "$_count_key")
@@ -338,27 +382,27 @@ phase19_node_restart() {
         _step76_issue="${_step76_issue} grpc_num_users='${_num_users:-empty}'"
 
     if [[ -z "$_step76_issue" ]]; then
-        pass "Step 78: Startup path keeps etcd read-only" \
+        pass "Step 79: Startup path keeps etcd read-only" \
             "HSI/count revisions unchanged (${_hsi1_rev_after}/${_hsi2_rev_after}/${_count_rev_after}); num_users=2"
     else
-        fail "Step 78: Startup path keeps etcd read-only" "${_step76_issue# }"
+        fail "Step 79: Startup path keeps etcd read-only" "${_step76_issue# }"
     fi
 
     # ------------------------------------------------------------------
-    # Step 79 — Restart with etcd unreachable: the persisted snapshot
+    # Step 80 — Restart with etcd unreachable: the persisted snapshot
     # (/etc/fastrg/config_snapshot.json) is the operating base. The node must
     # boot, apply both subscribers' configs from the snapshot and re-establish
     # PPPoE — all while etcd is blocked. etcd connectivity is then restored
     # and the watchers recover normal sync.
     # ------------------------------------------------------------------
-    info "Step 79: restart with etcd unreachable — snapshot is the operating base..."
+    info "Step 80: restart with etcd unreachable — snapshot is the operating base..."
     local _step79_issue=""
     local _p19_etcd_host="${ETCD_ENDPOINT%%:*}"
     local _p19_etcd_port="${ETCD_ENDPOINT##*:}"
     _P19_ETCD_BLOCKED=0
 
     if ! ssh_node "command -v iptables >/dev/null 2>&1"; then
-        fail "Step 79: snapshot is the boot base while etcd is down" "iptables not available on node"
+        fail "Step 80: snapshot is the boot base while etcd is down" "iptables not available on node"
         return
     fi
 
@@ -370,18 +414,18 @@ phase19_node_restart() {
         sleep 1
     done
     if [[ "$(_p19_process_state)" != "stopped" ]]; then
-        fail "Step 79: snapshot is the boot base while etcd is down" "fastrg did not stop within 20s"
+        fail "Step 80: snapshot is the boot base while etcd is down" "fastrg did not stop within 20s"
         return
     fi
     ssh_node "iptables -I OUTPUT 1 -p tcp -d ${_p19_etcd_host} --dport ${_p19_etcd_port} -j REJECT --reject-with tcp-reset" \
         >/dev/null 2>&1 && _P19_ETCD_BLOCKED=1
     if [[ $_P19_ETCD_BLOCKED -ne 1 ]]; then
-        fail "Step 79: snapshot is the boot base while etcd is down" "failed to install iptables block"
+        fail "Step 80: snapshot is the boot base while etcd is down" "failed to install iptables block"
         _cleanup_phase19_node_restart || true
         return
     fi
 
-    if ! ssh_node "nohup ${_FASTRG_START_CMD} >/var/log/fastrg.log 2>&1 &" >/dev/null 2>&1; then
+    if ! e2e_start_node >/dev/null 2>&1; then
         _step79_issue="cold start command failed"
     fi
     _FASTRG_STARTED_BY_SCRIPT=1
@@ -433,9 +477,9 @@ phase19_node_restart() {
 
     if [[ -z "$_step79_issue" ]]; then
         _P19_RESTART_NEEDED=0
-        pass "Step 79: snapshot is the boot base while etcd is down" \
+        pass "Step 80: snapshot is the boot base while etcd is down" \
             "cold start with etcd blocked: both users restored from snapshot to Data phase, num_users=2; etcd sync recovered after unblock"
     else
-        fail "Step 79: snapshot is the boot base while etcd is down" "$_step79_issue"
+        fail "Step 80: snapshot is the boot base while etcd is down" "$_step79_issue"
     fi
 }
