@@ -71,7 +71,7 @@ typedef struct {
 typedef enum {
     ETCD_EVENT_HSI = 1,        /* HSI config create/update/delete         */
     ETCD_EVENT_USER_COUNT,     /* subscriber-count change                 */
-    ETCD_EVENT_DNS_RECORD,     /* DNS static record create/update/delete  */
+    ETCD_EVENT_DNS_SET,        /* one user's complete DNS static record set */
     ETCD_EVENT_HSI_SWEEP       /* reconcile: keep ccb_ids present in etcd */
 } etcd_event_kind_t;
 
@@ -93,7 +93,10 @@ typedef struct etcd_event {
                                                 * for ConfigApplyResult.applied_resource_version. */
         } hsi;
         user_count_config_t user_count;
-        dns_record_config_t dns_record;
+        struct {
+            dns_record_config_t *records;   /* heap-owned: every record etcd holds for the user */
+            int                  count;     /* 0 means the user has no records in etcd */
+        } dns_set;
         struct {
             int *present_ccb_ids;       /* heap-owned: ccb_ids that exist in etcd */
             int  count;
@@ -108,6 +111,8 @@ static inline void etcd_event_free(etcd_event_t *ev) {
         return;
     if (ev->kind == ETCD_EVENT_HSI) {
         hsi_config_free_port_mappings(&ev->event_data.hsi.config);
+    } else if (ev->kind == ETCD_EVENT_DNS_SET) {
+        free(ev->event_data.dns_set.records);
     } else if (ev->kind == ETCD_EVENT_HSI_SWEEP) {
         free(ev->event_data.sweep.present_ccb_ids);
     }

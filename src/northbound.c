@@ -481,3 +481,90 @@ STATUS remove_dns_record(FastRG_t *fastrg_ccb, int ccb_id, const char *domain)
         "User %u: DNS static record removed: %s", ccb_id + 1, domain);
     return SUCCESS;
 }
+
+STATUS apply_dns_record_set(FastRG_t *fastrg_ccb, int ccb_id,
+    const dns_record_config_t *records, int count)
+{
+    U32 set_ip[DNS_STATIC_MAX_RECORDS] = {0};
+    char stale[DNS_STATIC_MAX_RECORDS][DNS_MAX_DOMAIN_LEN + 1];
+    U32 stale_count = 0, added = 0, removed = 0;
+    int wanted = count;
+    STATUS ret = SUCCESS;
+
+    if (!is_valid_ccb_id(fastrg_ccb, ccb_id) || count < 0 || (records == NULL && count > 0))
+        return ERROR;
+
+    dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
+    if (!dhcp_ccb)
+        return ERROR;
+
+    if (wanted > DNS_STATIC_MAX_RECORDS) {
+        FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
+            "User %u: etcd holds %d DNS static records, keeping the first %d",
+            ccb_id + 1, count, DNS_STATIC_MAX_RECORDS);
+        wanted = DNS_STATIC_MAX_RECORDS;
+    }
+
+    /* Convert every address before touching the table: one value the node
+     * cannot read must not turn into a removal. */
+    for(int i=0; i<wanted; i++) {
+        if (inet_pton(AF_INET, records[i].ip, &set_ip[i]) != 1) {
+            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
+                "User %u: Invalid DNS record IP: %s (%s), keeping the current records",
+                ccb_id + 1, records[i].ip, records[i].domain);
+            return ERROR;
+        }
+    }
+
+    dns_static_table_t *table = &dhcp_ccb->dns_state.static_table;
+
+    /* Collect the stale domains before removing any: the lookup decides which
+     * stored record a set entry refers to, so the table must not move yet. */
+    for(U32 i=0; i<DNS_STATIC_MAX_RECORDS; i++) {
+        if (!table->records[i].active)
+            continue;
+
+        BOOL in_set = FALSE;
+        for(int j=0; j<wanted; j++) {
+            if (dns_static_lookup(table, records[j].domain) == &table->records[i]) {
+                in_set = TRUE;
+                break;
+            }
+        }
+        if (in_set)
+            continue;
+
+        strncpy(stale[stale_count], table->records[i].domain, DNS_MAX_DOMAIN_LEN);
+        stale[stale_count][DNS_MAX_DOMAIN_LEN] = '\0';
+        stale_count++;
+    }
+
+    for(U32 i=0; i<stale_count; i++) {
+        if (remove_dns_record(fastrg_ccb, ccb_id, stale[i]) != SUCCESS) {
+            ret = ERROR;
+            continue;
+        }
+        removed++;
+    }
+
+    /* Add what is missing and update what differs; an identical record is left alone. */
+    for(int i=0; i<wanted; i++) {
+        U32 ttl = records[i].ttl > 0 ? records[i].ttl : 3600;
+        dns_static_record_t *local = dns_static_lookup(table, records[i].domain);
+
+        if (local != NULL && local->ip_addr == set_ip[i] && local->ttl == ttl)
+            continue;
+        if (apply_dns_record(fastrg_ccb, ccb_id, &records[i]) != SUCCESS) {
+            ret = ERROR;
+            continue;
+        }
+        added++;
+    }
+
+    if (added > 0 || removed > 0)
+        FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+            "User %u: DNS static records applied: %d in etcd, %u added, %u removed",
+            ccb_id + 1, wanted, added, removed);
+
+    return ret;
+}

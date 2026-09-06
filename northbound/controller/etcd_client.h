@@ -220,6 +220,7 @@ void etcd_client_cleanup(void);
 }
 
 #include <string>
+#include <vector>
 
 /* Forward declaration only: not every includer of this header builds with the
  * jsoncpp include path. */
@@ -230,6 +231,10 @@ bool parse_dns_records_envelope(const std::string &value, Json::Value *records_o
 
 /* Decode one envelope entry {"domain","ip","ttl"}; ttl defaults to 3600. */
 bool parse_dns_record_from_json(const Json::Value &entry, dns_record_config_t *rec);
+
+/* Decode a whole DNS value into the records it carries. Returns false on a
+ * value that is not an envelope; entries that do not decode are left out. */
+bool parse_dns_records(const std::string &value, std::vector<dns_record_config_t> *out);
 #endif
 
 #endif /* _ETCD_CLIENT_H_ */

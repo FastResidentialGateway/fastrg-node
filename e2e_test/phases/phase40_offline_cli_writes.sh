@@ -18,6 +18,10 @@
 # edits had been queued. Step 183 waits for the report, then takes both back
 # out through the controller.
 #
+# Step 183a then takes the same path the other way round: a record removed
+# through the controller while the node is cut off in both directions is one
+# the node never hears about, so it can only go away once the node is back.
+#
 # Step 184 then restarts the node with the block up again: with etcd out of
 # reach the local snapshot is the only place the subscriber's static DNS
 # records can come from, so it is the one path that proves they are applied at
@@ -38,12 +42,17 @@ _P40_DNS_DOMAIN="offline.fastrg.test"
 _P40_PROBE_DOMAIN="offline-probe.fastrg.test"
 _P40_DNS_IP="192.0.2.77"
 _P40_DNS_TTL=60
+# Added and removed through the controller only; the node has to lose it
+# without ever seeing the removal.
+_P40_SWEEP_DOMAIN="offline-sweep.fastrg.test"
+_P40_SWEEP_IP="192.0.2.78"
 
 # Bench state to undo, and what the phase read before it started editing.
 # Assigned only when unset: a drill puts the real functions back by re-reading
 # this file, and cleanup runs right after that with edits still outstanding.
 : "${_P40_SNAT_LEFT:=0}"
 : "${_P40_DNS_RECORD_LEFT:=0}"
+: "${_P40_SWEEP_LEFT:=0}"
 : "${_P40_IPV6_LEFT:=0}"
 : "${_P40_CONNTRACK_OFF:=0}"
 : "${_P40_DNS_PROXY_OFF:=0}"
@@ -62,6 +71,10 @@ _P40_DIG_RAW=""
 # notices etcd is back on a watchdog tick and then retries the connection with
 # a backoff; 150s has been measured, so the budget is twice that.
 _P40_DIRTY_WAIT_SECS=300
+
+# How long the node may take to drop a record it never saw removed: it has to
+# reconnect first, and the reconcile that clears it runs on that reconnect.
+_P40_SWEEP_WAIT_SECS=300
 
 # Filled in by _p40_wait_dirty_clear: the last two readings and the wait.
 _P40_DIRTY_HSI=""
@@ -385,6 +398,8 @@ _cleanup_phase40_offline_cli_writes() {
             _p40_rpc RemoveSnatConfig "{\"user_id\":${USER_ID},\"eport\":${_P40_EPORT}}" >/dev/null 2>&1
         [[ "${_P40_DNS_RECORD_LEFT:-0}" -eq 1 ]] && \
             _p40_rpc RemoveDnsRecord "{\"user_id\":${USER_ID},\"domain\":\"${_P40_DNS_DOMAIN}\"}" >/dev/null 2>&1
+        [[ "${_P40_SWEEP_LEFT:-0}" -eq 1 ]] && \
+            _p40_rpc RemoveDnsRecord "{\"user_id\":${USER_ID},\"domain\":\"${_P40_SWEEP_DOMAIN}\"}" >/dev/null 2>&1
         info "Cleanup(phase40): restoring node->etcd connectivity..."
         e2e_unblock_node_etcd
     else
@@ -407,10 +422,13 @@ _cleanup_phase40_offline_cli_writes() {
             fastrg_grpc remove_snat_config "${USER_ID}" "${_P40_EPORT}" >/dev/null 2>&1
         [[ "${_P40_DNS_RECORD_LEFT:-0}" -eq 1 ]] && \
             fastrg_grpc remove_dns_record "${USER_ID}" "${_P40_DNS_DOMAIN}" >/dev/null 2>&1
+        [[ "${_P40_SWEEP_LEFT:-0}" -eq 1 ]] && \
+            fastrg_grpc remove_dns_record "${USER_ID}" "${_P40_SWEEP_DOMAIN}" >/dev/null 2>&1
     fi
     _P40_IPV6_LEFT=0
     _P40_CONNTRACK_OFF=0
     _P40_DNS_PROXY_OFF=0
+    _P40_SWEEP_LEFT=0
     # The two leftovers keep their flags until the node says they are gone.
     _p40_verify_residue_gone
 
@@ -434,6 +452,7 @@ phase40_offline_cli_writes() {
     local _waited=0 _released=0 _marker="" _missing="" _kafka=""
     local _etcd_hsi="" _etcd_dns="" _conntrack="" _dig_off="" _dig_on=""
     local _stopped=0 _recovered=0 _started_at=0 _elapsed=0 _reported=0
+    local _seen=0 _gone=0
 
     bold "═══════════════════════════════════════════════════════"
     bold " Phase 40 — Offline node CLI config writes (Steps 176-184)"
@@ -835,8 +854,13 @@ phase40_offline_cli_writes() {
         if printf '%s' "$_etcd_dns" | jq -e ".records[]? | select(.domain == \"${_P40_DNS_DOMAIN}\")" >/dev/null 2>&1; then
             _issue="${_issue:+${_issue}; }etcd still carries the DNS record ${_P40_DNS_DOMAIN}"
         fi
-        # Read back last: the loop above is the settling window for both sides.
+        # Read back last: the loop above is the settling window for both sides,
+        # so anything still on the node here was not removed at all.
         _p40_verify_residue_gone
+        [[ "${_P40_SNAT_LEFT:-0}" -eq 0 ]] || \
+            _issue="${_issue:+${_issue}; }port forward ${_P40_EPORT} is still on the node after the removal"
+        [[ "${_P40_DNS_RECORD_LEFT:-0}" -eq 0 ]] || \
+            _issue="${_issue:+${_issue}; }${_P40_DNS_DOMAIN} is still in the node's static records after the removal"
     fi
 
     if [[ -z "$_issue" ]]; then
@@ -844,6 +868,86 @@ phase40_offline_cli_writes() {
             "both snapshot entries reported and cleared ${_waited}s after the reconnect; all ten edit markers on fastrg.node.events; etcd back to the fixture"
     else
         fail "Step 183: reconnect reports the offline edits and the fixture comes back" "$_issue"
+    fi
+
+    # ------------------------------------------------------------------
+    # Step 183a — a removal the node never hears about still lands once it
+    #             is back on etcd
+    #
+    # The record is added through the controller while the node is watching,
+    # then removed with the node cut off in both directions, so neither the
+    # node's own requests nor anything etcd pushes can reach it. The reading
+    # taken while the block is up is what says the removal really was missed;
+    # blocking only what the node sends leaves the pushed watch event getting
+    # through, which is no test at all.
+    # ------------------------------------------------------------------
+    info "Step 183a: adding ${_P40_SWEEP_DOMAIN} through the controller..."
+    _issue=""
+    _seen=0
+    _P40_SWEEP_LEFT=1
+    fastrg_grpc add_dns_record "${USER_ID}" "${_P40_SWEEP_DOMAIN}" "${_P40_SWEEP_IP}" \
+        "${_P40_DNS_TTL}" >/dev/null 2>&1 || true
+    for _i in $(seq 1 30); do
+        sleep 2
+        _domains=$(_p40_dns_domains "${USER_ID}")
+        if printf '%s\n' "$_domains" | grep -qxF "${_P40_SWEEP_DOMAIN}"; then
+            _seen=1
+            break
+        fi
+    done
+    [[ $_seen -eq 1 ]] || \
+        _issue="${_P40_SWEEP_DOMAIN} never reached the node while it was watching etcd (records: ${_domains:-none})"
+
+    if [[ -z "$_issue" ]]; then
+        info "Step 183a: removing ${_P40_SWEEP_DOMAIN} through the controller with the node cut off from etcd..."
+        e2e_block_node_etcd both
+        fastrg_grpc remove_dns_record "${USER_ID}" "${_P40_SWEEP_DOMAIN}" >/dev/null 2>&1 || true
+        _etcd_dns=$(etcdctl_get_value "configs/${NODE_UUID}/dns/${USER_ID}" 2>/dev/null || true)
+        if printf '%s' "$_etcd_dns" | jq -e ".records[]? | select(.domain == \"${_P40_SWEEP_DOMAIN}\")" >/dev/null 2>&1; then
+            _issue="the controller left ${_P40_SWEEP_DOMAIN} in etcd, so the node has nothing to catch up with"
+        fi
+        _domains=$(_p40_dns_domains "${USER_ID}")
+        _verdict=$(e2e_dns_record_set_verdict "$_domains" \
+            "${_P40_SWEEP_DOMAIN},www.fastrg.org" "-" || true)
+        [[ "$_verdict" == "ok" ]] || \
+            _issue="${_issue:+${_issue}; }verdict '${_verdict}' while the node was cut off from etcd, so the wait below would prove nothing (records: ${_domains//$'\n'/, })"
+
+        info "Step 183a: restoring node->etcd connectivity..."
+        e2e_unblock_node_etcd
+    fi
+
+    # Only worth waiting for when the setup above really did leave the node
+    # behind; otherwise the wait would just be 300s of nothing.
+    if [[ -z "$_issue" && $_seen -eq 1 ]]; then
+        info "Step 183a: waiting for the node to catch up with the removal..."
+        _gone=0
+        _waited=0
+        # The fixture's own record has to still be in the reading: without it
+        # an RPC that answered nothing would read as "the record is gone".
+        while true; do
+            _domains=$(_p40_dns_domains "${USER_ID}")
+            _verdict=$(e2e_dns_record_set_verdict "$_domains" www.fastrg.org \
+                "${_P40_SWEEP_DOMAIN}" || true)
+            if [[ "$_verdict" == "ok" ]]; then
+                _gone=1
+                break
+            fi
+            [[ "$_waited" -lt "$_P40_SWEEP_WAIT_SECS" ]] || break
+            sleep 5
+            _waited=$(( _waited + 5 ))
+        done
+        if [[ $_gone -eq 1 ]]; then
+            _P40_SWEEP_LEFT=0
+        else
+            _issue="verdict '${_verdict}' ${_waited}s after the reconnect (records: ${_domains//$'\n'/, })"
+        fi
+    fi
+
+    if [[ -z "$_issue" ]]; then
+        pass "Step 183a: a DNS removal missed while etcd was unreachable is applied on reconnect" \
+            "${_P40_SWEEP_DOMAIN} was still on the node while it was cut off and gone ${_waited}s after the reconnect"
+    else
+        fail "Step 183a: a DNS removal missed while etcd was unreachable is applied on reconnect" "$_issue"
     fi
 
     # ------------------------------------------------------------------

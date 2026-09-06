@@ -851,3 +851,39 @@ null
 # expect-output: err
 # expect-status: 1
 ---
+==== fixture: dns_record_set_ok
+# args: a.example,b.example c.example
+# expect-output: ok
+# expect-status: 0
+---
+a.example
+b.example
+==== fixture: dns_record_set_missing
+# args: a.example,b.example -
+# expect-output: missing:a.example
+# expect-status: 1
+---
+b.example
+==== fixture: dns_record_set_still_present
+# args: b.example a.example
+# expect-output: present:a.example
+# expect-status: 1
+---
+a.example
+b.example
+==== fixture: dns_record_set_unreadable
+# args: b.example a.example
+# expect-output: unreadable
+# expect-status: 1
+---
+err
+==== fixture: dns_record_set_empty_ok
+# args: - a.example,b.example
+# expect-output: ok
+# expect-status: 0
+---
+==== fixture: dns_record_set_empty_missing
+# args: b.example -
+# expect-output: missing:b.example
+# expect-status: 1
+---

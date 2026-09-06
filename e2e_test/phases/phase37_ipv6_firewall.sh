@@ -78,6 +78,7 @@ case_validation_register fw6_capture_wrong_interface phase37_ipv6_firewall \
 # printed "listening on" before dying, so only the liveness check separates this
 # from a window that really was silent.
 _p37_inject_capture_dies() {
+    sabotage_copy_function _p37_start_capture _p37_start_capture_real
     sabotage_override_function _p37_start_capture \
         '_p37_start_capture_real "$@" || return 1
          ssh_lan "kill -9 \$(cat '"'"'${_P37_CAP_PID}'"'"') 2>/dev/null || true" >/dev/null 2>&1

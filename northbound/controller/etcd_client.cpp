@@ -51,6 +51,24 @@ bool parse_dns_record_from_json(const Json::Value &entry, dns_record_config_t *r
     return true;
 }
 
+// A whole DNS value -> the records it carries. Shared by the watch and the
+// reconcile paths so both read one value the same way.
+bool parse_dns_records(const std::string &value, std::vector<dns_record_config_t> *out)
+{
+    Json::Value records;
+
+    out->clear();
+    if (!parse_dns_records_envelope(value, &records))
+        return false;
+    for (const Json::Value& entry : records) {
+        dns_record_config_t rec;
+        if (!parse_dns_record_from_json(entry, &rec))
+            continue;
+        out->push_back(rec);
+    }
+    return true;
+}
+
 class EtcdClientImpl {
 private:
     std::unique_ptr<etcd::Client> client_;
@@ -623,6 +641,34 @@ public:
         return true;
     }
 
+    // One event carrying every DNS static record etcd holds for a user. An
+    // empty list is what tells the control loop to clear the user's records,
+    // so it is enqueued like any other set.
+    bool enqueue_dns_set(const std::string& node_id, const std::string& user_id,
+        const std::vector<dns_record_config_t>& records, int64_t revision, BOOL from_reconcile) {
+        etcd_event_t *ev = fastrg_alloc_etcd_event(ETCD_EVENT_DNS_SET);
+
+        if (!ev)
+            return false;
+        ev->action = HSI_ACTION_UPDATE;
+        ev->revision = revision;
+        ev->from_reconcile = from_reconcile;
+        std::strncpy(ev->node_id, node_id.c_str(), sizeof(ev->node_id) - 1);
+        std::strncpy(ev->user_id, user_id.c_str(), sizeof(ev->user_id) - 1);
+        if (!records.empty()) {
+            ev->event_data.dns_set.records =
+                (dns_record_config_t *)malloc(sizeof(dns_record_config_t) * records.size());
+            if (!ev->event_data.dns_set.records) {
+                etcd_event_free(ev);
+                return false;
+            }
+            std::memcpy(ev->event_data.dns_set.records, records.data(),
+                sizeof(dns_record_config_t) * records.size());
+            ev->event_data.dns_set.count = (int)records.size();
+        }
+        return enqueue_etcd_event(ev);
+    }
+
     // Synchronize state with etcd after reconnection
     void sync_state_with_etcd() {
         FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "Starting state synchronization with etcd...");
@@ -735,17 +781,23 @@ public:
                 }
             }
 
-            // Step 3c: DNS static records — enqueue for the control-plane loop.
+            // Step 3c: DNS static records — one set event per subscriber, so a
+            // user whose key is gone (or never existed) is cleared too.
             // Key format: configs/{nodeId}/dns/{userId}  value: JSON array of records
             {
                 std::string dns_base_prefix = "configs/" + node_uuid_ + "/dns/";
                 auto dns_response = client_->ls(dns_base_prefix).get();
                 if (dns_response.error_code() == 0) {
+                    std::vector<bool> seen(fastrg_ccb->user_count, false);
                     int dns_total = 0;
+
                     for (size_t i = 0; i < dns_response.keys().size(); ++i) {
                         std::string key = dns_response.key(i);
                         std::string dns_node_id, dns_user_id;
                         if (!extract_ids_from_dns_key(key, &dns_node_id, &dns_user_id))
+                            continue;
+                        int ccb_id = parse_user_id(dns_user_id.c_str(), fastrg_ccb->user_count);
+                        if (ccb_id < 0)
                             continue;
                         std::string dns_value = dns_response.value(i).as_string();
 
@@ -753,33 +805,31 @@ public:
                             dns_user_id.c_str(), dns_value.c_str());
 
                         try {
-                            Json::Value records;
-                            if (!parse_dns_records_envelope(dns_value, &records))
+                            std::vector<dns_record_config_t> records;
+                            if (!parse_dns_records(dns_value, &records))
                                 continue;
-                            for (const Json::Value& entry : records) {
-                                dns_record_config_t rec;
-                                if (!parse_dns_record_from_json(entry, &rec))
-                                    continue;
-                                etcd_event_t *ev = fastrg_alloc_etcd_event(ETCD_EVENT_DNS_RECORD);
-                                if (!ev)
-                                    continue;
-                                ev->action = HSI_ACTION_CREATE;
-                                ev->revision = dns_response.index();
-                                ev->from_reconcile = TRUE;
-                                std::strncpy(ev->node_id, dns_node_id.c_str(), sizeof(ev->node_id) - 1);
-                                std::strncpy(ev->user_id, dns_user_id.c_str(), sizeof(ev->user_id) - 1);
-                                ev->event_data.dns_record = rec;
-                                enqueue_etcd_event(ev);
+                            if (enqueue_dns_set(node_uuid_, dns_user_id, records,
+                                    dns_response.value(i).modified_index(), TRUE))
                                 dns_total++;
-                            }
+                            seen[ccb_id] = true;
                         } catch (const std::exception& e) {
                             FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
                                 "Sync: failed to parse DNS records for key %s: %s",
                                 key.c_str(), e.what());
                         }
                     }
+
+                    // Whatever etcd had no key for is cleared by an empty set.
+                    const std::vector<dns_record_config_t> empty_set;
+                    for (int ccb_id = 0; ccb_id < fastrg_ccb->user_count; ++ccb_id) {
+                        if (seen[ccb_id])
+                            continue;
+                        if (enqueue_dns_set(node_uuid_, std::to_string(ccb_id + 1), empty_set,
+                                dns_response.index(), TRUE))
+                            dns_total++;
+                    }
                     FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
-                        "Sync: enqueued %d DNS record(s) for reconcile", dns_total);
+                        "Sync: enqueued %d DNS record set(s) for reconcile", dns_total);
                 }
             }
 
@@ -1715,6 +1765,8 @@ private:
 
     // Watcher thread: parse, mirror, and enqueue for the control loop (same
     // family as process_hsi_event / process_user_count_change_event above).
+    // Every event carries the user's whole record set, so a record dropped from
+    // the value is applied as a removal without any need for prev_kv.
     STATUS process_dns_record_event(const etcd::Event& event) {
         std::string key = event.kv().key();
 
@@ -1725,38 +1777,17 @@ private:
         if (node_id != node_uuid_) return ERROR; // Not for us
 
         int64_t revision = event.kv().modified_index();
+        std::vector<dns_record_config_t> records;
 
         switch (event.event_type()) {
             case etcd::Event::EventType::PUT: {
-                etcd_action_type_t action;
-                try {
-                    action = (event.prev_kv().key().empty()) ? HSI_ACTION_CREATE : HSI_ACTION_UPDATE;
-                } catch (...) {
-                    action = HSI_ACTION_CREATE;
-                }
                 std::string value = event.kv().as_string();
                 config_snapshot_watch_update(SNAPSHOT_KIND_DNS, user_id.c_str(),
                     value.c_str());
                 try {
-                    Json::Value records;
-                    if (!parse_dns_records_envelope(value, &records)) {
+                    if (!parse_dns_records(value, &records)) {
                         std::cerr << "Invalid DNS records envelope: " << key << std::endl;
                         return ERROR;
-                    }
-                    for (const Json::Value& entry : records) {
-                        dns_record_config_t rec;
-                        if (!parse_dns_record_from_json(entry, &rec))
-                            continue;
-                        etcd_event_t *ev = fastrg_alloc_etcd_event(ETCD_EVENT_DNS_RECORD);
-                        if (!ev)
-                            continue;
-                        ev->action = action;
-                        ev->revision = revision;
-                        ev->from_reconcile = FALSE;
-                        std::strncpy(ev->node_id, node_id.c_str(), sizeof(ev->node_id) - 1);
-                        std::strncpy(ev->user_id, user_id.c_str(), sizeof(ev->user_id) - 1);
-                        ev->event_data.dns_record = rec;
-                        enqueue_etcd_event(ev);
                     }
                 } catch (const std::exception& e) {
                     std::cerr << "Exception parsing DNS records: " << e.what() << std::endl;
@@ -1764,48 +1795,15 @@ private:
                 }
                 break;
             }
-            case etcd::Event::EventType::DELETE_: {
+            case etcd::Event::EventType::DELETE_:
+                // The key is gone, so the set is empty.
                 config_snapshot_watch_update(SNAPSHOT_KIND_DNS, user_id.c_str(), NULL);
-
-                // Parse prev_kv to emit per-record DELETE events
-                std::string prev_value;
-                try {
-                    if (!event.prev_kv().key().empty())
-                        prev_value = event.prev_kv().as_string();
-                } catch (...) {}
-
-                if (prev_value.empty())
-                    return SUCCESS; // No prev_kv — cannot determine deleted records
-
-                try {
-                    Json::Value records;
-                    if (!parse_dns_records_envelope(prev_value, &records))
-                        return ERROR;
-                    for (const Json::Value& entry : records) {
-                        if (!entry.isMember("domain"))
-                            continue;
-                        etcd_event_t *ev = fastrg_alloc_etcd_event(ETCD_EVENT_DNS_RECORD);
-                        if (!ev)
-                            continue;
-                        ev->action = HSI_ACTION_DELETE;
-                        ev->revision = revision;
-                        ev->from_reconcile = FALSE;
-                        std::strncpy(ev->node_id, node_id.c_str(), sizeof(ev->node_id) - 1);
-                        std::strncpy(ev->user_id, user_id.c_str(), sizeof(ev->user_id) - 1);
-                        std::strncpy(ev->event_data.dns_record.domain,
-                            entry["domain"].asString().c_str(),
-                            sizeof(ev->event_data.dns_record.domain) - 1);
-                        enqueue_etcd_event(ev);
-                    }
-                } catch (const std::exception& e) {
-                    std::cerr << "Exception parsing DNS records for delete: " << e.what() << std::endl;
-                    return ERROR;
-                }
                 break;
-            }
             default:
                 return ERROR;
         }
+
+        enqueue_dns_set(node_id, user_id, records, revision, FALSE);
         return SUCCESS;
     }
 

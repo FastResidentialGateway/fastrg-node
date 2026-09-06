@@ -163,16 +163,6 @@ BOOL hsi_config_matches_local(const char *user_id,
     const hsi_config_t *etcd_config, void *user_data);
 
 /**
- * @fn dns_record_matches_local
- *
- * @brief
- *      Compare etcd DNS static record against the local dns_static_table
- *      entry for the given user/domain. TRUE if domain, IP and TTL all match.
- */
-BOOL dns_record_matches_local(const char *user_id,
-    const dns_record_config_t *etcd_record, void *user_data);
-
-/**
  * @fn reconcile_pppoe_desire
  *
  * @brief

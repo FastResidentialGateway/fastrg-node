@@ -9,6 +9,7 @@
 #include <cstring>
 #include <iostream>
 #include <string>
+#include <vector>
 #include <unistd.h>
 
 // Offline-edit unit tests: config_snapshot_field_merge (pure JSON merge) and the
@@ -214,6 +215,46 @@ static void test_field_merge_dns_records()
     expect_equal("case 8 absent key fails", ERROR,
         config_snapshot_field_merge(SNAPSHOT_FIELD_KIND_DNS_DEL, NULL, "a.example", &out));
     free(out);
+}
+
+static void test_parse_dns_records()
+{
+    std::cout << "Case 25: parse_dns_records decodes a whole DNS value" << std::endl;
+    std::vector<dns_record_config_t> records;
+
+    const char *two =
+        "{\"records\":[{\"domain\":\"a.example\",\"ip\":\"10.0.0.1\",\"ttl\":60},"
+        "{\"domain\":\"b.example\",\"ip\":\"10.0.0.2\"}],"
+        "\"metadata\":{\"resourceVersion\":\"2\"}}";
+    expect_true("case 25 two records parse", parse_dns_records(two, &records));
+    expect_equal("case 25 two records size", size_t(2), records.size());
+    expect_equal("case 25 first domain", std::string("a.example"),
+        std::string(records[0].domain));
+    expect_equal("case 25 first ip", std::string("10.0.0.1"), std::string(records[0].ip));
+    expect_equal("case 25 first ttl", 60u, records[0].ttl);
+    expect_equal("case 25 absent ttl defaults", 3600u, records[1].ttl);
+
+    // An empty array is the shape a removal leaves behind, and it has to parse:
+    // it is what tells the node the user has no records left.
+    expect_true("case 25 empty envelope parses",
+        parse_dns_records("{\"records\":[],\"metadata\":{}}", &records));
+    expect_equal("case 25 empty envelope size", size_t(0), records.size());
+
+    // Anything that is not an envelope is a value the node must not act on.
+    expect_true("case 25 bare array rejected",
+        !parse_dns_records("[{\"domain\":\"a.example\",\"ip\":\"10.0.0.1\"}]", &records));
+    expect_true("case 25 garbage rejected", !parse_dns_records("not json", &records));
+    expect_true("case 25 records-less object rejected",
+        !parse_dns_records("{\"metadata\":{}}", &records));
+
+    // A single unusable entry is dropped; the rest of the value still applies.
+    expect_true("case 25 partial value parses", parse_dns_records(
+        "{\"records\":[{\"domain\":\"a.example\"},"
+        "{\"domain\":\"b.example\",\"ip\":\"10.0.0.2\",\"ttl\":30}],"
+        "\"metadata\":{}}", &records));
+    expect_equal("case 25 partial value size", size_t(1), records.size());
+    expect_equal("case 25 partial value keeps the usable entry", std::string("b.example"),
+        std::string(records[0].domain));
 }
 
 /* ---- config snapshot cases (rv stamping / dirty semantics / persistence);
@@ -982,6 +1023,7 @@ int main()
     test_hsi_ipv6_parse_explicit_values();
     test_hsi_ipv6_render_round_trip();
     test_field_merge_ipv6();
+    test_parse_dns_records();
 
     config_snapshot_cleanup();
     std::remove(path);

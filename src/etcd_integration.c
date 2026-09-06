@@ -288,37 +288,6 @@ BOOL hsi_config_matches_local(const char *user_id,
     return TRUE;
 }
 
-BOOL dns_record_matches_local(const char *user_id,
-    const dns_record_config_t *etcd_record, void *user_data)
-{
-    FastRG_t *fastrg_ccb = (FastRG_t *)user_data;
-    if (!fastrg_ccb || !user_id || !etcd_record)
-        return FALSE;
-
-    int ccb_id = atoi(user_id) - 1;
-    if (!is_valid_ccb_id(fastrg_ccb, ccb_id))
-        return FALSE;
-
-    dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
-    if (!dhcp_ccb)
-        return FALSE;
-
-    dns_static_record_t *local_rec =
-        dns_static_lookup(&dhcp_ccb->dns_state.static_table, etcd_record->domain);
-    if (!local_rec || !local_rec->active)
-        return FALSE;
-
-    U32 etcd_ip = 0;
-    if (etcd_record->ip[0] != '\0' && parse_ip(etcd_record->ip, &etcd_ip) == ERROR)
-        return FALSE;
-    if (local_rec->ip_addr != etcd_ip)
-        return FALSE;
-    if (local_rec->ttl != etcd_record->ttl)
-        return FALSE;
-
-    return TRUE;
-}
-
 /* Minimum spacing between PPPoE dials, to avoid a PADI storm when a node
  * restart loads many desire_status=connect subscribers at once (slice 13). */
 #define PPPOE_DIAL_MIN_GAP_US 50000   /* 50 ms */
@@ -810,15 +779,16 @@ void etcd_event_dispatch(FastRG_t *fastrg_ccb, etcd_event_t *ev)
                 ev->action, ev->revision, fastrg_ccb);
             break;
 
-        case ETCD_EVENT_DNS_RECORD:
-            if (ev->from_reconcile && ev->action != HSI_ACTION_DELETE &&
-                    dns_record_matches_local(ev->user_id, &ev->event_data.dns_record, fastrg_ccb)) {
-                FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
-                    "Reconcile: DNS record for user %s already matches, skipping", ev->user_id);
+        case ETCD_EVENT_DNS_SET:
+            int dns_ccb_id = parse_user_id(ev->user_id, fastrg_ccb->user_count);
+
+            if (dns_ccb_id < 0) {
+                FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
+                    "DNS record set: invalid user %s", ev->user_id);
                 break;
             }
-            dns_record_changed_callback(ev->node_id, ev->user_id, &ev->event_data.dns_record,
-                ev->action, ev->revision, fastrg_ccb);
+            apply_dns_record_set(fastrg_ccb, dns_ccb_id, ev->event_data.dns_set.records,
+                ev->event_data.dns_set.count);
             break;
 
         case ETCD_EVENT_HSI_SWEEP:
