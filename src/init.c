@@ -37,8 +37,11 @@
 #define NUM_MBUFS 		8191
 #define MBUF_CACHE_SIZE 512
 #define RING_SIZE 		16384
-/* Mail slot pool: one slot per in-flight cp_q event. */
-#define MAIL_SLOT_RING_SIZE 4096
+/* Mail slot pool: one slot per in-flight cp_q event. A reconcile tick posts one
+ * HSI and one DNS event per subscriber plus the count and sweep events
+ * (2 * MaxUserCount + 2), and the rest is headroom for data-plane control
+ * packets. */
+#define MAIL_SLOT_RING_SIZE 8192
 
 /* Headroom for the pdump pool, runtime rte_malloc calls, and the small metadata
  * the capacity measurement does not itemise. */

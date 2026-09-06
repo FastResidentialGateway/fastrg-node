@@ -6,9 +6,102 @@
 # Determines the current subscriber count (N), creates subscriber N+1,
 # applies the same config as subscriber 1 (with VLAN 100), exercises all
 # major gRPC configuration commands, verifies each produces the correct
-# etcd state and that fastrg_node applies changes locally.  The new
+# etcd state and that fastrg_node applies changes locally.  Two DNS records
+# are added so that removing one leaves the etcd key in place with a shorter
+# array, which is the shape the node has to apply as a removal.  The new
 # subscriber config is cleaned up and the subscriber count is restored.
 # ---------------------------------------------------------------------------
+
+# Whether one reading of a subscriber's static DNS records is the set a step
+# expects. PRESENT and ABSENT are comma-separated domain lists; "-" or an empty
+# string means none. A reading of "err" is a failed RPC and never an empty set,
+# so a step that asserts a domain is gone cannot pass on a read that never
+# happened.
+#
+# Prints ok | unreadable | missing:<domain> | present:<domain>.
+e2e_dns_record_set_verdict() {
+    local _body="${1:-}" _present="${2:-}" _absent="${3:-}" _domain=""
+
+    if [[ "$_body" == "err" ]]; then
+        printf 'unreadable'
+        return 1
+    fi
+    [[ "$_present" == "-" ]] && _present=""
+    [[ "$_absent" == "-" ]] && _absent=""
+
+    for _domain in ${_present//,/ }; do
+        if ! printf '%s\n' "$_body" | grep -qxF "$_domain"; then
+            printf 'missing:%s' "$_domain"
+            return 1
+        fi
+    done
+    for _domain in ${_absent//,/ }; do
+        if printf '%s\n' "$_body" | grep -qxF "$_domain"; then
+            printf 'present:%s' "$_domain"
+            return 1
+        fi
+    done
+    printf 'ok'
+    return 0
+}
+
+local_validation_register dns_record_set_verdict e2e_dns_record_set_verdict \
+    dns_record_set_ok \
+    dns_record_set_missing \
+    dns_record_set_still_present \
+    dns_record_set_unreadable \
+    dns_record_set_empty_ok \
+    dns_record_set_empty_missing
+
+# Static DNS records the node holds for a subscriber, one domain per line.
+# "err" when the RPC answered nothing at all.
+_p7_dns_domains() {
+    local _out=""
+
+    _out=$(fastrg_grpc get_dns_static "$1")
+    if [[ -z "$_out" ]]; then
+        printf 'err'
+        return 0
+    fi
+    printf '%s' "$_out" | jq -r '.entries[]?.domain' 2>/dev/null || true
+}
+
+# Poll the node's records until they are the set the caller expects, up to 10s.
+# Prints the last verdict; the reading it came from stays in
+# _P7_DNS_DOMAINS_SEEN for the failure message.
+_p7_wait_dns_verdict() {
+    local _uid="$1" _present="$2" _absent="$3" _i="" _verdict=""
+
+    for _i in $(seq 1 10); do
+        _P7_DNS_DOMAINS_SEEN=$(_p7_dns_domains "$_uid")
+        _verdict=$(e2e_dns_record_set_verdict "$_P7_DNS_DOMAINS_SEEN" "$_present" "$_absent" || true)
+        [[ "$_verdict" == "ok" ]] && break
+        sleep 1
+    done
+    printf '%s' "$_verdict"
+}
+
+# Drill: let the node keep a record the controller removed, which is what an
+# unapplied removal looks like from the outside.
+_p7_inject_dns_set_removal_skipped() {
+    sabotage_override_function _p7_dns_domains \
+        "printf '%s\n' \"\${_P7_DNS_DOMAIN}\" \"\${_P7_DNS_DOMAIN_B}\""
+}
+
+_p7_cleanup_dns_set_removal_skipped() {
+    restore_phase_functions phase7_extra_user_config_tests.sh
+    _cleanup_new_subscriber_config
+}
+
+case_validation_register dns_set_removal_skipped phase7_extra_user_config_tests \
+    _p7_inject_dns_set_removal_skipped _p7_cleanup_dns_set_removal_skipped \
+    'Step 26a:'
+
+# The two DNS records this phase creates; the cleanup below removes both.
+# Assigned only when unset: the drill puts the real functions back by re-reading
+# this file, and its cleanup runs right after that with the records still there.
+: "${_P7_DNS_DOMAIN:=}"
+: "${_P7_DNS_DOMAIN_B:=}"
 
 # Helper: remove newly-created subscriber config + restore count (idempotent).
 # Called at end of phase7 AND from cleanup_fastrg trap.
@@ -16,6 +109,12 @@ _cleanup_new_subscriber_config() {
     [[ -z "${NODE_UUID:-}" ]] && return
     [[ -z "${_NEW_USER_ID:-}" ]] && return
     local _chk
+    # The DNS records go first: RemoveConfig does not take them with it, and a
+    # leftover record would meet the next run as an unexplained fixture.
+    for _chk in "${_P7_DNS_DOMAIN}" "${_P7_DNS_DOMAIN_B}"; do
+        [[ -n "$_chk" ]] || continue
+        fastrg_grpc remove_dns_record "${_NEW_USER_ID}" "$_chk" >/dev/null 2>&1 || true
+    done
     _chk=$(etcdctl_get_value "configs/${NODE_UUID}/hsi/${_NEW_USER_ID}" 2>/dev/null || true)
     if [[ -n "$_chk" ]]; then
         info "Cleanup: removing user ${_NEW_USER_ID} config (RemoveConfig gRPC)..."
@@ -85,6 +184,12 @@ phase7_extra_user_config_tests() {
     local U1_DNS_DOMAIN="user${_NEW_USER_ID}test.fastrg.local"
     local U1_DNS_IP="10.1.0.${_NEW_USER_ID}"
     local U1_DNS_TTL=60
+    # The second record is what makes the removal of the first one a shrunken
+    # value in etcd instead of a deleted key.
+    local U1_DNS_DOMAIN_B="user${_NEW_USER_ID}test-b.fastrg.local"
+    local U1_DNS_IP_B="10.1.1.${_NEW_USER_ID}"
+    _P7_DNS_DOMAIN="$U1_DNS_DOMAIN"
+    _P7_DNS_DOMAIN_B="$U1_DNS_DOMAIN_B"
 
     info "New subscriber ${U1}: VLAN=${U1_VLAN} account=${U1_ACCOUNT} pool=${U1_POOL} subnet=${U1_SUBNET} gw=${U1_GATEWAY}"
 
@@ -114,7 +219,9 @@ phase7_extra_user_config_tests() {
         skip "Step 23: DhcpServerStart user ${U1}"        "ApplyConfig failed"
         skip "Step 24: DhcpServerStop user ${U1}"         "ApplyConfig failed"
         skip "Step 25: AddDnsRecord user ${U1}"           "ApplyConfig failed"
+        skip "Step 25a: AddDnsRecord second record user ${U1}" "ApplyConfig failed"
         skip "Step 26: RemoveDnsRecord user ${U1}"        "ApplyConfig failed"
+        skip "Step 26a: user ${U1} keeps the record etcd still has" "ApplyConfig failed"
         return
     fi
 
@@ -351,7 +458,9 @@ phase7_extra_user_config_tests() {
     if [[ -z "$_dns_add_status" ]]; then
         fail "Step 25: AddDnsRecord user ${U1}" \
             "gRPC AddDnsRecord returned no status — response: $(printf '%s' "$_dns_add_reply")"
+        skip "Step 25a: AddDnsRecord second record user ${U1}" "AddDnsRecord failed"
         skip "Step 26: RemoveDnsRecord user 1" "AddDnsRecord failed"
+        skip "Step 26a: user ${U1} keeps the record etcd still has" "AddDnsRecord failed"
     else
         sleep 1
         # DNS records are stored as a JSON array at configs/{node}/{user}/dns
@@ -379,6 +488,35 @@ phase7_extra_user_config_tests() {
                 "etcd ip=${_e24_ip} ttl=${_e24_ttl} grpc=ok"
         else
             fail "Step 25: AddDnsRecord user ${U1}" "Mismatch:${MISMATCH}"
+        fi
+
+        # ------------------------------------------------------------------
+        # Step 25a — a second record, so Step 26 removes one out of two
+        #
+        # With two records in the value, removing one leaves the key in place
+        # with a shorter array. That is the shape the node has to apply as a
+        # removal, and it is the only shape Step 26 can meet here.
+        # ------------------------------------------------------------------
+        info "Step 25a: AddDnsRecord user ${U1} domain=${U1_DNS_DOMAIN_B} ip=${U1_DNS_IP_B}..."
+        _p7_second_record=0
+        _dns_add_b_reply=$(fastrg_grpc add_dns_record "${U1}" "${U1_DNS_DOMAIN_B}" "${U1_DNS_IP_B}" "${U1_DNS_TTL}")
+        _dns_add_b_status=$(printf '%s' "$_dns_add_b_reply" | jq -r '.status // empty' 2>/dev/null || true)
+
+        if [[ -z "$_dns_add_b_status" ]]; then
+            fail "Step 25a: AddDnsRecord second record user ${U1}" \
+                "gRPC AddDnsRecord returned no status — response: $(printf '%s' "$_dns_add_b_reply")"
+        else
+            _p7_verdict=$(_p7_wait_dns_verdict "${U1}" "${U1_DNS_DOMAIN},${U1_DNS_DOMAIN_B}" "-")
+            _p7_etcd_count=$(etcdctl_get_value "configs/${NODE_UUID}/dns/${U1}" 2>/dev/null | \
+                jq -r '.records | length' 2>/dev/null || true)
+            if [[ "$_p7_verdict" == "ok" && "$_p7_etcd_count" == "2" ]]; then
+                _p7_second_record=1
+                pass "Step 25a: AddDnsRecord second record user ${U1}" \
+                    "etcd holds 2 records, the node holds both"
+            else
+                fail "Step 25a: AddDnsRecord second record user ${U1}" \
+                    "verdict '${_p7_verdict}' for the node records (${_P7_DNS_DOMAINS_SEEN//$'\n'/, }), etcd record count '${_p7_etcd_count:-unreadable}'"
+            fi
         fi
 
         # ------------------------------------------------------------------
@@ -410,6 +548,42 @@ phase7_extra_user_config_tests() {
                     "etcd entry removed from array, fastrg record removed"
             else
                 fail "Step 26: RemoveDnsRecord user ${U1}" "Mismatch:${MISMATCH}"
+            fi
+        fi
+
+        # ------------------------------------------------------------------
+        # Step 26a — the shrunken value took one record off the node and left
+        #            the other one alone, and emptying it takes that one too
+        #
+        # The surviving record is also what says the reading happened at all:
+        # an empty answer would otherwise pass for "the removed one is gone".
+        # ------------------------------------------------------------------
+        if [[ "${_p7_second_record:-0}" -ne 1 ]]; then
+            skip "Step 26a: user ${U1} keeps the record etcd still has" \
+                "the second record was never added"
+        else
+            info "Step 26a: verifying ${U1_DNS_DOMAIN_B} survived the removal of ${U1_DNS_DOMAIN}..."
+            _p7_issue=""
+            _p7_verdict=$(_p7_wait_dns_verdict "${U1}" "${U1_DNS_DOMAIN_B}" "${U1_DNS_DOMAIN}")
+            [[ "$_p7_verdict" == "ok" ]] || \
+                _p7_issue="verdict '${_p7_verdict}' after removing ${U1_DNS_DOMAIN} (records: ${_P7_DNS_DOMAINS_SEEN//$'\n'/, })"
+
+            # Removing the last record deletes the whole key, which is the
+            # other shape the node is told a record is gone in.
+            info "Step 26a: removing ${U1_DNS_DOMAIN_B}, the last record user ${U1} has..."
+            fastrg_grpc remove_dns_record "${U1}" "${U1_DNS_DOMAIN_B}" >/dev/null 2>&1 || true
+            _p7_verdict=$(_p7_wait_dns_verdict "${U1}" "-" "${U1_DNS_DOMAIN},${U1_DNS_DOMAIN_B}")
+            [[ "$_p7_verdict" == "ok" ]] || \
+                _p7_issue="${_p7_issue:+${_p7_issue}; }verdict '${_p7_verdict}' after removing ${U1_DNS_DOMAIN_B} (records: ${_P7_DNS_DOMAINS_SEEN//$'\n'/, })"
+            _p7_etcd_left=$(etcdctl_get_value "configs/${NODE_UUID}/dns/${U1}" 2>/dev/null || true)
+            [[ -z "$_p7_etcd_left" ]] || \
+                _p7_issue="${_p7_issue:+${_p7_issue}; }etcd still carries a DNS value for user ${U1}: $(printf '%s' "$_p7_etcd_left" | tr '\n' ' ' | cut -c 1-160)"
+
+            if [[ -z "$_p7_issue" ]]; then
+                pass "Step 26a: user ${U1} keeps the record etcd still has" \
+                    "${U1_DNS_DOMAIN_B} survived the removal of ${U1_DNS_DOMAIN}; removing it too emptied the etcd key and the node"
+            else
+                fail "Step 26a: user ${U1} keeps the record etcd still has" "$_p7_issue"
             fi
         fi
     fi

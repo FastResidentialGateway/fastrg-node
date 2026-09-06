@@ -342,6 +342,68 @@ void test_remove_hsi_config(FastRG_t *fastrg_ccb)
     fastrg_mfree(vlan_map);
 }
 
+static dhcp_ccb_t nb_dns_set_dhcp_ccb;
+
+void test_apply_dns_record_set(FastRG_t *fastrg_ccb)
+{
+    printf("\nTesting apply_dns_record_set function:\n");
+    printf("=========================================\n\n");
+
+    dhcp_ccb_t *orig_dhcp_ccb = fastrg_ccb->dhcp_ccb[0];
+    dns_record_config_t records[2];
+    dns_static_table_t *table = &nb_dns_set_dhcp_ccb.dns_state.static_table;
+
+    memset(&nb_dns_set_dhcp_ccb, 0, sizeof(nb_dns_set_dhcp_ccb));
+    nb_dns_set_dhcp_ccb.fastrg_ccb = fastrg_ccb;
+    fastrg_ccb->dhcp_ccb[0] = &nb_dns_set_dhcp_ccb;
+    dns_static_init(table);
+
+    memset(records, 0, sizeof(records));
+    strcpy(records[0].domain, "one.fastrg.org");
+    strcpy(records[0].ip, "10.0.0.1");
+    records[0].ttl = 60;
+    strcpy(records[1].domain, "two.fastrg.org");
+    strcpy(records[1].ip, "10.0.0.2");
+    records[1].ttl = 0;
+
+    TEST_ASSERT(apply_dns_record_set(fastrg_ccb, -1, records, 2) == ERROR,
+        "an invalid ccb id returns ERROR", "got SUCCESS");
+    TEST_ASSERT(apply_dns_record_set(fastrg_ccb, 0, records, -1) == ERROR,
+        "a negative count returns ERROR", "got SUCCESS");
+    TEST_ASSERT(apply_dns_record_set(fastrg_ccb, 0, NULL, 2) == ERROR,
+        "no records with a non-zero count returns ERROR", "got SUCCESS");
+
+    TEST_ASSERT(apply_dns_record_set(fastrg_ccb, 0, records, 2) == SUCCESS,
+        "applying two records returns SUCCESS", "got ERROR");
+    TEST_ASSERT(dns_static_get_count(table) == 2, "both records are on the node",
+        "count %u", dns_static_get_count(table));
+    dns_static_record_t *rec = dns_static_lookup(table, "two.fastrg.org");
+    TEST_ASSERT(rec != NULL && rec->ip_addr == rte_cpu_to_be_32(0x0A000002) &&
+        rec->ttl == 3600, "the IP string is decoded and ttl 0 defaults to 3600", "");
+
+    /* etcd dropped one record from the value: the node has to drop it too. */
+    TEST_ASSERT(apply_dns_record_set(fastrg_ccb, 0, records, 1) == SUCCESS &&
+        dns_static_lookup(table, "two.fastrg.org") == NULL &&
+        dns_static_lookup(table, "one.fastrg.org") != NULL,
+        "a record missing from the set is removed and the rest stays", "");
+
+    /* A value the node cannot decode must not clear what it already holds. */
+    strcpy(records[1].ip, "not-an-ip");
+    TEST_ASSERT(apply_dns_record_set(fastrg_ccb, 0, records, 2) == ERROR,
+        "an undecodable IP returns ERROR", "got SUCCESS");
+    TEST_ASSERT(dns_static_get_count(table) == 1 &&
+        dns_static_lookup(table, "one.fastrg.org") != NULL,
+        "a rejected set leaves the records untouched", "count %u",
+        dns_static_get_count(table));
+
+    TEST_ASSERT(apply_dns_record_set(fastrg_ccb, 0, NULL, 0) == SUCCESS &&
+        dns_static_get_count(table) == 0,
+        "an empty set clears the subscriber's records", "count %u",
+        dns_static_get_count(table));
+
+    fastrg_ccb->dhcp_ccb[0] = orig_dhcp_ccb;
+}
+
 void test_fastrg_gen_cli_request(FastRG_t *fastrg_ccb)
 {
     printf("\nTesting fastrg_gen_cli_request function:\n");
@@ -415,6 +477,7 @@ void test_northbound(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     pass_count = 0;
 
     test_reconcile_port_mapping(fastrg_ccb);
+    test_apply_dns_record_set(fastrg_ccb);
     test_fastrg_gen_cli_request(fastrg_ccb);
     test_remove_hsi_config(fastrg_ccb);
 

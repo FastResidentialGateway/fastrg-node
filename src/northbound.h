@@ -133,4 +133,23 @@ STATUS apply_dns_record(FastRG_t *fastrg_ccb, int ccb_id,
  */
 STATUS remove_dns_record(FastRG_t *fastrg_ccb, int ccb_id, const char *domain);
 
+/**
+ * @fn apply_dns_record_set
+ *
+ * @brief Make a subscriber's static DNS records match the set etcd holds.
+ *
+ * @param fastrg_ccb
+ *      Pointer to FastRG control block
+ * @param ccb_id
+ *      User ID (0-based)
+ * @param records
+ *      Every DNS record etcd holds for the subscriber; NULL when count is 0
+ * @param count
+ *      Number of entries in records; 0 clears the subscriber's records
+ *
+ * @return SUCCESS on success, ERROR on failure
+ */
+STATUS apply_dns_record_set(FastRG_t *fastrg_ccb, int ccb_id,
+    const dns_record_config_t *records, int count);
+
 #endif /* NORTHBOUND_H */
