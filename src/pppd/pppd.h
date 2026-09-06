@@ -25,8 +25,7 @@
 #include "../fastrg.h"
 #include "../init.h"
 #include "../mac_table.h"
-
-struct nd6_table;
+#include "../nd6/nd6_table.h"
 
 #define PPP_MSG_BUF_LEN	        128
 
@@ -298,7 +297,7 @@ typedef struct {
      * control plane. Data lcores must claim a new stamp with a relaxed
      * compare-exchange before escalating. */
     U64                   nd6_miss_last_cycles;
-    struct nd6_table      *nd6_table;       /* single-writer IPv6 neighbor cache */
+    nd6_table_t           *nd6_table;       /* single-writer IPv6 neighbor cache */
     struct rte_timer      ra_timer;         /* periodic LAN router advertisement for IPv6 */
     U64                   last_rs_ra_cycles; /* last RS-triggered RA, for rate limiting in IPv6 */
 }__rte_cache_aligned ppp_ccb_t;
