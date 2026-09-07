@@ -178,7 +178,7 @@ void ppp_build_state_report(const ppp_ccb_t *ppp_ccb, ppp_state_report_t *report
             sizeof(report->ipv6_dns));
 }
 
-static kafka_pppoe_phase_t report_phase_to_kafka(ppp_report_phase_t phase)
+static kafka_pppoe_phase_t ppp_report_phase_to_kafka(ppp_report_phase_t phase)
 {
     switch (phase) {
         case PPP_REPORT_CONNECTED:
@@ -198,7 +198,7 @@ static STATUS ppp_send_state_report(ppp_ccb_t *ppp_ccb,
         return ERROR;
 
     /* NULL, not an empty string, makes the controller store a NULL column. */
-    kafka_report_pppoe_state(report->user_id, report_phase_to_kafka(report->phase),
+    kafka_report_pppoe_state(report->user_id, ppp_report_phase_to_kafka(report->phase),
         report->ipv4[0] != '\0' ? report->ipv4 : NULL,
         report->ipv4_gw[0] != '\0' ? report->ipv4_gw : NULL, NULL,
         report->ipv6_addr[0] != '\0' ? report->ipv6_addr : NULL,
