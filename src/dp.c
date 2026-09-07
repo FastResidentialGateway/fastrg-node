@@ -164,10 +164,7 @@ STATUS dp_tx_handoff_pkt_init(FastRG_t *fastrg_ccb)
         }
         fastrg_ccb->tx_handoff_ring[port] =
             fastrg_calloc(struct rte_ring *, count, sizeof(struct rte_ring *), RTE_CACHE_LINE_SIZE);
-        fastrg_ccb->tx_full_logged_flag[port] =
-            fastrg_calloc(U8, count, sizeof(U8), RTE_CACHE_LINE_SIZE);
-        if (fastrg_ccb->tx_handoff_ring[port] == NULL ||
-            fastrg_ccb->tx_full_logged_flag[port] == NULL) {
+        if (fastrg_ccb->tx_handoff_ring[port] == NULL) {
             FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL,
                 "Cannot allocate TX queue tables for port %u", port);
             return ERROR;
@@ -187,7 +184,8 @@ STATUS dp_tx_handoff_pkt_init(FastRG_t *fastrg_ccb)
     }
 
     /* Only the data queues need one: they are the queues another lcore sends
-     * on. No one handof packets to control thread(queue 0) */
+     * on. No one handoff packets to control thread(queue 0) so we start loop 
+     from index 1 */
     for(port=0; port<PORT_AMOUNT; port++)
         for(q=1; q<=n; q++) {
             snprintf(name, sizeof(name), "tx_handoff_%u_%u", port, q);
@@ -226,10 +224,6 @@ void dp_tx_handoff_pkt_cleanup(FastRG_t *fastrg_ccb)
             }
             fastrg_mfree(fastrg_ccb->tx_handoff_ring[port]);
             fastrg_ccb->tx_handoff_ring[port] = NULL;
-        }
-        if (fastrg_ccb->tx_full_logged_flag[port] != NULL) {
-            fastrg_mfree(fastrg_ccb->tx_full_logged_flag[port]);
-            fastrg_ccb->tx_full_logged_flag[port] = NULL;
         }
         RTE_LCORE_FOREACH(lcore) {
             struct tx_queue_stats *row = fastrg_ccb->tx_queue_stats[lcore][port];
