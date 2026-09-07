@@ -119,7 +119,8 @@ build_libutil() {
     pushd $path/lib/libutil
     autoreconf --install
     ./configure
-    make && make install
+    make
+    make install
     ldconfig
     popd
 }
@@ -140,7 +141,8 @@ build_fastrg() {
     popd
 
     pushd $path
-    make && make install
+    make
+    make install
     mkdir -p /var/log/fastrg
     mkdir -p /var/run/fastrg
     mkdir -p /etc/fastrg
@@ -148,7 +150,8 @@ build_fastrg() {
     popd
 
     pushd $path/northbound/cmdline
-    make && make install || true
+    make
+    make install
     popd
 }
 
