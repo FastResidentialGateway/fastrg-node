@@ -2077,6 +2077,25 @@ void test_ppp_decode_config_ack_options(FastRG_t *fastrg_ccb)
         "inflated PPP header length with 0xff option length never reaches decode_lcp",
         "event=%u", event);
 
+    /* Test 7: a trailing byte too short to hold an option header is rejected
+     * before the walk reads a length field that is not there */
+    printf("Test 7: \"one-byte option tail in Configure-Ack is rejected\"\n");
+    decode_ccb_reset(fastrg_ccb, LCP_PHASE);
+    decode_ccb.identifier[0] = 1;
+    decode_ccb.config_request_pending[0] = TRUE;
+    decode_ccb.magic_num = rte_cpu_to_be_32(0x01020304);
+    frame_len = build_session_frame(frame, LCP_PROTOCOL, CONFIG_ACK,
+        sizeof(ppp_header_t) + 7, 7);
+    opts = frame + sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) +
+        sizeof(pppoe_header_t) + sizeof(ppp_payload_t) + sizeof(ppp_header_t);
+    const U8 magic_plus_stray_byte[] = {0x05, 0x06, 0x01, 0x02, 0x03, 0x04, 0xff};
+    rte_memcpy(opts, magic_plus_stray_byte, sizeof(magic_plus_stray_byte));
+    event = E_UNKNOWN;
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == ERROR,
+        "one-byte option tail in Configure-Ack returns ERROR", NULL);
+    TEST_ASSERT(decode_ccb.config_request_pending[0] == TRUE,
+        "one-byte option tail leaves the outstanding request untouched", NULL);
+
     codec_cleanup_ppp_ccb(&decode_ccb);
 }
 
@@ -2152,6 +2171,67 @@ void test_ppp_decode_ipcp_option_hardening(FastRG_t *fastrg_ccb)
     TEST_ASSERT(decode_ccb.hsi_ipv4 == rte_cpu_to_be_32(0x01020304),
         "valid IP_ADDRESS Configure-Ack stores the negotiated address",
         "hsi_ipv4=0x%x", decode_ccb.hsi_ipv4);
+
+    /* Test 4: a Configure-Request IP_ADDRESS option truncated to its header must
+     * not have its first value byte read while deciding whether to Nak */
+    printf("Test 4: \"truncated IP_ADDRESS option in IPCP Configure-Request is rejected\"\n");
+    decode_ccb_reset(fastrg_ccb, IPCP_PHASE);
+    frame_len = build_session_frame(frame, IPCP_PROTOCOL, CONFIG_REQUEST,
+        sizeof(ppp_header_t) + 2, 2);
+    opts = frame + sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) +
+        sizeof(pppoe_header_t) + sizeof(ppp_payload_t) + sizeof(ppp_header_t);
+    const U8 truncated_req_ip_opt[] = {IP_ADDRESS, 0x02};
+    rte_memcpy(opts, truncated_req_ip_opt, sizeof(truncated_req_ip_opt));
+    event = E_UNKNOWN;
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == ERROR,
+        "truncated IP_ADDRESS option in Configure-Request returns ERROR", NULL);
+    TEST_ASSERT(event == E_UNKNOWN,
+        "truncated IP_ADDRESS option in Configure-Request emits no FSM event",
+        "event=%u", event);
+
+    /* Test 5: a well-formed all-zero IP_ADDRESS still triggers the Nak response */
+    printf("Test 5: \"zero IP_ADDRESS in IPCP Configure-Request is naked\"\n");
+    decode_ccb_reset(fastrg_ccb, IPCP_PHASE);
+    frame_len = build_session_frame(frame, IPCP_PROTOCOL, CONFIG_REQUEST,
+        sizeof(ppp_header_t) + 6, 6);
+    opts = frame + sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) +
+        sizeof(pppoe_header_t) + sizeof(ppp_payload_t) + sizeof(ppp_header_t);
+    const U8 zero_req_ip_opt[] = {IP_ADDRESS, 0x06, 0x00, 0x00, 0x00, 0x00};
+    rte_memcpy(opts, zero_req_ip_opt, sizeof(zero_req_ip_opt));
+    event = E_UNKNOWN;
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == SUCCESS,
+        "zero IP_ADDRESS Configure-Request returns SUCCESS", NULL);
+    TEST_ASSERT(event == E_RECV_BAD_CONFIG_REQUEST,
+        "zero IP_ADDRESS Configure-Request emits E_RECV_BAD_CONFIG_REQUEST",
+        "event=%u", event);
+
+    /* Test 6: a trailing byte too short to hold an option header is rejected in
+     * the Configure-Request Nak/Reject scan */
+    printf("Test 6: \"one-byte option tail in IPCP Configure-Request is rejected\"\n");
+    decode_ccb_reset(fastrg_ccb, IPCP_PHASE);
+    frame_len = build_session_frame(frame, IPCP_PROTOCOL, CONFIG_REQUEST,
+        sizeof(ppp_header_t) + 7, 7);
+    opts = frame + sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) +
+        sizeof(pppoe_header_t) + sizeof(ppp_payload_t) + sizeof(ppp_header_t);
+    const U8 req_ip_plus_stray_byte[] = {IP_ADDRESS, 0x06, 0x01, 0x02, 0x03, 0x04, 0xff};
+    rte_memcpy(opts, req_ip_plus_stray_byte, sizeof(req_ip_plus_stray_byte));
+    event = E_UNKNOWN;
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == ERROR,
+        "one-byte option tail in IPCP Configure-Request returns ERROR", NULL);
+
+    /* Test 7: the same tail is rejected by the Configure-Ack option walk */
+    printf("Test 7: \"one-byte option tail in IPCP Configure-Ack is rejected\"\n");
+    decode_ccb_reset(fastrg_ccb, IPCP_PHASE);
+    decode_ccb.identifier[1] = 1;
+    decode_ccb.config_request_pending[1] = TRUE;
+    frame_len = build_session_frame(frame, IPCP_PROTOCOL, CONFIG_ACK,
+        sizeof(ppp_header_t) + 7, 7);
+    opts = frame + sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) +
+        sizeof(pppoe_header_t) + sizeof(ppp_payload_t) + sizeof(ppp_header_t);
+    rte_memcpy(opts, req_ip_plus_stray_byte, sizeof(req_ip_plus_stray_byte));
+    event = E_UNKNOWN;
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == ERROR,
+        "one-byte option tail in IPCP Configure-Ack returns ERROR", NULL);
 
     codec_cleanup_ppp_ccb(&decode_ccb);
 }
@@ -2440,6 +2520,120 @@ void test_ppp_decode_config_nak_rej_options(FastRG_t *fastrg_ccb)
         "rejected primary DNS is cleared", "dns=%x", decode_ccb.hsi_primary_dns);
     TEST_ASSERT(decode_ccb.config_request_pending[1] == FALSE,
         "matching IPCP Configure-Reject clears the outstanding request", NULL);
+
+    /* Test 12: an MRU option without its 2-byte value must not be read and
+     * rewritten past the option buffer while building the Nak */
+    printf("Test 12: \"truncated MRU option in LCP Configure-Request is rejected\"\n");
+    decode_ccb_reset(fastrg_ccb, LCP_PHASE);
+    frame_len = build_session_frame(frame, LCP_PROTOCOL, CONFIG_REQUEST,
+        sizeof(ppp_header_t) + 2, 2);
+    opts = frame + sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) +
+        sizeof(pppoe_header_t) + sizeof(ppp_payload_t) + sizeof(ppp_header_t);
+    const U8 truncated_mru_opt[] = {MRU, 0x02};
+    rte_memcpy(opts, truncated_mru_opt, sizeof(truncated_mru_opt));
+    event = E_UNKNOWN;
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == ERROR,
+        "truncated MRU option in Configure-Request returns ERROR", NULL);
+    TEST_ASSERT(event == E_UNKNOWN,
+        "truncated MRU option in Configure-Request emits no FSM event",
+        "event=%u", event);
+    TEST_ASSERT(decode_ccb.control_protocol[PPP_CP_LCP].ppp_hdr.code == CONFIG_REQUEST,
+        "truncated MRU option does not turn the request into a Nak response",
+        "code=%u", decode_ccb.control_protocol[PPP_CP_LCP].ppp_hdr.code);
+
+    /* Test 13: the same applies to an Auth-Protocol option missing a value byte */
+    printf("Test 13: \"truncated AUTH option in LCP Configure-Request is rejected\"\n");
+    decode_ccb_reset(fastrg_ccb, LCP_PHASE);
+    decode_ccb.auth_method = PAP_PROTOCOL;
+    frame_len = build_session_frame(frame, LCP_PROTOCOL, CONFIG_REQUEST,
+        sizeof(ppp_header_t) + 3, 3);
+    opts = frame + sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) +
+        sizeof(pppoe_header_t) + sizeof(ppp_payload_t) + sizeof(ppp_header_t);
+    const U8 truncated_auth_opt[] = {AUTH, 0x03, 0xc2};
+    rte_memcpy(opts, truncated_auth_opt, sizeof(truncated_auth_opt));
+    event = E_UNKNOWN;
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == ERROR,
+        "truncated AUTH option in Configure-Request returns ERROR", NULL);
+    TEST_ASSERT(decode_ccb.auth_method == PAP_PROTOCOL,
+        "truncated AUTH option leaves the negotiated auth method alone",
+        "auth_method=%x", decode_ccb.auth_method);
+    TEST_ASSERT(decode_ccb.peer_requires_auth == FALSE,
+        "truncated AUTH option does not arm the peer-requires-auth flag", NULL);
+
+    /* Test 14: a well-formed MRU carrying our own value is still accepted */
+    printf("Test 14: \"well-formed MRU option in LCP Configure-Request is accepted\"\n");
+    decode_ccb_reset(fastrg_ccb, LCP_PHASE);
+    frame_len = build_session_frame(frame, LCP_PROTOCOL, CONFIG_REQUEST,
+        sizeof(ppp_header_t) + 4, 4);
+    opts = frame + sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) +
+        sizeof(pppoe_header_t) + sizeof(ppp_payload_t) + sizeof(ppp_header_t);
+    const U8 good_mru_opt[] = {MRU, 0x04, PPP_MRU_HIGH_BYTE, PPP_MRU_LOW_BYTE};
+    rte_memcpy(opts, good_mru_opt, sizeof(good_mru_opt));
+    event = E_UNKNOWN;
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == SUCCESS,
+        "well-formed MRU Configure-Request returns SUCCESS", NULL);
+    TEST_ASSERT(event == E_RECV_GOOD_CONFIG_REQUEST,
+        "well-formed MRU Configure-Request emits E_RECV_GOOD_CONFIG_REQUEST",
+        "event=%u", event);
+
+    /* Test 15: a trailing byte too short to hold an option header is rejected in
+     * the Configure-Request Nak/Reject scan */
+    printf("Test 15: \"one-byte option tail in LCP Configure-Request is rejected\"\n");
+    decode_ccb_reset(fastrg_ccb, LCP_PHASE);
+    frame_len = build_session_frame(frame, LCP_PROTOCOL, CONFIG_REQUEST,
+        sizeof(ppp_header_t) + 5, 5);
+    opts = frame + sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) +
+        sizeof(pppoe_header_t) + sizeof(ppp_payload_t) + sizeof(ppp_header_t);
+    const U8 mru_plus_stray_byte[] = {MRU, 0x04, PPP_MRU_HIGH_BYTE, PPP_MRU_LOW_BYTE, 0xff};
+    rte_memcpy(opts, mru_plus_stray_byte, sizeof(mru_plus_stray_byte));
+    event = E_UNKNOWN;
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == ERROR,
+        "one-byte option tail in LCP Configure-Request returns ERROR", NULL);
+
+    /* Test 16: the same tail is rejected by the Configure-Nak option walk */
+    printf("Test 16: \"one-byte option tail in LCP Configure-Nak is rejected\"\n");
+    decode_ccb_reset(fastrg_ccb, LCP_PHASE);
+    decode_ccb.identifier[0] = 1;
+    decode_ccb.config_request_pending[0] = TRUE;
+    frame_len = build_session_frame(frame, LCP_PROTOCOL, CONFIG_NAK,
+        sizeof(ppp_header_t) + 5, 5);
+    opts = frame + sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) +
+        sizeof(pppoe_header_t) + sizeof(ppp_payload_t) + sizeof(ppp_header_t);
+    const U8 naked_mru_plus_stray_byte[] = {MRU, 0x04, 0x05, 0xaa, 0xff};
+    rte_memcpy(opts, naked_mru_plus_stray_byte, sizeof(naked_mru_plus_stray_byte));
+    event = E_UNKNOWN;
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == ERROR,
+        "one-byte option tail in LCP Configure-Nak returns ERROR", NULL);
+
+    /* Test 17: and by the Configure-Reject option walk */
+    printf("Test 17: \"one-byte option tail in LCP Configure-Reject is rejected\"\n");
+    decode_ccb_reset(fastrg_ccb, LCP_PHASE);
+    decode_ccb.identifier[0] = 1;
+    decode_ccb.config_request_pending[0] = TRUE;
+    frame_len = build_session_frame(frame, LCP_PROTOCOL, CONFIG_REJECT,
+        sizeof(ppp_header_t) + 5, 5);
+    opts = frame + sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) +
+        sizeof(pppoe_header_t) + sizeof(ppp_payload_t) + sizeof(ppp_header_t);
+    const U8 rejected_auth_plus_stray_byte[] = {AUTH, 0x04, 0xc0, 0x23, 0xff};
+    rte_memcpy(opts, rejected_auth_plus_stray_byte, sizeof(rejected_auth_plus_stray_byte));
+    event = E_UNKNOWN;
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == ERROR,
+        "one-byte option tail in LCP Configure-Reject returns ERROR", NULL);
+
+    /* Test 18: and by the IPCP Configure-Nak option walk */
+    printf("Test 18: \"one-byte option tail in IPCP Configure-Nak is rejected\"\n");
+    decode_ccb_reset(fastrg_ccb, IPCP_PHASE);
+    decode_ccb.identifier[1] = 1;
+    decode_ccb.config_request_pending[1] = TRUE;
+    frame_len = build_session_frame(frame, IPCP_PROTOCOL, CONFIG_NAK,
+        sizeof(ppp_header_t) + 7, 7);
+    opts = frame + sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t) +
+        sizeof(pppoe_header_t) + sizeof(ppp_payload_t) + sizeof(ppp_header_t);
+    const U8 naked_ip_plus_stray_byte[] = {0x03, 0x06, 0xc0, 0xa8, 0xc8, 0xfe, 0xff};
+    rte_memcpy(opts, naked_ip_plus_stray_byte, sizeof(naked_ip_plus_stray_byte));
+    event = E_UNKNOWN;
+    TEST_ASSERT(PPP_decode_frame(frame, frame_len, &event, &decode_ccb) == ERROR,
+        "one-byte option tail in IPCP Configure-Nak returns ERROR", NULL);
 
     codec_cleanup_ppp_ccb(&decode_ccb);
 }

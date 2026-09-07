@@ -67,17 +67,28 @@ check_nak_rej_result_t check_ipcp_nak_rej(U8 flag, ppp_ccb_t *s_ppp_ccb, U16 ppp
 
     ppp_hdr->length = sizeof(ppp_header_t);
     for(ppp_options_t *cur=ppp_options; tmp_total_length<ppp_hdr_len; cur=(ppp_options_t *)((char *)cur + cur->length)) {
-        if (cur->length == 0 || cur->length > (ppp_hdr_len - tmp_total_length)) {
+        U16 remaining = ppp_hdr_len - tmp_total_length;
+
+        if (remaining < sizeof(ppp_options_t) || cur->length < sizeof(ppp_options_t) ||
+                cur->length > remaining) {
             FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "Invalid PPP option length");
             fastrg_mfree(tmp_buf);
-            return ERROR;
+            return CHECK_NAK_REJ_ERROR;
         }
         if (flag == CONFIG_NAK) {
-            if (cur->type == IP_ADDRESS && cur->val[0] == 0) {
-                bool_flag = 1;
-                rte_memcpy(tmp_cur,cur,cur->length);
-                ppp_hdr->length += cur->length;
-                tmp_cur = (ppp_options_t *)((char *)tmp_cur + cur->length);
+            if (cur->type == IP_ADDRESS) {
+                /* IPCP IP-Address carries a 4-byte value (RFC 1332 option length 6). */
+                if (cur->length < sizeof(ppp_options_t) + sizeof(U32)) {
+                    FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "Invalid PPP option length");
+                    fastrg_mfree(tmp_buf);
+                    return CHECK_NAK_REJ_ERROR;
+                }
+                if (cur->val[0] == 0) {
+                    bool_flag = 1;
+                    rte_memcpy(tmp_cur,cur,cur->length);
+                    ppp_hdr->length += cur->length;
+                    tmp_cur = (ppp_options_t *)((char *)tmp_cur + cur->length);
+                }
             }
         } else {
             if (cur->type != IP_ADDRESS) {
@@ -222,13 +233,23 @@ check_nak_rej_result_t check_lcp_nak_rej(U8 flag, ppp_ccb_t *s_ppp_ccb, U16 ppp_
 
     ppp_hdr->length = sizeof(ppp_header_t);
     for(ppp_options_t *cur=ppp_options; tmp_total_length<ppp_hdr_len; cur=(ppp_options_t *)((char *)cur + cur->length)) {
-        if (cur->length == 0 || cur->length > (ppp_hdr_len - tmp_total_length)) {
+        U16 remaining = ppp_hdr_len - tmp_total_length;
+
+        if (remaining < sizeof(ppp_options_t) || cur->length < sizeof(ppp_options_t) ||
+                cur->length > remaining) {
             FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "Invalid PPP option length");
             fastrg_mfree(tmp_buf);
-            return ERROR;
+            return CHECK_NAK_REJ_ERROR;
         }
         if (flag == CONFIG_NAK) {
             U8 len_byte = PPP_MRU_LOW_BYTE;
+            /* MRU and Auth-Protocol both carry a 2-byte value. */
+            if ((cur->type == MRU || cur->type == AUTH) &&
+                    cur->length < sizeof(ppp_options_t) + sizeof(U16)) {
+                FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "Invalid PPP option length");
+                fastrg_mfree(tmp_buf);
+                return CHECK_NAK_REJ_ERROR;
+            }
             if (cur->type == MRU && (cur->val[0] != PPP_MRU_HIGH_BYTE || cur->val[1] != len_byte)) {
                 need_res_nak_reject = TRUE;
                 FastRG_LOG(WARN, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG, "MRU = %x%x", cur->val[0], cur->val[1]);
@@ -306,18 +327,18 @@ STATUS decode_lcp(U16 ppp_hdr_len, U16 *event, struct rte_timer *tim, ppp_ccb_t 
                 return ERROR;
             /* we check if the request packet contains what we want */
             switch (check_lcp_nak_rej(CONFIG_NAK, s_ppp_ccb, ppp_hdr_len)) {
-                case ERROR:
+                case CHECK_NAK_REJ_ERROR:
                     return ERROR;
-                case 1:
+                case CHECK_NAK_REJ_SEND_RESPONSE:
                     *event = E_RECV_BAD_CONFIG_REQUEST;
                     return SUCCESS;
                 default:
                     ;
             }
             switch (check_lcp_nak_rej(CONFIG_REJECT, s_ppp_ccb, ppp_hdr_len)) {
-                case ERROR:
+                case CHECK_NAK_REJ_ERROR:
                         return ERROR;
-                case 1:
+                case CHECK_NAK_REJ_SEND_RESPONSE:
                     *event = E_RECV_BAD_CONFIG_REQUEST;
                     return SUCCESS;
                 default:
@@ -342,7 +363,15 @@ STATUS decode_lcp(U16 ppp_hdr_len, U16 *event, struct rte_timer *tim, ppp_ccb_t 
             opt_total = sizeof(ppp_header_t);
             for(ppp_options_t *cur=ppp_options; opt_total<ppp_hdr_len;
                     cur = (ppp_options_t *)((char *)cur + cur->length)) {
-                if (cur->length < sizeof(ppp_options_t) || cur->length > ppp_hdr_len - opt_total) {
+                U16 remaining = ppp_hdr_len - opt_total;
+
+                if (remaining < sizeof(ppp_options_t)) {
+                    FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+                        "User %" PRIu16 " recv LCP Configure-Ack with a truncated option header.",
+                        s_ppp_ccb->user_num);
+                    return ERROR;
+                }
+                if (cur->length < sizeof(ppp_options_t) || cur->length > remaining) {
                     FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
                         "User %" PRIu16 " recv LCP Configure-Ack with invalid option length %u.",
                         s_ppp_ccb->user_num, cur->length);
@@ -384,7 +413,15 @@ STATUS decode_lcp(U16 ppp_hdr_len, U16 *event, struct rte_timer *tim, ppp_ccb_t 
             opt_total = sizeof(ppp_header_t);
             for(ppp_options_t *cur=ppp_options; opt_total<ppp_hdr_len;
                     cur = (ppp_options_t *)((char *)cur + cur->length)) {
-                if (cur->length < sizeof(ppp_options_t) || cur->length > ppp_hdr_len - opt_total) {
+                U16 remaining = ppp_hdr_len - opt_total;
+
+                if (remaining < sizeof(ppp_options_t)) {
+                    FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+                        "User %" PRIu16 " recv LCP Configure-Nak with a truncated option header.",
+                        s_ppp_ccb->user_num);
+                    return ERROR;
+                }
+                if (cur->length < sizeof(ppp_options_t) || cur->length > remaining) {
                     FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
                         "User %" PRIu16 " recv LCP Configure-Nak with invalid option length %u.",
                         s_ppp_ccb->user_num, cur->length);
@@ -426,7 +463,15 @@ STATUS decode_lcp(U16 ppp_hdr_len, U16 *event, struct rte_timer *tim, ppp_ccb_t 
                 U16 opt_total = sizeof(ppp_header_t);
                 for(ppp_options_t *cur=ppp_options; opt_total<ppp_hdr_len;
                         cur = (ppp_options_t *)((char *)cur + cur->length)) {
-                    if (cur->length < sizeof(ppp_options_t) || cur->length > ppp_hdr_len - opt_total) {
+                    U16 remaining = ppp_hdr_len - opt_total;
+
+                    if (remaining < sizeof(ppp_options_t)) {
+                        FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+                            "User %" PRIu16 " recv LCP Configure-Reject with a truncated option header.",
+                            s_ppp_ccb->user_num);
+                        return ERROR;
+                    }
+                    if (cur->length < sizeof(ppp_options_t) || cur->length > remaining) {
                         FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
                             "User %" PRIu16 " recv LCP Configure-Reject with invalid option length %u.",
                             s_ppp_ccb->user_num, cur->length);
@@ -510,18 +555,18 @@ STATUS decode_ipcp(U16 ppp_hdr_len, U16 *event, struct rte_timer *tim, ppp_ccb_t
     switch(ppp_hdr->code) {
         case CONFIG_REQUEST :
             switch (check_ipcp_nak_rej(CONFIG_NAK, s_ppp_ccb, ppp_hdr_len)) {
-                case ERROR:
+                case CHECK_NAK_REJ_ERROR:
                     return ERROR;
-                case 1:
+                case CHECK_NAK_REJ_SEND_RESPONSE:
                     *event = E_RECV_BAD_CONFIG_REQUEST;
                     return SUCCESS;
                 default:
                     ;
             }
             switch (check_ipcp_nak_rej(CONFIG_REJECT, s_ppp_ccb, ppp_hdr_len)) {
-                case ERROR:
+                case CHECK_NAK_REJ_ERROR:
                     return ERROR;
-                case 1:
+                case CHECK_NAK_REJ_SEND_RESPONSE:
                     *event = E_RECV_BAD_CONFIG_REQUEST;
                     return SUCCESS;
                 default:
@@ -532,7 +577,15 @@ STATUS decode_ipcp(U16 ppp_hdr_len, U16 *event, struct rte_timer *tim, ppp_ccb_t
                 U16 opt_total = sizeof(ppp_header_t);
                 for(ppp_options_t *cur=ppp_options; opt_total<ppp_hdr_len;
                         cur = (ppp_options_t *)((char *)cur + cur->length)) {
-                    if (cur->length < sizeof(ppp_options_t) || cur->length > ppp_hdr_len - opt_total) {
+                    U16 remaining = ppp_hdr_len - opt_total;
+
+                    if (remaining < sizeof(ppp_options_t)) {
+                        FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+                            "User %" PRIu16 " recv IPCP Configure-Request with a truncated option header.",
+                            s_ppp_ccb->user_num);
+                        return ERROR;
+                    }
+                    if (cur->length < sizeof(ppp_options_t) || cur->length > remaining) {
                         FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
                             "User %" PRIu16 " recv IPCP Configure-Request with invalid option length %u.",
                             s_ppp_ccb->user_num, cur->length);
@@ -578,7 +631,15 @@ STATUS decode_ipcp(U16 ppp_hdr_len, U16 *event, struct rte_timer *tim, ppp_ccb_t
                 U16 opt_total = sizeof(ppp_header_t);
                 for(ppp_options_t *cur=ppp_options; opt_total<ppp_hdr_len;
                         cur = (ppp_options_t *)((char *)cur + cur->length)) {
-                    if (cur->length < sizeof(ppp_options_t) || cur->length > ppp_hdr_len - opt_total) {
+                    U16 remaining = ppp_hdr_len - opt_total;
+
+                    if (remaining < sizeof(ppp_options_t)) {
+                        FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+                            "User %" PRIu16 " recv IPCP Configure-Ack with a truncated option header.",
+                            s_ppp_ccb->user_num);
+                        return ERROR;
+                    }
+                    if (cur->length < sizeof(ppp_options_t) || cur->length > remaining) {
                         FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
                             "User %" PRIu16 " recv IPCP Configure-Ack with invalid option length %u.",
                             s_ppp_ccb->user_num, cur->length);
@@ -620,7 +681,15 @@ STATUS decode_ipcp(U16 ppp_hdr_len, U16 *event, struct rte_timer *tim, ppp_ccb_t
                 U16 opt_total = sizeof(ppp_header_t);
                 for(ppp_options_t *cur=ppp_options; opt_total<ppp_hdr_len;
                         cur = (ppp_options_t *)((char *)cur + cur->length)) {
-                    if (cur->length < sizeof(ppp_options_t) || cur->length > ppp_hdr_len - opt_total) {
+                    U16 remaining = ppp_hdr_len - opt_total;
+
+                    if (remaining < sizeof(ppp_options_t)) {
+                        FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+                            "User %" PRIu16 " recv IPCP Configure-Nak with a truncated option header.",
+                            s_ppp_ccb->user_num);
+                        return ERROR;
+                    }
+                    if (cur->length < sizeof(ppp_options_t) || cur->length > remaining) {
                         FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
                             "User %" PRIu16 " recv IPCP Configure-Nak with invalid option length %u.",
                             s_ppp_ccb->user_num, cur->length);
@@ -661,7 +730,15 @@ STATUS decode_ipcp(U16 ppp_hdr_len, U16 *event, struct rte_timer *tim, ppp_ccb_t
                 U16 opt_total = sizeof(ppp_header_t);
                 for(ppp_options_t *cur=ppp_options; opt_total<ppp_hdr_len;
                         cur = (ppp_options_t *)((char *)cur + cur->length)) {
-                    if (cur->length < sizeof(ppp_options_t) || cur->length > ppp_hdr_len - opt_total) {
+                    U16 remaining = ppp_hdr_len - opt_total;
+
+                    if (remaining < sizeof(ppp_options_t)) {
+                        FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
+                            "User %" PRIu16 " recv IPCP Configure-Reject with a truncated option header.",
+                            s_ppp_ccb->user_num);
+                        return ERROR;
+                    }
+                    if (cur->length < sizeof(ppp_options_t) || cur->length > remaining) {
                         FastRG_LOG(ERR, fastrg_ccb->fp, s_ppp_ccb, PPPLOGMSG,
                             "User %" PRIu16 " recv IPCP Configure-Reject with invalid option length %u.",
                             s_ppp_ccb->user_num, cur->length);
