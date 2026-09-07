@@ -715,6 +715,14 @@ void test_dhcp_decode(FastRG_t *fastrg_ccb)
         fix.eth_hdr, fix.vlan_hdr, fix.ip_hdr, fix.udp_hdr);
     TEST_ASSERT(event == ERROR, "zero dgram_len returns ERROR", "got %d", event);
 
+    /* a valid magic cookie must not rescue a dgram_len that cannot even span the
+       fixed headers — the cookie itself sits past the end of such a packet */
+    fix.udp_hdr->dgram_len = rte_cpu_to_be_16(sizeof(struct rte_udp_hdr));
+    event = dhcp_decode(&fix.dhcp_ccb, &fix.per_lan_user, &fix.cur_tmp_pool_index,
+        fix.eth_hdr, fix.vlan_hdr, fix.ip_hdr, fix.udp_hdr);
+    TEST_ASSERT(event == ERROR,
+        "dgram_len covering only the UDP header returns ERROR", "got %d", event);
+
     printf("  All dhcp_decode tests done.\n");
 }
 
