@@ -57,14 +57,7 @@ download_controller_grpc() {
         else
             REMOTE_PATH="proto/$PROTO_NAME"
         fi
-        # The integration branch comes first, ahead of the tag: this checkout
-        # needs contract fields that are not on a tag or on master yet, and a
-        # tag of the same name on the controller side would otherwise win and
-        # hand back a proto without them. Once the branch merges and is
-        # deleted, this URL 404s and the list falls through to master, which
-        # by then carries the fields — so it stops mattering on its own.
         PROTO_URLS=(
-            "https://raw.githubusercontent.com/FastResidentialGateway/fastrg-controller/feat/support-ipv6/$REMOTE_PATH"
             "https://raw.githubusercontent.com/FastResidentialGateway/fastrg-controller/$CURRENT_TAG/$REMOTE_PATH"
             "https://raw.githubusercontent.com/FastResidentialGateway/fastrg-controller/master/$REMOTE_PATH"
         )
@@ -161,10 +154,6 @@ build_fastrg() {
 
 path=$(get_script_dir)
 
-# Re-fetch the contracts alone, without the submodule and build work around
-# them. This is how a checkout picks up a controller-side .proto change: the
-# download refreshes the file, and the build regenerates from it because the
-# Makefile has the generated sources depending on it.
 if [ "$PROTO_ONLY" = true ]; then
     download_controller_grpc
     echo "✅ Controller contracts fetched."
