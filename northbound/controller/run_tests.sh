@@ -151,15 +151,35 @@ stop_etcd() {
     fi
 }
 
+# Report a background test's wait status. It is stopped by this script's
+# SIGTERM, so 143 is its normal end; a clean exit is fine too. Anything else
+# (a crash above all) is a failure.
+check_background_status() {
+    local status="$1" name="$2"
+    if [ "$status" -eq 0 ] || [ "$status" -eq 143 ]; then
+        return 0
+    fi
+    echo "❌ $name exited abnormally (status $status)"
+    TEST_FAILED=1
+    return 1
+}
+
 # Build tests
 echo "📦 Building tests..."
-make test
+if ! make test; then
+    echo "❌ Failed to build the controller tests."
+    exit 1
+fi
 echo ""
 
 # Test 1: Run client test without server (should show connection errors)
 echo "🔧 Test 1: Client test without server (expecting connection errors)"
 echo "---------------------------------------------------------------"
-./test/test_controller
+# The client tolerates an absent server, so a non-zero exit is a real failure.
+if ! ./test/test_controller; then
+    echo "❌ Controller client test failed without server."
+    TEST_FAILED=1
+fi
 echo ""
 
 # Test 2: Run integrated test with server
@@ -173,12 +193,16 @@ SERVER_PID=$!
 sleep 2
 
 echo "Running client test..."
-./test/test_controller
+if ! ./test/test_controller; then
+    echo "❌ Controller client test failed against the server."
+    TEST_FAILED=1
+fi
 
 # Cleanup server
 echo "🧹 Cleaning up controller server..."
-kill $SERVER_PID 2>/dev/null
+kill -TERM $SERVER_PID 2>/dev/null
 wait $SERVER_PID 2>/dev/null
+check_background_status $? "Controller server test"
 echo ""
 
 # Test 3: Run etcd client test
@@ -235,9 +259,10 @@ if [ ! -z "$ETCD_MODE" ]; then
             
             # Stop the etcd client test
             echo "🛑 Stopping etcd client test..."
-            kill $ETCD_CLIENT_PID 2>/dev/null
+            kill -TERM $ETCD_CLIENT_PID 2>/dev/null
             wait $ETCD_CLIENT_PID 2>/dev/null
-            
+            ETCD_CLIENT_STATUS=$?
+
             echo ""
             echo "📊 Test Summary - Simulated Events:"
             echo "   ✅ HSI Config: Created user1 (VLAN 100)"
@@ -245,10 +270,12 @@ if [ ! -z "$ETCD_MODE" ]; then
             echo "   ✅ HSI Config: Created user2 (VLAN 200)"
             echo "   ✅ HSI Config: Deleted user1"
             echo ""
-            echo "✅ etcd client test completed with simulated events!"
+            if check_background_status "$ETCD_CLIENT_STATUS" "etcd client test"; then
+                echo "✅ etcd client test completed with simulated events!"
+            fi
         else
-            echo "⚠️  test_etcd_client executable not found. Skipping etcd test."
-            echo "   Make sure to build the etcd client test first."
+            echo "❌ test_etcd_client executable not found."
+            TEST_FAILED=1
         fi
     else
         echo "❌ Failed to start etcd server. Skipping etcd test."
