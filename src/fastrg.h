@@ -154,8 +154,6 @@ typedef struct FastRG {
     U16                     tx_queue_count[PORT_AMOUNT]; /* Tx queue count per port */
     struct tx_queue_stats   *tx_queue_stats[RTE_MAX_LCORE][PORT_AMOUNT]; /* TX queue statistics per lcore */
     struct rte_ring         **tx_handoff_ring[PORT_AMOUNT]; /* Per queue ring for packet handoff */
-    /* Log flag while tx queue is full to ensure no duplicate logging */
-    U8                      *tx_full_logged_flag[PORT_AMOUNT];
     /* pdump_rcu does not protect a data pointer. It marks intervals
      * where data-plane lcores may be inside RX/TX bursts and therefore pdump
      * callbacks. Callback removal does not wait for callbacks already in

@@ -324,16 +324,6 @@ static __always_inline void fastrg_sum_tx_queue_stats(
     }
 }
 
-static inline const char *tx_descriptor_status_name(int status)
-{
-    switch (status) {
-    case RTE_ETH_TX_DESC_FULL:   return "FULL";
-    case RTE_ETH_TX_DESC_DONE:   return "DONE";
-    case RTE_ETH_TX_DESC_UNAVAIL:return "UNAVAIL";
-    default:                     return "ERR";
-    }
-}
-
 /* Count while handoff ring is full, per lcore, per port, per queue */
 static __always_inline void count_tx_handoff_drop(FastRG_t *fastrg_ccb, 
     U16 port_id, U16 queue_id)
@@ -351,8 +341,7 @@ static __always_inline void count_tx_handoff_drop(FastRG_t *fastrg_ccb,
 /**
  * @fn count_tx_queue_refused
  *
- * @brief Record a TX burst the queue would not take in full, and describe the
- *        queue's descriptors only at the first time it happens on that queue.
+ * @brief Record a TX burst the queue would not take in full.
  *
  * @param fastrg_ccb
  *      FastRG control block pointer
@@ -370,7 +359,6 @@ static __always_inline void count_tx_handoff_drop(FastRG_t *fastrg_ccb,
 static inline void count_tx_queue_refused(FastRG_t *fastrg_ccb, U16 port_id, U16 queue_id,
                             U16 offered, U16 accepted)
 {
-    static const U16 probe_offsets[] = {0, 32, 64, 128, 256, TX_RING_SIZE - 1};
     unsigned int lcore_id = rte_lcore_id();
 
     if (unlikely(!is_tx_queue_valid(fastrg_ccb, port_id, queue_id) ||
@@ -382,26 +370,6 @@ static inline void count_tx_queue_refused(FastRG_t *fastrg_ccb, U16 port_id, U16
         return;
     row[queue_id].full_packets += (uint64_t)(offered - accepted);
     row[queue_id].short_bursts += 1;
-
-    U8 *logged = fastrg_ccb->tx_full_logged_flag[port_id];
-    if (unlikely(logged == NULL) ||
-        __atomic_exchange_n(&logged[queue_id], 1, __ATOMIC_RELAXED))
-        return;
-
-    char probe[256];
-    int used = 0;
-    for(unsigned int i=0; i<RTE_DIM(probe_offsets); i++) {
-        U16 off = probe_offsets[i];
-        int status = rte_eth_tx_descriptor_status(port_id, queue_id, off);
-        int n = snprintf(probe + used, sizeof(probe) - used, "%s%u=%s",
-            i ? " " : "", off, tx_descriptor_status_name(status));
-        if (n < 0 || (size_t)(used + n) >= sizeof(probe))
-            break;
-        used += n;
-    }
-    FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
-        "TX shortfall port %u queue %u lcore %u: offered %u accepted %u; descriptors %s",
-        port_id, queue_id, lcore_id, offered, accepted, probe);
 }
 
 
