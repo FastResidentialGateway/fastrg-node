@@ -1,5 +1,6 @@
 #include <iostream>
 #include <unistd.h>
+#include <cstdio>
 #include <cstring>
 #include <cstdlib>
 #include "../etcd_client.h"
@@ -13,7 +14,6 @@
 
 extern "C" {
 int parse_user_id(const char *user_id_str, int max_count) {
-    (void)max_count;
     if (!user_id_str || user_id_str[0] == '\0')
         return -1;
     char *endptr;
@@ -21,7 +21,7 @@ int parse_user_id(const char *user_id_str, int max_count) {
     if (endptr == user_id_str || *endptr != '\0')
         return -1;
     int ccb_id = (int)val - 1;
-    return ccb_id < 0 ? -1 : ccb_id;
+    return (ccb_id < 0 || ccb_id >= max_count) ? -1 : ccb_id;
 }
 
 // No control-plane loop here: take ownership and drop the event, which is what
@@ -32,6 +32,11 @@ STATUS fastrg_gen_etcd_event(FastRG_t *fastrg_ccb, etcd_event_t *ev) {
     return SUCCESS;
 }
 }
+
+// Stand-in for the node control block: the etcd client reads user_count from
+// it on every HSI event.
+static FastRG_t test_fastrg_ccb;
+static const U16 TEST_USER_COUNT = 8;
 
 // Global flag to control callback failure for testing
 static bool simulate_callback_failure = false;
@@ -55,8 +60,10 @@ int main() {
     std::cout << "  Type 'quit' to exit\n" << std::endl;
 
     // Initialize etcd client
+    test_fastrg_ccb.fp = stdout;
+    test_fastrg_ccb.user_count = TEST_USER_COUNT;
     const char* etcd_endpoints = "http://127.0.0.1:2379";
-    etcd_status_t status = etcd_client_init(etcd_endpoints, nullptr);
+    etcd_status_t status = etcd_client_init(etcd_endpoints, &test_fastrg_ccb);
 
     if (status != ETCD_SUCCESS) {
         std::cerr << "Failed to initialize etcd client" << std::endl;
