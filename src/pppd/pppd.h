@@ -339,10 +339,6 @@ static inline struct rte_timer *ppp_cp_timer(ppp_ccb_t *ppp_ccb)
  *        Caller must be the control plane, and must call after every write to
  *        any of those three flags.
  *
- *        Opening publishes a write barrier first, so a data lcore observing
- *        the gate open also observes the fields written before the call;
- *        closing needs no barrier.
- *
  * @param ppp_ccb
  *      Subscriber control block (NULL tolerated)
  * @return
@@ -387,10 +383,6 @@ void ppp_ipv6_redial(ppp_ccb_t *ppp_ccb);
  *
  *        Every output buffer is written; one with nothing to report is left
  *        as an empty string.
- *
- *        Caller must decide whether the fields are ready to be read: the
- *        control plane reads the three IPv6 flags in program order, other
- *        threads use pppd_ipv6_dp_gate_open().
  *
  * @param ppp_ccb
  *      Subscriber control block (NULL tolerated)
@@ -479,10 +471,6 @@ void ppp_build_state_report(const ppp_ccb_t *ppp_ccb, ppp_state_report_t *report
  *      Kafka: build the report from the control block, then send it. The
  *      controller overwrites its whole row per event, so the event always
  *      carries the complete state rather than a partial one.
- *
- *      Call it from the control plane whenever the reportable state changes,
- *      and from the northbound path to restate what the subscriber looks like
- *      right now.
  *
  * @param ppp_ccb
  *      PPP control block pointer
