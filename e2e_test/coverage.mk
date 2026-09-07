@@ -46,6 +46,8 @@ COVERAGE_FILTERS = '*/unit_test/*' '*/northbound/controller/test/*' '*/lib/*' '/
 MODULE_SUMMARY_AWK = '/^SF:/ { f = $$2; m = "other"; \
     if      (f ~ /\/src\/pppd\//)              m = "src/pppd"; \
     else if (f ~ /\/src\/dhcpd\//)             m = "src/dhcpd"; \
+    else if (f ~ /\/src\/dhcpd6\//)            m = "src/dhcpd6"; \
+    else if (f ~ /\/src\/nd6\//)               m = "src/nd6"; \
     else if (f ~ /\/src\/dnsd\//)              m = "src/dnsd"; \
     else if (f ~ /\/src\//)                    m = "src (core)"; \
     else if (f ~ /\/northbound\/grpc\//)       m = "northbound/grpc"; \
@@ -55,7 +57,7 @@ MODULE_SUMMARY_AWK = '/^SF:/ { f = $$2; m = "other"; \
   /^LF:/  { lf[cur]  += $$2 } /^LH:/  { lh[cur]  += $$2 } \
   /^FNF:/ { fnf[cur] += $$2 } /^FNH:/ { fnh[cur] += $$2 } \
   END { printf "%-24s %18s %18s\n", "Module", "Lines", "Functions"; \
-    n = split("src (core)|src/pppd|src/dhcpd|src/dnsd|northbound/grpc|northbound/controller|northbound/cmdline|other", order, "|"); \
+    n = split("src (core)|src/pppd|src/dhcpd|src/dhcpd6|src/nd6|src/dnsd|northbound/grpc|northbound/controller|northbound/cmdline|other", order, "|"); \
     for (i = 1; i <= n; i++) { m = order[i]; if (!(m in mods)) continue; \
       lr = lf[m]  ? 100 * lh[m]  / lf[m]  : 0; \
       fr = fnf[m] ? 100 * fnh[m] / fnf[m] : 0; \
