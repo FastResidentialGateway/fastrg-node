@@ -215,6 +215,31 @@ static void test_field_merge_dns_records()
     expect_equal("case 8 absent key fails", ERROR,
         config_snapshot_field_merge(SNAPSHOT_FIELD_KIND_DNS_DEL, NULL, "a.example", &out));
     free(out);
+
+    // A record whose domain is not a string cannot be matched; the merge has
+    // to report ERROR instead of letting jsoncpp throw across the C boundary.
+    const char *bad_domain =
+        "{\"records\":[{\"domain\":123,\"ip\":\"10.0.0.1\"}],\"metadata\":{}}";
+    char *bad_out = NULL;
+    expect_equal("case 8 non-string domain rejected on add", ERROR,
+        config_snapshot_field_merge(SNAPSHOT_FIELD_KIND_DNS_ADD, bad_domain,
+            "{\"domain\":\"c.example\",\"ip\":\"10.0.0.3\"}", &bad_out));
+    expect_true("case 8 rejected add produces no output", bad_out == NULL);
+    free(bad_out);
+    bad_out = NULL;
+    expect_equal("case 8 non-string domain rejected on delete", ERROR,
+        config_snapshot_field_merge(SNAPSHOT_FIELD_KIND_DNS_DEL, bad_domain,
+            "a.example", &bad_out));
+    expect_true("case 8 rejected delete produces no output", bad_out == NULL);
+    free(bad_out);
+
+    // The added record itself must be a JSON object with a string domain.
+    bad_out = NULL;
+    expect_equal("case 8 non-string domain in the added record rejected", ERROR,
+        config_snapshot_field_merge(SNAPSHOT_FIELD_KIND_DNS_ADD, seed,
+            "{\"domain\":[],\"ip\":\"10.0.0.4\"}", &bad_out));
+    expect_true("case 8 rejected record produces no output", bad_out == NULL);
+    free(bad_out);
 }
 
 static void test_parse_dns_records()
@@ -255,6 +280,17 @@ static void test_parse_dns_records()
     expect_equal("case 25 partial value size", size_t(1), records.size());
     expect_equal("case 25 partial value keeps the usable entry", std::string("b.example"),
         std::string(records[0].domain));
+
+    // A wrong-typed member drops only its own record, and a wrong-typed ttl
+    // falls back to the default instead of throwing.
+    expect_true("case 25 wrong-typed record dropped", parse_dns_records(
+        "{\"records\":[{\"domain\":123,\"ip\":\"10.0.0.1\"},"
+        "{\"domain\":\"c.example\",\"ip\":\"10.0.0.3\",\"ttl\":[]}],"
+        "\"metadata\":{}}", &records));
+    expect_equal("case 25 wrong-typed record dropped size", size_t(1), records.size());
+    expect_equal("case 25 wrong-typed record keeps the usable entry",
+        std::string("c.example"), std::string(records[0].domain));
+    expect_equal("case 25 wrong-typed ttl falls back", 3600u, records[0].ttl);
 }
 
 /* ---- config snapshot cases (rv stamping / dirty semantics / persistence);
@@ -431,6 +467,37 @@ static void test_snapshot_persistence()
     DirtyProbe p;
     config_snapshot_foreach_dirty(dirty_probe_cb, &p);
     expect_true("case 11 dirty survives restart", p.count >= 1);
+
+    // A snapshot file carrying a wrong-typed entry (etcd mirrors values the
+    // node never validated) still loads: the bad entry is skipped, the rest
+    // of the file applies.
+    config_snapshot_cleanup();
+    const char *file = getenv("CONFIG_SNAPSHOT_PATH");
+    expect_true("case 11 snapshot path is set", file != NULL);
+    FILE *f = file ? fopen(file, "w") : NULL;
+    expect_true("case 11 crafted snapshot written", f != NULL);
+    if (f) {
+        fputs("{\"version\":1,\"entries\":["
+            "{\"key\":\"hsi/85\",\"value\":42,\"exists\":true,"
+            "\"dirty\":false,\"edited_at\":0,\"summary\":\"\"},"
+            "{\"key\":\"hsi/86\",\"value\":"
+            "\"{\\\"config\\\":{\\\"vlan_id\\\":\\\"86\\\"}}\","
+            "\"exists\":true,\"dirty\":false,\"edited_at\":0,\"summary\":\"\"}"
+            "]}", f);
+        fclose(f);
+    }
+    expect_equal("case 11 wrong-typed entry does not fail the load", SUCCESS,
+        config_snapshot_init());
+    char *skipped = config_snapshot_get(SNAPSHOT_KIND_HSI, "85");
+    expect_true("case 11 wrong-typed entry skipped", skipped == NULL);
+    free(skipped);
+    char *kept = config_snapshot_get(SNAPSHOT_KIND_HSI, "86");
+    Json::Value kept_root;
+    expect_true("case 11 remaining entry still loads",
+        kept != NULL && parse_json(kept, kept_root));
+    expect_equal("case 11 remaining entry value", std::string("86"),
+        kept_root["config"]["vlan_id"].asString());
+    free(kept);
 }
 
 static void test_snapshot_content_equal()
@@ -516,6 +583,35 @@ static void test_snapshot_offline_delete()
     expect_true("case 13 absent-key delete adds nothing", !ft3.found);
 }
 
+/* Records what config_snapshot_apply_all handed to the apply callbacks. */
+struct ApplyProbe {
+    int count_calls = 0;
+    bool saw_count_three = false;
+    bool saw_bad_hsi = false;
+};
+
+static STATUS apply_probe_count_cb(const char *node_id, const user_count_config_t *config,
+    etcd_action_type_t action, int64_t revision, void *user_data)
+{
+    (void)node_id; (void)action; (void)revision;
+    ApplyProbe *p = (ApplyProbe *)user_data;
+    p->count_calls++;
+    if (config != NULL && config->user_count == 3)
+        p->saw_count_three = true;
+    return SUCCESS;
+}
+
+static STATUS apply_probe_hsi_cb(const char *node_id, const char *user_id,
+    const hsi_config_t *config, etcd_action_type_t action, int64_t revision,
+    void *user_data)
+{
+    (void)node_id; (void)config; (void)action; (void)revision;
+    ApplyProbe *p = (ApplyProbe *)user_data;
+    if (user_id != NULL && std::string(user_id) == "53")
+        p->saw_bad_hsi = true;
+    return SUCCESS;
+}
+
 static void test_snapshot_boot_apply_skips_deleted()
 {
     std::cout << "Case 14: boot apply skips deleted entries (no resurrection)" << std::endl;
@@ -552,6 +648,28 @@ static void test_snapshot_boot_apply_skips_deleted()
     // Clean up the tombstone's dirty flag so later cases see a known state.
     config_snapshot_clear_dirty(SNAPSHOT_KIND_HSI, "52",
         dirty_seq_of(SNAPSHOT_KIND_HSI, "52"));
+
+    // Wrong-typed values reach the boot apply straight from the etcd mirror.
+    // The baseline pass measures the snapshot as it stands, so the second pass
+    // shows exactly what the three added values contribute.
+    ApplyProbe baseline;
+    config_snapshot_apply_all("cas-test-node", apply_probe_hsi_cb,
+        apply_probe_count_cb, NULL, &baseline);
+
+    config_snapshot_watch_update(SNAPSHOT_KIND_COUNT, "61",
+        "{\"subscriber_count\":[]}");
+    config_snapshot_watch_update(SNAPSHOT_KIND_COUNT, "62",
+        "{\"subscriber_count\":3}");
+    config_snapshot_watch_update(SNAPSHOT_KIND_HSI, "53",
+        "{\"config\":{\"user_id\":{}}}");
+
+    ApplyProbe probe;
+    config_snapshot_apply_all("cas-test-node", apply_probe_hsi_cb,
+        apply_probe_count_cb, NULL, &probe);
+    expect_equal("case 14 only the usable count is applied",
+        baseline.count_calls + 1, probe.count_calls);
+    expect_true("case 14 integer subscriber_count applied", probe.saw_count_three);
+    expect_true("case 14 wrong-typed HSI value skipped", !probe.saw_bad_hsi);
 }
 
 static void test_snapshot_delete_recreate_rv_chain()
@@ -989,6 +1107,64 @@ static void test_field_merge_ipv6()
     free(out);
 }
 
+static void test_etcd_client_parse_hsi_config()
+{
+    std::cout << "Case 26: HSI parse rejects malformed values without leaking or "
+        "leaving a stale pointer" << std::endl;
+    /* Stands in for the stack garbage the boot-time loader hands to
+     * hsi_config_free_port_mappings() after a failed parse. */
+    port_mapping_t sentinel = { 0 };
+    hsi_config_t config;
+
+    /* A field of the wrong JSON type aborts the parse inside jsoncpp. */
+    config = hsi_config_t{ 0 };
+    config.port_mappings = &sentinel;
+    config.port_mapping_count = 7;
+    expect_equal("case 26 object user_id rejected", ERROR,
+        etcd_client_parse_hsi_config("{\"config\":{\"user_id\":{}}}", &config, NULL));
+    expect_true("case 26 object user_id clears port_mappings",
+        config.port_mappings == NULL);
+    expect_equal("case 26 object user_id clears count", 0, config.port_mapping_count);
+
+    /* Unparsable JSON returns before any field is read. */
+    config = hsi_config_t{ 0 };
+    config.port_mappings = &sentinel;
+    config.port_mapping_count = 7;
+    expect_equal("case 26 garbage rejected", ERROR,
+        etcd_client_parse_hsi_config("not json", &config, NULL));
+    expect_true("case 26 garbage clears port_mappings", config.port_mappings == NULL);
+    expect_equal("case 26 garbage clears count", 0, config.port_mapping_count);
+
+    /* A non-numeric eport throws after the array is already allocated. */
+    config = hsi_config_t{ 0 };
+    config.port_mappings = &sentinel;
+    config.port_mapping_count = 7;
+    expect_equal("case 26 non-numeric eport rejected", ERROR,
+        etcd_client_parse_hsi_config(
+            "{\"config\":{\"user_id\":\"7\",\"port-mapping\":"
+            "[{\"eport\":\"abc\",\"dip\":\"192.168.9.5\",\"dport\":\"80\"}]}}",
+            &config, NULL));
+    expect_true("case 26 non-numeric eport frees port_mappings",
+        config.port_mappings == NULL);
+    expect_equal("case 26 non-numeric eport clears count", 0, config.port_mapping_count);
+
+    /* A well-formed value still parses both mappings. */
+    config = hsi_config_t{ 0 };
+    expect_equal("case 26 well-formed value parses", SUCCESS,
+        etcd_client_parse_hsi_config(
+            "{\"config\":{\"user_id\":\"7\",\"port-mapping\":"
+            "[{\"eport\":\"8080\",\"dip\":\"192.168.9.5\",\"dport\":\"80\"},"
+            "{\"eport\":\"8081\",\"dip\":\"192.168.9.6\",\"dport\":\"81\"}]}}",
+            &config, NULL));
+    expect_equal("case 26 mapping count", 2, config.port_mapping_count);
+    expect_true("case 26 mappings allocated", config.port_mappings != NULL);
+    if (config.port_mappings != NULL) {
+        expect_equal("case 26 first eport", 8080, (int)config.port_mappings[0].eport);
+        expect_equal("case 26 second dport", 81, (int)config.port_mappings[1].dport);
+    }
+    hsi_config_free_port_mappings(&config);
+}
+
 int main()
 {
     // Point the snapshot at a scratch file so the test never touches the
@@ -1024,6 +1200,7 @@ int main()
     test_hsi_ipv6_render_round_trip();
     test_field_merge_ipv6();
     test_parse_dns_records();
+    test_etcd_client_parse_hsi_config();
 
     config_snapshot_cleanup();
     std::remove(path);
