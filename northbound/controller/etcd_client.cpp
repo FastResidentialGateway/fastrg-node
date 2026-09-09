@@ -42,12 +42,14 @@ bool parse_dns_records_envelope(const std::string &value, Json::Value *records_o
 // (ttl defaults to 3600 when absent).
 bool parse_dns_record_from_json(const Json::Value &entry, dns_record_config_t *rec)
 {
-    if (!entry.isMember("domain") || !entry.isMember("ip"))
+    // Wrong-typed members make the record unusable rather than throwing, so
+    // one bad record only costs itself and the rest of the value still applies.
+    if (!entry.isObject() || !entry["domain"].isString() || !entry["ip"].isString())
         return false;
     memset(rec, 0, sizeof(*rec));
     strncpy(rec->domain, entry["domain"].asString().c_str(), sizeof(rec->domain) - 1);
     strncpy(rec->ip, entry["ip"].asString().c_str(), sizeof(rec->ip) - 1);
-    rec->ttl = entry.isMember("ttl") ? entry["ttl"].asUInt() : 3600;
+    rec->ttl = entry["ttl"].isIntegral() ? entry["ttl"].asUInt() : 3600;
     return true;
 }
 
@@ -1040,6 +1042,10 @@ public:
             return ETCD_ERROR;
         }
 
+        /* Cleared before anything can throw; every exit path frees it. */
+        output->config.port_mappings = NULL;
+        output->config.port_mapping_count = 0;
+
         try {
             std::string key = "configs/" + node_id + "/hsi/" + user_id;
 
@@ -1148,8 +1154,6 @@ public:
             }
 
             // Parse port-mapping array (dynamic allocation — caller must call hsi_config_free_port_mappings)
-            output->config.port_mappings = NULL;
-            output->config.port_mapping_count = 0;
             if (config_obj.isMember("port-mapping") && config_obj["port-mapping"].isArray()) {
                 const Json::Value& pm_array = config_obj["port-mapping"];
                 int total = (int)pm_array.size();
@@ -1213,6 +1217,7 @@ public:
 
         } catch (const std::exception& e) {
             std::cerr << "Exception getting HSI config: " << e.what() << std::endl;
+            hsi_config_free_port_mappings(&output->config);
             return ETCD_ERROR;
         }
     }
@@ -1338,7 +1343,7 @@ public:
                         value.c_str());
 
                 // Parse HSI config from JSON
-                hsi_config_t config;
+                hsi_config_t config = { 0 };
                 bool is_enabled = false;
                 if (parse_hsi_config(value, &config, &is_enabled)) {
                     /* Per-key ModRevision: the reconcile gate uses this to compare whether the config has changed */
@@ -1427,6 +1432,10 @@ public:
     }
 
     static bool parse_hsi_config(const std::string& json_str, hsi_config_t* config, bool* is_enabled) {
+        /* Cleared before anything can throw; every exit path frees it. */
+        config->port_mappings = NULL;
+        config->port_mapping_count = 0;
+
         try {
             Json::Value root;
             Json::Reader reader;
@@ -1513,8 +1522,6 @@ public:
             }
 
             // Parse port-mapping array (dynamic allocation — caller must call hsi_config_free_port_mappings)
-            config->port_mappings = NULL;
-            config->port_mapping_count = 0;
             if (config_obj.isMember("port-mapping") && config_obj["port-mapping"].isArray()) {
                 const Json::Value& pm_array = config_obj["port-mapping"];
                 int total = (int)pm_array.size();
@@ -1548,6 +1555,7 @@ public:
 
         } catch (const std::exception& e) {
             std::cerr << "Exception parsing HSI config: " << e.what() << std::endl;
+            hsi_config_free_port_mappings(config);
             return false;
         }
     }

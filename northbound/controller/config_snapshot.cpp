@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <exception>
 #include <fstream>
 #include <iomanip>
 #include <map>
@@ -170,6 +171,24 @@ void report_persist_outcome(const PersistOutcome &out)
     }
 }
 
+// Typed member reads for values that come from etcd or the snapshot file.
+// jsoncpp throws when asString()/asBool()/asInt64() meets an array or object,
+// so a member of the wrong type reads as the caller's default instead.
+std::string json_string(const Json::Value &v, const char *key)
+{
+    return (v.isObject() && v[key].isString()) ? v[key].asString() : std::string();
+}
+
+bool json_bool(const Json::Value &v, const char *key, bool def)
+{
+    return (v.isObject() && v[key].isBool()) ? v[key].asBool() : def;
+}
+
+int64_t json_int64(const Json::Value &v, const char *key, int64_t def)
+{
+    return (v.isObject() && v[key].isIntegral()) ? v[key].asInt64() : def;
+}
+
 // Extract metadata.resourceVersion as an integer
 bool parse_rv(const std::string &value_json, long long *out)
 {
@@ -178,12 +197,12 @@ bool parse_rv(const std::string &value_json, long long *out)
     if (!reader.parse(value_json, root) || !root.isObject() ||
             !root.isMember("metadata") || !root["metadata"].isObject())
         return false;
-    const Json::Value &rv = root["metadata"]["resourceVersion"];
-    if (!rv.isString())
+    std::string rv = json_string(root["metadata"], "resourceVersion");
+    if (rv.empty())
         return false;
     char *end = nullptr;
-    long long v = strtoll(rv.asString().c_str(), &end, 10);
-    if (!end || *end != '\0' || rv.asString().empty())
+    long long v = strtoll(rv.c_str(), &end, 10);
+    if (!end || *end != '\0')
         return false;
     *out = v;
     return true;
@@ -208,222 +227,272 @@ extern "C" {
 
 STATUS config_snapshot_init(void)
 {
-    std::lock_guard<std::mutex> lk(g_mutex);
-    g_entries.clear();
-    g_initialized = true;
+    try {
+        std::lock_guard<std::mutex> lk(g_mutex);
+        g_entries.clear();
+        g_initialized = true;
 
-    std::ifstream ifs(snapshot_path());
-    if (!ifs)
-        return SUCCESS; // no file = empty snapshot
+        std::ifstream ifs(snapshot_path());
+        if (!ifs)
+            return SUCCESS; // no file = empty snapshot
 
-    std::stringstream buf;
-    buf << ifs.rdbuf();
-    Json::Value root;
-    Json::Reader reader;
-    if (!reader.parse(buf.str(), root) || !root.isMember("entries") ||
-            !root["entries"].isArray())
-        return ERROR; // corrupt file: start empty, report
+        std::stringstream buf;
+        buf << ifs.rdbuf();
+        Json::Value root;
+        Json::Reader reader;
+        if (!reader.parse(buf.str(), root) || !root.isMember("entries") ||
+                !root["entries"].isArray())
+            return ERROR; // corrupt file: start empty, report
 
-    for (const auto &j : root["entries"]) {
-        std::string key = j.get("key", "").asString();
-        if (key.empty())
-            continue;
-        Entry e;
-        e.value = j.get("value", "").asString();
-        e.exists = j.get("exists", false).asBool();
-        e.dirty = j.get("dirty", false).asBool();
-        e.edited_at = j.get("edited_at", (Json::Int64)0).asInt64();
-        e.summary = j.get("summary", "").asString();
-        g_entries[key] = e;
+        for (const auto &j : root["entries"]) {
+            // An entry without a string key and value is unusable; skip it
+            // and keep loading the rest of the file.
+            if (!j.isObject() || !j["key"].isString() || !j["value"].isString())
+                continue;
+            std::string key = json_string(j, "key");
+            if (key.empty())
+                continue;
+            Entry e;
+            e.value = json_string(j, "value");
+            e.exists = json_bool(j, "exists", false);
+            e.dirty = json_bool(j, "dirty", false);
+            e.edited_at = json_int64(j, "edited_at", 0);
+            e.summary = json_string(j, "summary");
+            g_entries[key] = e;
+        }
+        return SUCCESS;
+    } catch (const std::exception &e) {
+        std::fprintf(stderr, "[snapshot] config_snapshot_init failed: %s\n", e.what());
+        return ERROR;
     }
-    return SUCCESS;
 }
 
 void config_snapshot_cleanup(void)
 {
-    std::unique_lock<std::mutex> lk(g_mutex);
-    PersistOutcome out;
-    if (g_initialized)
-        out = persist_and_track_locked();
-    g_entries.clear();
-    g_initialized = false;
-    lk.unlock(); // reporting must not run under the snapshot lock
-    report_persist_outcome(out);
+    try {
+        std::unique_lock<std::mutex> lk(g_mutex);
+        PersistOutcome out;
+        if (g_initialized)
+            out = persist_and_track_locked();
+        g_entries.clear();
+        g_initialized = false;
+        lk.unlock(); // reporting must not run under the snapshot lock
+        report_persist_outcome(out);
+    } catch (const std::exception &e) {
+        std::fprintf(stderr, "[snapshot] config_snapshot_cleanup failed: %s\n", e.what());
+    }
 }
 
 void config_snapshot_watch_update(snapshot_kind_t kind, const char *user_id,
     const char *value_json)
 {
-    if (!user_id)
-        return;
-    std::unique_lock<std::mutex> lk(g_mutex);
-    if (!g_initialized)
-        return;
-    std::string key = map_key(kind, user_id);
-    auto it = g_entries.find(key);
-    if (it != g_entries.end() && it->second.dirty) {
-        // The entry carries an offline edit that has not been reported to the
-        // controller yet. Mirroring the etcd value now would overwrite the
-        // proposal and clear its dirty flag, losing the edit forever — this
-        // covers both the boot-time load (a dirty entry persisted across a
-        // restart) and a watch/reconcile racing an edit that landed after the
-        // last report. Skip the whole mirror write (value/exists/dirty/
-        // summary/edit_seq untouched, nothing persisted): the next report tick
-        // sends the proposal, the report path clears dirty (compare-and-clear
-        // or content match), and the following watch event for this key lands
-        // normally — so the deferral always converges.
-        lk.unlock(); // logging must not run under the snapshot lock
-        std::fprintf(stderr,
-            "[snapshot] INFO: etcd mirror of %s deferred: entry holds an unreported offline edit\n",
-            key.c_str());
-        return;
+    try {
+        if (!user_id)
+            return;
+        std::unique_lock<std::mutex> lk(g_mutex);
+        if (!g_initialized)
+            return;
+        std::string key = map_key(kind, user_id);
+        auto it = g_entries.find(key);
+        if (it != g_entries.end() && it->second.dirty) {
+            // The entry carries an offline edit that has not been reported to the
+            // controller yet. Mirroring the etcd value now would overwrite the
+            // proposal and clear its dirty flag, losing the edit forever — this
+            // covers both the boot-time load (a dirty entry persisted across a
+            // restart) and a watch/reconcile racing an edit that landed after the
+            // last report. Skip the whole mirror write (value/exists/dirty/
+            // summary/edit_seq untouched, nothing persisted): the next report tick
+            // sends the proposal, the report path clears dirty (compare-and-clear
+            // or content match), and the following watch event for this key lands
+            // normally — so the deferral always converges.
+            lk.unlock(); // logging must not run under the snapshot lock
+            std::fprintf(stderr,
+                "[snapshot] INFO: etcd mirror of %s deferred: entry holds an unreported offline edit\n",
+                key.c_str());
+            return;
+        }
+        // Reconcile mirrors every key each tick; when the value (or the deleted
+        // state) is already what we hold, skip the file rewrite.
+        if (it != g_entries.end() && it->second.exists == (value_json != nullptr) &&
+                it->second.value == (value_json ? value_json : ""))
+            return;
+        Entry &e = g_entries[key];
+        e.value = value_json ? value_json : "";
+        e.exists = (value_json != nullptr);
+        e.dirty = false;
+        e.summary.clear();
+        PersistOutcome out = persist_and_track_locked();
+        lk.unlock(); // reporting must not run under the snapshot lock
+        report_persist_outcome(out);
+    } catch (const std::exception &e) {
+        std::fprintf(stderr, "[snapshot] config_snapshot_watch_update failed: %s\n", e.what());
     }
-    // Reconcile mirrors every key each tick; when the value (or the deleted
-    // state) is already what we hold, skip the file rewrite.
-    if (it != g_entries.end() && it->second.exists == (value_json != nullptr) &&
-            it->second.value == (value_json ? value_json : ""))
-        return;
-    Entry &e = g_entries[key];
-    e.value = value_json ? value_json : "";
-    e.exists = (value_json != nullptr);
-    e.dirty = false;
-    e.summary.clear();
-    PersistOutcome out = persist_and_track_locked();
-    lk.unlock(); // reporting must not run under the snapshot lock
-    report_persist_outcome(out);
 }
 
 BOOL config_snapshot_persist_ok(void)
 {
-    std::lock_guard<std::mutex> lk(g_mutex);
-    return g_persist_failed ? FALSE : TRUE;
+    try {
+        std::lock_guard<std::mutex> lk(g_mutex);
+        return g_persist_failed ? FALSE : TRUE;
+    } catch (const std::exception &e) {
+        std::fprintf(stderr, "[snapshot] config_snapshot_persist_ok failed: %s\n", e.what());
+        return FALSE;
+    }
 }
 
 char *config_snapshot_get(snapshot_kind_t kind, const char *user_id)
 {
-    if (!user_id)
+    try {
+        if (!user_id)
+            return nullptr;
+        std::lock_guard<std::mutex> lk(g_mutex);
+        auto it = g_entries.find(map_key(kind, user_id));
+        if (it == g_entries.end() || !it->second.exists)
+            return nullptr;
+        return strdup(it->second.value.c_str());
+    } catch (const std::exception &e) {
+        std::fprintf(stderr, "[snapshot] config_snapshot_get failed: %s\n", e.what());
         return nullptr;
-    std::lock_guard<std::mutex> lk(g_mutex);
-    auto it = g_entries.find(map_key(kind, user_id));
-    if (it == g_entries.end() || !it->second.exists)
-        return nullptr;
-    return strdup(it->second.value.c_str());
+    }
 }
 
 STATUS config_snapshot_offline_edit(snapshot_kind_t kind, const char *user_id,
     const char *new_value_json, const char *edit_summary)
 {
-    if (!user_id || !new_value_json)
+    try {
+        if (!user_id || !new_value_json)
+            return ERROR;
+
+        Json::Value root;
+        Json::Reader reader;
+        if (!reader.parse(new_value_json, root) || !root.isObject())
+            return ERROR;
+
+        std::unique_lock<std::mutex> lk(g_mutex);
+        if (!g_initialized)
+            return ERROR;
+
+        Entry &e = g_entries[map_key(kind, user_id)];
+
+        // Resource version from the current snapshot entry. A tombstone (offline
+        // delete) keeps its pre-delete value: a recreate continues that rv
+        // chain instead of resetting to "1" — this will ensure the config always
+        // win the etcd key if it still exists.
+        long long cur = 0;
+        std::string rv;
+        if (!e.exists && e.value.empty())
+            rv = "1";
+        else if (!parse_rv(e.value, &cur))
+            rv = "2";
+        else
+            rv = std::to_string(cur + 1);
+
+        Json::Value meta = root.isMember("metadata") && root["metadata"].isObject()
+            ? root["metadata"] : Json::Value(Json::objectValue);
+        meta["resourceVersion"] = rv;
+        meta["updatedAt"] = iso8601_now();
+        meta["updatedBy"] = SNAPSHOT_UPDATED_BY;
+        root["metadata"] = meta;
+
+        Json::StreamWriterBuilder w;
+        w["indentation"] = "";
+        e.value = Json::writeString(w, root);
+        e.exists = true;
+        e.dirty = true;
+        e.edit_seq++;
+        e.edited_at = (int64_t)std::time(nullptr);
+        if (edit_summary && edit_summary[0] != '\0') {
+            if (!e.summary.empty())
+                e.summary += "; ";
+            e.summary += edit_summary;
+        }
+        PersistOutcome out = persist_and_track_locked();
+        lk.unlock(); // reporting must not run under the snapshot lock
+        report_persist_outcome(out);
+        // The in-memory edit is applied and dirty regardless of the persist
+        // outcome, so this is still a success for the caller: durability problems
+        // are surfaced out-of-band (stderr + Kafka runtime error), not as an
+        // operation failure.
+        return SUCCESS;
+    } catch (const std::exception &e) {
+        std::fprintf(stderr, "[snapshot] config_snapshot_offline_edit failed: %s\n", e.what());
         return ERROR;
-
-    Json::Value root;
-    Json::Reader reader;
-    if (!reader.parse(new_value_json, root) || !root.isObject())
-        return ERROR;
-
-    std::unique_lock<std::mutex> lk(g_mutex);
-    if (!g_initialized)
-        return ERROR;
-
-    Entry &e = g_entries[map_key(kind, user_id)];
-
-    // Resource version from the current snapshot entry. A tombstone (offline
-    // delete) keeps its pre-delete value: a recreate continues that rv
-    // chain instead of resetting to "1" — this will ensure the config always
-    // win the etcd key if it still exists.
-    long long cur = 0;
-    std::string rv;
-    if (!e.exists && e.value.empty())
-        rv = "1";
-    else if (!parse_rv(e.value, &cur))
-        rv = "2";
-    else
-        rv = std::to_string(cur + 1);
-
-    Json::Value meta = root.isMember("metadata") && root["metadata"].isObject()
-        ? root["metadata"] : Json::Value(Json::objectValue);
-    meta["resourceVersion"] = rv;
-    meta["updatedAt"] = iso8601_now();
-    meta["updatedBy"] = SNAPSHOT_UPDATED_BY;
-    root["metadata"] = meta;
-
-    Json::StreamWriterBuilder w;
-    w["indentation"] = "";
-    e.value = Json::writeString(w, root);
-    e.exists = true;
-    e.dirty = true;
-    e.edit_seq++;
-    e.edited_at = (int64_t)std::time(nullptr);
-    if (edit_summary && edit_summary[0] != '\0') {
-        if (!e.summary.empty())
-            e.summary += "; ";
-        e.summary += edit_summary;
     }
-    PersistOutcome out = persist_and_track_locked();
-    lk.unlock(); // reporting must not run under the snapshot lock
-    report_persist_outcome(out);
-    // The in-memory edit is applied and dirty regardless of the persist
-    // outcome, so this is still a success for the caller: durability problems
-    // are surfaced out-of-band (stderr + Kafka runtime error), not as an
-    // operation failure.
-    return SUCCESS;
 }
 
 STATUS config_snapshot_offline_delete(snapshot_kind_t kind, const char *user_id,
     const char *edit_summary)
 {
-    if (!user_id)
+    try {
+        if (!user_id)
+            return ERROR;
+
+        std::unique_lock<std::mutex> lk(g_mutex);
+        if (!g_initialized)
+            return ERROR;
+
+        auto it = g_entries.find(map_key(kind, user_id));
+        if (it == g_entries.end() || !it->second.exists)
+            return SUCCESS; // already absent: nothing to propose
+
+        Entry &e = it->second;
+        // Tombstone: keep e.value so foreach_dirty can still read the last-known
+        // rv for the proposal; config_snapshot_get guards on exists so the value
+        // never leaks as live config.
+        e.exists = false;
+        e.dirty = true;
+        e.edit_seq++;
+        e.edited_at = (int64_t)std::time(nullptr);
+        if (edit_summary && edit_summary[0] != '\0') {
+            if (!e.summary.empty())
+                e.summary += "; ";
+            e.summary += edit_summary;
+        }
+        PersistOutcome out = persist_and_track_locked();
+        lk.unlock(); // reporting must not run under the snapshot lock
+        report_persist_outcome(out);
+        // Same decision as offline_edit: the tombstone is applied in memory, so
+        // report SUCCESS and surface persist failures out-of-band.
+        return SUCCESS;
+    } catch (const std::exception &e) {
+        std::fprintf(stderr, "[snapshot] config_snapshot_offline_delete failed: %s\n", e.what());
         return ERROR;
-
-    std::unique_lock<std::mutex> lk(g_mutex);
-    if (!g_initialized)
-        return ERROR;
-
-    auto it = g_entries.find(map_key(kind, user_id));
-    if (it == g_entries.end() || !it->second.exists)
-        return SUCCESS; // already absent: nothing to propose
-
-    Entry &e = it->second;
-    // Tombstone: keep e.value so foreach_dirty can still read the last-known
-    // rv for the proposal; config_snapshot_get guards on exists so the value
-    // never leaks as live config.
-    e.exists = false;
-    e.dirty = true;
-    e.edit_seq++;
-    e.edited_at = (int64_t)std::time(nullptr);
-    if (edit_summary && edit_summary[0] != '\0') {
-        if (!e.summary.empty())
-            e.summary += "; ";
-        e.summary += edit_summary;
     }
-    PersistOutcome out = persist_and_track_locked();
-    lk.unlock(); // reporting must not run under the snapshot lock
-    report_persist_outcome(out);
-    // Same decision as offline_edit: the tombstone is applied in memory, so
-    // report SUCCESS and surface persist failures out-of-band.
-    return SUCCESS;
 }
 
 BOOL config_snapshot_content_equal(const char *json_a, const char *json_b)
 {
-    Json::Value a, b;
-    bool ok_a = parse_without_metadata(json_a, &a);
-    bool ok_b = parse_without_metadata(json_b, &b);
-    if (!ok_a || !ok_b)
-        return (ok_a == ok_b) ? TRUE : FALSE; // both absent/unparsable = equal
-    return (a == b) ? TRUE : FALSE;
+    try {
+        Json::Value a, b;
+        bool ok_a = parse_without_metadata(json_a, &a);
+        bool ok_b = parse_without_metadata(json_b, &b);
+        if (!ok_a || !ok_b)
+            return (ok_a == ok_b) ? TRUE : FALSE; // both absent/unparsable = equal
+        return (a == b) ? TRUE : FALSE;
+    } catch (const std::exception &e) {
+        std::fprintf(stderr, "[snapshot] config_snapshot_content_equal failed: %s\n", e.what());
+        return FALSE;
+    }
 }
 
 static void foreach_impl(snapshot_dirty_cb_t cb, void *user_data, bool dirty_only);
 
 void config_snapshot_foreach(snapshot_dirty_cb_t cb, void *user_data)
 {
-    foreach_impl(cb, user_data, false);
+    try {
+        foreach_impl(cb, user_data, false);
+    } catch (const std::exception &e) {
+        std::fprintf(stderr, "[snapshot] config_snapshot_foreach failed: %s\n", e.what());
+    }
 }
 
 void config_snapshot_foreach_dirty(snapshot_dirty_cb_t cb, void *user_data)
 {
-    foreach_impl(cb, user_data, true);
+    try {
+        foreach_impl(cb, user_data, true);
+    } catch (const std::exception &e) {
+        std::fprintf(stderr, "[snapshot] config_snapshot_foreach_dirty failed: %s\n", e.what());
+    }
 }
 
 static void foreach_impl(snapshot_dirty_cb_t cb, void *user_data, bool dirty_only)
@@ -480,22 +549,26 @@ static void foreach_impl(snapshot_dirty_cb_t cb, void *user_data, bool dirty_onl
 void config_snapshot_clear_dirty(snapshot_kind_t kind, const char *user_id,
     uint64_t seen_edit_seq)
 {
-    if (!user_id)
-        return;
-    std::unique_lock<std::mutex> lk(g_mutex);
-    auto it = g_entries.find(map_key(kind, user_id));
-    if (it == g_entries.end())
-        return;
-    // Compare-and-clear: a mismatch means a new offline edit landed after the
-    // caller copied the dirty set (its reported value is stale). Leave the
-    // entry dirty so the next report tick sends the new value.
-    if (it->second.edit_seq != seen_edit_seq)
-        return;
-    it->second.dirty = false;
-    it->second.summary.clear();
-    PersistOutcome out = persist_and_track_locked();
-    lk.unlock(); // reporting must not run under the snapshot lock
-    report_persist_outcome(out);
+    try {
+        if (!user_id)
+            return;
+        std::unique_lock<std::mutex> lk(g_mutex);
+        auto it = g_entries.find(map_key(kind, user_id));
+        if (it == g_entries.end())
+            return;
+        // Compare-and-clear: a mismatch means a new offline edit landed after the
+        // caller copied the dirty set (its reported value is stale). Leave the
+        // entry dirty so the next report tick sends the new value.
+        if (it->second.edit_seq != seen_edit_seq)
+            return;
+        it->second.dirty = false;
+        it->second.summary.clear();
+        PersistOutcome out = persist_and_track_locked();
+        lk.unlock(); // reporting must not run under the snapshot lock
+        report_persist_outcome(out);
+    } catch (const std::exception &e) {
+        std::fprintf(stderr, "[snapshot] config_snapshot_clear_dirty failed: %s\n", e.what());
+    }
 }
 
 // Field-level merge for the offline-edit kinds that touch a single aspect of
@@ -525,14 +598,23 @@ static STATUS field_merge_impl(const char *kind, const char *current_json,
         Json::Value arr = env.isMember("records") && env["records"].isArray()
             ? env["records"] : Json::Value(Json::arrayValue);
 
+        // A record whose domain is not a string cannot be matched, and
+        // rewriting the envelope around it would silently drop or duplicate
+        // it, so the whole merge fails instead.
+        for (const auto& entry : arr) {
+            if (!entry.isObject() || !entry["domain"].isString())
+                return ERROR;
+        }
+
         if (strcmp(kind, SNAPSHOT_FIELD_KIND_DNS_ADD) == 0) {
             Json::Value rec;
-            if (!reader.parse(value, rec) || !rec.isMember("domain"))
+            if (!reader.parse(value, rec) || !rec.isObject() ||
+                    !rec["domain"].isString())
                 return ERROR;
+            std::string domain = rec["domain"].asString();
             bool updated = false;
             for (auto& entry : arr) {
-                if (entry.get("domain", "").asString() ==
-                        rec["domain"].asString()) {
+                if (json_string(entry, "domain") == domain) {
                     entry = rec;
                     updated = true;
                     break;
@@ -545,7 +627,7 @@ static STATUS field_merge_impl(const char *kind, const char *current_json,
                 return ERROR;   // nothing to delete from
             Json::Value filtered(Json::arrayValue);
             for (const auto& entry : arr) {
-                if (entry.get("domain", "").asString() != value)
+                if (json_string(entry, "domain") != value)
                     filtered.append(entry);
             }
             arr = filtered;
@@ -574,15 +656,21 @@ static STATUS field_merge_impl(const char *kind, const char *current_json,
         cfg["ipv6_enable"] = (strcmp(value, "true") == 0);
     } else if (strcmp(kind, SNAPSHOT_FIELD_KIND_SNAT_UPSERT) == 0) {
         Json::Value entry;
-        if (!reader.parse(value, entry) || !entry.isMember("eport"))
+        if (!reader.parse(value, entry) || !entry.isObject() ||
+                !entry["eport"].isString())
             return ERROR;
+        std::string eport = entry["eport"].asString();
         Json::Value pms = cfg.isMember("port-mapping") &&
             cfg["port-mapping"].isArray() ? cfg["port-mapping"]
                                           : Json::Value(Json::arrayValue);
+        // Same rule as the DNS envelope: an unmatchable mapping fails the merge.
+        for (const auto& pm : pms) {
+            if (!pm.isObject() || !pm["eport"].isString())
+                return ERROR;
+        }
         bool updated = false;
         for (auto& pm : pms) {
-            if (pm.get("eport", "").asString() ==
-                    entry["eport"].asString()) {
+            if (json_string(pm, "eport") == eport) {
                 pm = entry;
                 updated = true;
                 break;
@@ -597,7 +685,9 @@ static STATUS field_merge_impl(const char *kind, const char *current_json,
         Json::Value filtered(Json::arrayValue);
         if (cfg.isMember("port-mapping") && cfg["port-mapping"].isArray()) {
             for (const auto& pm : cfg["port-mapping"]) {
-                if (pm.get("eport", "").asString() != value)
+                if (!pm.isObject() || !pm["eport"].isString())
+                    return ERROR;
+                if (json_string(pm, "eport") != value)
                     filtered.append(pm);
             }
         }
@@ -616,7 +706,12 @@ static STATUS field_merge_impl(const char *kind, const char *current_json,
 STATUS config_snapshot_field_merge(const char *kind, const char *current_json,
     const char *value, char **out_json)
 {
-    return field_merge_impl(kind, current_json, value, out_json);
+    try {
+        return field_merge_impl(kind, current_json, value, out_json);
+    } catch (const std::exception &e) {
+        std::fprintf(stderr, "[snapshot] config_snapshot_field_merge failed: %s\n", e.what());
+        return ERROR;
+    }
 }
 
 struct SnapshotApplyCtx {
@@ -646,8 +741,16 @@ static void snapshot_apply_cb(snapshot_kind_t kind, const char *user_id,
         if (!reader.parse(value_json, root) || !root.isObject() ||
                 !root.isMember("subscriber_count"))
             return;
+        /* The controller writes the count as a string; an integer is
+         * accepted too, anything else is a value this node cannot use. */
         user_count_config_t cfg;
-        cfg.user_count = atoi(root["subscriber_count"].asString().c_str());
+        const Json::Value &count = root["subscriber_count"];
+        if (count.isString())
+            cfg.user_count = atoi(count.asString().c_str());
+        else if (count.isIntegral())
+            cfg.user_count = count.asInt();
+        else
+            return;
         /* The snapshot only keeps the controller's resourceVersion,
          * which is not an etcd ModRevision so we use 0 here */
         if (cfg.user_count > 0)
@@ -660,8 +763,10 @@ static void snapshot_apply_cb(snapshot_kind_t kind, const char *user_id,
             return;
         hsi_config_t cfg;
         memset(&cfg, 0, sizeof(cfg));
-        if (etcd_client_parse_hsi_config(value_json, &cfg, NULL) != SUCCESS)
+        if (etcd_client_parse_hsi_config(value_json, &cfg, NULL) != SUCCESS) {
+            hsi_config_free_port_mappings(&cfg);
             return;
+        }
         /* The snapshot only keeps the controller's resourceVersion,
          * which is not an etcd ModRevision so we use 0 here */
         ctx->hsi_cb(ctx->node_id, user_id, &cfg, HSI_ACTION_UPDATE, 0, ctx->user_data);
@@ -691,17 +796,21 @@ void config_snapshot_apply_all(const char *node_id,
     dns_record_callback_t dns_callback,
     void *user_data)
 {
-    if (!node_id)
-        return;
-    /* Count bounds the valid subscriber ids and HSI creates the subscriber, so
-     * both must land before the DNS records that attach to it. */
-    SnapshotApplyCtx ctx{node_id, hsi_callback, user_count_callback, dns_callback,
-        user_data, SNAPSHOT_KIND_COUNT};
-    config_snapshot_foreach(snapshot_apply_cb, &ctx);
-    ctx.pass = SNAPSHOT_KIND_HSI;
-    config_snapshot_foreach(snapshot_apply_cb, &ctx);
-    ctx.pass = SNAPSHOT_KIND_DNS;
-    config_snapshot_foreach(snapshot_apply_cb, &ctx);
+    try {
+        if (!node_id)
+            return;
+        /* Count bounds the valid subscriber ids and HSI creates the subscriber, so
+         * both must land before the DNS records that attach to it. */
+        SnapshotApplyCtx ctx{node_id, hsi_callback, user_count_callback, dns_callback,
+            user_data, SNAPSHOT_KIND_COUNT};
+        config_snapshot_foreach(snapshot_apply_cb, &ctx);
+        ctx.pass = SNAPSHOT_KIND_HSI;
+        config_snapshot_foreach(snapshot_apply_cb, &ctx);
+        ctx.pass = SNAPSHOT_KIND_DNS;
+        config_snapshot_foreach(snapshot_apply_cb, &ctx);
+    } catch (const std::exception &e) {
+        std::fprintf(stderr, "[snapshot] config_snapshot_apply_all failed: %s\n", e.what());
+    }
 }
 
 } // extern "C"
