@@ -23,6 +23,9 @@ using controller::NodeRegisterReply;
 using controller::NodeHeartbeat;
 using controller::NodeShutdownRequest;
 
+// Never block the main lcore's timer loop on an unresponsive controller.
+static constexpr auto CONTROLLER_RPC_DEADLINE = std::chrono::seconds(5);
+
 class ControllerClient {
 public:
     ControllerClient(std::shared_ptr<Channel> channel)
@@ -46,6 +49,7 @@ public:
 
         NodeRegisterReply reply;
         ClientContext context;
+        context.set_deadline(std::chrono::system_clock::now() + CONTROLLER_RPC_DEADLINE);
 
         Status status = stub_->RegisterNode(&context, request, &reply);
 
@@ -86,6 +90,7 @@ public:
 
         google::protobuf::Empty reply;
         ClientContext context;
+        context.set_deadline(std::chrono::system_clock::now() + CONTROLLER_RPC_DEADLINE);
 
         Status status = stub_->Heartbeat(&context, heartbeat, &reply);
 
@@ -107,6 +112,7 @@ public:
                         std::cout << "Re-registration successful, retrying heartbeat..." << std::endl;
                         // Retry heartbeat after successful registration
                         ClientContext retry_context;
+                        retry_context.set_deadline(std::chrono::system_clock::now() + CONTROLLER_RPC_DEADLINE);
                         Status retry_status = stub_->Heartbeat(&retry_context, heartbeat, &reply);
                         if (retry_status.ok()) {
                             return CONTROLLER_SUCCESS;
@@ -127,9 +133,7 @@ public:
 
         google::protobuf::Empty reply;
         ClientContext context;
-        // Shutdown must not hang on an unreachable controller: a call without a
-        // deadline blocks for the whole TCP connect timeout, which can be minutes.
-        context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
+        context.set_deadline(std::chrono::system_clock::now() + CONTROLLER_RPC_DEADLINE);
 
         Status status = stub_->ReportShutdown(&context, request, &reply);
 
