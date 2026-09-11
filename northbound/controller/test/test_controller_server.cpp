@@ -1,6 +1,8 @@
+#include <chrono>
 #include <iostream>
 #include <memory>
 #include <string>
+#include <thread>
 #include <grpcpp/grpcpp.h>
 #include "../proto/controller.grpc.pb.h"
 
@@ -15,6 +17,15 @@ using controller::NodeHeartbeat;
 using controller::NodeShutdownRequest;
 using google::protobuf::Empty;
 
+// This node uuid makes the stub stall past the client's RPC deadline.
+static const std::string HANG_NODE_UUID = "test-uuid-hang";
+static constexpr int HANG_SECONDS = 8;
+
+static void hold_if_hang_node(const std::string& node_uuid) {
+    if (node_uuid == HANG_NODE_UUID)
+        std::this_thread::sleep_for(std::chrono::seconds(HANG_SECONDS));
+}
+
 class NodeManagementServiceImpl final : public NodeManagement::Service {
 public:
     Status RegisterNode(ServerContext* context, const NodeRegisterRequest* request,
@@ -23,7 +34,9 @@ public:
         std::cout << "  UUID: " << request->node_uuid() << std::endl;
         std::cout << "  IP: " << request->ip() << std::endl;
         std::cout << "  Version: " << request->version() << std::endl;
-        
+
+        hold_if_hang_node(request->node_uuid());
+
         reply->set_success(true);
         reply->set_message("Node registered successfully");
         
@@ -35,7 +48,9 @@ public:
         std::cout << "Heartbeat received from node " << request->node_uuid() 
                   << " at " << request->ip() 
                   << " (uptime: " << request->uptime_timestamp() << ")" << std::endl;
-        
+
+        hold_if_hang_node(request->node_uuid());
+
         return Status::OK;
     }
 

@@ -1,8 +1,33 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 #include "../controller_client.h"
+
+// A stalled controller must not hold the heartbeat past the RPC deadline.
+static int test_controller_send_heartbeat(const char *local_ip)
+{
+    struct timespec start, end;
+    controller_status_t status;
+    double elapsed;
+
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    status = controller_send_heartbeat("test-uuid-hang", 1697223600, local_ip);
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    elapsed = (double)(end.tv_sec - start.tv_sec) + (double)(end.tv_nsec - start.tv_nsec) / 1e9;
+
+    if (status == CONTROLLER_SUCCESS) {
+        printf("ERROR: heartbeat to a stalled controller reported success\n");
+        return -1;
+    }
+    if (elapsed > 6.0) {
+        printf("ERROR: heartbeat to a stalled controller took %.2fs\n", elapsed);
+        return -1;
+    }
+    printf("Heartbeat to a stalled controller gave up after %.2fs\n", elapsed);
+    return 0;
+}
 
 int main() {
     printf("Testing controller client...\n");
@@ -75,6 +100,9 @@ int main() {
         default:
             printf("Unknown status: %d\n", status);
     }
+
+    if (test_controller_send_heartbeat(local_ip) != 0)
+        return -1;
 
     // Test shutdown reporting (will also fail without server)
     status = controller_report_shutdown(node_uuid);

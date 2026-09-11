@@ -120,6 +120,9 @@ private:
     static constexpr int WATCHDOG_CHECK_INTERVAL_SEC = 60;      // Check every 60 seconds
     static constexpr int WATCH_TIMEOUT_SEC = 180;               // Reconnect if no activity for 3 minutes
 
+    // Bounds unary(one-shot) etcd calls only; the watch stream is unaffected.
+    static constexpr int GRPC_TIMEOUT_SEC = 5;
+
 public:
     EtcdClientImpl() : watch_running_(false),
                        sync_request_callback_(nullptr),
@@ -273,6 +276,7 @@ public:
             fastrg_ccb = (FastRG_t *)user_data;
             etcd_endpoints_ = etcd_endpoints;  // Store endpoints for reconnection
             client_ = std::make_unique<etcd::Client>(etcd_endpoints);
+            client_->set_grpc_timeout(std::chrono::seconds(GRPC_TIMEOUT_SEC));
 
             // Test connection by getting a simple key
             auto response_task = client_->get("test_connection");
@@ -566,6 +570,7 @@ public:
             try {
                 // Recreate the client
                 client_ = std::make_unique<etcd::Client>(etcd_endpoints_);
+                client_->set_grpc_timeout(std::chrono::seconds(GRPC_TIMEOUT_SEC));
                 
                 // Test connection
                 auto response = client_->get("test_connection").get();
