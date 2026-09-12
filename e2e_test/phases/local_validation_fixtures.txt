@@ -887,3 +887,67 @@ err
 # expect-output: missing:b.example
 # expect-status: 1
 ---
+==== fixture: registration_host_os_good
+# expect-output: pass
+# expect-status: 0
+---
+{"node_uuid":"u1","registered_at":1757640000,"last_seen_time":1757640000,"host_os":"Ubuntu 24.04.3 LTS","status":"active"}
+==== fixture: registration_host_os_field_missing
+# expect-output: no_host_os
+# expect-status: 1
+---
+{"node_uuid":"u1","registered_at":1757640000,"last_seen_time":1757640000,"status":"active"}
+==== fixture: registration_host_os_empty_value
+# expect-output: no_host_os
+# expect-status: 1
+---
+{"node_uuid":"u1","registered_at":1757640000,"last_seen_time":1757640000,"host_os":"","status":"active"}
+==== fixture: registration_host_os_after_heartbeat
+# expect-output: heartbeat_advanced
+# expect-status: 1
+---
+{"node_uuid":"u1","registered_at":1757640000,"last_seen_time":1757640030,"host_os":"Ubuntu 24.04.3 LTS","status":"active"}
+==== fixture: registration_host_os_no_timestamps
+# expect-output: no_timestamps
+# expect-status: 1
+---
+{"node_uuid":"u1","host_os":"Ubuntu 24.04.3 LTS","status":"active"}
+==== fixture: registration_host_os_unreadable
+# expect-output: unreadable
+# expect-status: 1
+---
+Error: context deadline exceeded
+==== fixture: registration_host_os_no_record
+# expect-output: unreadable
+# expect-status: 1
+---
+==== fixture: rest_node_record_wrapped
+# args: a185f64c
+# expect-output: {"node_uuid":"a185f64c","registered_at":1789199808,"last_seen_time":1789199808,"host_os":"Ubuntu 24.04.3 LTS","status":"active"}
+# expect-status: 0
+---
+[{"key":"nodes/other-node","value":"{\"node_uuid\":\"other-node\",\"registered_at\":1789100000,\"last_seen_time\":1789100000,\"host_os\":\"Debian 12\",\"status\":\"active\"}"},{"key":"nodes/a185f64c","value":"{\"node_uuid\":\"a185f64c\",\"registered_at\":1789199808,\"last_seen_time\":1789199808,\"host_os\":\"Ubuntu 24.04.3 LTS\",\"status\":\"active\"}"}]
+==== fixture: rest_node_record_plain
+# args: a185f64c
+# expect-output: {"node_uuid":"a185f64c","registered_at":1789199808,"last_seen_time":1789199808,"host_os":"Ubuntu 24.04.3 LTS","status":"active"}
+# expect-status: 0
+---
+[{"node_uuid":"other-node","registered_at":1789100000,"last_seen_time":1789100000,"host_os":"Debian 12","status":"active"},{"node_uuid":"a185f64c","registered_at":1789199808,"last_seen_time":1789199808,"host_os":"Ubuntu 24.04.3 LTS","status":"active"}]
+==== fixture: rest_node_record_other_nodes_only
+# args: a185f64c
+# expect-output:
+# expect-status: 0
+---
+[{"key":"nodes/other-node","value":"{\"node_uuid\":\"other-node\",\"registered_at\":1789100000,\"last_seen_time\":1789100000,\"host_os\":\"Debian 12\",\"status\":\"active\"}"}]
+==== fixture: rest_node_record_empty_array
+# args: a185f64c
+# expect-output:
+# expect-status: 0
+---
+[]
+==== fixture: rest_node_record_unreadable
+# args: a185f64c
+# expect-output:
+# expect-status: 0
+---
+Error: 401 Unauthorized
