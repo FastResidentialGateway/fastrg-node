@@ -26,6 +26,24 @@ using controller::NodeShutdownRequest;
 // Never block the main lcore's timer loop on an unresponsive controller.
 static constexpr auto CONTROLLER_RPC_DEADLINE = std::chrono::seconds(5);
 
+// The host OS pretty name from /etc/os-release; "Unknown OS" when unavailable.
+static std::string read_host_os() {
+    std::string host_os = "Unknown OS";
+    std::ifstream os_release("/etc/os-release");
+    if (os_release.is_open()) {
+        std::string line;
+        while (std::getline(os_release, line)) {
+            if (line.rfind("PRETTY_NAME=", 0) == 0) {
+                host_os = line.substr(12);
+                if (!host_os.empty() && host_os.front() == '"')
+                    host_os = host_os.substr(1, host_os.size() - 2);
+                break;
+            }
+        }
+    }
+    return host_os;
+}
+
 class ControllerClient {
 public:
     ControllerClient(std::shared_ptr<Channel> channel)
@@ -46,6 +64,7 @@ public:
         // Telling the controller our port is what lets it dial a node that does
         // not use the default one.
         request.set_grpc_port(grpc_port);
+        request.set_host_os(read_host_os());
 
         NodeRegisterReply reply;
         ClientContext context;
@@ -71,22 +90,7 @@ public:
         heartbeat.set_node_uuid(node_uuid);
         heartbeat.set_uptime_timestamp(uptime_timestamp);
         heartbeat.set_ip(ip);
-        
-        // Read OS pretty name from /etc/os-release (e.g. "Ubuntu 26.04 LTS")
-        std::string host_os = "Unknown OS";
-        std::ifstream os_release("/etc/os-release");
-        if (os_release.is_open()) {
-            std::string line;
-            while (std::getline(os_release, line)) {
-                if (line.rfind("PRETTY_NAME=", 0) == 0) {
-                    host_os = line.substr(12);
-                    if (!host_os.empty() && host_os.front() == '"')
-                        host_os = host_os.substr(1, host_os.size() - 2);
-                    break;
-                }
-            }
-        }
-        heartbeat.set_host_os(host_os);
+        heartbeat.set_host_os(read_host_os());
 
         google::protobuf::Empty reply;
         ClientContext context;

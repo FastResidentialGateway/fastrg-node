@@ -112,6 +112,15 @@ phase0_setup() {
     fi
     info "Python3 gRPC client: ${GRPC_CLIENT_DIR}/fastrg_grpc_client.py"
 
+    # curl carries every controller REST read. There is no fallback: without it
+    # those reads would come back empty and pass for "the field is absent".
+    info "Checking curl..."
+    if ! command -v curl >/dev/null 2>&1; then
+        error "curl is required but not found. Please install curl."
+        exit 1
+    fi
+    info "curl: $(command -v curl)"
+
     # Check grpcurl binary (bundled alongside script takes priority)
     if [[ -f "${GRPC_CLIENT_DIR}/grpcurl" ]] && [[ -x "${GRPC_CLIENT_DIR}/grpcurl" ]]; then
         info "grpcurl: ${GRPC_CLIENT_DIR}/grpcurl"

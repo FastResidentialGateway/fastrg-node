@@ -750,6 +750,63 @@ etcdctl_get_value() {
     _etcdctl_run "get --print-value-only $*"
 }
 
+# Where phase0's controller login caches its token.
+_E2E_CTRL_TOKEN_CACHE=/tmp/.fastrg_e2e_ctrl_token
+
+# One GET, printing the HTTP status and leaving the body in _out. Separated so
+# the retry below reuses the exact same request.
+_controller_rest_curl() {
+    local _token="$1" _path="$2" _out="$3" _err="$4"
+
+    curl -fsS -k --max-time 10 -H "Authorization: ${_token}" \
+        -o "$_out" -w '%{http_code}' "${CONTROLLER_REST}${_path}" 2>"$_err" || true
+}
+
+# Log in, refresh the cached token and print it; empty when the login failed.
+_controller_rest_login() {
+    local _token=""
+
+    _token=$(curl -fsS -k --max-time 10 -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"username\":\"${CONTROLLER_USER}\",\"password\":\"${CONTROLLER_PASS}\"}" \
+        "${CONTROLLER_REST}/api/login" 2>/dev/null | jq -r '.token // empty' 2>/dev/null || true)
+    [[ -n "$_token" ]] && printf '%s' "$_token" > "$_E2E_CTRL_TOKEN_CACHE"
+    printf '%s' "$_token"
+    return 0
+}
+
+# One authenticated GET against the controller REST API, printing the response
+# body. Same contract as the etcd helpers: a call that could not be made prints
+# nothing and returns non-zero, so an unreachable controller is never read as
+# data. The token phase0 cached is reused; an expired one is renewed once.
+#
+# The header carries the token verbatim -- this controller rejects a "Bearer "
+# prefix with 401.
+controller_rest_get() {
+    local _path="$1" _token="" _code="" _body="" _err=""
+
+    _body=$(mktemp) || return 1
+    _err=$(mktemp) || { rm -f "$_body"; return 1; }
+    _token=$(cat "$_E2E_CTRL_TOKEN_CACHE" 2>/dev/null || true)
+
+    _code=$(_controller_rest_curl "$_token" "$_path" "$_body" "$_err")
+    if [[ "$_code" == "401" ]]; then
+        _token=$(_controller_rest_login)
+        _code=$(_controller_rest_curl "$_token" "$_path" "$_body" "$_err")
+    fi
+
+    if [[ "$_code" != "200" ]]; then
+        printf '[ERROR] controller REST GET %s failed against %s: HTTP %s %s\n' \
+            "$_path" "${CONTROLLER_REST}" "${_code:-none}" \
+            "$(tr '\n' ' ' < "$_err" | cut -c 1-200)" >&2
+        rm -f "$_body" "$_err"
+        return 1
+    fi
+    cat "$_body"
+    rm -f "$_body" "$_err"
+    return 0
+}
+
 # Same RPC as fastrg_grpc, except the caller finds out whether the node
 # answered. fastrg_grpc ends in "|| true" because most callers only want a best
 # effort; a loop that is waiting for something to happen needs to know the
