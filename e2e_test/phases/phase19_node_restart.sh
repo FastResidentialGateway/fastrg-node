@@ -4,6 +4,58 @@
 # Phase 19 — Node Restart Recovery
 # ---------------------------------------------------------------------------
 
+# Verdict on the node record a registration wrote: pass | unreadable |
+# no_timestamps | heartbeat_advanced | no_host_os.
+e2e_registration_host_os_verdict() {
+    local _record="${1:-}" _registered="" _last_seen="" _host_os=""
+
+    if ! printf '%s' "$_record" | jq -e 'type == "object"' >/dev/null 2>&1; then
+        printf 'unreadable'
+        return 1
+    fi
+    _registered=$(printf '%s' "$_record" | jq -r '.registered_at // empty' 2>/dev/null || true)
+    _last_seen=$(printf '%s' "$_record" | jq -r '.last_seen_time // empty' 2>/dev/null || true)
+    _host_os=$(printf '%s' "$_record" | jq -r '.host_os // empty' 2>/dev/null || true)
+    if ! [[ "$_registered" =~ ^[0-9]+$ ]] || ! [[ "$_last_seen" =~ ^[0-9]+$ ]]; then
+        printf 'no_timestamps'
+        return 1
+    fi
+    if [[ "$_last_seen" != "$_registered" ]]; then
+        printf 'heartbeat_advanced'
+        return 1
+    fi
+    if [[ -z "$_host_os" ]]; then
+        printf 'no_host_os'
+        return 1
+    fi
+    printf 'pass'
+    return 0
+}
+
+local_validation_register registration_host_os_verdict e2e_registration_host_os_verdict \
+    registration_host_os_good \
+    registration_host_os_field_missing \
+    registration_host_os_empty_value \
+    registration_host_os_after_heartbeat \
+    registration_host_os_no_timestamps \
+    registration_host_os_unreadable \
+    registration_host_os_no_record
+
+# The record for one node out of a /api/nodes answer; empty when it is absent.
+# An element either wraps the record in a "value" JSON string or is the record.
+e2e_rest_node_record() {
+    printf '%s' "${1:-}" | jq -c --arg u "${2:-}" \
+        '[.[]? | if (type == "object" and has("value")) then ((.value | fromjson?) // {}) else . end]
+         | map(select(.node_uuid == $u)) | first // empty' 2>/dev/null || true
+}
+
+local_validation_register rest_node_record e2e_rest_node_record \
+    rest_node_record_wrapped \
+    rest_node_record_plain \
+    rest_node_record_other_nodes_only \
+    rest_node_record_empty_array \
+    rest_node_record_unreadable
+
 _cleanup_phase19_node_restart() {
     local _p19_cleanup_stopped=0
     # Step 80 safety: never leave the node's etcd path blocked.
@@ -74,6 +126,54 @@ _p19_etcd_snapshot() {
          else empty end' 2>/dev/null || true
 }
 
+# The controller's record for this node; wrapped so a drill can alter it.
+_p19_node_record() {
+    etcdctl_get_value "nodes/${NODE_UUID}" 2>/dev/null || true
+}
+
+# The same node record as the controller's REST API reports it; wrapped so a
+# drill can alter it without touching the step that reads it.
+_p19_rest_node_record() {
+    e2e_rest_node_record "$(controller_rest_get /api/nodes || true)" "${NODE_UUID}"
+}
+
+# A node record's registered_at stamp; empty unless it is a number.
+_p19_registered_at() {
+    local _stamp
+
+    _stamp=$(printf '%s' "${1:-}" | jq -r '.registered_at // empty' 2>/dev/null || true)
+    [[ "$_stamp" =~ ^[0-9]+$ ]] && printf '%s' "$_stamp"
+    return 0
+}
+
+# Drill: strip host_os from the record Step 77a reads, leaving the stamps.
+_p19_inject_registration_host_os_missing() {
+    sabotage_copy_function _p19_node_record _p19_node_record_real
+    sabotage_override_function _p19_node_record \
+        '_p19_node_record_real | jq -c "del(.host_os)" 2>/dev/null || true'
+}
+
+_p19_cleanup_registration_drill() {
+    restore_phase_functions phase19_node_restart.sh
+    _cleanup_phase19_node_restart
+}
+
+case_validation_register registration_host_os_missing phase19_node_restart \
+    _p19_inject_registration_host_os_missing _p19_cleanup_registration_drill \
+    'Step 77a:'
+
+# Drill: same removal on the REST side, so the etcd reading alone cannot carry
+# the step.
+_p19_inject_registration_host_os_rest_missing() {
+    sabotage_copy_function _p19_rest_node_record _p19_rest_node_record_real
+    sabotage_override_function _p19_rest_node_record \
+        '_p19_rest_node_record_real | jq -c "del(.host_os)" 2>/dev/null || true'
+}
+
+case_validation_register registration_host_os_rest_missing phase19_node_restart \
+    _p19_inject_registration_host_os_rest_missing _p19_cleanup_registration_drill \
+    'Step 77a:'
+
 phase19_node_restart() {
     local _hsi1_key="configs/${NODE_UUID}/hsi/1"
     local _hsi2_key="configs/${NODE_UUID}/hsi/2"
@@ -125,6 +225,16 @@ phase19_node_restart() {
     local _step73_issue=""
     local _step74_issue=""
     local _step76_issue=""
+    local _step77a_issue=""
+    local _p19_reg_before=""
+    local _p19_reg_record=""
+    local _p19_rest_record=""
+    local _p19_rest_verdict=""
+    local _p19_reg_stamp=""
+    local _p19_reg_seen=0
+    local _p19_reg_waited=0
+    local _p19_reg_verdict=""
+    local _p19_host_os=""
     local _shutdown_done=0
     local _restart_launched=0
     local _recovery_ready=0
@@ -227,6 +337,7 @@ phase19_node_restart() {
     # to recover from the etcd desire_status without any dial/config call.
     # ------------------------------------------------------------------
     info "Step 77: Cold-starting fastrg and waiting up to 150s for autonomous recovery..."
+    _p19_reg_before=$(_p19_registered_at "$(_p19_node_record)")
     _p19_dns_started_at=$(date +%s)
     if e2e_start_node >/dev/null 2>&1; then
         _restart_launched=1
@@ -236,6 +347,19 @@ phase19_node_restart() {
     _FASTRG_STARTED_BY_SCRIPT=1
 
     if [[ $_restart_launched -eq 1 ]]; then
+        # Step 77a reads here: the first heartbeat is 30s away and overwrites it.
+        for _i in $(seq 1 30); do
+            sleep 2
+            _p19_reg_record=$(_p19_node_record)
+            _p19_reg_stamp=$(_p19_registered_at "$_p19_reg_record")
+            if [[ -n "$_p19_reg_stamp" && "$_p19_reg_stamp" != "$_p19_reg_before" ]]; then
+                _p19_rest_record=$(_p19_rest_node_record)
+                _p19_reg_seen=1
+                break
+            fi
+        done
+        _p19_reg_waited=$(( $(date +%s) - _p19_dns_started_at ))
+
         for _i in $(seq 1 30); do
             sleep 5
             _hsi_after=$(fastrg_grpc get_hsi_info 2>/dev/null || true)
@@ -328,6 +452,28 @@ phase19_node_restart() {
     else
         fail "Step 77: Cold restart autonomous recovery" \
             "${_step74_issue# }; ${_p19_dns_detail}"
+    fi
+
+    # ------------------------------------------------------------------
+    # Step 77a — Registration carries host_os (read-only).
+    # ------------------------------------------------------------------
+    if [[ $_p19_reg_seen -ne 1 ]]; then
+        _step77a_issue="no new registration within 60s of the cold start (registered_at stayed '${_p19_reg_before:-none}')"
+    else
+        _p19_reg_verdict=$(e2e_registration_host_os_verdict "$_p19_reg_record") || true
+        _p19_rest_verdict=$(e2e_registration_host_os_verdict "$_p19_rest_record") || true
+        _p19_host_os=$(printf '%s' "$_p19_reg_record" | jq -r '.host_os // empty' 2>/dev/null || true)
+        [[ "$_p19_reg_verdict" != "pass" ]] && \
+            _step77a_issue="etcd:${_p19_reg_verdict:-empty} record=$(printf '%s' "$_p19_reg_record" | tr '\n' ' ' | cut -c 1-200 || true)"
+        [[ "$_p19_rest_verdict" != "pass" ]] && \
+            _step77a_issue="${_step77a_issue:+${_step77a_issue}; }rest:${_p19_rest_verdict:-empty} record=$(printf '%s' "$_p19_rest_record" | tr '\n' ' ' | cut -c 1-200 || true)"
+    fi
+
+    if [[ -z "$_step77a_issue" ]]; then
+        pass "Step 77a: host_os present at registration" \
+            "etcd and REST both report host_os='${_p19_host_os}' for ${NODE_UUID} ${_p19_reg_waited}s after the cold start, last_seen_time still at registered_at=${_p19_reg_stamp}"
+    else
+        fail "Step 77a: host_os present at registration" "$_step77a_issue"
     fi
 
     # ------------------------------------------------------------------

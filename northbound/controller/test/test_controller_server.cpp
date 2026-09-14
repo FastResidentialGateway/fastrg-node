@@ -34,6 +34,7 @@ public:
         std::cout << "  UUID: " << request->node_uuid() << std::endl;
         std::cout << "  IP: " << request->ip() << std::endl;
         std::cout << "  Version: " << request->version() << std::endl;
+        std::cout << "  Host OS: " << request->host_os() << std::endl;
 
         hold_if_hang_node(request->node_uuid());
 
