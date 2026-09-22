@@ -109,6 +109,13 @@ bool kafka_wal_parse(const std::string &data, std::vector<KafkaWalEvent> &out) {
     return true;
 }
 
+size_t kafka_wal_evict_index(const std::vector<KafkaWalEvent> &pending) {
+    for (size_t i = 0; i < pending.size(); ++i) {
+        if (!pending[i].persistent) return i;
+    }
+    return 0;
+}
+
 void kafka_build_config_apply_result(ev::ConfigApplyResult *out,
     const char *action, BOOL success, const char *err_code, const char *err_msg,
     const char *applied_resource_version, BOOL republished,
@@ -342,14 +349,16 @@ int64_t produce_event(const ev::NodeEvent &evt) {
         e.payload    = payload;
         e.persistent = durable;
         g_pending.push_back(std::move(e));
-        // Bound the buffer: drop the oldest past the cap.
+        // Bound the buffer: past the cap, drop the oldest memory-only event,
+        // and only when there is none the oldest durable one.
         if (g_pending.size() > MAX_WAL_EVENTS) {
-            evicted         = g_pending.front().seq;
-            evicted_durable = g_pending.front().persistent;
-            g_pending.erase(g_pending.begin());
+            size_t idx      = kafka_wal_evict_index(g_pending);
+            evicted         = g_pending[idx].seq;
+            evicted_durable = g_pending[idx].persistent;
+            g_pending.erase(g_pending.begin() + idx);
             unsigned long n = ++g_dropped;
             if ((n & (n - 1)) == 0)
-                std::fprintf(stderr, "[kafka] WAL full, dropped oldest; total dropped=%lu\n", n);
+                std::fprintf(stderr, "[kafka] WAL full, dropped an event; total dropped=%lu\n", n);
         }
     }
     // An evicted event is never confirmed; drop its binding.
