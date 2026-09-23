@@ -1,3 +1,7 @@
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -78,10 +82,9 @@ std::string iso8601_now()
     return out.str();
 }
 
-// Persist while holding g_mutex. Atomic replace, mirroring the pattern the
-// retired config queue used. Returns false when any step fails and stores a
-// short failure description into *err_detail (errno is best-effort for the
-// iostream steps: the stream flags the failure, the errno may be stale).
+// Persist while holding g_mutex. Writes an owner-only temp file, then renames
+// it over the snapshot. Returns false when any step fails and stores a short
+// failure description into *err_detail.
 bool persist_locked(std::string *err_detail)
 {
     Json::Value arr(Json::arrayValue);
@@ -104,20 +107,26 @@ bool persist_locked(std::string *err_detail)
     std::string data = Json::writeString(w, root);
     std::string tmp = std::string(snapshot_path()) + ".tmp";
     errno = 0;
-    std::ofstream ofs(tmp, std::ios::trunc);
-    if (!ofs) {
+    // The snapshot mirrors etcd config values, PPPoE passwords included, so the
+    // file is created readable by its owner only.
+    int fd = open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+    if (fd < 0) {
         *err_detail = "cannot open " + tmp + ": " + strerror(errno);
         return false;
     }
-    ofs << data;
-    ofs.flush();
-    if (!ofs) {
-        // badbit/failbit after write/flush: this is where a full disk shows up.
-        *err_detail = "write to " + tmp + " failed: " + strerror(errno);
+    FILE *fp = fdopen(fd, "w");
+    if (fp == nullptr) {
+        *err_detail = "cannot open " + tmp + ": " + strerror(errno);
+        close(fd);
         return false;
     }
-    ofs.close();
-    if (ofs.fail()) {
+    if (fwrite(data.data(), 1, data.size(), fp) != data.size() || fflush(fp) != 0) {
+        // Short write or failed flush: this is where a full disk shows up.
+        *err_detail = "write to " + tmp + " failed: " + strerror(errno);
+        fclose(fp);
+        return false;
+    }
+    if (fclose(fp) != 0) {
         *err_detail = "close of " + tmp + " failed: " + strerror(errno);
         return false;
     }
@@ -231,6 +240,10 @@ STATUS config_snapshot_init(void)
         std::lock_guard<std::mutex> lk(g_mutex);
         g_entries.clear();
         g_initialized = true;
+
+        // A snapshot left behind by an older build is world-readable; tighten it
+        // here rather than waiting for the next persist to replace the file.
+        chmod(snapshot_path(), S_IRUSR | S_IWUSR);
 
         std::ifstream ifs(snapshot_path());
         if (!ifs)
