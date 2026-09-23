@@ -118,8 +118,21 @@ static S16 cli_request_run(FastRG_t *fastrg_ccb, fastrg_event_type_t type, U8 cm
     return verdict;
 }
 
+// The main lcore is still loading config; refuse changes until start_flag is set.
+static bool node_starting(grpc::Status *st)
+{
+    if (rte_atomic16_read(&start_flag) != 0)
+        return false;
+    *st = grpc::Status(grpc::StatusCode::UNAVAILABLE, "node is starting up");
+    return true;
+}
+
 grpc::Status FastRGNodeServiceImpl::ApplyConfig(::grpc::ServerContext* context, const ::fastrgnodeservice::ConfigRequest* request, ::fastrgnodeservice::ConfigReply* response)
 {
+    grpc::Status st;
+    if (node_starting(&st))
+        return st;
+
     uint16_t user_id = request->user_id(), ccb_id = request->user_id() - 1;
     uint16_t vlan_id = request->vlan_id();
     string pppoe_account = request->pppoe_account();
@@ -237,6 +250,10 @@ grpc::Status FastRGNodeServiceImpl::ApplyConfig(::grpc::ServerContext* context, 
 
 grpc::Status FastRGNodeServiceImpl::RemoveConfig(::grpc::ServerContext* context, const ::fastrgnodeservice::ConfigRequest* request, ::fastrgnodeservice::ConfigReply* response)
 {
+    grpc::Status st;
+    if (node_starting(&st))
+        return st;
+
     uint16_t user_id = request->user_id(), ccb_id = request->user_id() - 1;
 
     cout << "RemoveConfig called" << endl;
@@ -299,6 +316,10 @@ grpc::Status FastRGNodeServiceImpl::RemoveConfig(::grpc::ServerContext* context,
 
 grpc::Status FastRGNodeServiceImpl::SetSubscriberCount(::grpc::ServerContext* context, const ::fastrgnodeservice::SetSubscriberCountRequest* request, ::fastrgnodeservice::SetSubscriberCountReply* response)
 {
+    grpc::Status st;
+    if (node_starting(&st))
+        return st;
+
     // Judge the wire value before narrowing: a uint32 above INT_MAX would turn
     // negative and slip past the bounds below.
     uint32_t requested_count = request->subscriber_count();
@@ -384,6 +405,10 @@ grpc::Status FastRGNodeServiceImpl::SetSubscriberCount(::grpc::ServerContext* co
 
 grpc::Status FastRGNodeServiceImpl::ConnectHsi(::grpc::ServerContext* context, const ::fastrgnodeservice::HsiRequest* request, ::fastrgnodeservice::HsiReply* response)
 {
+    grpc::Status st;
+    if (node_starting(&st))
+        return st;
+
     uint16_t user_id = request->user_id(), ccb_id = request->user_id() - 1;
 
     if (user_id > fastrg_ccb->user_count) {
@@ -465,6 +490,10 @@ grpc::Status FastRGNodeServiceImpl::ConnectHsi(::grpc::ServerContext* context, c
 
 grpc::Status FastRGNodeServiceImpl::DisconnectHsi(::grpc::ServerContext* context, const ::fastrgnodeservice::HsiRequest* request, ::fastrgnodeservice::HsiReply* response)
 {
+    grpc::Status st;
+    if (node_starting(&st))
+        return st;
+
     uint16_t user_id = request->user_id(), ccb_id = request->user_id() - 1;
     bool force = request->force();
 
@@ -567,6 +596,10 @@ grpc::Status FastRGNodeServiceImpl::DisconnectHsi(::grpc::ServerContext* context
 
 grpc::Status FastRGNodeServiceImpl::DhcpServerStart(::grpc::ServerContext* context, const ::fastrgnodeservice::DhcpServerRequest* request, ::fastrgnodeservice::DhcpServerReply* response)
 {
+    grpc::Status st;
+    if (node_starting(&st))
+        return st;
+
     uint16_t user_id = request->user_id(), ccb_id = request->user_id() - 1;
 
     if (user_id > fastrg_ccb->user_count) {
@@ -634,6 +667,10 @@ grpc::Status FastRGNodeServiceImpl::DhcpServerStart(::grpc::ServerContext* conte
 
 grpc::Status FastRGNodeServiceImpl::DhcpServerStop(::grpc::ServerContext* context, const ::fastrgnodeservice::DhcpServerRequest* request, ::fastrgnodeservice::DhcpServerReply* response)
 {
+    grpc::Status st;
+    if (node_starting(&st))
+        return st;
+
     uint16_t user_id = request->user_id(), ccb_id = request->user_id() - 1;
 
     if (user_id > fastrg_ccb->user_count) {
@@ -691,6 +728,10 @@ grpc::Status FastRGNodeServiceImpl::DhcpServerStop(::grpc::ServerContext* contex
 
 grpc::Status FastRGNodeServiceImpl::SetSnatConfig(::grpc::ServerContext* context, const ::fastrgnodeservice::SnatConfigRequest* request, ::fastrgnodeservice::SnatConfigReply* response)
 {
+    grpc::Status st;
+    if (node_starting(&st))
+        return st;
+
     cout << "SetSnatConfig called" << endl;
 
     U16 user_id = request->user_id();
@@ -779,6 +820,10 @@ grpc::Status FastRGNodeServiceImpl::SetSnatConfig(::grpc::ServerContext* context
 
 grpc::Status FastRGNodeServiceImpl::RemoveSnatConfig(::grpc::ServerContext* context, const ::fastrgnodeservice::SnatConfigRequest* request, ::fastrgnodeservice::SnatConfigReply* response)
 {
+    grpc::Status st;
+    if (node_starting(&st))
+        return st;
+
     cout << "RemoveSnatConfig called" << endl;
 
     U16 user_id = request->user_id();
@@ -1509,6 +1554,10 @@ grpc::Status FastRGNodeServiceImpl::AddDnsRecord(::grpc::ServerContext* context,
     const ::fastrgnodeservice::DnsRecordRequest* request,
     ::fastrgnodeservice::DnsRecordReply* response)
 {
+    grpc::Status st;
+    if (node_starting(&st))
+        return st;
+
     cout << "AddDnsRecord called" << endl;
 
     U16 user_id = request->user_id();
@@ -1595,6 +1644,10 @@ grpc::Status FastRGNodeServiceImpl::RemoveDnsRecord(::grpc::ServerContext* conte
     const ::fastrgnodeservice::DnsRecordRequest* request,
     ::fastrgnodeservice::DnsRecordReply* response)
 {
+    grpc::Status st;
+    if (node_starting(&st))
+        return st;
+
     cout << "RemoveDnsRecord called" << endl;
 
     U16 user_id = request->user_id();
@@ -1816,6 +1869,10 @@ grpc::Status FastRGNodeServiceImpl::FlushDnsCache(::grpc::ServerContext* context
     const ::fastrgnodeservice::DnsCacheFlushRequest* request,
     ::fastrgnodeservice::DnsCacheFlushReply* response)
 {
+    grpc::Status st;
+    if (node_starting(&st))
+        return st;
+
     cout << "FlushDnsCache called" << endl;
 
     U16 user_id = request->user_id();
@@ -1877,6 +1934,10 @@ grpc::Status FastRGNodeServiceImpl::SetDnsProxy(::grpc::ServerContext* context,
     const ::fastrgnodeservice::SetDnsProxyRequest* request,
     ::fastrgnodeservice::SetDnsProxyReply* response)
 {
+    grpc::Status st;
+    if (node_starting(&st))
+        return st;
+
     cout << "SetDnsProxy called" << endl;
 
     U16 user_id = request->user_id();
@@ -1942,6 +2003,10 @@ grpc::Status FastRGNodeServiceImpl::SetTcpConntrack(::grpc::ServerContext* conte
     const ::fastrgnodeservice::SetTcpConntrackRequest* request,
     ::fastrgnodeservice::SetTcpConntrackReply* response)
 {
+    grpc::Status st;
+    if (node_starting(&st))
+        return st;
+
     cout << "SetTcpConntrack called" << endl;
 
     U16 user_id = request->user_id();
@@ -2007,6 +2072,10 @@ grpc::Status FastRGNodeServiceImpl::SetIpv6(::grpc::ServerContext* context,
     const ::fastrgnodeservice::SetIpv6Request* request,
     ::fastrgnodeservice::SetIpv6Reply* response)
 {
+    grpc::Status st;
+    if (node_starting(&st))
+        return st;
+
     cout << "SetIpv6 called" << endl;
 
     U16 user_id = request->user_id();
@@ -2070,6 +2139,10 @@ grpc::Status FastRGNodeServiceImpl::SetIpv6(::grpc::ServerContext* context,
 grpc::Status FastRGNodeServiceImpl::PdumpStart(::grpc::ServerContext* context, const ::fastrgnodeservice::PdumpRequest* request, ::fastrgnodeservice::PdumpReply* response)
 {
     (void)context;
+    grpc::Status st;
+    if (node_starting(&st))
+        return st;
+
     int direction = request->direction();
     uint16_t subscriber = request->subscriber();
     std::string filter = request->filter();
@@ -2095,6 +2168,10 @@ grpc::Status FastRGNodeServiceImpl::PdumpStart(::grpc::ServerContext* context, c
 grpc::Status FastRGNodeServiceImpl::PdumpStop(::grpc::ServerContext* context, const ::fastrgnodeservice::PdumpRequest* request, ::fastrgnodeservice::PdumpReply* response)
 {
     (void)context;
+    grpc::Status st;
+    if (node_starting(&st))
+        return st;
+
     int direction = request->direction();
     uint16_t subscriber = request->subscriber();
 
@@ -2113,6 +2190,9 @@ grpc::Status FastRGNodeServiceImpl::RepublishPPPoEStatus(::grpc::ServerContext* 
 {
     (void)context;
     (void)request;
+    grpc::Status st;
+    if (node_starting(&st))
+        return st;
 
     uint32_t event_count = ppp_report_all_connection_status(fastrg_ccb);
 
@@ -2125,6 +2205,10 @@ grpc::Status FastRGNodeServiceImpl::RepublishConfigStatus(::grpc::ServerContext*
 {
     (void)context;
     (void)request;
+    grpc::Status st;
+    if (node_starting(&st))
+        return st;
+
     U32 event_count = 0;
 
     if (etcd_integration_republish_config_status(fastrg_ccb, &event_count) != SUCCESS) {
