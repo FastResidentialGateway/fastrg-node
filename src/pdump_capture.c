@@ -46,6 +46,8 @@
 #define PDUMP_CACHE_SIZE   256
 #define PDUMP_SNAPLEN      262144
 #define PDUMP_MAX_SIZE_MB  2048  /* hard cap on the pcap file size (2GB)         */
+#define PDUMP_MAX_FILTER_LEN 1024 /* longest accepted BPF filter expression       */
+#define PDUMP_MAX_FILTERS    32   /* compiled filters kept alive per session      */
 
 /* classic libpcap file headers (little-endian host assumed; magic encodes order) */
 struct pcap_file_hdr {
@@ -91,6 +93,7 @@ static struct pdump_ctx {
     U16             nb_tx_q[PORT_AMOUNT];
 
     struct cap_filter *filter_list;             /* all compiled filters (freed at teardown) */
+    int             nb_filters;                 /* length of filter_list, capped at PDUMP_MAX_FILTERS */
 
     struct rte_ring    *ring;
     struct rte_mempool *mp;
@@ -475,6 +478,7 @@ static void pdump_capture_teardown(FastRG_t *fastrg_ccb)
         f = nx;
     }
     global_pdump_ctx.filter_list = NULL;
+    global_pdump_ctx.nb_filters = 0;
     for(int p=0; p<PORT_AMOUNT; p++)
         if (global_pdump_ctx.filter[p])
             memset(global_pdump_ctx.filter[p], 0, global_pdump_ctx.slots * sizeof(struct cap_filter *));
@@ -542,6 +546,10 @@ STATUS fastrg_pdump_start(FastRG_t *fastrg_ccb, int dir, U16 subscriber,
         if (err) snprintf(err, err_len, "no subscribers configured");
         return ERROR;
     }
+    if (filter && strlen(filter) > PDUMP_MAX_FILTER_LEN) {
+        if (err) snprintf(err, err_len, "filter too long (max %d bytes)", PDUMP_MAX_FILTER_LEN);
+        return ERROR;
+    }
 
     /* Clamp the requested size to (0, 2GB]; 0 (unset) defaults to the 2GB cap. */
     if (size_limit_mb == 0 || size_limit_mb > PDUMP_MAX_SIZE_MB)
@@ -549,14 +557,24 @@ STATUS fastrg_pdump_start(FastRG_t *fastrg_ccb, int dir, U16 subscriber,
 
     pthread_mutex_lock(&global_pdump_ctx.lock);
 
-    /* Compile the optional filter once and share it across the affected slots. */
+    /* Compile the optional filter once and share it across the affected slots.
+     * Compiled filters are only freed at teardown, so cap how many one session
+     * may accumulate. */
     struct cap_filter *f = NULL;
     if (filter && filter[0]) {
+        if (global_pdump_ctx.nb_filters >= PDUMP_MAX_FILTERS) {
+            if (err)
+                snprintf(err, err_len,
+                    "too many filters in this capture session; stop all captures first");
+            pthread_mutex_unlock(&global_pdump_ctx.lock);
+            return ERROR;
+        }
         f = pdump_compile_filter(filter, err, err_len);
         if (f == NULL) {
             pthread_mutex_unlock(&global_pdump_ctx.lock);
             return ERROR;
         }
+        global_pdump_ctx.nb_filters++;
     }
 
     int was_idle = (rte_atomic32_read(&global_pdump_ctx.any_active) == 0);
