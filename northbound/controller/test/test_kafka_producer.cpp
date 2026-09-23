@@ -204,6 +204,39 @@ static void test_kafka_wal_parse_accepts_empty_input(void)
     check(out.empty(), "an empty array yields no events", "output not empty");
 }
 
+/* Buffer eviction order: a runtime error has to survive a flood of state
+ * events, so the oldest memory-only event goes first and a durable one is
+ * dropped only when there is nothing else left. */
+static void test_kafka_wal_evict_index(void)
+{
+    std::vector<KafkaWalEvent> v;
+
+    check(kafka_wal_evict_index(v) == 0,
+        "an empty buffer names index 0", "expected 0");
+
+    for (int i = 0; i < 5; i++) {
+        KafkaWalEvent e;
+        e.seq = i + 1;
+        e.persistent = false;
+        v.push_back(e);
+    }
+    check(kafka_wal_evict_index(v) == 0,
+        "a buffer of memory-only events drops the oldest",
+        std::to_string(kafka_wal_evict_index(v)).c_str());
+
+    for (int i = 0; i < 3; i++)
+        v[i].persistent = true;
+    check(kafka_wal_evict_index(v) == 3,
+        "durable events at the front are passed over for the first memory-only one",
+        std::to_string(kafka_wal_evict_index(v)).c_str());
+
+    for (size_t i = 0; i < v.size(); i++)
+        v[i].persistent = true;
+    check(kafka_wal_evict_index(v) == 0,
+        "an all-durable buffer falls back to the oldest event",
+        std::to_string(kafka_wal_evict_index(v)).c_str());
+}
+
 /* Cost smoke: one WAL write at these sizes is what the batching turns a burst
  * of that many events into, so the per-write cost is the thing to keep an eye
  * on. Correctness is asserted; the timings are printed for the record. */
@@ -361,6 +394,7 @@ int main(void)
     test_kafka_wal_parse_skips_bad_entries();
     test_kafka_wal_parse_rejects_corrupt_input();
     test_kafka_wal_parse_accepts_empty_input();
+    test_kafka_wal_evict_index();
     test_kafka_wal_serialize_at_scale();
 
     std::printf("-- Event payload builder --\n");

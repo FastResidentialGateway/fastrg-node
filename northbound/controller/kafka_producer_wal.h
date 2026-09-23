@@ -49,6 +49,18 @@ std::string kafka_wal_serialize(const std::vector<KafkaWalEvent> &events);
 bool kafka_wal_parse(const std::string &data, std::vector<KafkaWalEvent> &out);
 
 /**
+ * @fn kafka_wal_evict_index
+ *
+ * @brief pick which buffered event to drop when the buffer is over its cap
+ * @param pending
+ *      buffered events, oldest first
+ * @return
+ *      index of the oldest event that is not durable, or 0 when every event
+ *      is durable (or the buffer is empty)
+ */
+size_t kafka_wal_evict_index(const std::vector<KafkaWalEvent> &pending);
+
+/**
  * @fn kafka_build_config_apply_result
  *
  * @brief fill in the ConfigApplyResult payload of a kafka config-apply event
