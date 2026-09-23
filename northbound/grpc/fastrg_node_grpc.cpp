@@ -133,8 +133,9 @@ grpc::Status FastRGNodeServiceImpl::ApplyConfig(::grpc::ServerContext* context, 
     if (node_starting(&st))
         return st;
 
-    uint16_t user_id = request->user_id(), ccb_id = request->user_id() - 1;
-    uint16_t vlan_id = request->vlan_id();
+    // Range-check the wire value before narrowing it to 16 bits.
+    uint32_t requested_user_id = request->user_id();
+    uint32_t requested_vlan_id = request->vlan_id();
     string pppoe_account = request->pppoe_account();
     string pppoe_password = request->pppoe_password();
     string dhcp_pool_start = request->dhcp_pool_start();
@@ -144,14 +145,21 @@ grpc::Status FastRGNodeServiceImpl::ApplyConfig(::grpc::ServerContext* context, 
 
     cout << "Config called" << endl;
 
-    cout << "User ID: " << user_id << endl;
-    cout << "VLAN ID: " << vlan_id << endl;
+    cout << "User ID: " << requested_user_id << endl;
+    cout << "VLAN ID: " << requested_vlan_id << endl;
     cout << "PPPoE Account: " << pppoe_account << endl;
     cout << "PPPoE Password: " << pppoe_password << endl;
     cout << "DHCP Pool Start: " << dhcp_pool_start << endl;
     cout << "DHCP Pool End: " << dhcp_pool_end << endl;
     cout << "DHCP Subnet Mask: " << dhcp_subnet_mask << endl;
     cout << "DHCP Gateway: " << dhcp_gateway << endl;
+
+    if (requested_vlan_id > MAX_VLAN_ID || requested_vlan_id < 2) {
+        std::string err = "Error! VLAN ID " + std::to_string(requested_vlan_id) + " is invalid";
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, err);
+    }
+    uint16_t vlan_id = (uint16_t)requested_vlan_id;
 
     // SDN guard first: when etcd is reachable the node never accepts direct
     // config writes, regardless of user_id validity — the CLI must write through
@@ -163,17 +171,13 @@ grpc::Status FastRGNodeServiceImpl::ApplyConfig(::grpc::ServerContext* context, 
         return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, err);
     }
 
-    if (user_id > fastrg_ccb->user_count) {
-        std::string err = "Error! User " + std::to_string(user_id) + " is not exist";
+    if (requested_user_id == 0 || requested_user_id > fastrg_ccb->user_count) {
+        std::string err = "Error! User " + std::to_string(requested_user_id) + " is not exist";
         cout << err << endl;
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, err);
     }
-
-    if (vlan_id > MAX_VLAN_ID || vlan_id < 2) {
-        std::string err = "Error! VLAN ID " + std::to_string(vlan_id) + " is invalid";
-        cout << err << endl;
-        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, err);
-    }
+    uint16_t user_id = (uint16_t)requested_user_id;
+    uint16_t ccb_id = user_id - 1;
 
     hsi_config_t hsi_config = { 0 };
     snprintf(hsi_config.vlan_id, sizeof(hsi_config.vlan_id), "%d", vlan_id);
@@ -254,15 +258,18 @@ grpc::Status FastRGNodeServiceImpl::RemoveConfig(::grpc::ServerContext* context,
     if (node_starting(&st))
         return st;
 
-    uint16_t user_id = request->user_id(), ccb_id = request->user_id() - 1;
+    // Range-check the wire value before narrowing it to 16 bits.
+    uint32_t requested_user_id = request->user_id();
 
     cout << "RemoveConfig called" << endl;
 
-    if (user_id > fastrg_ccb->user_count) {
-        std::string err = "Error! User " + std::to_string(user_id) + " is not exist";
+    if (requested_user_id == 0 || requested_user_id > fastrg_ccb->user_count) {
+        std::string err = "Error! User " + std::to_string(requested_user_id) + " is not exist";
         cout << err << endl;
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, err);
     }
+    uint16_t user_id = (uint16_t)requested_user_id;
+    uint16_t ccb_id = user_id - 1;
 
     if (!fastrg_ccb || !fastrg_ccb->node_uuid) {
         std::string err = "Error! fastrg_ccb or node_uuid is NULL";
@@ -409,13 +416,16 @@ grpc::Status FastRGNodeServiceImpl::ConnectHsi(::grpc::ServerContext* context, c
     if (node_starting(&st))
         return st;
 
-    uint16_t user_id = request->user_id(), ccb_id = request->user_id() - 1;
+    // Range-check the wire value before narrowing; 0 means every subscriber.
+    uint32_t requested_user_id = request->user_id();
 
-    if (user_id > fastrg_ccb->user_count) {
-        std::string err = "Error! User " + std::to_string(user_id) + " is not exist";
+    if (requested_user_id > fastrg_ccb->user_count) {
+        std::string err = "Error! User " + std::to_string(requested_user_id) + " is not exist";
         cout << err << endl;
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, err);
     }
+    uint16_t user_id = (uint16_t)requested_user_id;
+    uint16_t ccb_id = user_id - 1;
 
     cout << "ConnectHsi called" << endl;
 
@@ -494,14 +504,17 @@ grpc::Status FastRGNodeServiceImpl::DisconnectHsi(::grpc::ServerContext* context
     if (node_starting(&st))
         return st;
 
-    uint16_t user_id = request->user_id(), ccb_id = request->user_id() - 1;
+    // Range-check the wire value before narrowing; 0 means every subscriber.
+    uint32_t requested_user_id = request->user_id();
     bool force = request->force();
 
-    if (user_id > fastrg_ccb->user_count) {
-        std::string err = "Error! User " + std::to_string(user_id) + " is not exist";
+    if (requested_user_id > fastrg_ccb->user_count) {
+        std::string err = "Error! User " + std::to_string(requested_user_id) + " is not exist";
         cout << err << endl;
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, err);
     }
+    uint16_t user_id = (uint16_t)requested_user_id;
+    uint16_t ccb_id = user_id - 1;
 
     cout << "DisconnectHsi called" << endl;
 
@@ -600,13 +613,16 @@ grpc::Status FastRGNodeServiceImpl::DhcpServerStart(::grpc::ServerContext* conte
     if (node_starting(&st))
         return st;
 
-    uint16_t user_id = request->user_id(), ccb_id = request->user_id() - 1;
+    // Range-check the wire value before narrowing; 0 means every subscriber.
+    uint32_t requested_user_id = request->user_id();
 
-    if (user_id > fastrg_ccb->user_count) {
-        std::string err = "Error! User " + std::to_string(user_id) + " is not exist";
+    if (requested_user_id > fastrg_ccb->user_count) {
+        std::string err = "Error! User " + std::to_string(requested_user_id) + " is not exist";
         cout << err << endl;
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, err);
     }
+    uint16_t user_id = (uint16_t)requested_user_id;
+    uint16_t ccb_id = user_id - 1;
 
     cout << "DhcpServerStart called" << endl;
     if (user_id == 0) {
@@ -671,13 +687,16 @@ grpc::Status FastRGNodeServiceImpl::DhcpServerStop(::grpc::ServerContext* contex
     if (node_starting(&st))
         return st;
 
-    uint16_t user_id = request->user_id(), ccb_id = request->user_id() - 1;
+    // Range-check the wire value before narrowing; 0 means every subscriber.
+    uint32_t requested_user_id = request->user_id();
 
-    if (user_id > fastrg_ccb->user_count) {
-        std::string err = "Error! User " + std::to_string(user_id) + " is not exist";
+    if (requested_user_id > fastrg_ccb->user_count) {
+        std::string err = "Error! User " + std::to_string(requested_user_id) + " is not exist";
         cout << err << endl;
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, err);
     }
+    uint16_t user_id = (uint16_t)requested_user_id;
+    uint16_t ccb_id = user_id - 1;
 
     cout << "DhcpServerStop called" << endl;
     if (user_id == 0) {
@@ -734,11 +753,20 @@ grpc::Status FastRGNodeServiceImpl::SetSnatConfig(::grpc::ServerContext* context
 
     cout << "SetSnatConfig called" << endl;
 
-    U16 user_id = request->user_id();
-    U16 ccb_id = user_id - 1;
-    U16 eport = request->eport();
-    U16 iport = request->iport();
+    // Range-check the wire value before narrowing it to 16 bits.
+    uint32_t requested_user_id = request->user_id();
+    uint32_t requested_eport = request->eport();
+    uint32_t requested_iport = request->iport();
     std::string dip = request->dip();
+
+    if (requested_eport > UINT16_MAX || requested_iport > UINT16_MAX) {
+        std::string err = "Error! Port out of range for user " + std::to_string(requested_user_id) +
+            " eport=" + std::to_string(requested_eport) + " iport=" + std::to_string(requested_iport);
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, err);
+    }
+    U16 eport = (U16)requested_eport;
+    U16 iport = (U16)requested_iport;
 
     // SDN guard first: when etcd is reachable the node never accepts direct
     // config writes — port forwarding goes via the controller and reaches the
@@ -754,6 +782,14 @@ grpc::Status FastRGNodeServiceImpl::SetSnatConfig(::grpc::ServerContext* context
         cout << err << endl;
         return grpc::Status(grpc::StatusCode::INTERNAL, err);
     }
+
+    if (requested_user_id == 0 || requested_user_id > fastrg_ccb->user_count) {
+        std::string err = "Error! User " + std::to_string(requested_user_id) + " does not exist";
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, err);
+    }
+    U16 user_id = (U16)requested_user_id;
+    U16 ccb_id = user_id - 1;
 
     // Validate the destination IP here so a malformed one never reaches the
     // control thread; everything else is checked where the rule is written.
@@ -826,9 +862,17 @@ grpc::Status FastRGNodeServiceImpl::RemoveSnatConfig(::grpc::ServerContext* cont
 
     cout << "RemoveSnatConfig called" << endl;
 
-    U16 user_id = request->user_id();
-    U16 ccb_id = user_id - 1;
-    U16 eport = request->eport();
+    // Range-check the wire value before narrowing it to 16 bits.
+    uint32_t requested_user_id = request->user_id();
+    uint32_t requested_eport = request->eport();
+
+    if (requested_eport > UINT16_MAX) {
+        std::string err = "Error! Port out of range for user " + std::to_string(requested_user_id) +
+            " eport=" + std::to_string(requested_eport);
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, err);
+    }
+    U16 eport = (U16)requested_eport;
 
     // SDN guard first: see SetSnatConfig.
     if (etcd_client_is_initialized() && etcd_client_is_connected()) {
@@ -842,6 +886,14 @@ grpc::Status FastRGNodeServiceImpl::RemoveSnatConfig(::grpc::ServerContext* cont
         cout << err << endl;
         return grpc::Status(grpc::StatusCode::INTERNAL, err);
     }
+
+    if (requested_user_id == 0 || requested_user_id > fastrg_ccb->user_count) {
+        std::string err = "Error! User " + std::to_string(requested_user_id) + " does not exist";
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, err);
+    }
+    U16 user_id = (U16)requested_user_id;
+    U16 ccb_id = user_id - 1;
 
     // etcd unreachable (pure standalone, or SDN with etcd down): queue the
     // removal on cp_q, the control thread is the only writer of CCB state.
@@ -893,14 +945,16 @@ grpc::Status FastRGNodeServiceImpl::GetPortFwdInfo(::grpc::ServerContext* contex
 {
     cout << "GetPortFwdInfo called" << endl;
 
-    U16 user_id = request->user_id();
-    U16 ccb_id = user_id - 1;
+    // Range-check the wire value before narrowing it to 16 bits.
+    uint32_t requested_user_id = request->user_id();
 
-    if (user_id == 0 || user_id > fastrg_ccb->user_count) {
-        std::string err = "Error! User " + std::to_string(user_id) + " does not exist";
+    if (requested_user_id == 0 || requested_user_id > fastrg_ccb->user_count) {
+        std::string err = "Error! User " + std::to_string(requested_user_id) + " does not exist";
         cout << err << endl;
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, err);
     }
+    U16 user_id = (U16)requested_user_id;
+    U16 ccb_id = user_id - 1;
 
     ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
     if (!ppp_ccb) {
@@ -935,14 +989,16 @@ grpc::Status FastRGNodeServiceImpl::GetNatEntries(::grpc::ServerContext* context
 {
     cout << "GetNatEntries called" << endl;
 
-    U16 user_id = request->user_id();
-    U16 ccb_id = user_id - 1;
+    // Range-check the wire value before narrowing it to 16 bits.
+    uint32_t requested_user_id = request->user_id();
 
-    if (user_id == 0 || user_id > fastrg_ccb->user_count) {
-        std::string err = "Error! User " + std::to_string(user_id) + " does not exist";
+    if (requested_user_id == 0 || requested_user_id > fastrg_ccb->user_count) {
+        std::string err = "Error! User " + std::to_string(requested_user_id) + " does not exist";
         cout << err << endl;
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, err);
     }
+    U16 user_id = (U16)requested_user_id;
+    U16 ccb_id = user_id - 1;
 
     ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
     if (!ppp_ccb) {
@@ -989,17 +1045,19 @@ grpc::Status FastRGNodeServiceImpl::GetArpTable(::grpc::ServerContext* context, 
 {
     cout << "GetArpTable called" << endl;
 
-    U16 user_id = request->user_id();
-    U16 ccb_id = user_id - 1;
+    // Range-check the wire value before narrowing it to 16 bits.
+    uint32_t requested_user_id = request->user_id();
     U32 max_count = request->max_count();
     if (max_count == 0)
         max_count = 100;
 
-    if (user_id == 0 || user_id > fastrg_ccb->user_count) {
-        std::string err = "Error! User " + std::to_string(user_id) + " does not exist";
+    if (requested_user_id == 0 || requested_user_id > fastrg_ccb->user_count) {
+        std::string err = "Error! User " + std::to_string(requested_user_id) + " does not exist";
         cout << err << endl;
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, err);
     }
+    U16 user_id = (U16)requested_user_id;
+    U16 ccb_id = user_id - 1;
 
     ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
     /* dhcp_ccb is only fetched for the joint not-initialized check below; the
@@ -1560,16 +1618,18 @@ grpc::Status FastRGNodeServiceImpl::AddDnsRecord(::grpc::ServerContext* context,
 
     cout << "AddDnsRecord called" << endl;
 
-    U16 user_id = request->user_id();
+    // Range-check the wire value before narrowing it to 16 bits.
+    uint32_t requested_user_id = request->user_id();
     std::string domain = request->domain();
     std::string ip = request->ip();
     U32 ttl = request->ttl();
     if (ttl == 0) ttl = 3600;
 
-    if (user_id == 0 || user_id > fastrg_ccb->user_count) {
-        std::string err = "Invalid user_id " + std::to_string(user_id);
+    if (requested_user_id == 0 || requested_user_id > fastrg_ccb->user_count) {
+        std::string err = "Invalid user_id " + std::to_string(requested_user_id);
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, err);
     }
+    U16 user_id = (U16)requested_user_id;
 
     // SDN guard first: DNS records are managed via the controller when etcd
     // is reachable; the dns watcher applies them locally.
@@ -1650,13 +1710,15 @@ grpc::Status FastRGNodeServiceImpl::RemoveDnsRecord(::grpc::ServerContext* conte
 
     cout << "RemoveDnsRecord called" << endl;
 
-    U16 user_id = request->user_id();
+    // Range-check the wire value before narrowing it to 16 bits.
+    uint32_t requested_user_id = request->user_id();
     std::string domain = request->domain();
 
-    if (user_id == 0 || user_id > fastrg_ccb->user_count) {
-        std::string err = "Invalid user_id " + std::to_string(user_id);
+    if (requested_user_id == 0 || requested_user_id > fastrg_ccb->user_count) {
+        std::string err = "Invalid user_id " + std::to_string(requested_user_id);
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, err);
     }
+    U16 user_id = (U16)requested_user_id;
 
     // SDN guard first: see AddDnsRecord.
     if (etcd_client_is_initialized() && etcd_client_is_connected()) {
@@ -1875,13 +1937,15 @@ grpc::Status FastRGNodeServiceImpl::FlushDnsCache(::grpc::ServerContext* context
 
     cout << "FlushDnsCache called" << endl;
 
-    U16 user_id = request->user_id();
-    U16 ccb_id = user_id - 1;
+    // Range-check the wire value before narrowing it to 16 bits.
+    uint32_t requested_user_id = request->user_id();
 
-    if (user_id == 0 || user_id > fastrg_ccb->user_count) {
-        std::string err = "Invalid user_id " + std::to_string(user_id);
+    if (requested_user_id == 0 || requested_user_id > fastrg_ccb->user_count) {
+        std::string err = "Invalid user_id " + std::to_string(requested_user_id);
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, err);
     }
+    U16 user_id = (U16)requested_user_id;
+    U16 ccb_id = user_id - 1;
 
     dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
     if (!dhcp_ccb) {
@@ -1940,14 +2004,16 @@ grpc::Status FastRGNodeServiceImpl::SetDnsProxy(::grpc::ServerContext* context,
 
     cout << "SetDnsProxy called" << endl;
 
-    U16 user_id = request->user_id();
+    // Range-check the wire value before narrowing it to 16 bits.
+    uint32_t requested_user_id = request->user_id();
     bool enable = request->enable();
-    U16 ccb_id = user_id - 1;
 
-    if (user_id == 0 || user_id > fastrg_ccb->user_count) {
-        std::string err = "Invalid user_id " + std::to_string(user_id);
+    if (requested_user_id == 0 || requested_user_id > fastrg_ccb->user_count) {
+        std::string err = "Invalid user_id " + std::to_string(requested_user_id);
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, err);
     }
+    U16 user_id = (U16)requested_user_id;
+    U16 ccb_id = user_id - 1;
 
     // SDN guard first: when etcd is reachable this toggle is set via the
     // controller and reaches the node through the HSI watcher.
@@ -2009,14 +2075,16 @@ grpc::Status FastRGNodeServiceImpl::SetTcpConntrack(::grpc::ServerContext* conte
 
     cout << "SetTcpConntrack called" << endl;
 
-    U16 user_id = request->user_id();
+    // Range-check the wire value before narrowing it to 16 bits.
+    uint32_t requested_user_id = request->user_id();
     bool enable = request->enable();
-    U16 ccb_id = user_id - 1;
 
-    if (user_id == 0 || user_id > fastrg_ccb->user_count) {
-        std::string err = "Invalid user_id " + std::to_string(user_id);
+    if (requested_user_id == 0 || requested_user_id > fastrg_ccb->user_count) {
+        std::string err = "Invalid user_id " + std::to_string(requested_user_id);
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, err);
     }
+    U16 user_id = (U16)requested_user_id;
+    U16 ccb_id = user_id - 1;
 
     // SDN guard first: when etcd is reachable this toggle is set via the
     // controller and reaches the node through the HSI watcher.
@@ -2078,14 +2146,16 @@ grpc::Status FastRGNodeServiceImpl::SetIpv6(::grpc::ServerContext* context,
 
     cout << "SetIpv6 called" << endl;
 
-    U16 user_id = request->user_id();
+    // Range-check the wire value before narrowing it to 16 bits.
+    uint32_t requested_user_id = request->user_id();
     bool enable = request->enable();
-    U16 ccb_id = user_id - 1;
 
-    if (user_id == 0 || user_id > fastrg_ccb->user_count) {
-        std::string err = "Invalid user_id " + std::to_string(user_id);
+    if (requested_user_id == 0 || requested_user_id > fastrg_ccb->user_count) {
+        std::string err = "Invalid user_id " + std::to_string(requested_user_id);
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, err);
     }
+    U16 user_id = (U16)requested_user_id;
+    U16 ccb_id = user_id - 1;
 
     if (etcd_client_is_initialized() && etcd_client_is_connected()) {
         std::string err = "etcd reachable (SDN mode); set ipv6_enable via controller/etcd, not the node";
@@ -2144,13 +2214,21 @@ grpc::Status FastRGNodeServiceImpl::PdumpStart(::grpc::ServerContext* context, c
         return st;
 
     int direction = request->direction();
-    uint16_t subscriber = request->subscriber();
+    // Range-check the wire value before narrowing; 0 means every subscriber.
+    uint32_t requested_subscriber = request->subscriber();
     std::string filter = request->filter();
     uint32_t size_limit_mb = request->size_limit_mb();
 
-    cout << "PdumpStart called direction=" << direction << " subscriber=" << subscriber
+    cout << "PdumpStart called direction=" << direction << " subscriber=" << requested_subscriber
          << " filter=" << (filter.empty() ? "(none)" : filter)
          << " size_limit_mb=" << size_limit_mb << endl;
+
+    if (requested_subscriber > fastrg_ccb->user_count) {
+        std::string err = "subscriber " + std::to_string(requested_subscriber) + " does not exist";
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, err);
+    }
+    uint16_t subscriber = (uint16_t)requested_subscriber;
 
     char out_file[256] = {0};
     char err[256] = {0};
@@ -2173,9 +2251,17 @@ grpc::Status FastRGNodeServiceImpl::PdumpStop(::grpc::ServerContext* context, co
         return st;
 
     int direction = request->direction();
-    uint16_t subscriber = request->subscriber();
+    // Range-check the wire value before narrowing; 0 means every subscriber.
+    uint32_t requested_subscriber = request->subscriber();
 
-    cout << "PdumpStop called direction=" << direction << " subscriber=" << subscriber << endl;
+    cout << "PdumpStop called direction=" << direction << " subscriber=" << requested_subscriber << endl;
+
+    if (requested_subscriber > fastrg_ccb->user_count) {
+        std::string err = "subscriber " + std::to_string(requested_subscriber) + " does not exist";
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, err);
+    }
+    uint16_t subscriber = (uint16_t)requested_subscriber;
 
     char err[256] = {0};
     if (fastrg_pdump_stop(fastrg_ccb, direction, subscriber, err, sizeof(err)) == ERROR) {
