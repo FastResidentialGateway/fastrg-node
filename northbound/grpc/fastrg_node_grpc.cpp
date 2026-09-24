@@ -1238,10 +1238,8 @@ grpc::Status FastRGNodeServiceImpl::GetFastrgHsiInfo(::grpc::ServerContext* cont
         ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, i);
         hsi_info->set_user_id(i + 1);
         hsi_info->set_vlan_id(rte_atomic16_read(&ppp_ccb->vlan_id));
-        /* Credential read side: a config update may free+realloc the buffers, so
-         * copy under cred_lock into private duplicates and marshal outside the
-         * lock (protobuf setters may block; only plain heap ops are allowed
-         * inside the critical section). */
+        /* A config update may free the credential buffers; copy them under
+         * cred_lock and build the reply outside it. */
         rte_spinlock_lock(&ppp_ccb->cred_lock);
         char *acc_dup = ppp_ccb->ppp_user_acc != NULL ?
             strdup(reinterpret_cast<const char*>(ppp_ccb->ppp_user_acc)) : NULL;

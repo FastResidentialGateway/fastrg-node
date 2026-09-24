@@ -82,9 +82,8 @@ std::string iso8601_now()
     return out.str();
 }
 
-// Persist while holding g_mutex. Writes an owner-only temp file, then renames
-// it over the snapshot. Returns false when any step fails and stores a short
-// failure description into *err_detail.
+// Atomically replace the snapshot file; caller holds g_mutex. On failure,
+// returns false and sets *err_detail.
 bool persist_locked(std::string *err_detail)
 {
     Json::Value arr(Json::arrayValue);
