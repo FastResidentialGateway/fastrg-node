@@ -2,19 +2,27 @@
 #include <sys/sysinfo.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 
-#include <rte_timer.h>
-#include <rte_cycles.h>
+#include <rte_lcore.h>
 
 #include "controller.h"
 #include "fastrg.h"
 #include "dbg.h"
 #include "../northbound/controller/controller_client.h"
 
-void controller_heartbeat_timer_cb(__rte_unused struct rte_timer *tim, void *arg)
+/**
+ * @fn controller_heartbeat_send
+ *
+ * @brief Send one heartbeat to the controller and log the result
+ *
+ * @param fastrg_ccb
+ *      FastRG control block
+ * @return
+ *      void
+ */
+static void controller_heartbeat_send(FastRG_t *fastrg_ccb)
 {
-    FastRG_t *fastrg_ccb = (FastRG_t *)arg;
-
     if (fastrg_ccb->node_uuid == NULL) {
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Node UUID or local IP not available for heartbeat");
         return;
@@ -37,15 +45,103 @@ void controller_heartbeat_timer_cb(__rte_unused struct rte_timer *tim, void *arg
     } else {
         FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL, "Failed to send heartbeat, status: %d", status);
     }
+}
 
-    // Reset the timer for next heartbeat
-    uint64_t timer_ticks = fastrg_get_cycles_in_sec() * fastrg_ccb->heartbeat_interval;
-    rte_timer_reset(&fastrg_ccb->heartbeat_timer, timer_ticks, SINGLE, 
-        fastrg_ccb->lcore.timer_thread, controller_heartbeat_timer_cb, fastrg_ccb);
+/**
+ * @fn controller_heartbeat_wait
+ *
+ * @brief Wait one heartbeat interval, returning early if a stop is requested
+ *
+ * @param fastrg_ccb
+ *      FastRG control block
+ * @return
+ *      TRUE to send the next heartbeat, FALSE if a stop was requested
+ */
+static BOOL controller_heartbeat_wait(FastRG_t *fastrg_ccb)
+{
+    controller_heartbeat_t *hb = &fastrg_ccb->heartbeat;
+    struct timespec deadline;
+    int ret = 0;
+
+    clock_gettime(CLOCK_MONOTONIC, &deadline);
+    deadline.tv_sec += fastrg_ccb->heartbeat_interval;
+
+    pthread_mutex_lock(&hb->lock);
+    while (hb->stop_requested == FALSE && ret != ETIMEDOUT)
+        ret = pthread_cond_timedwait(&hb->cond, &hb->lock, &deadline);
+    BOOL keep_running = (hb->stop_requested == FALSE);
+    pthread_mutex_unlock(&hb->lock);
+
+    return keep_running;
+}
+
+/**
+ * @fn controller_heartbeat_thread
+ *
+ * @brief Send a heartbeat every heartbeat_interval seconds until a stop is requested
+ *
+ * @param arg
+ *      FastRG control block
+ * @return
+ *      NULL
+ */
+static void *controller_heartbeat_thread(void *arg)
+{
+    FastRG_t *fastrg_ccb = (FastRG_t *)arg;
+
+    while (controller_heartbeat_wait(fastrg_ccb) == TRUE)
+        controller_heartbeat_send(fastrg_ccb);
+
+    return NULL;
+}
+
+/**
+ * @fn controller_heartbeat_stop
+ *
+ * @brief Stop the heartbeat thread and wait for it to exit; no-op if it never started
+ *
+ * @details
+ *      If the thread is inside a heartbeat RPC, the join waits for that RPC's
+ *      deadlines to expire (up to 15 s in the re-register path).
+ *
+ * @param fastrg_ccb
+ *      FastRG control block
+ * @return
+ *      void
+ */
+static void controller_heartbeat_stop(FastRG_t *fastrg_ccb)
+{
+    controller_heartbeat_t *hb = &fastrg_ccb->heartbeat;
+
+    if (hb->started == FALSE)
+        return;
+
+    pthread_mutex_lock(&hb->lock);
+    hb->stop_requested = TRUE;
+    pthread_cond_signal(&hb->cond);
+    pthread_mutex_unlock(&hb->lock);
+
+    int ret = pthread_join(hb->thread, NULL);
+    if (ret != 0)
+        FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
+            "Failed to join heartbeat thread: %s", strerror(ret));
+    hb->started = FALSE;
 }
 
 int controller_init(FastRG_t *fastrg_ccb)
 {
+    controller_heartbeat_t *hb = &fastrg_ccb->heartbeat;
+
+    hb->started = FALSE;
+    hb->stop_requested = FALSE;
+    pthread_mutex_init(&hb->lock, NULL);
+    // The heartbeat wait uses CLOCK_MONOTONIC so wall-clock jumps do not stretch or skip it
+    pthread_condattr_t cond_attr;
+    pthread_condattr_init(&cond_attr);
+    pthread_condattr_setclock(&cond_attr, CLOCK_MONOTONIC);
+    pthread_cond_init(&hb->cond, &cond_attr);
+    pthread_condattr_destroy(&cond_attr);
+
     if (!fastrg_ccb->controller_address) {
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Controller address not configured");
         return -1;
@@ -62,8 +158,8 @@ int controller_init(FastRG_t *fastrg_ccb)
 
 void controller_cleanup(FastRG_t *fastrg_ccb)
 {
-    // Stop heartbeat timer
-    rte_timer_stop(&fastrg_ccb->heartbeat_timer);
+    // Join the heartbeat thread first so only this thread uses the controller client from here on
+    controller_heartbeat_stop(fastrg_ccb);
 
     // Report shutdown instead of unregistering: unregistering deletes nodes/<uuid>
     // so the node disappears from the controller UI, while reporting shutdown only
@@ -108,10 +204,13 @@ int controller_register_this_node(FastRG_t *fastrg_ccb)
     if (status == CONTROLLER_SUCCESS) {
         FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "Node registered successfully with controller");
 
-        // Start heartbeat timer
-        uint64_t timer_ticks = fastrg_get_cycles_in_sec() * fastrg_ccb->heartbeat_interval;
-        rte_timer_reset(&fastrg_ccb->heartbeat_timer, timer_ticks, SINGLE,
-                        fastrg_ccb->lcore.timer_thread, controller_heartbeat_timer_cb, fastrg_ccb);
+        // Started only after registration, so the controller client never has two users at once
+        if (fastrg_create_pthread("fastrg_hbeat", controller_heartbeat_thread, fastrg_ccb,
+                rte_lcore_id(), &fastrg_ccb->heartbeat.thread) != SUCCESS) {
+            FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Failed to start heartbeat thread");
+            return -1;
+        }
+        fastrg_ccb->heartbeat.started = TRUE;
 
         return 0;
     } else {

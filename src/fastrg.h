@@ -22,6 +22,7 @@ extern "C" {
 #include "init.h"
 #include "lighthttp.h"
 #include "etcd_event.h"
+#include "controller.h"
 
 #define MAX_VLAN_ID 4000
 #define MIN_VLAN_ID 2
@@ -164,7 +165,6 @@ typedef struct FastRG {
      * (max_user_count+1) entry array, fixed like per_subscriber_stats. */
     struct pppoes_lcore_stats *pppoes_stats[RTE_MAX_LCORE];
     struct rte_timer        link;           /* for physical link checking timer */
-    struct rte_timer        heartbeat_timer;/* for controller heartbeat timer */
     struct rte_timer        nd6_age_timer;  /* periodic IPv6 neighbor cache aging sweep */
     datapath_mode_t         datapath_mode;    /* RSS multi-queue vs software distributor */
     U16                     dp_ctrl_txq_self[PORT_AMOUNT]; /* Tx queue self own(N+1) */
@@ -198,6 +198,7 @@ typedef struct FastRG {
     lighthttp_server_t      metrics_server;
     pthread_t               grpc_thread;      /* joinable northbound gRPC server thread */
     BOOL                    grpc_thread_started;
+    controller_heartbeat_t  heartbeat;        /* controller heartbeat thread */
     uint64_t                node_start_time;  /* process start time (epoch seconds) — crashloop detection */
     uint64_t                node_restart_total; /* persisted restart count from RESTART_COUNT_FILE */
     /* Per-port link state cache, updated by EV_LINK handler, read by metrics thread (atomic). */
