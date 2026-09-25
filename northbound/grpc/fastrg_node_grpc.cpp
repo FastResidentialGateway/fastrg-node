@@ -148,7 +148,6 @@ grpc::Status FastRGNodeServiceImpl::ApplyConfig(::grpc::ServerContext* context, 
     cout << "User ID: " << requested_user_id << endl;
     cout << "VLAN ID: " << requested_vlan_id << endl;
     cout << "PPPoE Account: " << pppoe_account << endl;
-    cout << "PPPoE Password: " << pppoe_password << endl;
     cout << "DHCP Pool Start: " << dhcp_pool_start << endl;
     cout << "DHCP Pool End: " << dhcp_pool_end << endl;
     cout << "DHCP Subnet Mask: " << dhcp_subnet_mask << endl;
@@ -1333,24 +1332,26 @@ grpc::Status FastRGNodeServiceImpl::GetFastrgSystemXStats(::grpc::ServerContext*
 
 grpc::Status FastRGNodeServiceImpl::GetFastrgHsiInfo(::grpc::ServerContext* context, const ::google::protobuf::Empty* request, ::fastrgnodeservice::FastrgHsiInfo* response) 
 {
+    /* The unix socket is reachable only by local root, so it gets the real
+     * credential; every TCP caller gets a placeholder. */
+    bool local_caller = context->peer().rfind("unix:", 0) == 0;
+
     for(int i=0; i<fastrg_ccb->user_count; i++) {
         HsiInfo *hsi_info = response->add_hsi_infos();
         ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, i);
         hsi_info->set_user_id(i + 1);
         hsi_info->set_vlan_id(rte_atomic16_read(&ppp_ccb->vlan_id));
-        /* PPPoE credential read side: this runs on the gRPC thread while a config
-         * update (ctrl thread, or another gRPC call) may free+realloc the
-         * buffers. Copy under cred_lock into private duplicates, then
-         * marshal outside the lock (protobuf setters may block; only plain
-         * heap ops are allowed inside the critical section). */
+        /* A config update may free the credential buffers; copy them under
+         * cred_lock and build the reply outside it. */
         rte_spinlock_lock(&ppp_ccb->cred_lock);
         char *acc_dup = ppp_ccb->ppp_user_acc != NULL ?
             strdup(reinterpret_cast<const char*>(ppp_ccb->ppp_user_acc)) : NULL;
-        char *pwd_dup = ppp_ccb->ppp_passwd != NULL ?
+        char *pwd_dup = (local_caller && ppp_ccb->ppp_passwd != NULL) ?
             strdup(reinterpret_cast<const char*>(ppp_ccb->ppp_passwd)) : NULL;
         rte_spinlock_unlock(&ppp_ccb->cred_lock);
         hsi_info->set_account(std::string(acc_dup != NULL ? acc_dup : ""));
-        hsi_info->set_password(std::string(pwd_dup != NULL ? pwd_dup : ""));
+        hsi_info->set_password(local_caller ?
+            std::string(pwd_dup != NULL ? pwd_dup : "") : std::string("Unreveal"));
         free(acc_dup);
         free(pwd_dup);
 
