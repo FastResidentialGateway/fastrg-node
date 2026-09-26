@@ -34,7 +34,7 @@ service FastrgService {
   rpc GetFastrgSystemStats(google.protobuf.Empty) returns(FastrgSystemStatsInfo) {}
   rpc GetFastrgSystemXStats(google.protobuf.Empty) returns(FastrgSystemXStatsInfo) {}
   rpc GetFastrgHsiInfo(google.protobuf.Empty) returns(FastrgHsiInfo) {}
-  rpc GetFastrgDhcpInfo(google.protobuf.Empty) returns(FastrgDhcpInfo) {}
+  rpc GetFastrgDhcpInfo(DhcpInfoRequest) returns(FastrgDhcpInfo) {}
   rpc GetPortFwdInfo(PortFwdInfoRequest) returns(PortFwdInfoReply) {}
   rpc GetNatEntries(NatEntriesRequest) returns(NatEntriesReply) {}
   rpc GetArpTable(ArpTableRequest) returns(ArpTableReply) {}
@@ -221,14 +221,19 @@ message FastrgHsiInfo {
   repeated HsiInfo hsi_infos = 1;
 }
 
+message DhcpInfoRequest {
+  uint32 user_id = 1; // 0 = every subscriber, without the in-use address list
+}
+
 message DhcpInfo {
   uint32 user_id = 1;
   string status = 2;
   string ip_range = 3;
   string subnet_mask = 4;
   string gateway = 5;
-  repeated string inuse_ips = 6;
+  repeated string inuse_ips = 6; // empty when user_id is 0 (all subscribers)
   repeated string dnss = 7;
+  uint32 inuse_count = 8;        // number of allocated addresses
 }
 
 message FastrgDhcpInfo {

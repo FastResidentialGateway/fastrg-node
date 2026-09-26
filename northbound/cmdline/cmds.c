@@ -67,7 +67,7 @@ static void cmd_info_parsed(void *parsed_result,
     if (strncmp(res->subsystem, "hsi", 3) == 0)
         fastrg_grpc_get_hsi_info();
     else if (strncmp(res->subsystem, "dhcp", 4) == 0)
-        fastrg_grpc_get_dhcp_info();
+        fastrg_grpc_get_dhcp_info(0);
 
     return;
 }
@@ -85,6 +85,41 @@ cmdline_parse_inst_t cmd_info = {
             (void *)&cmd_info_info_token,
             (void *)&cmd_show_subsystem,
             NULL,
+    },
+};
+
+/****** SHOW DHCP <USER ID> ******/
+
+struct cmd_show_dhcp_user_result {
+    cmdline_fixed_string_t show_token;
+    cmdline_fixed_string_t dhcp_token;
+    uint16_t               user_id;
+};
+
+static void cmd_show_dhcp_user_parsed(void *parsed_result,
+        struct cmdline *cl,
+        __attribute__((unused)) void *data)
+{
+    struct cmd_show_dhcp_user_result *res = parsed_result;
+    fastrg_grpc_get_dhcp_info(res->user_id);
+}
+
+cmdline_parse_token_string_t cmd_show_dhcp_user_show =
+    TOKEN_STRING_INITIALIZER(struct cmd_show_dhcp_user_result, show_token, "show");
+cmdline_parse_token_string_t cmd_show_dhcp_user_dhcp =
+    TOKEN_STRING_INITIALIZER(struct cmd_show_dhcp_user_result, dhcp_token, "dhcp");
+cmdline_parse_token_num_t cmd_show_dhcp_user_id =
+    TOKEN_NUM_INITIALIZER(struct cmd_show_dhcp_user_result, user_id, RTE_UINT16);
+
+cmdline_parse_inst_t cmd_show_dhcp_user = {
+    .f = cmd_show_dhcp_user_parsed,
+    .data = NULL,
+    .help_str = "show dhcp <user id>: display one subscriber's DHCP info with its in-use IPs (0 = every subscriber's summary)",
+    .tokens = {
+        (void *)&cmd_show_dhcp_user_show,
+        (void *)&cmd_show_dhcp_user_dhcp,
+        (void *)&cmd_show_dhcp_user_id,
+        NULL,
     },
 };
 
@@ -201,7 +236,8 @@ static void cmd_help_parsed(__attribute__((unused)) void *parsed_result,
                 __attribute__((unused)) void *data)
 {
     cmdline_printf(cl,"usage: \n"
-        "show <hsi|dhcp> to show information\n"
+        "show <hsi|dhcp> to show information (dhcp: every subscriber's status and in-use count)\n"
+        "show dhcp <user id> to show one subscriber's DHCP info including its in-use IPs\n"
         "show system <info|stats|xstats> to show system info/stats/xstats\n"
         "config <add|del> user <id> pppoe-dhcp vlan <id> account <account> password <password> pool <start~end> subnet <mask> gateway <ip> to add/update/del PPPoE/DHCP configuration\n"
         "configure SNAT port forwarding: config <add|del> user <id> snat eport <port> dip <ip> iport <port>\n"
@@ -1371,6 +1407,7 @@ cmdline_parse_inst_t cmd_exec_pdump = {
 /****** CONTEXT (list of instruction) */
 cmdline_parse_ctx_t ctx[] = {
         (cmdline_parse_inst_t *)&cmd_info,
+        (cmdline_parse_inst_t *)&cmd_show_dhcp_user,
         (cmdline_parse_inst_t *)&cmd_system,
         (cmdline_parse_inst_t *)&cmd_quit,
         (cmdline_parse_inst_t *)&cmd_help,

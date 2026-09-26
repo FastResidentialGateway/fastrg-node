@@ -575,9 +575,10 @@ int fastrg_grpc_get_hsi_user(U16 user_id, char *out_buf, U32 out_len) {
     return 0;
 }
 
-void fastrg_grpc_get_dhcp_info() {
+void fastrg_grpc_get_dhcp_info(U16 user_id) {
     std::cout << "grpc client getting dhcp info" << std::endl;
-    google::protobuf::Empty request;
+    DhcpInfoRequest request;
+    request.set_user_id(user_id);
     FastrgDhcpInfo reply;
     ClientContext context;
     Status status = fastrg_client->stub_->GetFastrgDhcpInfo(&context, request, &reply);
@@ -588,6 +589,10 @@ void fastrg_grpc_get_dhcp_info() {
             std::cout << "  DHCP " << i << ":" << std::endl;
             std::cout << "    User ID: " << dhcp_info.user_id() << std::endl;
             std::cout << "    Status: " << dhcp_info.status() << std::endl;
+            std::cout << "    In-use count: " << dhcp_info.inuse_count() << std::endl;
+            // The every-subscriber summary stops here.
+            if (user_id == 0)
+                continue;
             std::cout << "    IP Range: " << dhcp_info.ip_range() << std::endl;
             std::cout << "    Subnet Mask: " << dhcp_info.subnet_mask() << std::endl;
             std::cout << "    Gateway: " << dhcp_info.gateway() << std::endl;
