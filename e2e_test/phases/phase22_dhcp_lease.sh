@@ -124,9 +124,7 @@ _p22_run_client() {
 }
 
 _p22_get_ips() {
-    fastrg_grpc get_dhcp_info | jq -c \
-        ".dhcp_infos[] | select(.user_id == ${USER_ID}) | (.inuse_ips // [])" \
-        2>/dev/null || true
+    e2e_dhcp_user_ips "$(fastrg_grpc get_dhcp_info "${USER_ID}")" "${USER_ID}" || true
 }
 
 _p22_fetch_metric() {

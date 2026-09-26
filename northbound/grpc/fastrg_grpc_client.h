@@ -29,7 +29,8 @@ void fastrg_grpc_get_hsi_info();
 /* Fetch a single user's current (running) HSI state into out_buf.
  * Returns 0 if found, -1 otherwise. */
 int  fastrg_grpc_get_hsi_user(U16 user_id, char *out_buf, U32 out_len);
-void fastrg_grpc_get_dhcp_info();
+/* 0 = every user's status and in-use count; N = user N in full, with its IPs */
+void fastrg_grpc_get_dhcp_info(U16 user_id);
 void fastrg_grpc_add_dns_record(U16 user_id, char *domain, char *ip, U32 ttl);
 void fastrg_grpc_remove_dns_record(U16 user_id, char *domain);
 void fastrg_grpc_get_dns_cache(U16 user_id);

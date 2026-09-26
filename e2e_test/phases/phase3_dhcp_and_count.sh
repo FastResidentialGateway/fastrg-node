@@ -3,6 +3,35 @@
 # ---------------------------------------------------------------------------
 # Phase 3 — DHCP Assignment + Subscriber Count
 # ---------------------------------------------------------------------------
+
+# e2e_dhcp_user_ips BODY USER_ID — that user's in-use IPs as a JSON array.
+# "err" unless BODY is only that user's entry and inuse_count matches the list.
+e2e_dhcp_user_ips() {
+    local _body="${1:-}" _uid="${2:-}" _ips=""
+
+    if [[ ! "$_uid" =~ ^[0-9]+$ ]] || \
+       ! _ips=$(printf '%s' "$_body" | jq -ce --argjson uid "$_uid" '
+            if ((.dhcp_infos | length) == 1 and .dhcp_infos[0].user_id == $uid)
+            then .dhcp_infos[0] else error("not this subscriber") end
+            | (.inuse_ips // []) as $ips
+            | if ((.inuse_count | type) == "number" and .inuse_count == ($ips | length))
+              then $ips else error("list and count disagree") end' 2>/dev/null); then
+        printf 'err'
+        return 1
+    fi
+    printf '%s' "$_ips"
+}
+
+local_validation_register dhcp_user_ips e2e_dhcp_user_ips \
+    dhcp_user_ips_good \
+    dhcp_user_ips_none_in_use \
+    dhcp_user_ips_summary_reply \
+    dhcp_user_ips_unfiltered_reply \
+    dhcp_user_ips_other_subscriber \
+    dhcp_user_ips_count_missing \
+    dhcp_user_ips_count_mismatch \
+    dhcp_user_ips_empty_input
+
 phase3_dhcp_and_count() {
     bold "═══════════════════════════════════════════════════════"
     bold " Phase 3 — DHCP Assignment & Subscriber Count (Steps 5, 6)"
@@ -12,13 +41,14 @@ phase3_dhcp_and_count() {
     # Step 5 — DHCP In-use IPs (LAN device got an IP)
     # ------------------------------------------------------------------
     info "Step 5: Checking DHCP address assignment for USER_ID=${USER_ID}..."
-    DHCP_GRPC3=$(fastrg_grpc get_dhcp_info)
-    DHCP_USER3=$(printf '%s' "$DHCP_GRPC3" | jq -r ".dhcp_infos[] | select(.user_id == ${USER_ID})" 2>/dev/null || true)
+    DHCP_GRPC3=$(fastrg_grpc get_dhcp_info "${USER_ID}")
+    DHCP_IPS3=$(e2e_dhcp_user_ips "$DHCP_GRPC3" "${USER_ID}" || true)
 
-    if [[ -z "$DHCP_USER3" ]]; then
-        fail "Step 5: DHCP address assigned" "User ID ${USER_ID} not found in gRPC GetFastrgDhcpInfo"
+    if [[ "$DHCP_IPS3" == "err" ]]; then
+        fail "Step 5: DHCP address assigned" \
+            "GetFastrgDhcpInfo user_id=${USER_ID} gave no usable in-use list: '$(printf '%s' "$DHCP_GRPC3" | tr '\n' ' ' | cut -c 1-300)'"
     else
-        INUSE_IPS=$(printf '%s' "$DHCP_USER3" | jq -r '.inuse_ips | if length > 0 then join(", ") else empty end' 2>/dev/null || true)
+        INUSE_IPS=$(printf '%s' "$DHCP_IPS3" | jq -r 'if length > 0 then join(", ") else empty end' 2>/dev/null || true)
         if [[ -n "$INUSE_IPS" ]]; then
             pass "Step 5: DHCP address assigned" "In-use IPs: ${INUSE_IPS}"
         else

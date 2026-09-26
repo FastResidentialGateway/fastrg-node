@@ -951,3 +951,50 @@ Error: context deadline exceeded
 # expect-status: 0
 ---
 Error: 401 Unauthorized
+==== fixture: dhcp_user_ips_good
+# args: 2
+# expect-output: ["192.168.4.2","192.168.4.3"]
+# expect-status: 0
+---
+{"dhcp_infos": [{"user_id": 2, "status": "DHCP server is on", "ip_range": "192.168.4.2 - 192.168.4.10", "subnet_mask": "255.255.255.0", "gateway": "192.168.4.1", "inuse_ips": ["192.168.4.2", "192.168.4.3"], "dnss": ["8.8.8.8"], "inuse_count": 2}]}
+==== fixture: dhcp_user_ips_none_in_use
+# args: 2
+# expect-output: []
+# expect-status: 0
+---
+{"dhcp_infos": [{"user_id": 2, "status": "DHCP server is on", "ip_range": "192.168.4.2 - 192.168.4.10", "subnet_mask": "255.255.255.0", "gateway": "192.168.4.1", "inuse_ips": [], "dnss": ["8.8.8.8"], "inuse_count": 0}]}
+==== fixture: dhcp_user_ips_summary_reply
+# args: 2
+# expect-output: err
+# expect-status: 1
+---
+{"dhcp_infos": [{"user_id": 1, "status": "DHCP server is on", "ip_range": "192.168.5.2 - 192.168.5.10", "subnet_mask": "255.255.255.0", "gateway": "192.168.5.1", "inuse_ips": [], "dnss": ["8.8.8.8"], "inuse_count": 1}, {"user_id": 2, "status": "DHCP server is on", "ip_range": "192.168.4.2 - 192.168.4.10", "subnet_mask": "255.255.255.0", "gateway": "192.168.4.1", "inuse_ips": [], "dnss": ["8.8.8.8"], "inuse_count": 2}]}
+==== fixture: dhcp_user_ips_unfiltered_reply
+# args: 2
+# expect-output: err
+# expect-status: 1
+---
+{"dhcp_infos": [{"user_id": 1, "status": "DHCP server is on", "ip_range": "192.168.5.2 - 192.168.5.10", "subnet_mask": "255.255.255.0", "gateway": "192.168.5.1", "inuse_ips": ["192.168.5.2"], "dnss": ["8.8.8.8"], "inuse_count": 1}, {"user_id": 2, "status": "DHCP server is on", "ip_range": "192.168.4.2 - 192.168.4.10", "subnet_mask": "255.255.255.0", "gateway": "192.168.4.1", "inuse_ips": ["192.168.4.2"], "dnss": ["8.8.8.8"], "inuse_count": 1}]}
+==== fixture: dhcp_user_ips_other_subscriber
+# args: 2
+# expect-output: err
+# expect-status: 1
+---
+{"dhcp_infos": [{"user_id": 1, "status": "DHCP server is on", "ip_range": "192.168.5.2 - 192.168.5.10", "subnet_mask": "255.255.255.0", "gateway": "192.168.5.1", "inuse_ips": ["192.168.5.2"], "dnss": ["8.8.8.8"], "inuse_count": 1}]}
+==== fixture: dhcp_user_ips_count_missing
+# args: 2
+# expect-output: err
+# expect-status: 1
+---
+{"dhcp_infos": [{"user_id": 2, "status": "DHCP server is on", "ip_range": "192.168.4.2 - 192.168.4.10", "subnet_mask": "255.255.255.0", "gateway": "192.168.4.1", "inuse_ips": ["192.168.4.2"], "dnss": ["8.8.8.8"]}]}
+==== fixture: dhcp_user_ips_count_mismatch
+# args: 2
+# expect-output: err
+# expect-status: 1
+---
+{"dhcp_infos": [{"user_id": 2, "status": "DHCP server is on", "ip_range": "192.168.4.2 - 192.168.4.10", "subnet_mask": "255.255.255.0", "gateway": "192.168.4.1", "inuse_ips": [], "dnss": ["8.8.8.8"], "inuse_count": 1}]}
+==== fixture: dhcp_user_ips_empty_input
+# args: 2
+# expect-output: err
+# expect-status: 1
+---

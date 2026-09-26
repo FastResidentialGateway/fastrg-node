@@ -1430,9 +1430,24 @@ grpc::Status FastRGNodeServiceImpl::GetFastrgHsiInfo(::grpc::ServerContext* cont
     return grpc::Status::OK;
 }
 
-grpc::Status FastRGNodeServiceImpl::GetFastrgDhcpInfo(::grpc::ServerContext* context, const ::google::protobuf::Empty* request, ::fastrgnodeservice::FastrgDhcpInfo* response) 
+grpc::Status FastRGNodeServiceImpl::GetFastrgDhcpInfo(::grpc::ServerContext* context, const ::fastrgnodeservice::DhcpInfoRequest* request, ::fastrgnodeservice::FastrgDhcpInfo* response) 
 {
-    for(int i=0; i<fastrg_ccb->user_count; i++) {
+    // Range-check the wire value before narrowing; 0 means every subscriber.
+    uint32_t requested_user_id = request->user_id();
+
+    if (requested_user_id > fastrg_ccb->user_count) {
+        std::string err = "Error! User " + std::to_string(requested_user_id) + " is not exist";
+        cout << err << endl;
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, err);
+    }
+    uint16_t user_id = (uint16_t)requested_user_id;
+
+    /* Only a single-subscriber query lists the in-use addresses. */
+    bool list_inuse_ips = (user_id != 0);
+    int first = list_inuse_ips ? user_id - 1 : 0;
+    int last = list_inuse_ips ? user_id : fastrg_ccb->user_count;
+
+    for(int i=first; i<last; i++) {
         DhcpInfo *dhcp_info = response->add_dhcp_infos();
         ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, i);
         dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, i);
@@ -1446,14 +1461,19 @@ grpc::Status FastRGNodeServiceImpl::GetFastrgDhcpInfo(::grpc::ServerContext* con
             dhcp_info->set_user_id(i + 1);
             dhcp_info->set_status("DHCP server is on");
 
+            U32 inuse_count = 0;
 			for(U32 j=0; j<dhcp_ccb->per_lan_user_pool_len; j++) {
 				if (dhcp_ccb->per_lan_user_pool[j]->ip_pool.used) {
+                    inuse_count++;
+                    if (list_inuse_ips == false)
+                        continue;
                     dhcp_info->add_inuse_ips(std::to_string(*(((U8 *)&(dhcp_ccb->per_lan_user_pool[j]->ip_pool.ip_addr)))) + "." +
                         std::to_string(*(((U8 *)&(dhcp_ccb->per_lan_user_pool[j]->ip_pool.ip_addr))+1)) + "." +
                         std::to_string(*(((U8 *)&(dhcp_ccb->per_lan_user_pool[j]->ip_pool.ip_addr))+2)) + "." +
                         std::to_string(*(((U8 *)&(dhcp_ccb->per_lan_user_pool[j]->ip_pool.ip_addr))+3)));
 				}
 			}
+            dhcp_info->set_inuse_count(inuse_count);
 		} else {
             dhcp_info->set_user_id(i + 1);
             dhcp_info->set_status("DHCP server is off");

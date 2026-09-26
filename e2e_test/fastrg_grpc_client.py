@@ -7,7 +7,7 @@ Usage:
 
 Commands:
     get_hsi_info                                            - GetFastrgHsiInfo  → JSON
-    get_dhcp_info                                           - GetFastrgDhcpInfo → JSON
+    get_dhcp_info [user_id]                                 - GetFastrgDhcpInfo → JSON (in-use IPs only with user_id)
     get_system_info                                         - GetFastrgSystemInfo → JSON
     get_system_stats                                        - GetFastrgSystemStats → JSON
     get_user_drop_count <user_id> [port_idx]               - GetFastrgSystemStats, WAN dropped_packets for user
@@ -193,8 +193,10 @@ def get_hsi_info(node_addr):
     return {"hsi_infos": resp.get('hsi_infos', [])}
 
 
-def get_dhcp_info(node_addr):
-    resp = _grpcurl(node_addr, 'GetFastrgDhcpInfo')
+def get_dhcp_info(node_addr, user_id=None):
+    """Every subscriber's DHCP summary, or one subscriber's with its in-use IPs."""
+    data = {'user_id': user_id} if user_id is not None else None
+    resp = _grpcurl(node_addr, 'GetFastrgDhcpInfo', data)
     return {"dhcp_infos": resp.get('dhcp_infos', [])}
 
 
@@ -471,7 +473,7 @@ def main():
         if opts.command == "get_hsi_info":
             result = get_hsi_info(opts.node)
         elif opts.command == "get_dhcp_info":
-            result = get_dhcp_info(opts.node)
+            result = get_dhcp_info(opts.node, int(opts.args[0]) if opts.args else None)
         elif opts.command == "get_system_info":
             result = get_system_info(opts.node)
         elif opts.command == "get_system_stats":
