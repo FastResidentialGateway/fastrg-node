@@ -780,8 +780,8 @@ _controller_rest_login() {
 # nothing and returns non-zero, so an unreachable controller is never read as
 # data. The token phase0 cached is reused; an expired one is renewed once.
 #
-# The header carries the token verbatim -- this controller rejects a "Bearer "
-# prefix with 401.
+# The header carries the raw token; the controller accepts it with or without a
+# "Bearer " prefix.
 controller_rest_get() {
     local _path="$1" _token="" _code="" _body="" _err=""
 
