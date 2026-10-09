@@ -998,3 +998,73 @@ Error: 401 Unauthorized
 # expect-output: err
 # expect-status: 1
 ---
+==== fixture: node_shutdown_clean
+# expect-output: pass
+# expect-status: 0
+---
+log: ok
+log_last: FastRG[INFO][2026-10-09 03:17:05]: src/fastrg.c:915> bye!
+apport: ok
+kernel: ok
+==== fixture: node_shutdown_abort_without_bye
+# expect-output: no_bye
+# expect-status: 1
+---
+log: ok
+log_last: malloc_consolidate(): unaligned fastbin chunk detected
+apport: ok
+apport_new: INFO: apport (pid 80952) 2026-10-09 00:00:10,762: executable: /root/fastrg/fastrg-node/fastrg (command line "/root/fastrg/fastrg-node/fastrg -l 1-8 -n 4 --socket-mem 17408 -a 0000:07:00.0 -a 0000:08:00.0")
+kernel: ok
+==== fixture: node_shutdown_bye_not_last
+# expect-output: no_bye
+# expect-status: 1
+---
+log: ok
+log_last: free(): invalid pointer
+apport: ok
+kernel: ok
+==== fixture: node_shutdown_apport_record
+# expect-output: apport_record
+# expect-status: 1
+---
+log: ok
+log_last: FastRG[INFO][2026-10-09 03:17:05]: src/fastrg.c:915> bye!
+apport: ok
+apport_new: INFO: apport (pid 80952) 2026-10-09 00:00:10,762: executable: /root/fastrg/fastrg-node/fastrg (command line "/root/fastrg/fastrg-node/fastrg -l 1-8 -n 4 --socket-mem 17408 -a 0000:07:00.0 -a 0000:08:00.0")
+kernel: ok
+==== fixture: node_shutdown_kernel_trap
+# expect-output: kernel_trap
+# expect-status: 1
+---
+log: ok
+log_last: FastRG[INFO][2026-10-09 03:17:05]: src/fastrg.c:915> bye!
+apport: ok
+kernel: ok
+kernel_new: Oct 08 23:33:50 openrg-node kernel: traps: fastrg[51080] general protection fault ip:75335c8a9d3d sp:7ffe0e411340 error:0 in libc.so.6[75335c828000+189000]
+==== fixture: node_shutdown_log_unreadable
+# expect-output: collector_failed
+# expect-status: 1
+---
+log: unreadable
+apport: ok
+kernel: ok
+==== fixture: node_shutdown_apport_unhooked
+# expect-output: collector_failed
+# expect-status: 1
+---
+log: ok
+log_last: FastRG[INFO][2026-10-09 03:17:05]: src/fastrg.c:915> bye!
+apport: unhooked
+kernel: ok
+==== fixture: node_shutdown_kernel_unreadable
+# expect-output: collector_failed
+# expect-status: 1
+---
+log: ok
+log_last: FastRG[INFO][2026-10-09 03:17:05]: src/fastrg.c:915> bye!
+apport: ok
+kernel: unreadable
+==== fixture: node_shutdown_no_evidence
+# expect-output: collector_failed
+# expect-status: 1
+---

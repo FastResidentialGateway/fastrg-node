@@ -190,6 +190,15 @@ case_validation_register offline_snat_add_skipped phase40_offline_cli_writes \
 case_validation_register offline_dns_record_add_skipped phase40_offline_cli_writes \
     _p40_inject_dns_record_add_skipped _p40_cleanup_drill 'Step 182:'
 
+# Drill: the Step 184 stop leaves a stdout log without "bye!".
+_p40_cleanup_shutdown_drill() {
+    _e2e_restore_node_shutdown_functions
+    _cleanup_phase40_offline_cli_writes
+}
+
+case_validation_register shutdown_bye_missing_step184 phase40_offline_cli_writes \
+    _e2e_inject_node_shutdown_no_bye _p40_cleanup_shutdown_drill 'Step 184:'
+
 # ---------------------------------------------------------------------------
 # Node-side readings. All of them go straight to the node, which is the only
 # side that can answer while etcd is unreachable.
@@ -452,7 +461,7 @@ phase40_offline_cli_writes() {
     local _waited=0 _released=0 _marker="" _missing="" _kafka=""
     local _etcd_hsi="" _etcd_dns="" _conntrack="" _dig_off="" _dig_on=""
     local _stopped=0 _recovered=0 _started_at=0 _elapsed=0 _reported=0
-    local _seen=0 _gone=0
+    local _seen=0 _gone=0 _stop_mark="" _stop_crash="pass"
 
     bold "═══════════════════════════════════════════════════════"
     bold " Phase 40 — Offline node CLI config writes (Steps 176-184)"
@@ -968,6 +977,7 @@ phase40_offline_cli_writes() {
     # this step is about to read back.
     _P40_NODE_STOPPED=1
     if _p40_node_running; then
+        _stop_mark=$(e2e_node_stop_mark)
         ssh_node "pkill -x fastrg" >/dev/null 2>&1 || true
         for _i in $(seq 1 30); do
             if ! _p40_node_running; then
@@ -976,6 +986,10 @@ phase40_offline_cli_writes() {
             fi
             sleep 1
         done
+        # Reported with the step's verdict; the cold start below still has to run.
+        if [[ $_stopped -eq 1 ]]; then
+            _stop_crash=$(e2e_node_shutdown_check "$_stop_mark") || true
+        fi
     else
         _stopped=1
     fi
@@ -1021,6 +1035,8 @@ phase40_offline_cli_writes() {
         _issue="${_issue:+${_issue}; }hsi/${USER_ID} still dirty='${_dirty_hsi}' ${_waited}s after the reconnect"
     [[ "$_dirty_dns" == "false" ]] || \
         _issue="${_issue:+${_issue}; }dns/${USER_ID} still dirty='${_dirty_dns}' ${_waited}s after the reconnect"
+    [[ "$_stop_crash" == "pass" ]] || \
+        _issue="${_issue:+${_issue}; }shutdown_crash=${_stop_crash}"
 
     if [[ -z "$_issue" ]]; then
         pass "Step 184: cold start with etcd unreachable keeps the static DNS records" \

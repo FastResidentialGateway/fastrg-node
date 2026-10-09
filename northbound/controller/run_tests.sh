@@ -305,9 +305,31 @@ else
     echo "⚠️  etcd server is not available. Skipping etcd CAS put test."
 fi
 
-# Test 5: Kafka retry policy (no broker, no WAL, no etcd needed)
+# Test 5: etcd client teardown under ASan — a watcher callback that touches the
+# freed client is reported by AddressSanitizer
 echo ""
-echo "🔧 Test 5: Kafka retry policy test"
+echo "🔧 Test 5: etcd watch teardown test (ASan)"
+echo "------------------------------------------"
+if [ "$ETCD_READY" -eq 1 ]; then
+    if [ -f "./test/test_etcd_watch_teardown" ]; then
+        ./test/test_etcd_watch_teardown
+        if [ $? -ne 0 ]; then
+            echo "❌ etcd watch teardown test failed."
+            TEST_FAILED=1
+        else
+            echo "✅ etcd watch teardown test completed!"
+        fi
+    else
+        echo "❌ test_etcd_watch_teardown executable not found."
+        TEST_FAILED=1
+    fi
+else
+    echo "⚠️  etcd server is not available. Skipping etcd watch teardown test."
+fi
+
+# Test 6: Kafka retry policy (no broker, no WAL, no etcd needed)
+echo ""
+echo "🔧 Test 6: Kafka retry policy test"
 if [ -f "./test/test_kafka_retry" ]; then
     ./test/test_kafka_retry
     if [ $? -ne 0 ]; then
@@ -321,10 +343,10 @@ else
     TEST_FAILED=1
 fi
 
-# Test 6: Kafka producer pure functions — WAL serialization and event payload
+# Test 7: Kafka producer pure functions — WAL serialization and event payload
 # builders (no broker, no WAL file, no etcd needed)
 echo ""
-echo "🔧 Test 6: Kafka producer unit tests"
+echo "🔧 Test 7: Kafka producer unit tests"
 if [ -f "./test/test_kafka_producer" ]; then
     ./test/test_kafka_producer
     if [ $? -ne 0 ]; then

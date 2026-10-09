@@ -195,11 +195,21 @@ _cleanup_phase33_shutdown_inactive() {
     return 0
 }
 
+# Drill: the Step 137 stop leaves a stdout log without "bye!".
+_p33_cleanup_shutdown_drill() {
+    _e2e_restore_node_shutdown_functions
+    _cleanup_phase33_shutdown_inactive
+}
+
+case_validation_register shutdown_bye_missing_step137 phase33_shutdown_inactive \
+    _e2e_inject_node_shutdown_no_bye _p33_cleanup_shutdown_drill 'Step 137:'
+
 phase33_shutdown_inactive() {
     local _issue135="" _issue136=""
     local _config_log_path="" _log_baseline=0
     local _entry="" _presence="" _status="" _reason=""
     local _stopped=0 _relaunched=0 _recovered=0
+    local _stop_mark="" _stop_crash=""
     local _controller_ok=0 _shutdown_seconds=0
     local _hsi="" _status1="" _status2=""
     local _i
@@ -225,6 +235,7 @@ phase33_shutdown_inactive() {
         info "  log baseline: ${_log_baseline} lines in ${_P33_LOG_PATH}"
 
         _P33_RESTART_NEEDED=1
+        _stop_mark=$(e2e_node_stop_mark)
         if ! ssh_node "pkill -x fastrg" >/dev/null 2>&1; then
             _issue135="${_issue135} SIGTERM_delivery=failed"
         fi
@@ -236,7 +247,11 @@ phase33_shutdown_inactive() {
             fi
             sleep 1
         done
-        [[ $_stopped -eq 1 ]] || _issue135="${_issue135} fastrg_still_running_after_30s"
+        if [[ $_stopped -ne 1 ]]; then
+            _issue135="${_issue135} fastrg_still_running_after_30s"
+        elif ! _stop_crash=$(e2e_node_shutdown_check "$_stop_mark"); then
+            _issue135="${_issue135} shutdown_crash=${_stop_crash}"
+        fi
 
         # The application log is truncated on every start, so this must be
         # read before Step 138 cold-starts the node.
@@ -263,7 +278,7 @@ phase33_shutdown_inactive() {
 
         if [[ -z "$_issue135" ]]; then
             pass "Step 137: graceful stop marks node inactive" \
-                "node still listed after SIGTERM (exited in ${_shutdown_seconds}s): status=${_status}, inactive_reason=${_reason}; shutdown report logged"
+                "node still listed after SIGTERM (exited in ${_shutdown_seconds}s, log ends with bye!, no crash record): status=${_status}, inactive_reason=${_reason}; shutdown report logged"
         else
             fail "Step 137: graceful stop marks node inactive" "${_issue135# }"
             _p33_failure_evidence

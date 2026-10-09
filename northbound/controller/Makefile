@@ -52,12 +52,19 @@ TEST_CLIENT_SRC = $(TEST_DIR)/test_controller.c
 TEST_SERVER_SRC = $(TEST_DIR)/test_controller_server.cpp
 TEST_ETCD_SRC = $(TEST_DIR)/test_etcd_client.cpp
 TEST_ETCD_CAS_SRC = $(TEST_DIR)/test_etcd_cas.cpp
+TEST_ETCD_WATCH_TEARDOWN = $(TEST_DIR)/test_etcd_watch_teardown
+TEST_ETCD_WATCH_TEARDOWN_SRC = $(TEST_DIR)/test_etcd_watch_teardown.cpp
 TEST_KAFKA_RETRY = $(TEST_DIR)/test_kafka_retry
 TEST_KAFKA_RETRY_SRC = $(TEST_DIR)/test_kafka_retry.cpp
 TEST_KAFKA_PRODUCER = $(TEST_DIR)/test_kafka_producer
 TEST_KAFKA_PRODUCER_SRC = $(TEST_DIR)/test_kafka_producer.cpp
 
-.PHONY: all clean test test-client test-server test-etcd test-etcd-cas test-kafka-retry test-kafka-producer run-tests
+# The watch teardown test links an ASan build of etcd_client.cpp; the
+# production etcd_client.o is left uninstrumented.
+ASAN_FLAGS = -fsanitize=address -fsanitize-recover=address -fno-omit-frame-pointer
+ETCD_CLIENT_ASAN_OBJ = $(TEST_DIR)/etcd_client_asan.o
+
+.PHONY: all clean test test-client test-server test-etcd test-etcd-cas test-etcd-watch-teardown test-kafka-retry test-kafka-producer run-tests
 
 all: $(OBJECTS)
 
@@ -93,13 +100,14 @@ kafka_producer.o: kafka_producer.cpp kafka_producer.h kafka_retry_policy.h kafka
 	$(CXX) $(CXXFLAGS) -c kafka_producer.cpp -o kafka_producer.o
 
 # Test targets
-test: test-client test-server test-etcd test-etcd-cas test-kafka-retry test-kafka-producer
+test: test-client test-server test-etcd test-etcd-cas test-etcd-watch-teardown test-kafka-retry test-kafka-producer
 	@echo "✅ All controller tests built successfully"
 	@echo "Usage:"
 	@echo "  ./$(TEST_CLIENT)         - Run controller client test"
 	@echo "  ./$(TEST_SERVER)         - Run controller server test"
 	@echo "  ./$(TEST_ETCD)           - Run etcd client test"
 	@echo "  ./$(TEST_ETCD_CAS)       - Run etcd CAS put test"
+	@echo "  ./$(TEST_ETCD_WATCH_TEARDOWN) - Run etcd watch teardown test (ASan)"
 	@echo "  make run-tests           - Run automated test suite"
 	@echo "  ./run_tests.sh           - Run automated test suite (alternative)"
 
@@ -118,6 +126,9 @@ test-etcd: $(TEST_ETCD)
 
 test-etcd-cas: $(TEST_ETCD_CAS)
 	@echo "✅ Etcd CAS put test built: $(TEST_ETCD_CAS)"
+
+test-etcd-watch-teardown: $(TEST_ETCD_WATCH_TEARDOWN)
+	@echo "✅ Etcd watch teardown test built: $(TEST_ETCD_WATCH_TEARDOWN)"
 
 test-kafka-retry: $(TEST_KAFKA_RETRY)
 	@echo "✅ Kafka retry policy test built: $(TEST_KAFKA_RETRY)"
@@ -153,6 +164,15 @@ $(TEST_ETCD_CAS): $(TEST_ETCD_CAS_SRC) etcd_client.o config_snapshot.o kafka_pro
 		config_snapshot.o kafka_producer.o $(EVENTS_PROTO_OBJ) ../../src/dbg.o \
 		$(LDFLAGS) -laddress_sorting -lpthread
 
+$(ETCD_CLIENT_ASAN_OBJ): etcd_client.cpp etcd_client.h
+	$(CXX) $(CXXFLAGS) $(ASAN_FLAGS) -c etcd_client.cpp -o $(ETCD_CLIENT_ASAN_OBJ)
+
+$(TEST_ETCD_WATCH_TEARDOWN): $(TEST_ETCD_WATCH_TEARDOWN_SRC) $(ETCD_CLIENT_ASAN_OBJ) config_snapshot.o kafka_producer.o $(EVENTS_PROTO_OBJ)
+	$(CXX) $(CXXFLAGS) $(ASAN_FLAGS) -I. -o $(TEST_ETCD_WATCH_TEARDOWN) $(TEST_ETCD_WATCH_TEARDOWN_SRC) \
+		$(ETCD_CLIENT_ASAN_OBJ) config_snapshot.o kafka_producer.o $(EVENTS_PROTO_OBJ) ../../src/dbg.o \
+		$(LDFLAGS) -laddress_sorting -lpthread
+
 clean:
 	rm -f $(OBJECTS) $(PROTO_SOURCES) $(PROTO_HEADERS) $(EVENTS_PROTO_SRC) $(EVENTS_PROTO_HDR)
 	rm -f $(TEST_CLIENT) $(TEST_SERVER) $(TEST_ETCD) $(TEST_ETCD_CAS) $(TEST_KAFKA_RETRY) $(TEST_KAFKA_PRODUCER)
+	rm -f $(TEST_ETCD_WATCH_TEARDOWN) $(ETCD_CLIENT_ASAN_OBJ)

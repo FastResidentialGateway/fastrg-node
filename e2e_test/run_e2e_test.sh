@@ -455,6 +455,11 @@ if [[ -z "${_FASTRG_E2E_RELOCATED:-}" ]]; then
             exit $_ssh_rc
         fi
 
+        # The final node stop is checked inside the runner-side cleanup, after
+        # RESULT, and its output stays on the runner; show its verdict here.
+        ssh $_SSH_OPTS "${_E2E_RUNNER_USER}@${_E2E_RUNNER_HOST}" \
+            "grep -a 'Final stop:' ${_E2E_CLEANUP_LOG} 2>/dev/null" 2>/dev/null || true
+
         # Clean up uploaded files from runner (always, regardless of test result)
         info "Cleaning up uploaded files from runner ${_E2E_RUNNER_HOST}:${_E2E_REMOTE_DIR} ..."
         ssh $_SSH_OPTS "${_E2E_RUNNER_USER}@${_E2E_RUNNER_HOST}" \
@@ -952,6 +957,8 @@ source "${_E2E_PHASES_DIR}/rss_probe_lib.sh"
 source "${_E2E_PHASES_DIR}/progress_lib.sh"
 # The node->etcd block every offline phase shares — not a phase either.
 source "${_E2E_PHASES_DIR}/etcd_block_lib.sh"
+# The crash check every SIGTERM stop of the node shares — not a phase either.
+source "${_E2E_PHASES_DIR}/node_shutdown_lib.sh"
 source "${_E2E_PHASES_DIR}/phase0_setup.sh"
 source "${_E2E_PHASES_DIR}/phase1_subscriber_count_tests.sh"
 source "${_E2E_PHASES_DIR}/phase2_etcd_config_sync.sh"
@@ -1302,6 +1309,10 @@ stop_orphan_watchdog() {
 }
 
 cleanup_fastrg() {
+    # The status the run is exiting with; only a clean run is turned into a
+    # failure by an unclean final node stop below.
+    local _e2e_exit_status=$?
+    local _e2e_final_stop_failed=0 _e2e_stop_mark="" _e2e_stop_crash="" _e2e_stop_state="" _e2e_stop_i
     set +eu  # Prevent set -e / set -u from interrupting cleanup, ensure all cleanup steps are executed
 
     # From here on the run is being torn down, and a signal arriving now would
@@ -1367,8 +1378,24 @@ cleanup_fastrg() {
 
     if [[ "${_FASTRG_STARTED_BY_SCRIPT:-0}" -eq 1 ]]; then
         info "Stopping fastrg (started by this script)..."
+        _e2e_stop_mark=$(e2e_node_stop_mark)
         ssh_node "pkill -x fastrg 2>/dev/null || true" || true
-        info "fastrg stopped."
+        for _e2e_stop_i in $(seq 1 30); do
+            _e2e_stop_state=$(ssh_node \
+                "if pgrep -x fastrg >/dev/null 2>&1; then echo running; else echo stopped; fi" 2>/dev/null)
+            [[ "$_e2e_stop_state" == "stopped" ]] && break
+            sleep 1
+        done
+        # "Final stop:" lines are relayed to the caller after the run.
+        if [[ "$_e2e_stop_state" != "stopped" ]]; then
+            error "Final stop: fastrg not seen stopped within 30s of SIGTERM (state: ${_e2e_stop_state:-node unreachable})"
+            _e2e_final_stop_failed=1
+        elif _e2e_stop_crash=$(e2e_node_shutdown_check "$_e2e_stop_mark"); then
+            info "Final stop: fastrg stopped cleanly (log ends with bye!, no crash record)"
+        else
+            error "Final stop: fastrg did not stop cleanly: ${_e2e_stop_crash}"
+            _e2e_final_stop_failed=1
+        fi
 
         # A config-apply failure emitted while phase17 removes its offline
         # test user can race with controller rollback and resurrect an older
@@ -1409,6 +1436,11 @@ cleanup_fastrg() {
 
     _trace_interrupt "cleanup: finished normally"
     info "Cleanup complete."
+
+    # RESULT is already printed by now, so the exit status carries this one.
+    if [[ "$_e2e_final_stop_failed" -eq 1 && "$_e2e_exit_status" -eq 0 ]]; then
+        exit 1
+    fi
 }
 
 # ---------------------------------------------------------------------------

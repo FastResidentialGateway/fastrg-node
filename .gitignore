@@ -7,6 +7,7 @@ build
 **/fastrg_northbound
 **/.libs
 unit_test/unit-tester
+northbound/controller/test/test_etcd_watch_teardown
 **/*.gcda
 **/*.gcno
 coverage/
