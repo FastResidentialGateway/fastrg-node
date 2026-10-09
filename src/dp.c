@@ -255,8 +255,6 @@ static struct rte_eth_conf port_conf_default = {
     .intr_conf = {
         .lsc = 1, /**< link status interrupt feature enabled */ },
 };
-/* Per-lcore persistent-online flag for the RCU getter fast path (see fastrg.h). */
-BOOL fastrg_rcu_persistent[RTE_MAX_LCORE];
 
 static int lsi_event_callback(U16 port_id, enum rte_eth_event_type type, void *param);
 
@@ -2227,11 +2225,10 @@ void wan_ctrl_tx(FastRG_t *fastrg_ccb, U16 ccb_id, U8 *mu, U16 mulen)
     pkt->pkt_len = mulen;
     count_tx_packet(fastrg_ccb, pkt, WAN_PORT, ccb_id);
     unsigned int lcore_id = rte_lcore_id();
-    /* Control TX callers must run on an EAL lcore. Persistent data-plane
-     * lcores are already pdump_rcu-online. Callback removal does not wait, so
-     * this window covers ctrl_thread's queue-0 TX burst in teardown's
+    /* Control TX callers must run on an EAL lcore. Callback removal does not
+     * wait, so this window covers ctrl_thread's queue-0 TX burst in teardown's
      * synchronize-before-free grace period. */
-    BOOL rcu_toggle = (lcore_id != LCORE_ID_ANY) && !fastrg_rcu_persistent[lcore_id];
+    BOOL rcu_toggle = (lcore_id != LCORE_ID_ANY);
     if (rcu_toggle)
         rte_rcu_qsbr_thread_online(fastrg_ccb->pdump_rcu, lcore_id);
     U16 cp_tx_q = fastrg_ccb->dp_ctrl_txq_cp[WAN_PORT];
@@ -2271,11 +2268,10 @@ void lan_ctrl_tx(FastRG_t *fastrg_ccb, U16 ccb_id, U8 *mu, U16 mulen)
     pkt->pkt_len = mulen;
     count_tx_packet(fastrg_ccb, pkt, LAN_PORT, ccb_id);
     unsigned int lcore_id = rte_lcore_id();
-    /* Control TX callers must run on an EAL lcore. Persistent data-plane
-     * lcores are already pdump_rcu-online. Callback removal does not wait, so
-     * this window covers ctrl_thread's queue-0 TX burst in teardown's
+    /* Control TX callers must run on an EAL lcore. Callback removal does not
+     * wait, so this window covers ctrl_thread's queue-0 TX burst in teardown's
      * synchronize-before-free grace period. */
-    BOOL rcu_toggle = (lcore_id != LCORE_ID_ANY) && !fastrg_rcu_persistent[lcore_id];
+    BOOL rcu_toggle = (lcore_id != LCORE_ID_ANY);
     if (rcu_toggle)
         rte_rcu_qsbr_thread_online(fastrg_ccb->pdump_rcu, lcore_id);
     U16 cp_tx_q = fastrg_ccb->dp_ctrl_txq_cp[LAN_PORT];

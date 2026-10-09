@@ -333,7 +333,6 @@ static void dns_tcp_env_init(FastRG_t *fastrg_ccb)
     }
     memset(fastrg_ccb->per_subscriber_stats, 0,
         sizeof(fastrg_ccb->per_subscriber_stats));
-    fastrg_rcu_persistent[rte_lcore_id()] = TRUE;
 }
 
 static void dns_tcp_ctx_init(dns_tcp_ctx_t *c, FastRG_t *fastrg_ccb)
@@ -765,7 +764,6 @@ static void dns_udp_env_init(FastRG_t *fastrg_ccb)
     memset(fastrg_ccb->per_subscriber_stats, 0,
         sizeof(fastrg_ccb->per_subscriber_stats));
     fastrg_ccb->per_subscriber_stats[rte_lcore_id()][WAN_PORT] = &dns_udp_wan_stats;
-    fastrg_rcu_persistent[rte_lcore_id()] = TRUE;
 }
 
 static void dns_udp_packet_init(dns_udp_ctx_t *c, FastRG_t *fastrg_ccb)

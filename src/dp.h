@@ -532,7 +532,6 @@ static inline void fastrg_rcu_dp_online(FastRG_t *fastrg_ccb)
 static inline void fastrg_rcu_dp_register(FastRG_t *fastrg_ccb)
 {
     fastrg_rcu_dp_online(fastrg_ccb);
-    fastrg_rcu_persistent[rte_lcore_id()] = TRUE;   /* online first, then flip flag */
 }
 
 /**
@@ -557,8 +556,8 @@ static inline void fastrg_rcu_dp_quiescent(FastRG_t *fastrg_ccb)
 /**
  * @fn fastrg_rcu_dp_unregister
  *
- * @brief Report QSBR-offline on both RCUs for the calling data-plane lcore
- *        and clear its persistent flag.  MUST be called once when the thread
+ * @brief Report QSBR-offline on both RCUs for the calling data-plane lcore.
+ *        MUST be called once when the thread
  *        leaves its poll loop (on stop_flag), before returning.  Without this
  *        the thread exits while still recorded online, and the cleanup-path
  *        rte_rcu_qsbr_synchronize() waits on it forever (it never reports
@@ -570,7 +569,6 @@ static inline void fastrg_rcu_dp_quiescent(FastRG_t *fastrg_ccb)
  */
 static inline void fastrg_rcu_dp_unregister(FastRG_t *fastrg_ccb)
 {
-    fastrg_rcu_persistent[rte_lcore_id()] = FALSE;  /* flag first, then go offline */
     fastrg_rcu_dp_offline(fastrg_ccb);
 }
 

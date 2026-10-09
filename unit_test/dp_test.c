@@ -208,7 +208,6 @@ static void test_send2cp(FastRG_t *fastrg_ccb)
     tFastRG_MBX *received = NULL;
     void *object = NULL;
     unsigned int lcore_id = rte_lcore_id();
-    BOOL old_persistent;
     struct per_ccb_stats *old_lan_stats;
     struct per_ccb_stats *old_wan_stats;
     unsigned int available_before;
@@ -218,10 +217,8 @@ static void test_send2cp(FastRG_t *fastrg_ccb)
     printf("\nTesting send2cp function:\n");
 
     TEST_ASSERT(lcore_id != LCORE_ID_ANY, "send2cp runs on an EAL lcore", "unit test should run on EAL lcore 0");
-    old_persistent = fastrg_rcu_persistent[lcore_id];
     old_lan_stats = fastrg_ccb->per_subscriber_stats[lcore_id][LAN_PORT];
     old_wan_stats = fastrg_ccb->per_subscriber_stats[lcore_id][WAN_PORT];
-    fastrg_rcu_persistent[lcore_id] = TRUE;
     fastrg_ccb->per_subscriber_stats[lcore_id][LAN_PORT] = NULL;
     fastrg_ccb->per_subscriber_stats[lcore_id][WAN_PORT] = NULL;
 
@@ -282,7 +279,6 @@ static void test_send2cp(FastRG_t *fastrg_ccb)
     fastrg_ccb->free_mail_ring = old_free_mail_ring;
     fastrg_ccb->per_subscriber_stats[lcore_id][LAN_PORT] = old_lan_stats;
     fastrg_ccb->per_subscriber_stats[lcore_id][WAN_PORT] = old_wan_stats;
-    fastrg_rcu_persistent[lcore_id] = old_persistent;
 }
 
 /* Two lcores writing one TX queue corrupt its ring, so the layout must never

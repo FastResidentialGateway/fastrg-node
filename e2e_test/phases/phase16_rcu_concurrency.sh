@@ -1,19 +1,12 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # ---------------------------------------------------------------------------
-# Phase 16 — RCU reader/writer concurrency under data-plane load
+# Phase 16 — subscriber-count churn under data-plane load
 #
-# Exercises the per-lcore persistent-online RCU getter fast path: a high-rate
-# iperf3 flow keeps the data-plane lcores hammering PPPD_GET_CCB / DHCP / stats
-# getters (RCU readers on the fast path, reporting quiescent once per burst),
-# while SetSubscriberCount is fired repeatedly — each call makes fastrg realloc
-# the ppp_ccb / dhcp_ccb / per_subscriber_stats arrays and run
-# rte_rcu_qsbr_synchronize (the RCU writer).
-#
-# If fast-path readers stopped reporting quiescent, synchronize would block and
-# SetSubscriberCount would hang; if a reader saw a freed array the node would
-# crash. Both steps passing under sustained load confirms reader/writer
-# concurrency is correct.
+# A high-rate iperf3 flow keeps the data-plane lcores busy while
+# SetSubscriberCount is fired repeatedly; each change enables or disables
+# preallocated subscriber slots on the control thread. The node must not hang
+# or crash, and the data plane must keep forwarding afterwards.
 # ---------------------------------------------------------------------------
 # Helper: restore the subscriber count churned by the Step 67 loop below +
 # stop the iperf3 server. Idempotent (set_subscriber_count/pkill both tolerate

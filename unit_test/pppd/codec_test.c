@@ -1443,12 +1443,10 @@ static void decode_env_init(FastRG_t *fastrg_ccb)
     }
 
     /* The mock FastRG_t is malloc'd, so the per-lcore stats grid is garbage —
-     * wipe it and install one WAN row. The persistent-RCU flag makes the
-     * stats getter skip the (unset) stats qsbr on this lcore. */
+     * wipe it and install one WAN row. */
     memset(fastrg_ccb->per_subscriber_stats, 0,
         sizeof(fastrg_ccb->per_subscriber_stats));
     fastrg_ccb->per_subscriber_stats[rte_lcore_id()][WAN_PORT] = &decode_wan_stats;
-    fastrg_rcu_persistent[rte_lcore_id()] = TRUE;
 }
 
 static void decode_ccb_reset(FastRG_t *fastrg_ccb, U8 phase)

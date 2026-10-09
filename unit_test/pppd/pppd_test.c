@@ -50,7 +50,6 @@ static void pppd_env_init(FastRG_t *fastrg_ccb)
     }
     memset(fastrg_ccb->per_subscriber_stats, 0,
         sizeof(fastrg_ccb->per_subscriber_stats));
-    fastrg_rcu_persistent[rte_lcore_id()] = TRUE;
     rte_timer_subsystem_init();
     fastrg_ccb->lcore.ctrl_thread = rte_lcore_id();
 

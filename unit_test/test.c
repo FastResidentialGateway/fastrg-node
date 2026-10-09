@@ -20,6 +20,7 @@ void free_ccb(FastRG_t *ccb)
     }
     if (ccb->ppp_ccb) fastrg_mfree(ccb->ppp_ccb);
     if (ccb->dhcp_ccb) fastrg_mfree(ccb->dhcp_ccb);
+    if (ccb->pdump_rcu) fastrg_mfree(ccb->pdump_rcu);
     fastrg_mfree(ccb);
 }
 
@@ -56,6 +57,18 @@ FastRG_t *init_ccb(int user_count)
         goto err;
     rte_rcu_qsbr_thread_register(ppp_rcu, 0);
     ccb->ppp_ccb_rcu = ppp_rcu;
+
+    /* ---- pdump_rcu ---------------------------------------------------- */
+    ccb->pdump_rcu = fastrg_calloc(struct rte_rcu_qsbr, 1, rcu_sz, RTE_CACHE_LINE_SIZE);
+    if (ccb->pdump_rcu == NULL)
+        goto err;
+    if (rte_rcu_qsbr_init(ccb->pdump_rcu, RTE_MAX_LCORE) != 0)
+        goto err;
+    unsigned int lcore_id;
+    RTE_LCORE_FOREACH(lcore_id) {
+        if (rte_rcu_qsbr_thread_register(ccb->pdump_rcu, lcore_id) != 0)
+            goto err;
+    }
 
     /* ---- ppp_ccb pointer array + individual CCBs --------------------- */
     ccb->ppp_ccb = fastrg_calloc(ppp_ccb_t *, user_count, sizeof(ppp_ccb_t *), 0);

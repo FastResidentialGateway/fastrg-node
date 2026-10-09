@@ -49,13 +49,6 @@ enum {
 extern rte_atomic16_t stop_flag;
 extern rte_atomic16_t start_flag;
 
-/* Set TRUE per data-plane lcore at thread startup (fastrg_rcu_dp_register).
- * When set, the RCU ccb/stats getters take a lean load-only fast path: the lcore
- * stays QSBR-online for its whole life and reports quiescent once per burst,
- * instead of entering/exiting a critical section on every getter call.
- * Control-plane / metrics threads leave it FALSE and use the full path. */
-extern BOOL fastrg_rcu_persistent[RTE_MAX_LCORE];
-
 #define NIC_MODEL_MAX_LEN 128
 
 struct nic_info {
