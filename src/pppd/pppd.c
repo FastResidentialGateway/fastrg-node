@@ -231,12 +231,6 @@ U32 ppp_report_all_connection_status(FastRG_t *fastrg_ccb)
     return event_count;
 }
 
-void PPP_bye_timer_cb(__attribute__((unused)) struct rte_timer *tim,
-    ppp_ccb_t *ppp_ccb)
-{
-    PPP_bye(ppp_ccb);
-}
-
 void PPP_keepalive_cb(__attribute__((unused)) struct rte_timer *tim,
     ppp_ccb_t *s_ppp_ccb)
 {
