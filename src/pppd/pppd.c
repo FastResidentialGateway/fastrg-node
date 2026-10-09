@@ -948,6 +948,8 @@ void exit_ppp(ppp_ccb_t *ppp_ccb)
     dhcp_ccb_t *dhcp_ccb = DHCPD_GET_CCB(fastrg_ccb, ccb_id);
 
     rte_atomic16_cmpset((U16 *)&(ppp_ccb->ppp_bool.cnt), 1, 0);
+    /* Callers may skip PPP_bye, so the data-plane gate must be closed here. */
+    rte_atomic16_cmpset((volatile uint16_t *)&ppp_ccb->dp_start_bool.cnt, (S16)1, (S16)0);
     rte_timer_stop(&(ppp_ccb->ppp));
     rte_timer_stop(&(ppp_ccb->ppp_ipv6cp));
     rte_timer_stop(&(ppp_ccb->dhcp6_timer));
@@ -966,6 +968,8 @@ void exit_ppp(ppp_ccb_t *ppp_ccb)
     ppp_ccb->ipv6cp_up = FALSE;
     pppd_ipv6_dp_gate_update(ppp_ccb);
     ppp_ccb->pppoe_phase.active = FALSE;
+    /* Clear the session id so late PADT/LCP frames from the old session are dropped. */
+    ppp_ccb->session_id = 0;
     ppp_ccb->hsi_ipv4 = 0x0;
     ppp_ccb->hsi_ipv4_gw = 0x0;
     ppp_ccb->hsi_primary_dns = 0xffffffff; /* 0xffffffff means no dns assigned by server */
@@ -1027,8 +1031,26 @@ STATUS ppp_process(FastRG_t *fastrg_ccb, U8 *pkt_data, U16 len)
     U16 vlan_offset = sizeof(struct rte_ether_hdr);
     U16 ppp_offset = vlan_offset + sizeof(vlan_header_t) +
         sizeof(pppoe_header_t);
+    vlan_header_t *vlan_hdr = (vlan_header_t *)(pkt_data + vlan_offset);
+    pppoe_header_t *pppoe_hdr = (pppoe_header_t *)(vlan_hdr + 1);
+
+    /* return ERROR if PADT and session frames that are not for the current session,
+     * before anything is saved into the ccb. */
+    if (len >= ppp_offset) {
+        BOOL names_session = vlan_hdr->next_proto == rte_cpu_to_be_16(ETH_P_PPP_SES) ||
+            (vlan_hdr->next_proto == rte_cpu_to_be_16(ETH_P_PPP_DIS) && pppoe_hdr->code == PADT);
+        if (names_session && (ppp_ccb->session_id == 0 ||
+                pppoe_hdr->session_id != ppp_ccb->session_id)) {
+            FastRG_LOG(DBG, fastrg_ccb->fp, ppp_ccb, PPPLOGMSG,
+                "This frame's session ID 0x%x is different from user %" PRIu16 
+                "'s current session 0x%x",
+                rte_be_to_cpu_16(pppoe_hdr->session_id), ppp_ccb->user_num,
+                rte_be_to_cpu_16(ppp_ccb->session_id));
+            return ERROR;
+        }
+    }
+
     if (len >= ppp_offset + sizeof(ppp_payload_t)) {
-        vlan_header_t *vlan_hdr = (vlan_header_t *)(pkt_data + vlan_offset);
         ppp_payload_t *ppp_payload = (ppp_payload_t *)(pkt_data + ppp_offset);
 
         if (vlan_hdr->next_proto == rte_cpu_to_be_16(ETH_P_PPP_SES) &&

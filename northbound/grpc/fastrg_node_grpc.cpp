@@ -529,11 +529,17 @@ grpc::Status FastRGNodeServiceImpl::DisconnectHsi(::grpc::ServerContext* context
         for(int i=0; i<fastrg_ccb->user_count; i++) {
             if (force) {
                 if (fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_PPPoE, PPPoE_CMD_FORCE_DISABLE, i, NULL) == ERROR) {
-                    cout << "Failed to generate PPPoE enable event for user " << i + 1 << endl;
-                    std::string err = "Failed to generate PPPoE enable event for user " + std::to_string(i + 1);
+                    cout << "Failed to generate PPPoE force-disable event for user " << i + 1 << endl;
+                    std::string err = "Failed to generate PPPoE force-disable event for user " + std::to_string(i + 1);
                     cout << err << endl;
                     continue;
                 }
+                if (sdn_offline) {
+                    std::string u = std::to_string(i + 1);
+                    snapshot_field_edit(SNAPSHOT_KIND_HSI, u.c_str(), SNAPSHOT_FIELD_KIND_DESIRE,
+                        DESIRE_STATUS_DISCONNECT, std::string("desire=") + DESIRE_STATUS_DISCONNECT, false);
+                }
+                continue;
             }
             ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, i);
             /* The CCB pointer array is RCU-protected and a slot may be transiently
@@ -563,8 +569,8 @@ grpc::Status FastRGNodeServiceImpl::DisconnectHsi(::grpc::ServerContext* context
     } else {
         if (force) {
             if (fastrg_gen_northbound_event(fastrg_ccb, EV_NORTHBOUND_PPPoE, PPPoE_CMD_FORCE_DISABLE, ccb_id, NULL) == ERROR) {
-                cout << "Failed to generate PPPoE enable event for user " << ccb_id + 1 << endl;
-                std::string err = "Failed to generate PPPoE enable event for user " + std::to_string(ccb_id + 1);
+                cout << "Failed to generate PPPoE force-disable event for user " << ccb_id + 1 << endl;
+                std::string err = "Failed to generate PPPoE force-disable event for user " + std::to_string(ccb_id + 1);
                 cout << err << endl;
                 return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, err);
             } else {
