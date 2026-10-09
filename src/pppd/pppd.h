@@ -196,7 +196,7 @@ typedef struct {
     pppoe_phase_t         pppoe_phase;       /* store pppoe info */
     U8                    cp_id;             /* current control protocol: PPP_CP_* */
     U8                    phase;             /* pppoe connection phase */
-    U16                   session_id;        /* pppoe session id */
+    U16                   session_id;        /* pppoe session id (network order); 0 = no session */
     struct rte_ether_addr PPP_dst_mac;       /* pppoe server mac addr */
     U32                   hsi_ipv4;          /* ip addr pppoe server assign to pppoe client */
     U32                   hsi_ipv4_gw;       /* ip addr gateway pppoe server assign to pppoe client */
@@ -510,7 +510,8 @@ void   exit_ppp(ppp_ccb_t *ppp_ccb);
  * @param len
  *      Length of the packet data
  * 
- * @return SUCCESS if process successfully, ERROR if process failed
+ * @return SUCCESS if processed; ERROR if processing failed or the frame is not 
+ *      for the current session.
  */
 STATUS ppp_process(FastRG_t *fastrg_ccb, U8 *pkt_data, U16 len);
 

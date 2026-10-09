@@ -1,9 +1,6 @@
 /*
- * fastrg_test.c — fixed-max prealloc semantics of FastRG_t.
- *
- * The pre-refactor stats-resize cases were removed with the resize code
- * itself (approved 2026-07-31); this file now carries only the fixed-max
- * cases for fastrg.c-level state.
+ * fastrg_test.c — fastrg.c-level cases: fixed-max prealloc semantics of
+ * FastRG_t, etcd event posting, and force-terminating a subscriber.
  */
 #include <stdlib.h>
 #include <string.h>
@@ -19,6 +16,9 @@
 
 static int test_count = 0;
 static int pass_count = 0;
+
+/* External linkage but no header: fastrg.h cannot name ppp_ccb_t. */
+extern void fastrg_force_terminate_hsi(ppp_ccb_t *ppp_ccb);
 
 static void test_user_count_change_keeps_slots(FastRG_t *fastrg_ccb)
 {
@@ -123,6 +123,41 @@ out:
         rte_ring_free(free_mail_ring);
 }
 
+static void test_fastrg_force_terminate_hsi(FastRG_t *fastrg_ccb)
+{
+    printf("\nTesting fastrg_force_terminate_hsi function:\n");
+    printf("=============================================\n\n");
+
+    /* ppp_ccb_t embeds the NAT slot pool, so the case's ccb lives on the
+     * heap. user_num 1 makes exit_ppp() use the fixture's dhcp slot 0. */
+    ppp_ccb_t *ppp_ccb = fastrg_calloc(ppp_ccb_t, 1, sizeof(ppp_ccb_t), 0);
+    TEST_ASSERT(ppp_ccb != NULL, "allocate the test ppp ccb", "");
+    if (ppp_ccb == NULL)
+        return;
+    ppp_ccb->fastrg_ccb = fastrg_ccb;
+    ppp_ccb->user_num = 1;
+
+    /* A slot with no config keeps NOT_CONFIGURED, so a later apply still
+     * treats it as a new config. */
+    ppp_ccb->phase = NOT_CONFIGURED;
+    fastrg_force_terminate_hsi(ppp_ccb);
+    TEST_ASSERT(ppp_ccb->phase == NOT_CONFIGURED,
+        "an unconfigured slot stays NOT_CONFIGURED", "got %u", ppp_ccb->phase);
+
+    /* A live session is torn down and its data-plane gate should be closed. */
+    ppp_ccb->phase = DATA_PHASE;
+    rte_atomic16_set(&ppp_ccb->ppp_bool, 1);
+    rte_atomic16_set(&ppp_ccb->dp_start_bool, 1);
+    fastrg_force_terminate_hsi(ppp_ccb);
+    TEST_ASSERT(ppp_ccb->phase == END_PHASE,
+        "a live session moves to END_PHASE", "got %u", ppp_ccb->phase);
+    TEST_ASSERT(rte_atomic16_read(&ppp_ccb->ppp_bool) == 0 &&
+        rte_atomic16_read(&ppp_ccb->dp_start_bool) == 0,
+        "a live session has ppp_bool and dp_start_bool cleared", "");
+
+    fastrg_mfree(ppp_ccb);
+}
+
 void test_fastrg(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 {
     printf("\n");
@@ -132,6 +167,7 @@ void test_fastrg(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
 
     test_user_count_change_keeps_slots(fastrg_ccb);
     test_fastrg_gen_etcd_event(fastrg_ccb);
+    test_fastrg_force_terminate_hsi(fastrg_ccb);
 
     printf("\nfastrg tests: %d passed, %d failed\n", pass_count, test_count - pass_count);
     *total_tests += test_count;

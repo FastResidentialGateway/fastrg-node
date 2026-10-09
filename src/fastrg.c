@@ -50,8 +50,28 @@ rte_atomic16_t start_flag = RTE_ATOMIC16_INIT(0);
 
 FastRG_t                fastrg_ccb;
 
+/**
+ * @fn fastrg_force_terminate_hsi
+ *
+ * @brief Tear down a subscriber's HSI session at once except unconfigured 
+ *      subscribers.
+ *
+ * @param ppp_ccb
+ *      the subscriber's ppp ccb
+ *
+ * @return
+ *      void
+ */
 void fastrg_force_terminate_hsi(ppp_ccb_t *ppp_ccb)
 {
+    FastRG_t *fastrg_ccb = ppp_ccb->fastrg_ccb;
+
+    if (ppp_ccb->phase == NOT_CONFIGURED) {
+        FastRG_LOG(DBG, fastrg_ccb->fp, NULL, NULL, "User %d has no config, skip force terminate\n",
+            ppp_ccb->user_num);
+        return;
+    }
+    FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "User %d pppoe is force terminating\n", ppp_ccb->user_num);
     exit_ppp(ppp_ccb);
 }
 
@@ -330,7 +350,6 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
                         kafka_report_pppoe_state(uid, KAFKA_PPPOE_CONNECTING, NULL, NULL, NULL, NULL, NULL, NULL);
                     }
                 } else if (pppoe_msg->cmd == PPPoE_CMD_FORCE_DISABLE) {
-                    FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "User %d pppoe is force terminating\n", pppoe_msg->ccb_id + 1);
                     fastrg_force_terminate_hsi(ppp_ccb);
                 } else if (pppoe_msg->cmd == PPPoE_CMD_IPV6_CHANGED) {
                     if (is_ppp_ipv6_need_redial(TRUE, ppp_ccb->phase,

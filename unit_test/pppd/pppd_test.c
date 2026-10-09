@@ -10,6 +10,7 @@
 #include <rte_ring.h>
 #include <rte_lcore.h>
 #include <rte_mempool.h>
+#include <rte_ip.h>
 
 #include "../../src/fastrg.h"
 #include "../../src/init.h"
@@ -275,6 +276,8 @@ static void test_exit_ppp_resets_fields(void)
     pppd_ccb_reset();
     test_ppp_ccb.phase = LCP_PHASE;
     rte_atomic16_set(&test_ppp_ccb.ppp_bool, 1);
+    rte_atomic16_set(&test_ppp_ccb.dp_start_bool, 1);
+    test_ppp_ccb.session_id = rte_cpu_to_be_16(0x000a);
     test_ppp_ccb.control_protocol[PPP_CP_LCP].state = S_OPENED;
     test_ppp_ccb.control_protocol[PPP_CP_IPCP].state = S_OPENED;
     test_ppp_ccb.pppoe_phase.active = TRUE;
@@ -286,6 +289,10 @@ static void test_exit_ppp_resets_fields(void)
     exit_ppp(&test_ppp_ccb);
 
     TEST_ASSERT(rte_atomic16_read(&test_ppp_ccb.ppp_bool) == 0, "ppp_bool cleared", "");
+    TEST_ASSERT(rte_atomic16_read(&test_ppp_ccb.dp_start_bool) == 0,
+        "dp_start_bool cleared (data-plane gate closed)", "");
+    TEST_ASSERT(test_ppp_ccb.session_id == 0,
+        "session_id cleared (no session)", "got 0x%x", rte_be_to_cpu_16(test_ppp_ccb.session_id));
     TEST_ASSERT(test_ppp_ccb.phase == END_PHASE, "phase set to END_PHASE", "");
     TEST_ASSERT(test_ppp_ccb.control_protocol[PPP_CP_LCP].state == S_INIT && test_ppp_ccb.control_protocol[PPP_CP_IPCP].state == S_INIT,
         "both cp states reset to S_INIT", "");
@@ -330,6 +337,138 @@ static void test_exit_ppp_no_redial_when_not_pending(void)
 
     TEST_ASSERT(pppd_drain_pppoe_enable_events() == 0,
         "no redial_pending -> no northbound re-dial event enqueued", "");
+}
+
+/* ---- ppp_process ---- */
+
+/* All zero: every VLAN maps to ccb 0 while test_ppp_process() runs. */
+static rte_atomic16_t g_pppd_vlan_map[MAX_VLAN_ID];
+
+/**
+ * @fn pppd_build_frame
+ *
+ * @brief craft an eth/vlan/PPPoE frame on the fixture's VLAN with a zeroed
+ *      payload
+ * @param buf
+ *      output buffer (must hold the returned length)
+ * @param next_proto
+ *      ETH_P_PPP_SES or ETH_P_PPP_DIS, host order
+ * @param code
+ *      PPPoE code (SESSION_DATA, PADT, PADS, ...)
+ * @param session_id
+ *      PPPoE session id, host order
+ * @param ppp_proto
+ *      PPP protocol of a session frame, host order; unused for discovery
+ * @param payload_len
+ *      bytes after the PPPoE header
+ * @return
+ *      total frame length
+ */
+static U16 pppd_build_frame(U8 *buf, U16 next_proto, U8 code, U16 session_id,
+    U16 ppp_proto, U16 payload_len)
+{
+    struct rte_ether_hdr *eth_hdr = (struct rte_ether_hdr *)buf;
+    vlan_header_t *vlan_hdr = (vlan_header_t *)(eth_hdr + 1);
+    pppoe_header_t *pppoe_hdr = (pppoe_header_t *)(vlan_hdr + 1);
+    U16 frame_len = sizeof(*eth_hdr) + sizeof(*vlan_hdr) + sizeof(*pppoe_hdr) +
+        payload_len;
+
+    memset(buf, 0, frame_len);
+    eth_hdr->ether_type = rte_cpu_to_be_16(VLAN);
+    vlan_hdr->tci_union.tci_value = rte_cpu_to_be_16(100);
+    vlan_hdr->next_proto = rte_cpu_to_be_16(next_proto);
+    pppoe_hdr->ver_type = VER_TYPE;
+    pppoe_hdr->code = code;
+    pppoe_hdr->session_id = rte_cpu_to_be_16(session_id);
+    pppoe_hdr->length = rte_cpu_to_be_16(payload_len);
+    if (next_proto == ETH_P_PPP_SES)
+        ((ppp_payload_t *)(pppoe_hdr + 1))->ppp_protocol = rte_cpu_to_be_16(ppp_proto);
+
+    return frame_len;
+}
+
+static void test_ppp_process(void)
+{
+    printf("\nTesting ppp_process (session id check before decode and DHCPv6):\n");
+    printf("=========================================\n\n");
+
+    U8 frame[128];
+    U16 frame_len;
+    const U16 ipv6_len = sizeof(ppp_payload_t) + sizeof(struct rte_ipv6_hdr);
+    const U16 padt_len = sizeof(pppoe_header_tag_t); /* one empty tag */
+    rte_atomic16_t *orig_vlan_map = g_pppd_fastrg_ccb->vlan_userid_map;
+    U16 orig_user_count = g_pppd_fastrg_ccb->user_count;
+
+    memset(g_pppd_vlan_map, 0, sizeof(g_pppd_vlan_map));
+    g_pppd_fastrg_ccb->vlan_userid_map = g_pppd_vlan_map;
+    g_pppd_fastrg_ccb->user_count = 1;
+
+    /* IPv6 frames reach DHCPv6 only for the current session. */
+    pppd_ccb_reset();
+    test_ppp_ccb.phase = DATA_PHASE;
+    test_ppp_ccb.session_id = rte_cpu_to_be_16(0x000a);
+    frame_len = pppd_build_frame(frame, ETH_P_PPP_SES, SESSION_DATA, 0x000b,
+        PPP_IPV6_PROTOCOL, ipv6_len);
+    TEST_ASSERT(ppp_process(g_pppd_fastrg_ccb, frame, frame_len) == ERROR,
+        "IPv6 frame for another session is dropped before DHCPv6", "");
+    frame_len = pppd_build_frame(frame, ETH_P_PPP_SES, SESSION_DATA, 0x000a,
+        PPP_IPV6_PROTOCOL, ipv6_len);
+    TEST_ASSERT(ppp_process(g_pppd_fastrg_ccb, frame, frame_len) == SUCCESS,
+        "IPv6 frame for the current session is still handed to DHCPv6", "");
+
+    /* Another session's Echo-Request gets no reply and leaves no trace. */
+    pppd_ccb_reset();
+    test_ppp_ccb.phase = DATA_PHASE;
+    test_ppp_ccb.session_id = rte_cpu_to_be_16(0x000a);
+    test_ppp_ccb.echo_miss_count = 2;
+    frame_len = pppd_build_frame(frame, ETH_P_PPP_SES, SESSION_DATA, 0x000b,
+        LCP_PROTOCOL, sizeof(ppp_payload_t) + sizeof(ppp_header_t) + sizeof(U32));
+    ppp_header_t *ppp_hdr = (ppp_header_t *)(frame + sizeof(struct rte_ether_hdr) +
+        sizeof(vlan_header_t) + sizeof(pppoe_header_t) + sizeof(ppp_payload_t));
+    ppp_hdr->code = ECHO_REQUEST;
+    ppp_hdr->identifier = 1;
+    ppp_hdr->length = rte_cpu_to_be_16(sizeof(ppp_header_t) + sizeof(U32));
+    TEST_ASSERT(ppp_process(g_pppd_fastrg_ccb, frame, frame_len) == ERROR &&
+        test_ppp_ccb.echo_miss_count == 2 && test_ppp_ccb.pppoe_header.session_id == 0,
+        "LCP Echo-Request for another session is dropped without touching the ccb",
+        "echo_miss_count=%u saved session 0x%x", test_ppp_ccb.echo_miss_count,
+        rte_be_to_cpu_16(test_ppp_ccb.pppoe_header.session_id));
+
+    /* PADT only tears down the session it names. */
+    pppd_ccb_reset();
+    test_ppp_ccb.phase = DATA_PHASE;
+    test_ppp_ccb.session_id = rte_cpu_to_be_16(0x000a);
+    rte_atomic16_set(&test_ppp_ccb.ppp_bool, 1);
+    frame_len = pppd_build_frame(frame, ETH_P_PPP_DIS, PADT, 0x000b, 0, padt_len);
+    ppp_process(g_pppd_fastrg_ccb, frame, frame_len);
+    TEST_ASSERT(test_ppp_ccb.phase == DATA_PHASE && rte_atomic16_read(&test_ppp_ccb.ppp_bool) == 1,
+        "PADT for another session leaves the current session up", "phase=%u", test_ppp_ccb.phase);
+    frame_len = pppd_build_frame(frame, ETH_P_PPP_DIS, PADT, 0x000a, 0, padt_len);
+    ppp_process(g_pppd_fastrg_ccb, frame, frame_len);
+    TEST_ASSERT(test_ppp_ccb.phase == END_PHASE && rte_atomic16_read(&test_ppp_ccb.ppp_bool) == 0,
+        "PADT for the current session tears it down", "phase=%u", test_ppp_ccb.phase);
+
+    /* With no session (id 0), session frames and PADT are dropped even when
+     * they carry id 0; discovery still runs. */
+    pppd_ccb_reset();
+    test_ppp_ccb.phase = PPPOE_PHASE;
+    rte_atomic16_set(&test_ppp_ccb.ppp_bool, 1);
+    frame_len = pppd_build_frame(frame, ETH_P_PPP_DIS, PADT, 0x0000, 0, padt_len);
+    ppp_process(g_pppd_fastrg_ccb, frame, frame_len);
+    TEST_ASSERT(test_ppp_ccb.phase == PPPOE_PHASE && rte_atomic16_read(&test_ppp_ccb.ppp_bool) == 1,
+        "PADT carrying id 0 does not abort a dial", "phase=%u", test_ppp_ccb.phase);
+    frame_len = pppd_build_frame(frame, ETH_P_PPP_SES, SESSION_DATA, 0x0000,
+        PPP_IPV6_PROTOCOL, ipv6_len);
+    TEST_ASSERT(ppp_process(g_pppd_fastrg_ccb, frame, frame_len) == ERROR,
+        "session frame carrying id 0 is dropped while there is no session", "");
+    frame_len = pppd_build_frame(frame, ETH_P_PPP_DIS, PADS, 0x000c, 0, padt_len);
+    ppp_process(g_pppd_fastrg_ccb, frame, frame_len);
+    TEST_ASSERT(test_ppp_ccb.session_id == rte_cpu_to_be_16(0x000c),
+        "PADS is still accepted with no session and sets the session id",
+        "got 0x%x", rte_be_to_cpu_16(test_ppp_ccb.session_id));
+
+    g_pppd_fastrg_ccb->vlan_userid_map = orig_vlan_map;
+    g_pppd_fastrg_ccb->user_count = orig_user_count;
 }
 
 /* ---- PPP_keepalive_cb ---- */
@@ -915,6 +1054,8 @@ void test_pppd(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_exit_ppp_resets_fields();
     test_exit_ppp_redial_pending_honored();
     test_exit_ppp_no_redial_when_not_pending();
+
+    test_ppp_process();
 
     test_keepalive_probes_and_increments();
     test_keepalive_exceeds_threshold_tears_down();
