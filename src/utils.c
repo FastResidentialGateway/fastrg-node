@@ -52,7 +52,7 @@ void get_all_lcore_id(struct lcore_map *lcore, unsigned int cpu_count)
     lcore->ctrl_thread = rte_get_next_lcore(rte_lcore_id(), 1, 0);
     lcore->wan_ctrl_thread = rte_get_next_lcore(lcore->ctrl_thread, 1, 0);
     lcore->lan_ctrl_thread = rte_get_next_lcore(lcore->wan_ctrl_thread, 1, 0);
-    lcore->timer_thread = rte_lcore_id();
+    lcore->main_thread = rte_lcore_id();
 
     /* Dynamic data threads: wan_data[i] + lan_data[i] per RSS queue */
     U16 rss_count = fastrg_calc_rss_queue_count(cpu_count);

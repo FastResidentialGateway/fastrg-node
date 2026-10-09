@@ -553,7 +553,7 @@ int fastrg_loop(FastRG_t *fastrg_ccb)
                     if (mail[i]->link.up_down == LINK_DOWN) {
                         if (rte_timer_reset(&fastrg_ccb->link,
                                 LINK_DOWN_TIMEOUT * fastrg_get_cycles_in_sec(), // 10 seconds
-                                SINGLE, fastrg_ccb->lcore.timer_thread,
+                                SINGLE, fastrg_ccb->lcore.main_thread,
                                 (rte_timer_cb_t)link_disconnect, fastrg_ccb) == -1) {
                             /* -1 only when the timer is RUNNING, i.e. link_disconnect
                              * is executing on the timer lcore at this very moment: the

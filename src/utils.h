@@ -156,7 +156,7 @@ struct lcore_map {
     U8 ctrl_thread;
     U8 wan_ctrl_thread;     /* WAN queue 0: PPPoE control + ICMP decap */
     U8 lan_ctrl_thread;     /* LAN queue 0: ARP, ICMP, PPPoE passthrough */
-    U8 timer_thread;
+    U8 main_thread;
     U8 northbound_thread;
     U8 wan_data_threads[MAX_DATA_QUEUES];  /* WAN queues 1..N: PPPoE session TCP/UDP */
     U8 lan_data_threads[MAX_DATA_QUEUES];  /* LAN queues 1..N: TCP/UDP encap */
