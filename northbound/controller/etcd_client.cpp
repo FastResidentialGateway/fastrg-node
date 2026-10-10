@@ -77,6 +77,15 @@ private:
     std::unique_ptr<etcd::Watcher> hsi_watcher_;
     std::unique_ptr<etcd::Watcher> user_count_watcher_;
     std::unique_ptr<etcd::Watcher> dns_record_watcher_;
+
+    // Shared with the watchers' wait callbacks, which etcd-cpp-api runs on
+    // detached threads that can outlive this object.
+    struct WatchCallbackGuard {
+        std::mutex mutex;
+        bool alive = true;  // guarded by mutex; false once stop_watch() begins
+    };
+    std::shared_ptr<WatchCallbackGuard> callback_guard_ = std::make_shared<WatchCallbackGuard>();
+
     std::atomic<bool> watch_running_;
     std::atomic<bool> shutting_down_{false};   // set once during teardown; blocks new reconnect attempts
     std::atomic<bool> etcd_reachable_{false};  // last-known etcd reachability (watchdog/init)
@@ -355,6 +364,24 @@ public:
         return ETCD_SUCCESS;
     }
 
+    // Wait callback for one watcher; touches this only while the guard is alive.
+    std::function<void(bool)> make_wait_callback(const char *watcher_name) {
+        return [this, guard = callback_guard_, watcher_name](bool cancelled) {
+            std::lock_guard<std::mutex> lock(guard->mutex);
+            if (!guard->alive)
+                return;
+
+            update_watch_activity(); // update activity time
+
+            // A stream that ended without Cancel() was dropped by etcd.
+            if (!cancelled && watch_running_) {
+                FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
+                    "%s watcher disconnected, triggering reconnect...", watcher_name);
+                trigger_reconnect();
+            }
+        };
+    }
+
     // Create or recreate watchers - separated for reconnection support
     etcd_status_t create_watchers() {
         try {
@@ -396,15 +423,7 @@ public:
                         trigger_reconnect();
                     }
                 },
-                [this](bool connected) {
-                    update_watch_activity(); // update activity time
-                    
-                    // Connection status callback
-                    if (!connected && watch_running_) {
-                        FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL, "HSI watcher disconnected, triggering reconnect...");
-                        trigger_reconnect();
-                    }
-                },
+                make_wait_callback("HSI"),
                 true  // recursive
             );
 
@@ -431,16 +450,7 @@ public:
                         trigger_reconnect();
                     }
                 },
-                [this](bool connected) {
-                    update_watch_activity(); // update activity time
-                    
-                    // Connection status callback
-                    if (!connected && watch_running_) {
-                        FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL, 
-                            "User count watcher disconnected, triggering reconnect...");
-                        trigger_reconnect();
-                    }
-                },
+                make_wait_callback("User count"),
                 true  // recursive
             );
 
@@ -462,14 +472,7 @@ public:
                         trigger_reconnect();
                     }
                 },
-                [this](bool connected) {
-                    update_watch_activity();
-                    if (!connected && watch_running_) {
-                        FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
-                            "DNS record watcher disconnected, triggering reconnect...");
-                        trigger_reconnect();
-                    }
-                },
+                make_wait_callback("DNS record"),
                 true  // recursive
             );
 
@@ -856,7 +859,14 @@ public:
     void stop_watch() {
         FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL, "Stopping watch...");
 
-        // Mark teardown first so any in-flight watch/connection callback that
+        // Clear alive under the guard lock: a callback already inside finishes 
+        // first, and any later one returns without touching this.
+        {
+            std::lock_guard<std::mutex> lock(callback_guard_->mutex);
+            callback_guard_->alive = false;
+        }
+
+        // Mark teardown so any in-flight watch/connection callback that
         // calls trigger_reconnect() becomes a no-op and cannot spawn a thread
         // that would outlive cleanup.
         shutting_down_ = true;
@@ -879,8 +889,8 @@ public:
         // Now signal and join the watchdog.
         stop_watchdog();
 
-        // Cancel and destroy every watcher. reset() blocks until the watcher's
-        // in-flight callback returns, so after this no watch callback can run.
+        // Cancel() joins each watcher's thread, so no response callback runs
+        // after this; detached wait callbacks are fenced by callback_guard_.
         if (hsi_watcher_) {
             hsi_watcher_->Cancel();
             hsi_watcher_.reset();

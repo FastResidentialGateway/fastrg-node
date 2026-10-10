@@ -174,6 +174,15 @@ case_validation_register registration_host_os_rest_missing phase19_node_restart 
     _p19_inject_registration_host_os_rest_missing _p19_cleanup_registration_drill \
     'Step 77a:'
 
+# Drill: the Step 76 stop leaves a stdout log without "bye!".
+_p19_cleanup_shutdown_drill() {
+    _e2e_restore_node_shutdown_functions
+    _cleanup_phase19_node_restart
+}
+
+case_validation_register shutdown_bye_missing_step76 phase19_node_restart \
+    _e2e_inject_node_shutdown_no_bye _p19_cleanup_shutdown_drill 'Step 76:'
+
 phase19_node_restart() {
     local _hsi1_key="configs/${NODE_UUID}/hsi/1"
     local _hsi2_key="configs/${NODE_UUID}/hsi/2"
@@ -226,6 +235,8 @@ phase19_node_restart() {
     local _step74_issue=""
     local _step76_issue=""
     local _step77a_issue=""
+    local _p19_stop_mark=""
+    local _p19_stop_crash=""
     local _p19_reg_before=""
     local _p19_reg_record=""
     local _p19_rest_record=""
@@ -311,6 +322,7 @@ phase19_node_restart() {
 
     info "  Sending SIGTERM to fastrg and waiting up to 30s for a clean exit..."
     _P19_RESTART_NEEDED=1
+    _p19_stop_mark=$(e2e_node_stop_mark)
     if ! ssh_node "pkill -x fastrg" >/dev/null 2>&1; then
         _step73_issue="${_step73_issue} SIGTERM_delivery=failed"
     fi
@@ -323,11 +335,13 @@ phase19_node_restart() {
     done
     if [[ $_shutdown_done -ne 1 ]]; then
         _step73_issue="${_step73_issue} shutdown_timeout=30s"
+    elif ! _p19_stop_crash=$(e2e_node_shutdown_check "$_p19_stop_mark"); then
+        _step73_issue="${_step73_issue} shutdown_crash=${_p19_stop_crash}"
     fi
 
     if [[ -z "$_step73_issue" ]]; then
         pass "Step 76: Snapshot + graceful shutdown" \
-            "users 1/2 Data phase; desire_status=connect; revisions=${_hsi1_rev_before}/${_hsi2_rev_before}/${_count_rev_before}; clean SIGTERM exit"
+            "users 1/2 Data phase; desire_status=connect; revisions=${_hsi1_rev_before}/${_hsi2_rev_before}/${_count_rev_before}; clean SIGTERM exit (log ends with bye!, no crash record)"
     else
         fail "Step 76: Snapshot + graceful shutdown" "${_step73_issue# }"
     fi
@@ -554,6 +568,7 @@ phase19_node_restart() {
 
     # Stop gracefully, then block etcd BEFORE the cold start.
     _P19_RESTART_NEEDED=1
+    _p19_stop_mark=$(e2e_node_stop_mark)
     ssh_node "pkill -x fastrg" >/dev/null 2>&1 || true
     for _i in $(seq 1 20); do
         [[ "$(_p19_process_state)" == "stopped" ]] && break
@@ -563,6 +578,8 @@ phase19_node_restart() {
         fail "Step 80: snapshot is the boot base while etcd is down" "fastrg did not stop within 20s"
         return
     fi
+    # Reported with the step's verdict; the restart below still has to run.
+    _p19_stop_crash=$(e2e_node_shutdown_check "$_p19_stop_mark") || true
     ssh_node "iptables -I OUTPUT 1 -p tcp -d ${_p19_etcd_host} --dport ${_p19_etcd_port} -j REJECT --reject-with tcp-reset" \
         >/dev/null 2>&1 && _P19_ETCD_BLOCKED=1
     if [[ $_P19_ETCD_BLOCKED -ne 1 ]]; then
@@ -620,6 +637,10 @@ phase19_node_restart() {
         fi
     done
     [[ $_p79_sync -eq 1 ]] || _step79_issue="${_step79_issue:+${_step79_issue}; }no etcd watch event observed within 150s of unblocking (watchers did not recover)"
+
+    if [[ "$_p19_stop_crash" != "pass" ]]; then
+        _step79_issue="${_step79_issue:+${_step79_issue}; }shutdown_crash=${_p19_stop_crash}"
+    fi
 
     if [[ -z "$_step79_issue" ]]; then
         _P19_RESTART_NEEDED=0

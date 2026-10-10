@@ -52,6 +52,15 @@ _cleanup_phase17_etcd_offline_queue() {
     fi
 }
 
+# Drill: the Step 70c stop leaves a stdout log without "bye!".
+_p17_cleanup_shutdown_drill() {
+    _e2e_restore_node_shutdown_functions
+    _cleanup_phase17_etcd_offline_queue
+}
+
+case_validation_register shutdown_bye_missing_step70c phase17_etcd_offline_queue \
+    _e2e_inject_node_shutdown_no_bye _p17_cleanup_shutdown_drill 'Step 70c:'
+
 # Raw node gRPC ApplyConfig call (bypasses the controller entirely — same
 # invocation shape as phase9 Step 38, but with full DHCP fields so a
 # non-SDN-guard ApplyConfig can actually succeed).
@@ -449,7 +458,8 @@ phase17_etcd_offline_queue() {
 
     info "Step 70c: gracefully stopping fastrg with the dirty edit persisted..."
     _P17C_RESTART_NEEDED=1
-    local _p17c_stopped=0
+    local _p17c_stopped=0 _p17c_stop_mark="" _p17c_stop_crash=""
+    _p17c_stop_mark=$(e2e_node_stop_mark)
     ssh_node "pkill -x fastrg" >/dev/null 2>&1 || true
     for _i in $(seq 1 30); do
         if ! ssh_node "pgrep -x fastrg >/dev/null 2>&1"; then
@@ -460,6 +470,8 @@ phase17_etcd_offline_queue() {
     done
     if [[ $_p17c_stopped -ne 1 ]]; then
         _p17c_issue="${_p17c_issue:+${_p17c_issue}; }fastrg did not exit within 30s of SIGTERM"
+    elif ! _p17c_stop_crash=$(e2e_node_shutdown_check "$_p17c_stop_mark"); then
+        _p17c_issue="${_p17c_issue:+${_p17c_issue}; }shutdown_crash=${_p17c_stop_crash}"
     fi
 
     # Kafka baseline while the node is down: every message after this offset
