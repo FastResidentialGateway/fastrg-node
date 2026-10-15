@@ -135,8 +135,10 @@ static inline void nat_reverse_hash_free_cb(void *p, void *key_data)
  * @fn nat_table_reset
  *
  * @brief Flush all NAT state of a subscriber: empty both hashes and
- *        refill the free-list with every pool index.  Control-plane only
- *        (subscriber re-init), must not race data-plane traffic for this sub.
+ *        refill the free-list with every pool index.  Control-plane only;
+ *        at runtime the caller must first close the data-plane gate and wait
+ *        for a ppp_ccb_rcu grace period, since data lcores may still be
+ *        using the tables.
  *
  * @param ppp_ccb
  *      Subscriber control block

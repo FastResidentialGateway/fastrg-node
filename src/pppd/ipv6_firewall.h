@@ -247,8 +247,9 @@ static inline void ipv6_firewall_hash_free_cb(void *p, void *key_data)
  *
  * @brief Flush every session of a subscriber and refill the free-list.
  *
- *        Control-plane only: the caller must close the IPv6 forwarding gate
- *        first, so no data-plane traffic races this subscriber.
+ *        Control-plane only; at runtime the caller must first close the IPv6
+ *        forwarding gate and wait for a ppp_ccb_rcu grace period, since data
+ *        lcores may still be using the session table.
  *
  * @param ppp_ccb
  *        Subscriber control block

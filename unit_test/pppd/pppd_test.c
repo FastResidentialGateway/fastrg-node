@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <inttypes.h>
 
 #include <common.h>
 
@@ -11,10 +12,13 @@
 #include <rte_lcore.h>
 #include <rte_mempool.h>
 #include <rte_ip.h>
+#include <rte_rcu_qsbr.h>
 
 #include "../../src/fastrg.h"
 #include "../../src/init.h"
 #include "../../src/pppd/pppd.h"
+#include "../../src/pppd/nat.h"
+#include "../../src/pppd/ipv6_firewall.h"
 #include "../../src/pppd/fsm.h"
 #include "../../src/pppd/codec.h"
 #include "../../src/pppd/header.h"
@@ -637,6 +641,97 @@ static void test_credentials_overwrite(void)
     fastrg_mfree(ccb);
 }
 
+/* ---- ppp_init_config_by_user ---- */
+
+#define PPPD_TEST_NAT_ID        997
+#define PPPD_TEST_FIREWALL_ID   60005
+
+/* Callback for timers a test arms but never lets expire. */
+static void pppd_test_timer_noop(struct rte_timer *tim, void *arg)
+{
+    (void)tim;
+    (void)arg;
+}
+
+static void test_ppp_init_config_by_user(void)
+{
+    printf("\nTesting ppp_init_config_by_user:\n");
+    printf("=========================================\n\n");
+
+    struct rte_rcu_qsbr *rcu = g_pppd_fastrg_ccb->ppp_ccb_rcu;
+
+    pppd_ccb_reset();
+    if (nat_table_init(&test_ppp_ccb, PPPD_TEST_NAT_ID, rcu) != SUCCESS ||
+            ipv6_firewall_table_init(&test_ppp_ccb, PPPD_TEST_FIREWALL_ID, rcu) != SUCCESS) {
+        TEST_ASSERT(FALSE, "build the NAT and IPv6 firewall tables", "table creation failed");
+        nat_table_destroy(&test_ppp_ccb);
+        ipv6_firewall_table_destroy(&test_ppp_ccb);
+        return;
+    }
+
+    /* A data lcore may be inside the NAT / IPv6 firewall insert section. */
+    rte_spinlock_lock(&test_ppp_ccb.nat_insert_lock);
+    rte_spinlock_lock(&test_ppp_ccb.ipv6_firewall_insert_lock);
+
+    /* The sentinel expires just before the PPP timer, so on this lcore's
+     * timer list sentinel.sl_next[0] is the PPP timer exactly while that timer
+     * is linked. rte_timer_pending() cannot tell: rte_timer_init() marks a
+     * still-linked timer as stopped. */
+    static struct rte_timer sentinel;
+    U64 far_ticks = 3600 * fastrg_get_cycles_in_sec();
+    unsigned int lcore_id = rte_lcore_id();
+
+    rte_timer_init(&sentinel);
+    rte_timer_reset(&sentinel, far_ticks, SINGLE, lcore_id, pppd_test_timer_noop, NULL);
+    rte_timer_reset(&test_ppp_ccb.ppp, far_ticks, SINGLE, lcore_id, pppd_test_timer_noop, NULL);
+    BOOL ppp_linked_before = sentinel.sl_next[0] == &test_ppp_ccb.ppp;
+
+    /* Each rte_rcu_qsbr_start() call, including the one inside
+     * rte_rcu_qsbr_synchronize(), moves the token up by one, so the gap
+     * between these two calls counts the grace periods started in between. */
+    uint64_t token_before = rte_rcu_qsbr_start(rcu);
+    STATUS ret = ppp_init_config_by_user(g_pppd_fastrg_ccb, &test_ppp_ccb, 0, 100,
+        "user", "pass");
+    uint64_t token_after = rte_rcu_qsbr_start(rcu);
+
+    TEST_ASSERT(ret == SUCCESS, "re-initializing the subscriber succeeds", "got ERROR");
+    TEST_ASSERT(token_after - token_before >= 3,
+        "re-initializing waits for two ppp_ccb_rcu grace periods",
+        "grace periods started: %" PRIu64, token_after - token_before - 1);
+
+    BOOL nat_lock_held = rte_spinlock_is_locked(&test_ppp_ccb.nat_insert_lock);
+    BOOL fw_lock_held = rte_spinlock_is_locked(&test_ppp_ccb.ipv6_firewall_insert_lock);
+    rte_spinlock_unlock(&test_ppp_ccb.nat_insert_lock);
+    rte_spinlock_unlock(&test_ppp_ccb.ipv6_firewall_insert_lock);
+    TEST_ASSERT(nat_lock_held && fw_lock_held,
+        "re-initializing leaves held insert locks locked",
+        "NAT lock held=%d, IPv6 firewall lock held=%d", nat_lock_held, fw_lock_held);
+
+    BOOL ppp_linked_after = sentinel.sl_next[0] == &test_ppp_ccb.ppp;
+    BOOL ppp_pending_after = rte_timer_pending(&test_ppp_ccb.ppp);
+    TEST_ASSERT(ppp_linked_before && !ppp_linked_after && !ppp_pending_after,
+        "a pending PPP timer is stopped and unlinked from the timer list",
+        "linked before=%d, linked after=%d, pending after=%d",
+        ppp_linked_before, ppp_linked_after, ppp_pending_after);
+
+    rte_timer_reset(&test_ppp_ccb.ppp, far_ticks, SINGLE, lcore_id, pppd_test_timer_noop, NULL);
+    BOOL rearmed = rte_timer_pending(&test_ppp_ccb.ppp) &&
+        sentinel.sl_next[0] == &test_ppp_ccb.ppp;
+    rte_timer_stop(&test_ppp_ccb.ppp);
+    BOOL stopped_again = !rte_timer_pending(&test_ppp_ccb.ppp) &&
+        sentinel.sl_next[0] != &test_ppp_ccb.ppp;
+    rte_timer_stop(&sentinel);
+    TEST_ASSERT(rearmed && stopped_again,
+        "the PPP timer can be armed and stopped again afterwards",
+        "re-armed=%d, stopped again=%d", rearmed, stopped_again);
+
+    nat_table_destroy(&test_ppp_ccb);
+    ipv6_firewall_table_destroy(&test_ppp_ccb);
+    fastrg_mfree(test_ppp_ccb.ppp_user_acc);
+    fastrg_mfree(test_ppp_ccb.ppp_passwd);
+    pppd_ccb_reset();
+}
+
 static void test_port_fwd_entry_packing(void)
 {
     printf("\nTesting port_fwd_entry_t layout:\n");
@@ -1066,6 +1161,8 @@ void test_pppd(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_pppoe_send_pkt_padr_exhausted();
 
     test_credentials_overwrite();
+
+    test_ppp_init_config_by_user();
 
     test_port_fwd_entry_packing();
 
