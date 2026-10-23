@@ -50,6 +50,48 @@ int wan_dist_worker(void *arg);
 int lan_dist_worker(void *arg);
 
 /**
+ * @fn dp_wan_dist_worker_process_pkt
+ *
+ * @brief Decapsulate one WAN session packet a wan_dist worker pulled.
+ *
+ * @param fastrg_ccb
+ *      FastRG control block
+ * @param single_pkt
+ *      Packet from wan_dist; queued to tx_pkt, handed off or freed here
+ * @param tx_q
+ *      LAN TX queue owned by the calling worker
+ * @param tx_pkt
+ *      LAN TX batch the forwarded packets are appended to
+ * @param total_tx
+ *      [in/out] number of packets in tx_pkt
+ * @return
+ *      void
+ */
+void dp_wan_dist_worker_process_pkt(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt,
+    U16 tx_q, struct rte_mbuf **tx_pkt, U16 *total_tx);
+
+/**
+ * @fn dp_lan_dist_worker_process_pkt
+ *
+ * @brief Encapsulate one WAN-bound packet a lan_dist worker pulled.
+ *
+ * @param fastrg_ccb
+ *      FastRG control block
+ * @param single_pkt
+ *      Packet from lan_dist; queued to wan_pkt, handed off or freed here
+ * @param tx_q
+ *      WAN TX queue owned by the calling worker
+ * @param wan_pkt
+ *      WAN TX batch the encapsulated packets are appended to
+ * @param total_wan_tx
+ *      [in/out] number of packets in wan_pkt
+ * @return
+ *      void
+ */
+void dp_lan_dist_worker_process_pkt(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt,
+    U16 tx_q, struct rte_mbuf **wan_pkt, U16 *total_wan_tx);
+
+/**
  * @fn PORT_INIT
  * 
  * @brief Initialize a port for data-plane operation.

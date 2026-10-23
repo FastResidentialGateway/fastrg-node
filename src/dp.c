@@ -1546,6 +1546,66 @@ int wan_dist_rx(void *arg)
     return 0;
 }
 
+void dp_wan_dist_worker_process_pkt(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt,
+    U16 tx_q, struct rte_mbuf **tx_pkt, U16 *total_tx)
+{
+    mbuf_priv_t *mbuf_priv = rte_mbuf_to_priv(single_pkt);
+    struct rte_ether_hdr *eth_hdr = mbuf_priv->eth_hdr;
+    vlan_header_t *vlan_header = mbuf_priv->vlan_hdr;
+    U16 ccb_id = mbuf_priv->ccb_id;
+    ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
+    struct rte_ipv4_hdr *ip_hdr;
+    int pkt_num;
+
+    /* IPv6 arrives here still encapsulated; IPv4 was stripped by the
+     * RX lcore, so the VLAN next protocol identifies the family. */
+    if (unlikely(vlan_header->next_proto == rte_cpu_to_be_16(ETH_P_PPP_SES))) {
+        /* The RX lcore checked the gate before queueing this packet. Since then
+         * the ctrl thread may have closed the gate and cleared the
+         * NAT / firewall tables without waiting for the RCU offline worker
+         * which is waiting for incoming packets. Check the gate again. */
+        if (unlikely(!pppd_ipv6_dp_gate_open(ppp_ccb))) {
+            drop_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
+            return;
+        }
+        ipv6_forward_result_t fwd = ipv6_firewall_wan_to_lan_forward(fastrg_ccb,
+            ppp_ccb, single_pkt, ccb_id);
+
+        if (likely(fwd == IPV6_FWD_OK))
+            tx_pkt[(*total_tx)++] = single_pkt;
+        else if (fwd == IPV6_FWD_NEIGHBOR_MISS)
+            ipv6_neighbor_miss(fastrg_ccb, ppp_ccb, single_pkt, ccb_id);
+        else
+            drop_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
+        return;
+    }
+    /* The RX lcore checked the gate before queueing this packet. Since then
+     * the ctrl thread may have closed the gate and cleared the NAT / firewall
+     * tables without waiting for the RCU offline worker which is waiting for
+     * incoming packets. Check the gate again. */
+    if (unlikely(!pppd_dp_gate_open(ppp_ccb))) {
+        drop_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
+        return;
+    }
+    ip_hdr = (struct rte_ipv4_hdr *)((char *)eth_hdr +
+        sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t));
+    ip_hdr->hdr_checksum = 0;
+    if (ip_hdr->next_proto_id == PROTO_TYPE_UDP) {
+        pkt_num = decaps_udp(fastrg_ccb, single_pkt, eth_hdr,
+            vlan_header, ip_hdr, ccb_id, tx_q);
+    } else if (ip_hdr->next_proto_id == PROTO_TYPE_TCP) {
+        pkt_num = decaps_tcp(fastrg_ccb, single_pkt, eth_hdr,
+            vlan_header, ip_hdr, ccb_id, tx_q);
+    } else {
+        drop_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
+        return;
+    }
+    for(int j=0; j<pkt_num; j++) {
+        tx_pkt[(*total_tx)++] = single_pkt;
+        single_pkt = single_pkt->next;
+    }
+}
+
 /**
  * wan_dist_worker - WAN decap worker lcore (DP_MODE_DISTRIBUTOR).
  *
@@ -1563,14 +1623,8 @@ int wan_dist_worker(void *arg)
     struct rte_distributor *dist = wk->dist;
     const unsigned int     worker_id = wk->worker_id;
     const U16              tx_q = wk->tx_queue_id;
-    struct rte_mbuf        *single_pkt;
-    struct rte_ether_hdr   *eth_hdr;
-    vlan_header_t          *vlan_header;
-    struct rte_ipv4_hdr    *ip_hdr;
     struct rte_mbuf        *bufs[BURST_SIZE];
     struct rte_mbuf        *tx_pkt[BURST_SIZE];
-    U16                    ccb_id;
-    int                    pkt_num;
     int                    n;
     char                   thread_name[32];
 
@@ -1593,43 +1647,7 @@ int wan_dist_worker(void *arg)
         for(int i=0; i<n; i++) {
             if (i + pf_k < n)
                 rte_prefetch0(rte_pktmbuf_mtod(bufs[i + pf_k], void *));
-            single_pkt = bufs[i];
-            mbuf_priv_t *mbuf_priv = rte_mbuf_to_priv(single_pkt);
-            eth_hdr = mbuf_priv->eth_hdr;
-            vlan_header = mbuf_priv->vlan_hdr;
-            ccb_id = mbuf_priv->ccb_id;
-            /* IPv6 arrives here still encapsulated; IPv4 was stripped by the
-             * RX lcore, so the VLAN next protocol identifies the family. */
-            if (unlikely(vlan_header->next_proto == rte_cpu_to_be_16(ETH_P_PPP_SES))) {
-                ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
-                ipv6_forward_result_t fwd = ipv6_firewall_wan_to_lan_forward(fastrg_ccb,
-                    ppp_ccb, single_pkt, ccb_id);
-
-                if (likely(fwd == IPV6_FWD_OK))
-                    tx_pkt[total_tx++] = single_pkt;
-                else if (fwd == IPV6_FWD_NEIGHBOR_MISS)
-                    ipv6_neighbor_miss(fastrg_ccb, ppp_ccb, single_pkt, ccb_id);
-                else
-                    drop_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
-                continue;
-            }
-            ip_hdr = (struct rte_ipv4_hdr *)((char *)eth_hdr +
-                sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t));
-            ip_hdr->hdr_checksum = 0;
-            if (ip_hdr->next_proto_id == PROTO_TYPE_UDP) {
-                pkt_num = decaps_udp(fastrg_ccb, single_pkt, eth_hdr,
-                    vlan_header, ip_hdr, ccb_id, tx_q);
-            } else if (ip_hdr->next_proto_id == PROTO_TYPE_TCP) {
-                pkt_num = decaps_tcp(fastrg_ccb, single_pkt, eth_hdr,
-                    vlan_header, ip_hdr, ccb_id, tx_q);
-            } else {
-                drop_packet(fastrg_ccb, single_pkt, WAN_PORT, ccb_id);
-                continue;
-            }
-            for(int j=0; j<pkt_num; j++) {
-                tx_pkt[total_tx++] = single_pkt;
-                single_pkt = single_pkt->next;
-            }
+            dp_wan_dist_worker_process_pkt(fastrg_ccb, bufs[i], tx_q, tx_pkt, &total_tx);
         }
         /* In case there are packets to hand off */
         total_tx = check_pkt_from_other_lcore(fastrg_ccb->tx_handoff_ring[LAN_PORT][tx_q],
@@ -1995,10 +2013,7 @@ int lan_dist_rx(void *arg)
                         wan_pkt[total_wan_tx++] = single_pkt;
                         continue;
                     }
-                    /* The gate check belongs here even though this lcore only
-                     * computes the flow tag: the worker that encapsulates the
-                     * packet inherits this read barrier through the
-                     * rte_distributor handoff, so it needs no check of its own. */
+                    /* Drop early; the worker checks the gate again. */
                     if (unlikely(!pppd_dp_gate_open(ppp_ccb))) {
                         drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
                         continue;
@@ -2099,6 +2114,58 @@ int lan_dist_rx(void *arg)
     return 0;
 }
 
+void dp_lan_dist_worker_process_pkt(FastRG_t *fastrg_ccb, struct rte_mbuf *single_pkt,
+    U16 tx_q, struct rte_mbuf **wan_pkt, U16 *total_wan_tx)
+{
+    mbuf_priv_t *mbuf_priv = rte_mbuf_to_priv(single_pkt);
+    struct rte_ether_hdr *eth_hdr = mbuf_priv->eth_hdr;
+    vlan_header_t *vlan_header = mbuf_priv->vlan_hdr;
+    U16 ccb_id = mbuf_priv->ccb_id;
+    ppp_ccb_t *ppp_ccb = PPPD_GET_CCB(fastrg_ccb, ccb_id);
+    struct rte_ipv4_hdr *ip_hdr;
+    int pkt_num;
+
+    /* IPv6 keeps its L2 headers in place: encapsulation moves them
+     * back over the PPPoE header instead of prepending fresh ones. */
+    if (unlikely(vlan_header->next_proto == rte_cpu_to_be_16(FRAME_TYPE_IPV6))) {
+        /* The RX lcore checked the gate before queueing this packet. Since then
+         * the ctrl thread may have closed the gate and cleared the
+         * NAT / firewall tables without waiting for the RCU offline worker
+         * which is waiting for incoming packets. Check the gate again. */
+        if (unlikely(!pppd_ipv6_dp_gate_open(ppp_ccb))) {
+            drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
+            return;
+        }
+        ipv6_firewall_lan_to_wan_encap(fastrg_ccb, ppp_ccb, single_pkt, ccb_id);
+        wan_pkt[(*total_wan_tx)++] = single_pkt;
+        return;
+    }
+    /* The RX lcore checked the gate before queueing this packet. Since then
+     * the ctrl thread may have closed the gate and cleared the NAT / firewall
+     * tables without waiting for the RCU offline worker which is waiting for
+     * incoming packets. Check the gate again. */
+    if (unlikely(!pppd_dp_gate_open(ppp_ccb))) {
+        drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
+        return;
+    }
+    ip_hdr = (struct rte_ipv4_hdr *)rte_pktmbuf_adj(single_pkt,
+        (U16)(sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t)));
+    if (ip_hdr->next_proto_id == PROTO_TYPE_TCP) {
+        pkt_num = encaps_tcp(fastrg_ccb, &single_pkt, eth_hdr,
+            vlan_header, ip_hdr, ccb_id, tx_q);
+    } else if (ip_hdr->next_proto_id == PROTO_TYPE_UDP) {
+        pkt_num = encaps_udp(fastrg_ccb, &single_pkt, eth_hdr,
+            vlan_header, ip_hdr, ccb_id, tx_q);
+    } else {
+        drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
+        return;
+    }
+    for(int j=0; j<pkt_num; j++) {
+        wan_pkt[(*total_wan_tx)++] = single_pkt;
+        single_pkt = single_pkt->next;
+    }
+}
+
 /**
  * lan_dist_worker - LAN encap worker lcore (DP_MODE_DISTRIBUTOR).
  *
@@ -2113,14 +2180,8 @@ int lan_dist_worker(void *arg)
     struct rte_distributor *dist = wk->dist;
     const unsigned int     worker_id = wk->worker_id;
     const U16              tx_q = wk->tx_queue_id;
-    struct rte_mbuf        *single_pkt;
-    struct rte_ether_hdr   *eth_hdr;
-    vlan_header_t          *vlan_header;
-    struct rte_ipv4_hdr    *ip_hdr;
     struct rte_mbuf        *bufs[BURST_SIZE];
     struct rte_mbuf        *wan_pkt[BURST_SIZE];
-    U16                    ccb_id;
-    int                    pkt_num;
     int                    n;
     char                   thread_name[32];
 
@@ -2143,35 +2204,7 @@ int lan_dist_worker(void *arg)
         for(int i=0; i<n; i++) {
             if (i + pf_k < n)
                 rte_prefetch0(rte_pktmbuf_mtod(bufs[i + pf_k], void *));
-            single_pkt = bufs[i];
-            mbuf_priv_t *mbuf_priv = rte_mbuf_to_priv(single_pkt);
-            eth_hdr = mbuf_priv->eth_hdr;
-            vlan_header = mbuf_priv->vlan_hdr;
-            ccb_id = mbuf_priv->ccb_id;
-            /* IPv6 keeps its L2 headers in place: encapsulation moves them
-             * back over the PPPoE header instead of prepending fresh ones. */
-            if (unlikely(vlan_header->next_proto == rte_cpu_to_be_16(FRAME_TYPE_IPV6))) {
-                ipv6_firewall_lan_to_wan_encap(fastrg_ccb, PPPD_GET_CCB(fastrg_ccb, ccb_id),
-                    single_pkt, ccb_id);
-                wan_pkt[total_wan_tx++] = single_pkt;
-                continue;
-            }
-            ip_hdr = (struct rte_ipv4_hdr *)rte_pktmbuf_adj(single_pkt,
-                (U16)(sizeof(struct rte_ether_hdr) + sizeof(vlan_header_t)));
-            if (ip_hdr->next_proto_id == PROTO_TYPE_TCP) {
-                pkt_num = encaps_tcp(fastrg_ccb, &single_pkt, eth_hdr,
-                    vlan_header, ip_hdr, ccb_id, tx_q);
-            } else if (ip_hdr->next_proto_id == PROTO_TYPE_UDP) {
-                pkt_num = encaps_udp(fastrg_ccb, &single_pkt, eth_hdr,
-                    vlan_header, ip_hdr, ccb_id, tx_q);
-            } else {
-                drop_packet(fastrg_ccb, single_pkt, LAN_PORT, ccb_id);
-                continue;
-            }
-            for(int j=0; j<pkt_num; j++) {
-                wan_pkt[total_wan_tx++] = single_pkt;
-                single_pkt = single_pkt->next;
-            }
+            dp_lan_dist_worker_process_pkt(fastrg_ccb, bufs[i], tx_q, wan_pkt, &total_wan_tx);
         }
         /* In case there are packets to hand off */
         total_wan_tx = check_pkt_from_other_lcore(fastrg_ccb->tx_handoff_ring[WAN_PORT][tx_q],

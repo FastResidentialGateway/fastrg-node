@@ -959,6 +959,8 @@ source "${_E2E_PHASES_DIR}/progress_lib.sh"
 source "${_E2E_PHASES_DIR}/etcd_block_lib.sh"
 # The crash check every SIGTERM stop of the node shares — not a phase either.
 source "${_E2E_PHASES_DIR}/node_shutdown_lib.sh"
+# Data-plane mode reading and the EnableDDP switch; uses node_shutdown_lib.sh.
+source "${_E2E_PHASES_DIR}/datapath_mode_lib.sh"
 source "${_E2E_PHASES_DIR}/phase0_setup.sh"
 source "${_E2E_PHASES_DIR}/phase1_subscriber_count_tests.sh"
 source "${_E2E_PHASES_DIR}/phase2_etcd_config_sync.sh"
@@ -1002,7 +1004,8 @@ source "${_E2E_PHASES_DIR}/phase37_ipv6_firewall.sh"
 source "${_E2E_PHASES_DIR}/phase38_config_republish.sh"
 source "${_E2E_PHASES_DIR}/phase39_wal_durability.sh"
 source "${_E2E_PHASES_DIR}/phase40_offline_cli_writes.sh"
-source "${_E2E_PHASES_DIR}/phase41_summary.sh"
+source "${_E2E_PHASES_DIR}/phase41_distributor_mode.sh"
+source "${_E2E_PHASES_DIR}/phase42_summary.sh"
 
 # ---------------------------------------------------------------------------
 # Phase table, progress display and phase-duration history
@@ -1055,7 +1058,8 @@ E2E_PHASES=(
     phase38_config_republish
     phase39_wal_durability
     phase40_offline_cli_writes
-    phase41_summary
+    phase41_distributor_mode
+    phase42_summary
 )
 
 # Both are index-aligned with E2E_PHASES: how long each phase took in this run,
@@ -1347,6 +1351,9 @@ cleanup_fastrg() {
     # node cut off from etcd, and it undoes its config edits over the path the
     # block leaves usable.
     _cleanup_phase40_offline_cli_writes 2>/dev/null || true
+    # Third: it may restart the node, and the steps after it expect the node
+    # back on its original config and data-plane mode.
+    _cleanup_phase41_distributor_mode 2>/dev/null || true
     _cleanup_phase0_setup 2>/dev/null || true
     _cleanup_phase11_kafka_pipeline || true
     _cleanup_phase20_nat_expiry 2>/dev/null || true

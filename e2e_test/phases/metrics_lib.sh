@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # ---------------------------------------------------------------------------
-# Shared Prometheus /metrics sampling helpers.
+# Shared Prometheus /metrics sampling helpers, plus the count comparisons the
+# phases judge those readings with.
 #
 # This file defines no phase function. It lives in phases/ so the existing
 # "scp phases/*.sh" upload in run_e2e_test.sh carries it to the runner without
@@ -156,7 +157,21 @@ e2e_all_uint() {
     return 0
 }
 
-# Sample-based self-verification of the extractors above; the phases call these
+# e2e_counter_increased BEFORE AFTER — true when both are unsigned integers and
+# AFTER is larger. An unreadable side never counts as growth.
+e2e_counter_increased() {
+    e2e_all_uint "${1:-}" "${2:-}" || return 1
+    (( 10#$2 > 10#$1 ))
+}
+
+# e2e_all_flows_replied REPLIED EXPECTED — true when both are unsigned integers
+# and equal. An empty REPLIED means no echo server came up.
+e2e_all_flows_replied() {
+    e2e_all_uint "${1:-}" "${2:-}" || return 1
+    (( 10#$1 == 10#$2 ))
+}
+
+# Sample-based self-verification of the helpers above; the phases call these
 # same functions.
 local_validation_register metric_scan _e2e_metric_scan \
     metric_scan_good metric_scan_empty_input metric_scan_no_matching_rows
@@ -178,3 +193,9 @@ local_validation_register is_uint e2e_is_uint \
     is_uint_good is_uint_empty_input is_uint_non_numeric is_uint_negative
 local_validation_register all_uint e2e_all_uint \
     all_uint_good all_uint_empty_input all_uint_one_non_numeric
+local_validation_register counter_increased e2e_counter_increased \
+    counter_increased_good counter_increased_decreased counter_increased_equal \
+    counter_increased_empty_input counter_increased_non_numeric
+local_validation_register all_flows_replied e2e_all_flows_replied \
+    all_flows_replied_good all_flows_replied_short all_flows_replied_over \
+    all_flows_replied_empty_input all_flows_replied_non_numeric
