@@ -351,26 +351,14 @@ _p37_start_iperf6_server() {
     return 1
 }
 
-phase37_ipv6_firewall() {
-    local _i _issue="" _ok=0
-    local _etcd_val="" _flag="" _phase="" _uid=""
-    local _addr_line="" _route_line="" _lan_addrs=""
-    local _drop_before=0 _drop_after=0 _drop_delta=0
-    local _pass_before="" _pass_after="" _drop6_before="" _drop6_after=""
-    local _cap_count="" _out="" _sport="" _used="" _bps=0 _floor=0
-    local _flow6="" _flow_ep="" _listen6=""
-    local _inject_out="" _spray_log=""
-    local _positive_ok=0 _negative_seen=0 _listener_alive=1 _listener_ready=0
+# Switch IPv6 on for the primary subscriber, redial it and give both hosts
+# what the IPv6 path needs. Leaves what went wrong in _P37_FIXTURE_ISSUE and
+# the LAN host's global addresses in _P37_FIXTURE_LAN_ADDRS.
+_P37_FIXTURE_ISSUE=""
+_P37_FIXTURE_LAN_ADDRS=""
+_p37_ipv6_fixture_up() {
+    local _i _issue="" _etcd_val="" _flag="" _addr_line="" _route_line="" _lan_addrs=""
 
-    bold "═══════════════════════════════════════════════════════"
-    bold " Phase 37 — IPv6 Stateful Firewall (Steps 156-170)"
-    bold "═══════════════════════════════════════════════════════"
-
-    # ------------------------------------------------------------------
-    # Step 156 — bring IPv6 up end to end again
-    # ------------------------------------------------------------------
-    info "Step 156: enabling IPv6, redialling and provisioning both hosts..."
-    _issue=""
     _P37_IPV6_SET=1
     fastrg_grpc set_ipv6 "${USER_ID}" true >/dev/null 2>&1 || true
     for _i in $(seq 1 10); do
@@ -439,6 +427,34 @@ phase37_ipv6_firewall() {
         sed -nE 's/.* src ([0-9a-fA-F:]+).*/\1/p' | head -1 || true)
     [[ -n "$_P37_LAN6" ]] || \
         _issue="${_issue:+${_issue}; }LAN host has no IPv6 source address towards ${_P37_WAN6_HOST_ADDR}"
+
+    _P37_FIXTURE_ISSUE="$_issue"
+    _P37_FIXTURE_LAN_ADDRS="$_lan_addrs"
+    [[ -z "$_issue" ]]
+}
+
+phase37_ipv6_firewall() {
+    local _i _issue="" _ok=0
+    local _flag="" _phase="" _uid=""
+    local _lan_addrs=""
+    local _drop_before=0 _drop_after=0 _drop_delta=0
+    local _pass_before="" _pass_after="" _drop6_before="" _drop6_after=""
+    local _cap_count="" _out="" _sport="" _used="" _bps=0 _floor=0
+    local _flow6="" _flow_ep="" _listen6=""
+    local _inject_out="" _spray_log=""
+    local _positive_ok=0 _negative_seen=0 _listener_alive=1 _listener_ready=0
+
+    bold "═══════════════════════════════════════════════════════"
+    bold " Phase 37 — IPv6 Stateful Firewall (Steps 156-170)"
+    bold "═══════════════════════════════════════════════════════"
+
+    # ------------------------------------------------------------------
+    # Step 156 — bring IPv6 up end to end again
+    # ------------------------------------------------------------------
+    info "Step 156: enabling IPv6, redialling and provisioning both hosts..."
+    _p37_ipv6_fixture_up || true
+    _issue="$_P37_FIXTURE_ISSUE"
+    _lan_addrs="$_P37_FIXTURE_LAN_ADDRS"
 
     if [[ -z "$_issue" ]]; then
         pass "Step 156: IPv6 firewall fixture ready" \

@@ -1068,3 +1068,112 @@ kernel: unreadable
 # expect-output: collector_failed
 # expect-status: 1
 ---
+==== fixture: datapath_mode_rss
+# expect-output: rss
+# expect-status: 0
+---
+FastRG[INFO][2026-10-22 20:57:27]: src/init.c:489> i40e DDP package loaded, multi-queue RSS will be enabled
+FastRG[INFO][2026-10-22 20:57:31]: src/fastrg.c:1069> NIC Vendor ID: 0x0003, vendor: net_i40e, datapath: RSS multi-queue, DDP enabled: yes
+FastRG[INFO][2026-10-22 20:57:31]: src/dp_flow.c:595> Port 1: PPPoE Session -> RSS 1..2 via i40e DDP PCTYPE mapping [OK]
+==== fixture: datapath_mode_distributor
+# expect-output: distributor
+# expect-status: 0
+---
+FastRG[INFO][2026-10-22 20:57:31]: src/fastrg.c:1069> NIC Vendor ID: 0x0003, vendor: net_i40e, datapath: software distributor, DDP enabled: no
+==== fixture: datapath_mode_last_start_wins
+# expect-output: distributor
+# expect-status: 0
+---
+FastRG[INFO][2026-10-22 20:57:31]: src/fastrg.c:1069> NIC Vendor ID: 0x0003, vendor: net_i40e, datapath: RSS multi-queue, DDP enabled: yes
+FastRG[INFO][2026-10-22 21:05:02]: src/fastrg.c:1069> NIC Vendor ID: 0x0003, vendor: net_i40e, datapath: software distributor, DDP enabled: no
+==== fixture: datapath_mode_line_missing
+# expect-output: err
+# expect-status: 1
+---
+FastRG[INFO][2026-10-22 20:57:27]: src/init.c:489> i40e DDP package loaded, multi-queue RSS will be enabled
+EAL: Error - exiting with code: 1
+==== fixture: datapath_mode_unknown_mode
+# expect-output: err
+# expect-status: 1
+---
+FastRG[INFO][2026-10-22 20:57:31]: src/fastrg.c:1069> NIC Vendor ID: 0x0003, vendor: net_i40e, datapath: , DDP enabled: no
+==== fixture: datapath_mode_empty_input
+# expect-output: err
+# expect-status: 1
+---
+==== fixture: counter_increased_good
+# invoke: args-only
+# args: 3 7
+# expect-status: 0
+---
+==== fixture: counter_increased_decreased
+# invoke: args-only
+# args: 7 3
+# expect-status: 1
+---
+==== fixture: counter_increased_equal
+# invoke: args-only
+# args: 7 7
+# expect-status: 1
+---
+==== fixture: counter_increased_empty_input
+# args: 5
+# expect-status: 1
+---
+==== fixture: counter_increased_non_numeric
+# invoke: args-only
+# args: NA 3
+# expect-status: 1
+---
+==== fixture: all_flows_replied_good
+# invoke: args-only
+# args: 16 16
+# expect-status: 0
+---
+==== fixture: all_flows_replied_short
+# invoke: args-only
+# args: 15 16
+# expect-status: 1
+---
+==== fixture: all_flows_replied_over
+# invoke: args-only
+# args: 17 16
+# expect-status: 1
+---
+==== fixture: all_flows_replied_empty_input
+# args: 16
+# expect-status: 1
+---
+==== fixture: all_flows_replied_non_numeric
+# invoke: args-only
+# args: x 16
+# expect-status: 1
+---
+==== fixture: dist_worker_roles_good
+# invoke: args-only
+# args: 2 2 0
+# expect-status: 0
+---
+==== fixture: dist_worker_roles_wan_missing
+# invoke: args-only
+# args: 0 2 0
+# expect-status: 1
+---
+==== fixture: dist_worker_roles_lan_missing
+# invoke: args-only
+# args: 2 0 0
+# expect-status: 1
+---
+==== fixture: dist_worker_roles_data_lcores_present
+# invoke: args-only
+# args: 2 2 1
+# expect-status: 1
+---
+==== fixture: dist_worker_roles_empty_input
+# expect-status: 1
+---
+==== fixture: dist_worker_roles_non_numeric
+# invoke: args-only
+# args: 2 2 NA
+# expect-status: 1
+---
