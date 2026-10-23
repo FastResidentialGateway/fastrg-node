@@ -695,8 +695,8 @@ static void test_ppp_init_config_by_user(void)
     uint64_t token_after = rte_rcu_qsbr_start(rcu);
 
     TEST_ASSERT(ret == SUCCESS, "re-initializing the subscriber succeeds", "got ERROR");
-    TEST_ASSERT(token_after - token_before >= 3,
-        "re-initializing waits for two ppp_ccb_rcu grace periods",
+    TEST_ASSERT(token_after - token_before >= 2,
+        "re-initializing waits for a ppp_ccb_rcu grace period",
         "grace periods started: %" PRIu64, token_after - token_before - 1);
 
     BOOL nat_lock_held = rte_spinlock_is_locked(&test_ppp_ccb.nat_insert_lock);

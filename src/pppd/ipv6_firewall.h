@@ -40,7 +40,7 @@
 #define IPV6_FIREWALL_GC_SCAN_CHUNK 512
 
 #define IPV6_FIREWALL_ENTRY_FREE  0
-#define IPV6_FIREWALL_ENTRY_READY 2
+#define IPV6_FIREWALL_ENTRY_READY 1
 
 /*--------- ICMPv6 MESSAGE TYPES ----------*/
 #define ICMP6_DST_UNREACH    1
@@ -243,43 +243,32 @@ static inline void ipv6_firewall_hash_free_cb(void *p, void *key_data)
 }
 
 /**
- * @fn ipv6_firewall_table_reset
+ * @fn ipv6_firewall_table_del_all_entries_from_hash
  *
- * @brief Flush every session of a subscriber and refill the free-list.
- *
- *        Control-plane only; at runtime the caller must first close the IPv6
- *        forwarding gate and wait for a ppp_ccb_rcu grace period, since data
- *        lcores may still be using the session table.
+ * @brief Delete every live entry with rte_hash_del_key(); safe while data
+ *        lcores are running GC on the same IPv6 firewall table. Runtime 
+ *        callers must close the IPv6 forwarding gate and call
+ *        rte_rcu_qsbr_synchronize() first.
  *
  * @param ppp_ccb
  *        Subscriber control block
  */
-static inline void ipv6_firewall_table_reset(ppp_ccb_t *ppp_ccb)
+static inline void ipv6_firewall_table_del_all_entries_from_hash(ppp_ccb_t *ppp_ccb)
 {
-    unsigned int freed, pending, avail;
-
-    /* Drain the defer queue first: a deferred free surviving the reset would
-     * push an already re-issued slot index into the refilled free ring.
-     * Data lcores report quiescent every poll loop, so this terminates. */
-    do {
-        freed = pending = avail = 0;
-        rte_hash_rcu_qsbr_dq_reclaim(ppp_ccb->ipv6_firewall_hash, &freed, &pending, &avail);
-    } while (pending != 0);
-
-    rte_hash_reset(ppp_ccb->ipv6_firewall_hash);
-    rte_ring_reset(ppp_ccb->ipv6_firewall_free_ring);
     for(U32 i=0; i<IPV6_FIREWALL_MAX_ENTRIES; i++) {
-        ppp_ccb->ipv6_firewall_expire_at[i] = 0;
-        ppp_ccb->ipv6_firewall_last_used[i] = 0;
-        rte_atomic16_set(&ppp_ccb->ipv6_firewall_table[i].is_fill, IPV6_FIREWALL_ENTRY_FREE);
-        rte_ring_enqueue(ppp_ccb->ipv6_firewall_free_ring, (void *)(uintptr_t)i);
+        /* Deadline 0 marks a free slot. */
+        if (__atomic_load_n(&ppp_ccb->ipv6_firewall_expire_at[i], __ATOMIC_RELAXED) == 0)
+            continue;
+        ipv6_firewall_entry_t *entry = &ppp_ccb->ipv6_firewall_table[i];
+        if (rte_atomic16_read(&entry->is_fill) == IPV6_FIREWALL_ENTRY_READY)
+            rte_hash_del_key(ppp_ccb->ipv6_firewall_hash, &entry->key);
     }
-    ppp_ccb->ipv6_firewall_gc_counter = 0;
-    ppp_ccb->ipv6_firewall_enospc = 0;
-    ppp_ccb->ipv6_firewall_gc_reclaimed = 0;
-    ppp_ccb->ipv6_firewall_evicted = 0;
-    ppp_ccb->ipv6_firewall_icmp6_err_passed = 0;
-    ppp_ccb->ipv6_firewall_icmp6_err_dropped = 0;
+    __atomic_store_n(&ppp_ccb->ipv6_firewall_gc_counter, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&ppp_ccb->ipv6_firewall_enospc, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&ppp_ccb->ipv6_firewall_gc_reclaimed, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&ppp_ccb->ipv6_firewall_evicted, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&ppp_ccb->ipv6_firewall_icmp6_err_passed, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&ppp_ccb->ipv6_firewall_icmp6_err_dropped, 0, __ATOMIC_RELAXED);
 }
 
 /**
@@ -301,6 +290,40 @@ static inline void ipv6_firewall_table_destroy(ppp_ccb_t *ppp_ccb)
         rte_ring_free(ppp_ccb->ipv6_firewall_free_ring);
         ppp_ccb->ipv6_firewall_free_ring = NULL;
     }
+}
+
+/**
+ * @fn ipv6_firewall_table_init_entries
+ *
+ * @brief Reset every IPv6 firewall table entry: Clear each entry's deadline and
+ *        last-used stamp and mark entry IPV6_FIREWALL_ENTRY_FREE; init-time
+ *        only, before any data lcore runs.
+ *
+ * @param ppp_ccb
+ *        Subscriber control block
+ */
+static inline void ipv6_firewall_table_init_entries(ppp_ccb_t *ppp_ccb)
+{
+    for(U32 i=0; i<IPV6_FIREWALL_MAX_ENTRIES; i++) {
+        ppp_ccb->ipv6_firewall_expire_at[i] = 0;
+        ppp_ccb->ipv6_firewall_last_used[i] = 0;
+        rte_atomic16_set(&ppp_ccb->ipv6_firewall_table[i].is_fill, IPV6_FIREWALL_ENTRY_FREE);
+    }
+}
+
+/**
+ * @fn ipv6_firewall_table_enqueue_all_entries_to_ring
+ *
+ * @brief Refill the idle ring queue with every IPV6_FIREWALL_ENTRY_FREE entry; 
+ *        init-time only, before any data lcore runs.
+ *
+ * @param ppp_ccb
+ *        Subscriber control block
+ */
+static inline void ipv6_firewall_table_enqueue_all_entries_to_ring(ppp_ccb_t *ppp_ccb)
+{
+    for(U32 i=0; i<IPV6_FIREWALL_MAX_ENTRIES; i++)
+        rte_ring_enqueue(ppp_ccb->ipv6_firewall_free_ring, (void *)(uintptr_t)i);
 }
 
 /**
@@ -363,7 +386,14 @@ static inline STATUS ipv6_firewall_table_init(ppp_ccb_t *ppp_ccb, U16 ccb_id,
         }
     }
 
-    ipv6_firewall_table_reset(ppp_ccb);
+    ipv6_firewall_table_init_entries(ppp_ccb);
+    ipv6_firewall_table_enqueue_all_entries_to_ring(ppp_ccb);
+    ppp_ccb->ipv6_firewall_gc_counter = 0;
+    ppp_ccb->ipv6_firewall_enospc = 0;
+    ppp_ccb->ipv6_firewall_gc_reclaimed = 0;
+    ppp_ccb->ipv6_firewall_evicted = 0;
+    ppp_ccb->ipv6_firewall_icmp6_err_passed = 0;
+    ppp_ccb->ipv6_firewall_icmp6_err_dropped = 0;
     return SUCCESS;
 }
 

@@ -47,8 +47,7 @@
 #define NAT_PORT_RANGE (TOTAL_SOCK_PORT - SYS_MAX_PORT)
 
 #define NAT_ENTRY_FREE       0
-#define NAT_ENTRY_FILLING    1
-#define NAT_ENTRY_READY      2
+#define NAT_ENTRY_READY      1
 
 /**
  * @fn nat_expiry_cycles
@@ -132,48 +131,37 @@ static inline void nat_reverse_hash_free_cb(void *p, void *key_data)
 }
 
 /**
- * @fn nat_table_reset
+ * @fn nat_table_init_entries
  *
- * @brief Flush all NAT state of a subscriber: empty both hashes and
- *        refill the free-list with every pool index.  Control-plane only;
- *        at runtime the caller must first close the data-plane gate and wait
- *        for a ppp_ccb_rcu grace period, since data lcores may still be
- *        using the tables.
+ * @brief Reset every NAT table entry: Bind each entry's deadline pointer, clear
+ *        the deadline and mark entry NAT_ENTRY_FREE; init-time only, before any
+ *        data lcore runs.
  *
  * @param ppp_ccb
  *      Subscriber control block
  */
-static inline void nat_table_reset(ppp_ccb_t *ppp_ccb)
+static inline void nat_table_init_entries(ppp_ccb_t *ppp_ccb)
 {
-    unsigned int freed, pending, avail;
-
-    /* Drain both defer queues before rebuilding: a deferred free surviving
-     * the reset would fire later and push its (now re-issued) slot index
-     * into the refilled free ring — two flows sharing one entry — and the
-     * same staleness corrupts the hashes' internal key-slot allocators.
-     * Terminates: data lcores report quiescent every poll loop even when
-     * idle, and at first init the queues are simply empty. */
-    do {
-        freed = pending = avail = 0;
-        rte_hash_rcu_qsbr_dq_reclaim(ppp_ccb->nat_reverse_hash, &freed, &pending, &avail);
-    } while (pending != 0);
-    do {
-        freed = pending = avail = 0;
-        rte_hash_rcu_qsbr_dq_reclaim(ppp_ccb->nat_forward_hash, &freed, &pending, &avail);
-    } while (pending != 0);
-
-    rte_hash_reset(ppp_ccb->nat_reverse_hash);
-    rte_hash_reset(ppp_ccb->nat_forward_hash);
-    rte_ring_reset(ppp_ccb->nat_free_ring);
     for(U32 i=0; i<MAX_NAT_ENTRIES; i++) {
         ppp_ccb->addr_table[i].expire_slot = &ppp_ccb->nat_expire_at[i];
         ppp_ccb->nat_expire_at[i] = 0;
         rte_atomic16_set(&ppp_ccb->addr_table[i].is_fill, NAT_ENTRY_FREE);
-        rte_ring_enqueue(ppp_ccb->nat_free_ring, (void *)(uintptr_t)i);
     }
-    ppp_ccb->nat_gc_counter = 0;
-    ppp_ccb->nat_enospc = 0;
-    ppp_ccb->nat_gc_reclaimed = 0;
+}
+
+/**
+ * @fn nat_table_enqueue_all_entries_to_ring
+ *
+ * @brief Refill the idle ring queue with every NAT_ENTRY_FREE entry; init-time 
+ *        only, before any data lcore runs.
+ *
+ * @param ppp_ccb
+ *      Subscriber control block
+ */
+static inline void nat_table_enqueue_all_entries_to_ring(ppp_ccb_t *ppp_ccb)
+{
+    for(U32 i=0; i<MAX_NAT_ENTRIES; i++)
+        rte_ring_enqueue(ppp_ccb->nat_free_ring, (void *)(uintptr_t)i);
 }
 
 /**
@@ -277,7 +265,11 @@ static inline STATUS nat_table_init(ppp_ccb_t *ppp_ccb, U16 ccb_id, struct rte_r
         }
     }
 
-    nat_table_reset(ppp_ccb);
+    nat_table_init_entries(ppp_ccb);
+    nat_table_enqueue_all_entries_to_ring(ppp_ccb);
+    ppp_ccb->nat_gc_counter = 0;
+    ppp_ccb->nat_enospc = 0;
+    ppp_ccb->nat_gc_reclaimed = 0;
     return SUCCESS;
 }
 
@@ -339,6 +331,31 @@ static inline int nat_entry_del_keys(ppp_ccb_t *ppp_ccb, addr_table_t *entry)
 
     rte_hash_del_key(ppp_ccb->nat_forward_hash, &fkey);
     return rte_hash_del_key(ppp_ccb->nat_reverse_hash, &rkey) >= 0;
+}
+
+/**
+ * @fn nat_table_del_all_entries_from_hash
+ *
+ * @brief Delete every live entry with rte_hash_del_key(); safe while data 
+ *        lcores are running GC on the same NAT table. Runtime callers must 
+ *        close the data-plane gate and call rte_rcu_qsbr_synchronize() first.
+ *
+ * @param ppp_ccb
+ *      Subscriber control block
+ */
+static inline void nat_table_del_all_entries_from_hash(ppp_ccb_t *ppp_ccb)
+{
+    for(U32 i=0; i<MAX_NAT_ENTRIES; i++) {
+        /* Deadline 0 marks a free slot. */
+        if (__atomic_load_n(&ppp_ccb->nat_expire_at[i], __ATOMIC_RELAXED) == 0)
+            continue;
+        addr_table_t *entry = &ppp_ccb->addr_table[i];
+        if (rte_atomic16_read(&entry->is_fill) == NAT_ENTRY_READY)
+            nat_entry_del_keys(ppp_ccb, entry);
+    }
+    __atomic_store_n(&ppp_ccb->nat_gc_counter, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&ppp_ccb->nat_enospc, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&ppp_ccb->nat_gc_reclaimed, 0, __ATOMIC_RELAXED);
 }
 
 /**

@@ -38,14 +38,49 @@ static void nat_env_init_once(void)
     assert(nat_table_init(&test_ccb, 999, test_rcu) == SUCCESS);
 }
 
+/* Report reader-0 quiescent and empty both defer queues; returns how many
+ * pool slots the reverse hash handed back.  Stops early if nothing can be
+ * reclaimed, so a stuck queue fails the caller's assertions instead of
+ * hanging. */
+static unsigned int nat_drain_deferred(void)
+{
+    unsigned int freed, pending, avail, total = 0;
+
+    rte_rcu_qsbr_quiescent(test_rcu, 0);
+    do {
+        freed = pending = avail = 0;
+        rte_hash_rcu_qsbr_dq_reclaim(test_ccb.nat_reverse_hash, &freed, &pending, &avail);
+        total += freed;
+    } while (pending != 0 && freed != 0);
+    do {
+        freed = pending = avail = 0;
+        rte_hash_rcu_qsbr_dq_reclaim(test_ccb.nat_forward_hash, &freed, &pending, &avail);
+    } while (pending != 0 && freed != 0);
+    return total;
+}
+
+/* Keys still linked in a hash.  rte_hash_count() would also count key slots
+ * that wait in the RCU defer queue. */
+static U32 nat_live_keys(const struct rte_hash *h)
+{
+    const void *key;
+    void *data;
+    U32 next = 0, n = 0;
+
+    while (rte_hash_iterate(h, &key, &data, &next) >= 0)
+        n++;
+    return n;
+}
+
 static void nat_env_reset(void)
 {
     nat_env_init_once();
-    /* The test thread is reader 0 and holds no entry pointers here; report
-     * quiescent so nat_table_reset() can drain leftover deferred frees from
-     * the previous test (its drain loop would otherwise wait on us). */
+    /* The test thread is reader 0 and holds no entry pointers here.  Deleting
+     * frees slots through the defer queue, so drain it afterwards to start
+     * every test from a full free ring. */
     rte_rcu_qsbr_quiescent(test_rcu, 0);
-    nat_table_reset(&test_ccb);
+    nat_table_del_all_entries_from_hash(&test_ccb);
+    nat_drain_deferred();
     memset(test_ccb.port_fwd_table, 0, sizeof(test_ccb.port_fwd_table));
 }
 
@@ -75,6 +110,71 @@ static void test_compute_initial_nat_port(void)
     TEST_ASSERT(h >= SYS_MAX_PORT && h < TOTAL_SOCK_PORT,
         "port in [SYS_MAX_PORT, TOTAL_SOCK_PORT)",
         "got %u", h);
+}
+
+static void test_nat_table_del_all_entries_from_hash(void)
+{
+    printf("\nTesting nat_table_del_all_entries_from_hash:\n");
+    printf("============================================\n\n");
+
+    nat_env_reset();
+    struct rte_ether_hdr eth = {0};
+    U32 dst_ip = rte_cpu_to_be_32(0x08080808);
+    U16 dst_port = rte_cpu_to_be_16(443);
+    addr_table_t *entries[3] = {0};
+    BOOL all_free = TRUE;
+
+    for (int i = 0; i < 3; i++)
+        nat_learning_port_reuse(&test_ccb, &eth, IPPROTO_TCP,
+            rte_cpu_to_be_32(0xC0A80120 + i), dst_ip,
+            rte_cpu_to_be_16(57200 + i), dst_port, &entries[i]);
+    TEST_ASSERT(entries[0] != NULL && entries[1] != NULL && entries[2] != NULL &&
+            nat_live_keys(test_ccb.nat_reverse_hash) == 3 &&
+            nat_live_keys(test_ccb.nat_forward_hash) == 3,
+        "three READY mappings are linked in both hashes", NULL);
+
+    nat_table_del_all_entries_from_hash(&test_ccb);
+    U32 rev_keys = nat_live_keys(test_ccb.nat_reverse_hash);
+    U32 fwd_keys = nat_live_keys(test_ccb.nat_forward_hash);
+    TEST_ASSERT(rev_keys == 0 && fwd_keys == 0,
+        "delete unlinks every mapping from both hashes",
+        "reverse keys=%u forward keys=%u", rev_keys, fwd_keys);
+    TEST_ASSERT(rte_ring_count(test_ccb.nat_free_ring) == MAX_NAT_ENTRIES - 3,
+        "the slots stay out of the free ring until a grace period passes",
+        "free slots=%u", rte_ring_count(test_ccb.nat_free_ring));
+
+    unsigned int reclaimed = nat_drain_deferred();
+    for (int i = 0; i < 3; i++)
+        all_free = all_free && rte_atomic16_read(&entries[i]->is_fill) == NAT_ENTRY_FREE;
+    TEST_ASSERT(reclaimed == 3 && all_free &&
+            rte_ring_count(test_ccb.nat_free_ring) == MAX_NAT_ENTRIES &&
+            rte_hash_count(test_ccb.nat_reverse_hash) == 0 &&
+            rte_hash_count(test_ccb.nat_forward_hash) == 0,
+        "after a grace period every slot is FREE and back in the free ring",
+        "reclaimed=%u all FREE=%d free slots=%u", reclaimed, all_free,
+        rte_ring_count(test_ccb.nat_free_ring));
+
+    /* GC on a data lcore may unlink a mapping right before the delete: its
+     * slot is still READY in the defer queue, so the delete hits ENOENT on
+     * its keys. */
+    for (int i = 0; i < 2; i++)
+        nat_learning_port_reuse(&test_ccb, &eth, IPPROTO_TCP,
+            rte_cpu_to_be_32(0xC0A80130 + i), dst_ip,
+            rte_cpu_to_be_16(57300 + i), dst_port, &entries[i]);
+    nat_expire_set(entries[0]->expire_slot, 1);
+    TEST_ASSERT(nat_gc_scan_by_ccb(&test_ccb, MAX_NAT_ENTRIES) == 1 &&
+            rte_atomic16_read(&entries[0]->is_fill) == NAT_ENTRY_READY,
+        "GC unlinks one mapping whose slot stays READY until reclaim", NULL);
+
+    nat_table_del_all_entries_from_hash(&test_ccb);
+    rev_keys = nat_live_keys(test_ccb.nat_reverse_hash);
+    fwd_keys = nat_live_keys(test_ccb.nat_forward_hash);
+    reclaimed = nat_drain_deferred();
+    TEST_ASSERT(rev_keys == 0 && fwd_keys == 0 && reclaimed == 2 &&
+            rte_ring_count(test_ccb.nat_free_ring) == MAX_NAT_ENTRIES,
+        "delete after a GC delete reclaims each slot exactly once",
+        "reverse keys=%u forward keys=%u reclaimed=%u free slots=%u",
+        rev_keys, fwd_keys, reclaimed, rte_ring_count(test_ccb.nat_free_ring));
 }
 
 static void test_learning_basic(void)
@@ -810,6 +910,7 @@ void test_nat(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     pass_count = 0;
 
     test_compute_initial_nat_port();
+    test_nat_table_del_all_entries_from_hash();
     test_learning_basic();
     test_learning_same_flow_refresh();
     test_learning_port_reuse_different_dst();
