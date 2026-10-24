@@ -63,14 +63,44 @@ static void fw_env_init_once(void)
     assert(ipv6_firewall_table_init(&test_ccb, 60003, test_rcu) == SUCCESS);
 }
 
+/* Report reader-0 quiescent and empty the defer queue; returns how many pool
+ * slots came back.  Stops early if nothing can be reclaimed, so a stuck queue
+ * fails the caller's assertions instead of hanging. */
+static unsigned int fw_drain_deferred(void)
+{
+    unsigned int freed, pending, avail, total = 0;
+
+    rte_rcu_qsbr_quiescent(test_rcu, 0);
+    do {
+        freed = pending = avail = 0;
+        rte_hash_rcu_qsbr_dq_reclaim(test_ccb.ipv6_firewall_hash, &freed, &pending, &avail);
+        total += freed;
+    } while (pending != 0 && freed != 0);
+    return total;
+}
+
+/* Keys still linked in a hash.  rte_hash_count() would also count key slots
+ * that wait in the RCU defer queue. */
+static U32 fw_live_keys(const struct rte_hash *h)
+{
+    const void *key;
+    void *data;
+    U32 next = 0, n = 0;
+
+    while (rte_hash_iterate(h, &key, &data, &next) >= 0)
+        n++;
+    return n;
+}
+
 static void fw_env_reset(void)
 {
     fw_env_init_once();
-    /* The test thread is reader 0 and holds no entry pointers here; report
-     * quiescent so the reset can drain leftover deferred frees from the
-     * previous test (its drain loop would otherwise wait on us). */
+    /* The test thread is reader 0 and holds no entry pointers here.  Deleting
+     * frees slots through the defer queue, so drain it afterwards to start
+     * every test from a full free ring. */
     rte_rcu_qsbr_quiescent(test_rcu, 0);
-    ipv6_firewall_table_reset(&test_ccb);
+    ipv6_firewall_table_del_all_entries_from_hash(&test_ccb);
+    fw_drain_deferred();
     test_ccb.tcp_conntrack_enabled = TRUE;
 }
 
@@ -203,6 +233,75 @@ static ipv6_firewall_entry_t *fw_find(ppp_ccb_t *ccb, const struct rte_ipv6_hdr 
 static U64 fw_deadline(ppp_ccb_t *ccb, U32 idx)
 {
     return __atomic_load_n(&ccb->ipv6_firewall_expire_at[idx], __ATOMIC_RELAXED);
+}
+
+/**
+ * Delete unlinks every session through the RCU delete path GC uses, so slots
+ * come back only after a grace period.
+ */
+static void test_ipv6_firewall_table_del_all_entries_from_hash(void)
+{
+    struct rte_ipv6_hdr *ip6;
+    ipv6_firewall_entry_t *entries[3] = {0};
+    U32 idx[3] = {0};
+    BOOL all_free = TRUE;
+
+    printf("\nTesting ipv6_firewall_table_del_all_entries_from_hash:\n");
+    printf("======================================================\n\n");
+
+    fw_env_reset();
+    for(int i=0; i<3; i++) {
+        ip6 = build_udp6(outer_buf, lan_host, remote_host, (U16)(40500 + i), 53);
+        ipv6_firewall_learn(&test_ccb, ip6);
+        entries[i] = fw_find(&test_ccb, ip6, FALSE, &idx[i]);
+    }
+    TEST_ASSERT(entries[0] != NULL && entries[1] != NULL && entries[2] != NULL &&
+            fw_live_keys(test_ccb.ipv6_firewall_hash) == 3,
+        "three READY sessions are linked in the hash", NULL);
+
+    ipv6_firewall_table_del_all_entries_from_hash(&test_ccb);
+    U32 keys = fw_live_keys(test_ccb.ipv6_firewall_hash);
+    TEST_ASSERT(keys == 0, "delete unlinks every session from the hash",
+        "keys=%u", keys);
+    TEST_ASSERT(rte_ring_count(test_ccb.ipv6_firewall_free_ring) ==
+            IPV6_FIREWALL_MAX_ENTRIES - 3,
+        "the slots stay out of the free ring until a grace period passes",
+        "free slots=%u", rte_ring_count(test_ccb.ipv6_firewall_free_ring));
+
+    unsigned int reclaimed = fw_drain_deferred();
+    for(int i=0; i<3; i++)
+        all_free = all_free &&
+            rte_atomic16_read(&entries[i]->is_fill) == IPV6_FIREWALL_ENTRY_FREE;
+    TEST_ASSERT(reclaimed == 3 && all_free &&
+            rte_ring_count(test_ccb.ipv6_firewall_free_ring) == IPV6_FIREWALL_MAX_ENTRIES &&
+            rte_hash_count(test_ccb.ipv6_firewall_hash) == 0,
+        "after a grace period every slot is FREE and back in the free ring",
+        "reclaimed=%u all FREE=%d free slots=%u", reclaimed, all_free,
+        rte_ring_count(test_ccb.ipv6_firewall_free_ring));
+
+    /* GC on a data lcore may unlink a session right before the delete: its
+     * slot is still READY in the defer queue, so the delete hits ENOENT on
+     * its key. */
+    for(int i=0; i<2; i++) {
+        ip6 = build_udp6(outer_buf, lan_host, remote_host, (U16)(40600 + i), 53);
+        ipv6_firewall_learn(&test_ccb, ip6);
+        entries[i] = fw_find(&test_ccb, ip6, FALSE, &idx[i]);
+    }
+    TEST_ASSERT(entries[0] != NULL && entries[1] != NULL,
+        "two more sessions are open", NULL);
+    nat_expire_set(&test_ccb.ipv6_firewall_expire_at[idx[0]], 1);
+    TEST_ASSERT(ipv6_firewall_gc_scan_by_ccb(&test_ccb, IPV6_FIREWALL_MAX_ENTRIES) == 1 &&
+            rte_atomic16_read(&entries[0]->is_fill) == IPV6_FIREWALL_ENTRY_READY,
+        "GC unlinks one session whose slot stays READY until reclaim", NULL);
+
+    ipv6_firewall_table_del_all_entries_from_hash(&test_ccb);
+    keys = fw_live_keys(test_ccb.ipv6_firewall_hash);
+    reclaimed = fw_drain_deferred();
+    TEST_ASSERT(keys == 0 && reclaimed == 2 &&
+            rte_ring_count(test_ccb.ipv6_firewall_free_ring) == IPV6_FIREWALL_MAX_ENTRIES,
+        "delete after a GC delete reclaims each slot exactly once",
+        "keys=%u reclaimed=%u free slots=%u", keys, reclaimed,
+        rte_ring_count(test_ccb.ipv6_firewall_free_ring));
 }
 
 /**
@@ -851,6 +950,7 @@ void test_ipv6_firewall(FastRG_t *fastrg_ccb, U32 *total_tests, U32 *total_pass)
     test_count = 0;
     pass_count = 0;
 
+    test_ipv6_firewall_table_del_all_entries_from_hash();
     test_key_normalization();
     test_unsolicited_inbound_dropped();
     test_icmp6_echo_session();

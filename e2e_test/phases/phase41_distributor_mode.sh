@@ -4,7 +4,9 @@
 # Phase 41 — Software distributor data plane (Steps 185-192)
 #
 # Restart the node with EnableDDP = false, check that traffic round-trips
-# through the distributor workers, then restore the config and the old mode.
+# through the distributor workers and that the tables only shrink and end
+# empty across a reconfig under load (Step 190b), then restore the config and
+# the old mode.
 # ---------------------------------------------------------------------------
 
 # Mode the node ran before this phase; kept across a drill's re-source.
@@ -26,6 +28,30 @@ _p41_cleanup_switch_skipped() {
 
 case_validation_register distributor_switch_skipped phase41_distributor_mode \
     _p41_inject_switch_skipped _p41_cleanup_switch_skipped 'Step 185:'
+
+# Drill: the subscriber-count change never happens, so the tables are never
+# cleared while the load keeps them filled.
+_p41_inject_reconfig_skipped() {
+    sabotage_override_function _e2e_rr_set_count 'return 0'
+}
+
+_p41_cleanup_reconfig_skipped() {
+    restore_phase_functions reconfig_race_lib.sh
+    _e2e_reconfig_race_cleanup
+    _cleanup_phase41_distributor_mode
+}
+
+case_validation_register reconfig_race_trigger_skipped phase41_distributor_mode \
+    _p41_inject_reconfig_skipped _p41_cleanup_reconfig_skipped 'Step 190b:'
+
+# Drill: the sampler reads /metrics every 100 ms instead of back to back, too
+# sparse to see the tables between two reads.
+_p41_inject_sampler_sparse() {
+    sabotage_override_function _e2e_rr_sampler_gap "printf '0.1'"
+}
+
+case_validation_register reconfig_race_sampler_sparse phase41_distributor_mode \
+    _p41_inject_sampler_sparse _p41_cleanup_reconfig_skipped 'Step 190b:'
 
 # Idempotent: called at the end of phase41 and from the top-level EXIT trap.
 _cleanup_phase41_distributor_mode() {
@@ -276,6 +302,16 @@ phase41_distributor_mode() {
         fi
     else
         fail "Step 190: IPv6 UDP round-trips through the distributor" "$_not_dist"
+    fi
+
+    # ------------------------------------------------------------------
+    # Step 190b — drop and re-add the subscriber under new-flow load
+    # ------------------------------------------------------------------
+    info "Step 190b: dropping and re-adding user ${USER_ID} under new-flow load (distributor)..."
+    if [[ $_in_dist -eq 1 ]]; then
+        e2e_reconfig_race_step "Step 190b: NAT / IPv6 firewall fill never exceeds its pre-reconfig value and clears (distributor)"
+    else
+        fail "Step 190b: NAT / IPv6 firewall fill never exceeds its pre-reconfig value and clears (distributor)" "$_not_dist"
     fi
 
     # ------------------------------------------------------------------

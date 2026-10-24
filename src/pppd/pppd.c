@@ -473,6 +473,17 @@ static STATUS pppd_construct_ccb_elements(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_c
      * the first ppp_init_config_by_user allocates them. */
     rte_spinlock_init(&ppp_ccb->cred_lock);
 
+    /* Initialized only here: on a reconfiguration a data lcore may hold
+     * these locks and the timers may be pending. */
+    rte_spinlock_init(&ppp_ccb->nat_insert_lock);
+    rte_spinlock_init(&ppp_ccb->ipv6_firewall_insert_lock);
+    rte_timer_init(&(ppp_ccb->pppoe));
+    rte_timer_init(&(ppp_ccb->ppp));
+    rte_timer_init(&(ppp_ccb->ppp_ipv6cp));
+    rte_timer_init(&(ppp_ccb->dhcp6_timer));
+    rte_timer_init(&(ppp_ccb->ra_timer));
+    rte_timer_init(&(ppp_ccb->ppp_alive));
+
     return SUCCESS;
 
 err:
@@ -644,23 +655,6 @@ STATUS ppp_init_config_by_user(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb, U16 ccb
     ppp_ccb->magic_num = rte_cpu_to_be_32((rand() % 0xFFFFFFFE) + 1);
     memset(ppp_ccb->identifier, 0, sizeof(ppp_ccb->identifier));
     memset(ppp_ccb->config_request_pending, 0, sizeof(ppp_ccb->config_request_pending));
-    /* Bound was TOTAL_SOCK_PORT before — only the first quarter of the pool
-     * got initialized (benign only because ccbs come zeroed from the mempool).
-     * expire deadlines live in the SoA array; nat_table_reset() zeroes them
-     * and binds each entry's expire_slot. */
-    for(int i=0; i<MAX_NAT_ENTRIES; i++)
-        rte_atomic16_init(&ppp_ccb->addr_table[i].is_fill);
-    rte_spinlock_init(&ppp_ccb->nat_insert_lock);
-    for(int i=0; i<IPV6_FIREWALL_MAX_ENTRIES; i++)
-        rte_atomic16_init(&ppp_ccb->ipv6_firewall_table[i].is_fill);
-    rte_spinlock_init(&ppp_ccb->ipv6_firewall_insert_lock);
-    memset(ppp_ccb->PPP_dst_mac.addr_bytes, 0, ETH_ALEN);
-    rte_timer_init(&(ppp_ccb->pppoe));
-    rte_timer_init(&(ppp_ccb->ppp));
-    rte_timer_init(&(ppp_ccb->ppp_ipv6cp));
-    rte_timer_init(&(ppp_ccb->dhcp6_timer));
-    rte_timer_init(&(ppp_ccb->ra_timer));
-    rte_timer_init(&(ppp_ccb->ppp_alive));
     rte_atomic16_init(&ppp_ccb->dp_start_bool);
     rte_atomic16_init(&ppp_ccb->ppp_bool);
     rte_atomic16_init(&ppp_ccb->ipv6_dp_bool);
@@ -676,6 +670,19 @@ STATUS ppp_init_config_by_user(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb, U16 ccb
     memset(ppp_ccb->ipv6cp_peer_iid, 0, sizeof(ppp_ccb->ipv6cp_peer_iid));
     ppp_ccb->ipv6cp_up = FALSE;
     pppd_ipv6_dp_gate_update(ppp_ccb);
+
+    /* Wait for packets still inside NAT / IPv6 firewall processing after the gates closed. */
+    rte_rcu_qsbr_synchronize(fastrg_ccb->ppp_ccb_rcu, RTE_QSBR_THRID_INVALID);
+
+    memset(ppp_ccb->PPP_dst_mac.addr_bytes, 0, ETH_ALEN);
+    /* A pending timer must be unlinked from the timer list, which only
+     * rte_timer_stop() does; rte_timer_init() would leave it linked. */
+    rte_timer_stop(&(ppp_ccb->pppoe));
+    rte_timer_stop(&(ppp_ccb->ppp));
+    rte_timer_stop(&(ppp_ccb->ppp_ipv6cp));
+    rte_timer_stop(&(ppp_ccb->dhcp6_timer));
+    rte_timer_stop(&(ppp_ccb->ra_timer));
+    rte_timer_stop(&(ppp_ccb->ppp_alive));
     dhcp6_pd_stop(ppp_ccb);
 
     /* All elements below were preallocated by pppd_construct_ccb_elements()
@@ -691,12 +698,12 @@ STATUS ppp_init_config_by_user(FastRG_t *fastrg_ccb, ppp_ccb_t *ppp_ccb, U16 ccb
     /* ARP pending ring: drop queued packets from the previous config. */
     arp_pending_flush(fastrg_ccb->arp_pending_mp, &ppp_ccb->arp_pq);
 
-    /* NAT hashes + free-list: flush all learned flows. */
-    nat_table_reset(ppp_ccb);
+    /* NAT hashes: delete all learned flows. */
+    nat_table_del_all_entries_from_hash(ppp_ccb);
 
-    /* IPv6 firewall hash + free-list: flush all learned sessions. Must run
-     * after pppd_ipv6_dp_gate_update() above has closed the IPv6 gate. */
-    ipv6_firewall_table_reset(ppp_ccb);
+    /* IPv6 firewall hash: delete all learned sessions. Must run after
+     * pppd_ipv6_dp_gate_update() above has closed the IPv6 gate. */
+    ipv6_firewall_table_del_all_entries_from_hash(ppp_ccb);
 
     return SUCCESS;
 }

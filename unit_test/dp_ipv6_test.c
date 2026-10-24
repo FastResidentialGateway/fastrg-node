@@ -574,7 +574,7 @@ static void test_firewall_wrappers(void)
     set_gate(TRUE, TRUE, TRUE);
     nd6_table_reset(test_ccb.nd6_table);
     nd6_table_learn(test_ccb.nd6_table, lan_host, &host_mac);
-    ipv6_firewall_table_reset(&test_ccb);
+    ipv6_firewall_table_del_all_entries_from_hash(&test_ccb);
 
     /* Nothing was requested from the LAN, so the reply path must reject the
      * frame and hand it back exactly as it arrived. */
