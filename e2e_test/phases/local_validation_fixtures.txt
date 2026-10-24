@@ -1177,3 +1177,500 @@ FastRG[INFO][2026-10-22 20:57:31]: src/fastrg.c:1069> NIC Vendor ID: 0x0003, ven
 # args: 2 2 NA
 # expect-status: 1
 ---
+==== fixture: reconfig_race_samples_good
+# args: 2
+# expect-output: 1000 4242 532 12 2
+---
+@ 1000 4242 | fastrg_node_per_user_nat_entries_used{node_uuid="n",user_id="1"} 77 | fastrg_node_per_user_nat_entries_used{node_uuid="n",user_id="2"} 532 | fastrg_node_per_user_ipv6_firewall_entries_used{node_uuid="n",user_id="2"} 12 | fastrg_node_total_pppoe_data_sessions{node_uuid="n"} 2
+==== fixture: reconfig_race_samples_user_beyond_count
+# args: 2
+# expect-output: 1100 4242 - - 1
+---
+@ 1100 4242 | fastrg_node_total_pppoe_data_sessions{node_uuid="n"} 1
+==== fixture: reconfig_race_samples_scrape_failed
+# args: 2
+# expect-output: 1200 4242 - - -
+---
+@ 1200 4242 | # scrape failed: URLError
+==== fixture: reconfig_race_samples_other_user_ignored
+# args: 2
+# expect-output: 1300 4242 - - 2
+---
+@ 1300 4242 | fastrg_node_per_user_nat_entries_used{node_uuid="n",user_id="12"} 5 | fastrg_node_per_user_ipv6_firewall_entries_used{node_uuid="n",user_id="12"} 6 | fastrg_node_total_pppoe_data_sessions{node_uuid="n"} 2
+==== fixture: reconfig_race_samples_empty_input
+# args: 2
+# expect-output:
+---
+==== fixture: reconfig_race_verdict_good
+# args: 1000 500 3 100000
+# expect-output: ok samples=6 median_gap=100000us peak_after_drop=3/1 pre_drop=125/31 zero_after=100.0ms data_after=400.0ms
+# expect-status: 0
+---
+0 4242 120 30 2
+100000 4242 125 31 2
+200000 4242 - - 1
+300000 4242 - - 1
+400000 4242 3 1 1
+500000 4242 0 0 1
+600000 4242 0 0 1
+700000 4242 0 0 1
+800000 4242 0 0 2
+900000 4242 15 4 2
+==== fixture: reconfig_race_verdict_good_dense
+# args: 1000 500 5 2000
+# expect-output: ok samples=6 median_gap=1000us peak_after_drop=2/1 pre_drop=125/31 zero_after=1.0ms data_after=4.0ms
+# expect-status: 0
+---
+0 4242 120 30 2
+1000 4242 125 31 2
+2000 4242 - - 1
+3000 4242 - - 1
+4000 4242 2 1 1
+5000 4242 0 0 1
+6000 4242 0 0 1
+7000 4242 0 0 1
+8000 4242 0 0 2
+==== fixture: reconfig_race_verdict_pre_drop_peak_of_last_second
+# args: 1000 500 3 100000
+# expect-output: ok samples=4 median_gap=100000us peak_after_drop=110/20 pre_drop=125/31 zero_after=100.0ms data_after=300.0ms
+# expect-status: 0
+---
+0 4242 120 30 2
+100000 4242 125 31 2
+200000 4242 100 10 1
+300000 4242 - - 1
+400000 4242 110 20 1
+500000 4242 0 0 1
+600000 4242 0 0 1
+700000 4242 0 0 2
+==== fixture: reconfig_race_verdict_pre_drop_window_is_1s
+# args: 1000 500 3 100000
+# expect-output: above_pre_drop at +100.0ms after the drop (nat=300 fw6=0; before the drop nat=125 fw6=31; 1 of 5 samples above, peak nat=300 fw6=0)
+# expect-status: 1
+---
+0 4242 500 30 2
+900000 4242 120 30 2
+1000000 4242 120 30 2
+1100000 4242 125 31 2
+1200000 4242 - - 1
+1300000 4242 300 0 1
+1400000 4242 0 0 1
+1500000 4242 0 0 1
+1600000 4242 0 0 1
+1700000 4242 0 0 2
+==== fixture: reconfig_race_verdict_above_pre_drop_nat
+# args: 262144 65536 3 100000
+# expect-output: above_pre_drop at +300.0ms after the drop (nat=196608 fw6=0; before the drop nat=125 fw6=31; 1 of 5 samples above, peak nat=196608 fw6=0)
+# expect-status: 1
+---
+0 4242 120 30 2
+100000 4242 125 31 2
+200000 4242 - - 1
+300000 4242 0 0 1
+400000 4242 0 0 1
+500000 4242 196608 0 1
+600000 4242 0 0 1
+700000 4242 0 0 2
+==== fixture: reconfig_race_verdict_above_pre_drop_fw6
+# args: 262144 65536 3 100000
+# expect-output: above_pre_drop at +300.0ms after the drop (nat=0 fw6=40000; before the drop nat=125 fw6=31; 1 of 5 samples above, peak nat=0 fw6=40000)
+# expect-status: 1
+---
+0 4242 120 30 2
+100000 4242 125 31 2
+200000 4242 - - 1
+300000 4242 0 0 1
+400000 4242 0 0 1
+500000 4242 0 40000 1
+600000 4242 0 0 1
+700000 4242 0 0 2
+==== fixture: reconfig_race_verdict_sampler_too_few
+# args: 1000 500 10 2000
+# expect-output: sampler_sparse (3 samples from the drop to Data phase, median gap 1000us; need >= 10 and <= 2000us)
+# expect-status: 1
+---
+0 4242 120 30 2
+1000 4242 125 31 2
+2000 4242 - - 1
+3000 4242 0 0 1
+4000 4242 0 0 1
+5000 4242 0 0 2
+==== fixture: reconfig_race_verdict_sampler_gaps_too_wide
+# args: 1000 500 3 2000
+# expect-output: sampler_sparse (6 samples from the drop to Data phase, median gap 100000us; need >= 3 and <= 2000us)
+# expect-status: 1
+---
+0 4242 120 30 2
+100000 4242 125 31 2
+200000 4242 - - 1
+300000 4242 - - 1
+400000 4242 3 1 1
+500000 4242 0 0 1
+600000 4242 0 0 1
+700000 4242 0 0 1
+800000 4242 0 0 2
+900000 4242 15 4 2
+==== fixture: reconfig_race_verdict_sampler_median_not_min
+# args: 1000 500 3 2000
+# expect-output: sampler_sparse (4 samples from the drop to Data phase, median gap 100000us; need >= 3 and <= 2000us)
+# expect-status: 1
+---
+0 4242 120 30 2
+1000 4242 125 31 2
+2000 4242 - - 1
+3000 4242 0 0 1
+103000 4242 0 0 1
+203000 4242 0 0 1
+303000 4242 0 0 2
+==== fixture: reconfig_race_verdict_sampler_one_long_gap_ok
+# args: 1000 500 3 2000
+# expect-output: ok samples=5 median_gap=1000us peak_after_drop=0/0 pre_drop=125/31 zero_after=0.0ms data_after=502.0ms
+# expect-status: 0
+---
+0 4242 120 30 2
+1000 4242 125 31 2
+2000 4242 - - 1
+3000 4242 - - 1
+4000 4242 0 0 1
+504000 4242 0 0 1
+505000 4242 0 0 1
+506000 4242 0 0 2
+==== fixture: reconfig_race_verdict_no_trigger
+# args: 1000 500 3 100000
+# expect-output: no_trigger: the user row never left /metrics (last nat=130 fw6=33)
+# expect-status: 1
+---
+0 4242 120 30 2
+100000 4242 125 31 2
+200000 4242 130 33 2
+==== fixture: reconfig_race_verdict_not_zero_within_1s
+# args: 1000 500 3 100000
+# expect-output: not_zero_within_1s (nat=1 fw6=0 at +1000.0ms)
+# expect-status: 1
+---
+0 4242 120 30 2
+100000 4242 125 31 2
+200000 4242 - - 1
+300000 4242 1 0 1
+400000 4242 1 0 1
+500000 4242 1 0 1
+600000 4242 1 0 1
+700000 4242 1 0 1
+800000 4242 1 0 1
+900000 4242 1 0 1
+1000000 4242 1 0 1
+1100000 4242 1 0 1
+1200000 4242 1 0 1
+1300000 4242 1 0 1
+1400000 4242 1 0 1
+1500000 4242 1 0 2
+==== fixture: reconfig_race_verdict_zero_too_late
+# args: 1000 500 3 100000
+# expect-output: not_zero_within_1s (nat=2 fw6=1 at +1000.0ms)
+# expect-status: 1
+---
+0 4242 120 30 2
+100000 4242 125 31 2
+200000 4242 - - 1
+300000 4242 2 1 1
+400000 4242 2 1 1
+500000 4242 2 1 1
+600000 4242 2 1 1
+700000 4242 2 1 1
+800000 4242 2 1 1
+900000 4242 2 1 1
+1000000 4242 2 1 1
+1100000 4242 2 1 1
+1200000 4242 2 1 1
+1300000 4242 2 1 1
+1400000 4242 0 0 1
+1500000 4242 0 0 2
+==== fixture: reconfig_race_verdict_nonzero_before_data
+# args: 1000 500 3 100000
+# expect-output: nonzero_before_data at +200.0ms (nat=0 fw6=1)
+# expect-status: 1
+---
+0 4242 120 30 2
+100000 4242 125 31 2
+200000 4242 - - 1
+300000 4242 - - 1
+400000 4242 0 0 1
+500000 4242 0 0 1
+600000 4242 0 1 1
+700000 4242 0 1 1
+800000 4242 0 1 2
+==== fixture: reconfig_race_verdict_no_data_phase
+# args: 1000 500 3 100000
+# expect-output: no_data_phase (data sessions 1, expected 2, +100.0ms)
+# expect-status: 1
+---
+0 4242 120 30 2
+100000 4242 125 31 2
+200000 4242 - - 1
+300000 4242 0 0 1
+400000 4242 0 0 1
+==== fixture: reconfig_race_verdict_out_of_range
+# args: 1000 500 3 100000
+# expect-output: out_of_range at +100.0ms (nat=4294967295 fw6=31)
+# expect-status: 1
+---
+0 4242 120 30 2
+100000 4242 4294967295 31 2
+==== fixture: reconfig_race_verdict_no_load
+# args: 1000 500 3 100000
+# expect-output: no_load before the drop (peak nat=125 fw6=0)
+# expect-status: 1
+---
+0 4242 120 0 2
+100000 4242 125 0 2
+200000 4242 - - 1
+300000 4242 0 0 1
+400000 4242 0 0 2
+==== fixture: reconfig_race_verdict_node_restarted
+# args: 1000 500 3 100000
+# expect-output: node_restarted at +200.0ms (pid 4242 -> 5151)
+# expect-status: 1
+---
+0 4242 120 30 2
+100000 4242 125 31 2
+200000 5151 - - 1
+==== fixture: reconfig_race_verdict_node_down
+# args: 1000 500 3 100000
+# expect-output: node_down at +100.0ms
+# expect-status: 1
+---
+0 4242 120 30 2
+100000 - - - -
+==== fixture: reconfig_race_verdict_scrape_failed
+# args: 1000 500 3 100000
+# expect-output: scrape_failed at +100.0ms
+# expect-status: 1
+---
+0 4242 120 30 2
+100000 4242 - - -
+==== fixture: reconfig_race_verdict_sampler_gap
+# args: 1000 500 3 100000
+# expect-output: sampler_gap 1500.0ms at +0.0ms
+# expect-status: 1
+---
+0 4242 120 30 2
+1500000 4242 125 31 2
+==== fixture: reconfig_race_verdict_row_never_returned
+# args: 1000 500 3 100000
+# expect-output: row_never_returned (dropped at +200.0ms)
+# expect-status: 1
+---
+0 4242 120 30 2
+100000 4242 125 31 2
+200000 4242 - - 1
+300000 4242 - - 1
+==== fixture: reconfig_race_verdict_row_vanished_again
+# args: 1000 500 3 100000
+# expect-output: row_vanished_again at +100.0ms
+# expect-status: 1
+---
+0 4242 120 30 2
+100000 4242 125 31 2
+200000 4242 - - 1
+300000 4242 0 0 1
+400000 4242 - - 1
+500000 4242 0 0 2
+==== fixture: reconfig_race_verdict_empty_input
+# args: 1000 500 3 100000
+# expect-output: no_samples
+# expect-status: 1
+---
+==== fixture: nat_entries_unique_good
+# expect-output: ok 2
+# expect-status: 0
+---
+{"user_id":2,"entries":[{"proto":17,"src_ip":"192.168.4.10","dst_ip":"192.168.201.11","src_port":30000,"dst_port":40700,"nat_port":31000,"tcp_state":0},{"proto":17,"src_ip":"192.168.4.10","dst_ip":"192.168.201.11","src_port":30001,"dst_port":40700,"nat_port":31001,"tcp_state":0}]}
+==== fixture: nat_entries_unique_dup_reverse
+# expect-output: dup_reverse 17 192.168.201.11 40700 31000 x2
+# expect-status: 1
+---
+{"user_id":2,"entries":[{"proto":17,"src_ip":"192.168.4.10","dst_ip":"192.168.201.11","src_port":30000,"dst_port":40700,"nat_port":31000,"tcp_state":0},{"proto":17,"src_ip":"192.168.4.10","dst_ip":"192.168.201.11","src_port":30001,"dst_port":40700,"nat_port":31000,"tcp_state":0}]}
+==== fixture: nat_entries_unique_dup_forward
+# expect-output: dup_forward 17 192.168.4.10 30000 192.168.201.11 40700 x2
+# expect-status: 1
+---
+{"user_id":2,"entries":[{"proto":17,"src_ip":"192.168.4.10","dst_ip":"192.168.201.11","src_port":30000,"dst_port":40700,"nat_port":31000,"tcp_state":0},{"proto":17,"src_ip":"192.168.4.10","dst_ip":"192.168.201.11","src_port":30000,"dst_port":40700,"nat_port":31002,"tcp_state":0}]}
+==== fixture: nat_entries_unique_other_proto
+# expect-output: ok 2
+# expect-status: 0
+---
+{"user_id":2,"entries":[{"proto":17,"src_ip":"192.168.4.10","dst_ip":"192.168.201.11","src_port":30000,"dst_port":8,"nat_port":31000,"tcp_state":0},{"proto":1,"src_ip":"192.168.4.10","dst_ip":"192.168.201.11","src_port":30000,"dst_port":8,"nat_port":31000,"tcp_state":0}]}
+==== fixture: nat_entries_unique_unreadable
+# expect-output: unreadable
+# expect-status: 1
+---
+Error: rpc error: code = Unavailable
+==== fixture: nat_entries_unique_empty_input
+# expect-output: unreadable
+# expect-status: 1
+---
+==== fixture: reconfig_race_node_ok
+# expect-output: ok
+# expect-status: 0
+---
+log: ok
+apport: ok
+kernel: ok
+pid_start: 4242
+pid_now: 4242
+log_size: 1000
+log_size_after_ping: 1030
+==== fixture: reconfig_race_node_restarted
+# expect-output: node_restarted
+# expect-status: 1
+---
+log: ok
+apport: ok
+kernel: ok
+pid_start: 4242
+pid_now: 5151
+log_size: 1000
+log_size_after_ping: 1030
+==== fixture: reconfig_race_node_down
+# expect-output: node_down
+# expect-status: 1
+---
+log: ok
+apport: ok
+kernel: ok
+pid_start: 4242
+pid_now: -
+log_size: 1000
+log_size_after_ping: 1000
+==== fixture: reconfig_race_node_crash_line
+# expect-output: crash_line
+# expect-status: 1
+---
+log: ok
+apport: ok
+kernel: ok
+pid_start: 4242
+pid_now: 4242
+log_size: 1000
+crash_line: Segmentation fault (core dumped)
+log_size_after_ping: 1030
+==== fixture: reconfig_race_node_apport_record
+# expect-output: apport_record
+# expect-status: 1
+---
+log: ok
+apport: ok
+apport_new: ERROR: apport (pid 99) executable: /root/fastrg/fastrg-node/fastrg (command line "fastrg")
+kernel: ok
+pid_start: 4242
+pid_now: 4242
+log_size: 1000
+log_size_after_ping: 1030
+==== fixture: reconfig_race_node_kernel_trap
+# expect-output: kernel_trap
+# expect-status: 1
+---
+log: ok
+apport: ok
+kernel: ok
+kernel_new: Oct 23 09:00:00 node kernel: traps: lcore-worker-3[4250] general protection ip:55 sp:7f error:0
+pid_start: 4242
+pid_now: 4242
+log_size: 1000
+log_size_after_ping: 1030
+==== fixture: reconfig_race_node_log_stalled
+# expect-output: log_stalled
+# expect-status: 1
+---
+log: ok
+apport: ok
+kernel: ok
+pid_start: 4242
+pid_now: 4242
+log_size: 1000
+log_size_after_ping: 1000
+==== fixture: reconfig_race_node_collector_failed
+# expect-output: collector_failed
+# expect-status: 1
+---
+log: ok
+apport: ok
+kernel: unreadable
+pid_start: 4242
+pid_now: 4242
+log_size: 1000
+log_size_after_ping: 1030
+==== fixture: reconfig_race_node_empty_input
+# expect-output: collector_failed
+# expect-status: 1
+---
+==== fixture: bras_pool_clean
+# args: 0
+# expect-output: ok 0
+# expect-status: 0
+---
+read: ok
+==== fixture: bras_pool_first_exhaustion
+# args: 0
+# expect-output: exhausted 2 [2026-10-23 20:41:15.636] PPP: [126] IP pool exhausted — terminating session
+# expect-status: 1
+---
+[2026-10-23 20:41:15.636] PPP: [126] IP pool exhausted — terminating session
+[2026-10-23 20:41:49.131] PPP: [127] IP pool exhausted — terminating session
+read: ok
+==== fixture: bras_pool_already_reported
+# args: 2
+# expect-output: ok 2
+# expect-status: 0
+---
+[2026-10-23 20:41:15.636] PPP: [126] IP pool exhausted — terminating session
+[2026-10-23 20:41:49.131] PPP: [127] IP pool exhausted — terminating session
+read: ok
+==== fixture: bras_pool_more_since_last
+# args: 2
+# expect-output: exhausted 3 [2026-10-23 20:42:20.002] PPP: [128] IP pool exhausted — terminating session
+# expect-status: 1
+---
+[2026-10-23 20:41:15.636] PPP: [126] IP pool exhausted — terminating session
+[2026-10-23 20:41:49.131] PPP: [127] IP pool exhausted — terminating session
+[2026-10-23 20:42:20.002] PPP: [128] IP pool exhausted — terminating session
+read: ok
+==== fixture: bras_pool_log_restarted_clean
+# args: 5
+# expect-output: ok 0
+# expect-status: 0
+---
+read: ok
+==== fixture: bras_pool_log_restarted_exhausted
+# args: 5
+# expect-output: exhausted 2 [2026-10-23 21:10:00.100] PPP: [126] IP pool exhausted — terminating session
+# expect-status: 1
+---
+[2026-10-23 21:10:00.100] PPP: [126] IP pool exhausted — terminating session
+[2026-10-23 21:10:30.200] PPP: [127] IP pool exhausted — terminating session
+read: ok
+==== fixture: bras_pool_other_lines_ignored
+# args: 0
+# expect-output: ok 0
+# expect-status: 0
+---
+[2026-10-23 20:41:13.073] PPP: [125] IPCP CONF_ACK — session UP! client_ip=192.168.200.254
+[2026-10-23 20:41:14.000] [BRAS] sessions_up=2     rx=29          tx=8           drop=1
+read: ok
+==== fixture: bras_pool_unreadable
+# args: 0
+# expect-output: unreadable
+# expect-status: 1
+---
+[2026-10-23 20:41:15.636] PPP: [126] IP pool exhausted — terminating session
+==== fixture: bras_pool_bad_seen
+# args: x
+# expect-output: unreadable
+# expect-status: 1
+---
+read: ok
+==== fixture: bras_pool_empty_input
+# args: 0
+# expect-output: unreadable
+# expect-status: 1
+---

@@ -90,7 +90,7 @@ _case_validation_phase_is_clean_again() {
 # case_validation_run [ID,...] — every entry when no list is given.
 case_validation_run() {
     local _wanted="${1:-}" _index _phase
-    local _total=0 _caught=0 _polluted=0
+    local _total=0 _caught=0 _polluted=0 _pool_ok=1
     local _selected=() _phases_done=" "
 
     for _index in "${!_CASE_VALIDATION_IDS[@]}"; do
@@ -104,8 +104,10 @@ case_validation_run() {
         return 1
     fi
 
+    # A BRAS out of addresses makes drill results meaningless; say so.
     for _index in "${_selected[@]}"; do
         _total=$(( _total + 1 ))
+        e2e_bras_pool_guard "before drill ${_CASE_VALIDATION_IDS[$_index]}" || _pool_ok=0
         _case_validation_run_one "$_index" && _caught=$(( _caught + 1 ))
     done
 
@@ -116,8 +118,11 @@ case_validation_run() {
         _case_validation_phase_is_clean_again "$_phase" || _polluted=$(( _polluted + 1 ))
     done
 
-    printf '\nVALIDATE RESULT: %d/%d caught, %d polluted\n' "$_caught" "$_total" "$_polluted"
-    [[ "$_caught" -eq "$_total" && "$_polluted" -eq 0 ]]
+    e2e_bras_pool_guard "after the drills" || _pool_ok=0
+
+    printf '\nVALIDATE RESULT: %d/%d caught, %d polluted%s\n' "$_caught" "$_total" "$_polluted" \
+        "$([[ "$_pool_ok" -eq 1 ]] || printf ', BRAS address pool exhausted')"
+    [[ "$_caught" -eq "$_total" && "$_polluted" -eq 0 && "$_pool_ok" -eq 1 ]]
 }
 
 # ---------------------------------------------------------------------------

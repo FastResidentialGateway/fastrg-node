@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # ---------------------------------------------------------------------------
-# Phase 36 — IPv4 NAT near capacity (Steps 152-155)
+# Phase 36 — IPv4 NAT near capacity (Steps 152-155b)
 #
 # The rest of the suite proves NAT works with a handful of flows. This phase
 # asks what it does with the table nearly full: a LAN-side sprayer holds about
 # 90% of the pool open while throughput is compared against the same link's
 # idle baseline, and the drain afterwards shows the GC still reclaims at that
-# scale.
+# scale. Step 155b then drops and re-adds the subscriber under new-flow load
+# (reconfig_race_lib.sh) on the RSS data plane.
 #
 # The pass mark for throughput is half of the baseline this phase measured
 # moments earlier, not an absolute number, so it catches disproportionate
@@ -167,7 +168,7 @@ phase36_nat_capacity() {
     local _bps=0 _floor=0 _spray_ready=0 _spray_log=""
 
     bold "═══════════════════════════════════════════════════════"
-    bold " Phase 36 — IPv4 NAT Near Capacity (Steps 152-155)"
+    bold " Phase 36 — IPv4 NAT Near Capacity (Steps 152-155b)"
     bold "═══════════════════════════════════════════════════════"
 
     # ------------------------------------------------------------------
@@ -328,6 +329,12 @@ echo \$! >'${_P36_SPRAY_PID}'" >/dev/null 2>&1 || true
     else
         fail "Step 155: the GC drains the pool" "$_issue"
     fi
+
+    # ------------------------------------------------------------------
+    # Step 155b — drop and re-add the subscriber under new-flow load
+    # ------------------------------------------------------------------
+    info "Step 155b: dropping and re-adding user ${USER_ID} under new-flow load (RSS)..."
+    e2e_reconfig_race_step "Step 155b: NAT / IPv6 firewall fill never exceeds its pre-reconfig value and clears (RSS)"
 
     _cleanup_phase36_nat_capacity
     return 0

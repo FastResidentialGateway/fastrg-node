@@ -961,6 +961,10 @@ source "${_E2E_PHASES_DIR}/etcd_block_lib.sh"
 source "${_E2E_PHASES_DIR}/node_shutdown_lib.sh"
 # Data-plane mode reading and the EnableDDP switch; uses node_shutdown_lib.sh.
 source "${_E2E_PHASES_DIR}/datapath_mode_lib.sh"
+# The reconfig-under-load step phases 36 and 41 share — not a phase either.
+source "${_E2E_PHASES_DIR}/reconfig_race_lib.sh"
+# The BRAS address-pool check run after every phase and around drills.
+source "${_E2E_PHASES_DIR}/bras_pool_lib.sh"
 source "${_E2E_PHASES_DIR}/phase0_setup.sh"
 source "${_E2E_PHASES_DIR}/phase1_subscriber_count_tests.sh"
 source "${_E2E_PHASES_DIR}/phase2_etcd_config_sync.sh"
@@ -1351,7 +1355,10 @@ cleanup_fastrg() {
     # node cut off from etcd, and it undoes its config edits over the path the
     # block leaves usable.
     _cleanup_phase40_offline_cli_writes 2>/dev/null || true
-    # Third: it may restart the node, and the steps after it expect the node
+    # Third: the subscriber count the reconfig step lowers goes back before
+    # the node may restart on whatever count etcd holds.
+    _e2e_reconfig_race_cleanup 2>/dev/null || true
+    # Fourth: it may restart the node, and the steps after it expect the node
     # back on its original config and data-plane mode.
     _cleanup_phase41_distributor_mode 2>/dev/null || true
     _cleanup_phase0_setup 2>/dev/null || true
@@ -1499,6 +1506,8 @@ main() {
 
     for (( _e2e_main_i = 0; _e2e_main_i < _e2e_main_total - 1; _e2e_main_i++ )); do
         _e2e_run_phase "${E2E_PHASES[$_e2e_main_i]}" "$(( _e2e_main_i + 1 ))" "$_e2e_main_total"
+        # A FAIL here reaches the summary and exit status like any step.
+        e2e_bras_pool_guard "after ${E2E_PHASES[$_e2e_main_i]}" || true
     done
     # The summary returns non-zero when a step failed; the run's own exit status
     # is worked out below, so its return must not end the script here.
