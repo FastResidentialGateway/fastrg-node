@@ -810,6 +810,59 @@ err
 # expect-status: 1
 ---
 null
+==== fixture: dns_removal_source_reconcile
+# args: 2 offline-sweep.fastrg.test
+# expect-output: reconcile
+# expect-status: 0
+---
+FastRG[INFO][2026-11-01 01:20:00]: src/etcd_integration.c:821> Reconcile: HSI user 1 already matches local state, reconciling PPPoE only
+FastRG[INFO][2026-11-01 01:20:00]: src/etcd_integration.c:821> Reconcile: HSI user 2 already matches local state, reconciling PPPoE only
+FastRG[INFO][2026-11-01 01:20:00]: src/northbound.c:480> User 2: DNS static record removed: offline-sweep.fastrg.test
+FastRG[INFO][2026-11-01 01:20:00]: src/northbound.c:565> User 2: DNS static records applied: 1 in etcd, 0 added, 1 removed
+==== fixture: dns_removal_source_watch
+# args: 2 offline-sweep.fastrg.test
+# expect-output: watch
+# expect-status: 1
+---
+GetDnsStaticRecords called
+FastRG[INFO][2026-11-01 01:20:00]: src/northbound.c:480> User 2: DNS static record removed: offline-sweep.fastrg.test
+FastRG[INFO][2026-11-01 01:20:00]: src/northbound.c:565> User 2: DNS static records applied: 1 in etcd, 0 added, 1 removed
+==== fixture: dns_removal_source_reconcile_after
+# args: 2 offline-sweep.fastrg.test
+# expect-output: watch
+# expect-status: 1
+---
+FastRG[INFO][2026-11-01 01:20:00]: src/northbound.c:480> User 2: DNS static record removed: offline-sweep.fastrg.test
+FastRG[INFO][2026-11-01 01:20:31]: src/etcd_integration.c:821> Reconcile: HSI user 1 already matches local state, reconciling PPPoE only
+FastRG[INFO][2026-11-01 01:20:31]: src/etcd_integration.c:821> Reconcile: HSI user 2 already matches local state, reconciling PPPoE only
+==== fixture: dns_removal_source_other_user_pass
+# args: 2 offline-sweep.fastrg.test
+# expect-output: watch
+# expect-status: 1
+---
+FastRG[INFO][2026-11-01 01:20:00]: src/etcd_integration.c:821> Reconcile: HSI user 1 already matches local state, reconciling PPPoE only
+FastRG[INFO][2026-11-01 01:20:00]: src/etcd_integration.c:821> Reconcile: HSI user 20 already matches local state, reconciling PPPoE only
+FastRG[INFO][2026-11-01 01:20:00]: src/northbound.c:480> User 2: DNS static record removed: offline-sweep.fastrg.test
+==== fixture: dns_removal_source_longer_domain
+# args: 2 offline-sweep.fastrg.test
+# expect-output: absent
+# expect-status: 1
+---
+FastRG[INFO][2026-11-01 01:20:00]: src/etcd_integration.c:821> Reconcile: HSI user 2 already matches local state, reconciling PPPoE only
+FastRG[INFO][2026-11-01 01:20:00]: src/northbound.c:480> User 2: DNS static record removed: offline-sweep.fastrg.test.example
+FastRG[INFO][2026-11-01 01:20:00]: src/northbound.c:480> User 12: DNS static record removed: offline-sweep.fastrg.test
+==== fixture: dns_removal_source_absent
+# args: 2 offline-sweep.fastrg.test
+# expect-output: absent
+# expect-status: 1
+---
+FastRG[INFO][2026-11-01 01:20:00]: src/etcd_integration.c:821> Reconcile: HSI user 2 already matches local state, reconciling PPPoE only
+==== fixture: dns_removal_source_unread
+# args: 2 offline-sweep.fastrg.test
+# expect-output: err
+# expect-status: 1
+---
+err
 ==== fixture: rss_spread_good
 # invoke: args-only
 # args: 3 4 800 12 16 16
@@ -2012,3 +2065,38 @@ FastRG[INFO][2026-10-30 15:41:05]: src/etcd_integration.c:595> Removing 1 CCBs (
 # expect-output: err
 # expect-status: 1
 ---
+==== fixture: etcd_connection_sport_v4
+# args: 192.168.10.212 2378
+# expect-output: 45344
+# expect-status: 0
+---
+0      0      192.168.10.211:22                    192.168.10.104:51220
+0      0      192.168.10.211:45344                 192.168.10.212:2378
+==== fixture: etcd_connection_sport_mapped
+# args: 192.168.10.212 2378
+# expect-output: 45344
+# expect-status: 0
+---
+0      0      [::ffff:192.168.10.211]:22           [::ffff:192.168.10.104]:51220
+0      0      [::ffff:192.168.10.211]:45344        [::ffff:192.168.10.212]:2378
+==== fixture: etcd_connection_sport_two
+# args: 192.168.10.212 2378
+# expect-output: 45344
+# expect-status: 0
+---
+0      0      [::ffff:192.168.10.211]:45344        [::ffff:192.168.10.212]:2378
+0      0      [::ffff:192.168.10.211]:52304        [::ffff:192.168.10.212]:2378
+==== fixture: etcd_connection_sport_none
+# args: 192.168.10.212 2378
+# expect-output: none
+# expect-status: 1
+---
+0      0      [::ffff:192.168.10.211]:45344        [::ffff:192.168.10.212]:23780
+0      0      192.168.10.211:41000                 192.168.10.212:50051
+0      0      192.168.10.211:22                    192.168.10.104:51220
+==== fixture: etcd_connection_sport_local_side
+# args: 192.168.10.212 2378
+# expect-output: none
+# expect-status: 1
+---
+0      0      192.168.10.212:2378                  192.168.10.211:45344
