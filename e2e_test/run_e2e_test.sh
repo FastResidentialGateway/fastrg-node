@@ -1387,6 +1387,7 @@ cleanup_fastrg() {
     _cleanup_phase9_user 2>/dev/null || true
     _cleanup_phase9_cli_fallback 2>/dev/null || true
     _cleanup_phase12_rollback 2>/dev/null || true
+    _cleanup_phase13_pdump 2>/dev/null || true
     _cleanup_phase16_rcu_concurrency 2>/dev/null || true
     _cleanup_phase18_dns_cache 2>/dev/null || true
 

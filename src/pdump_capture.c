@@ -497,6 +497,28 @@ static int pdump_dir_ports(int dir, U16 ports[PORT_AMOUNT])
     }
 }
 
+/* Stop capture for ccb ids [lo, hi] on dir's ports. Caller holds the lock. */
+static void pdump_stop_range(int dir, U16 lo, U16 hi)
+{
+    U16 ports[PORT_AMOUNT];
+    int nports = pdump_dir_ports(dir, ports);
+
+    for(int pi=0; pi<nports; pi++) {
+        U16 port = ports[pi];
+        for(U16 ccb=lo; ccb<=hi; ccb++) {
+            if (global_pdump_ctx.capture_on[port][ccb]) {
+                global_pdump_ctx.capture_on[port][ccb] = 0;  /* stop matching new frames     */
+                rte_smp_wmb();
+                global_pdump_ctx.filter[port][ccb] = NULL;   /* object stays on filter_list  */
+                global_pdump_ctx.active_per_port[port]--;
+                rte_atomic32_dec(&global_pdump_ctx.any_active);
+            }
+        }
+        if (global_pdump_ctx.active_per_port[port] == 0)
+            pdump_unregister_port(port);
+    }
+}
+
 /* ------------------------------------------------------------------- public API */
 
 STATUS fastrg_pdump_capture_init(FastRG_t *fastrg_ccb)
@@ -660,20 +682,7 @@ STATUS fastrg_pdump_stop(FastRG_t *fastrg_ccb, int dir, U16 subscriber,
     U16 lo = (subscriber == 0) ? 0 : (subscriber - 1);
     U16 hi = (subscriber == 0) ? (fastrg_ccb->user_count - 1) : (subscriber - 1);
 
-    for(int pi=0; pi<nports; pi++) {
-        U16 port = ports[pi];
-        for(U16 ccb=lo; ccb<=hi; ccb++) {
-            if (global_pdump_ctx.capture_on[port][ccb]) {
-                global_pdump_ctx.capture_on[port][ccb] = 0;  /* stop matching new frames     */
-                rte_smp_wmb();
-                global_pdump_ctx.filter[port][ccb] = NULL;   /* object stays on filter_list  */
-                global_pdump_ctx.active_per_port[port]--;
-                rte_atomic32_dec(&global_pdump_ctx.any_active);
-            }
-        }
-        if (global_pdump_ctx.active_per_port[port] == 0)
-            pdump_unregister_port(port);
-    }
+    pdump_stop_range(dir, lo, hi);
 
     if (rte_atomic32_read(&global_pdump_ctx.any_active) == 0)
         pdump_capture_teardown(fastrg_ccb);
@@ -681,6 +690,23 @@ STATUS fastrg_pdump_stop(FastRG_t *fastrg_ccb, int dir, U16 subscriber,
     FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
         "pdump stop dir=%d subscriber=%u", dir, subscriber);
 
+    pthread_mutex_unlock(&global_pdump_ctx.lock);
+    return SUCCESS;
+}
+
+STATUS fastrg_pdump_disable_ccb(FastRG_t *fastrg_ccb, U16 to_remove, U16 current_count)
+{
+    if (!global_pdump_ctx.initialized || to_remove == 0)
+        return SUCCESS;
+    if (to_remove > current_count || current_count > global_pdump_ctx.slots)
+        return ERROR;
+
+    pthread_mutex_lock(&global_pdump_ctx.lock);
+    if (rte_atomic32_read(&global_pdump_ctx.any_active) > 0) {
+        pdump_stop_range(PDUMP_DIR_ALL, current_count - to_remove, current_count - 1);
+        if (rte_atomic32_read(&global_pdump_ctx.any_active) == 0)
+            pdump_capture_teardown(fastrg_ccb);
+    }
     pthread_mutex_unlock(&global_pdump_ctx.lock);
     return SUCCESS;
 }
@@ -730,6 +756,11 @@ STATUS fastrg_pdump_stop(FastRG_t *fastrg_ccb, int dir, U16 subscriber, char *er
     (void)fastrg_ccb; (void)dir; (void)subscriber;
     if (err) snprintf(err, err_len, "pdump not available in unit test build");
     return ERROR;
+}
+STATUS fastrg_pdump_disable_ccb(FastRG_t *fastrg_ccb, U16 to_remove, U16 current_count)
+{
+    (void)fastrg_ccb; (void)to_remove; (void)current_count;
+    return SUCCESS;
 }
 void fastrg_pdump_capture_cleanup(FastRG_t *fastrg_ccb) { (void)fastrg_ccb; }
 

@@ -72,6 +72,21 @@ STATUS fastrg_pdump_stop(FastRG_t *fastrg_ccb, int dir, U16 subscriber,
     char *err, U32 err_len);
 
 /**
+ * @fn fastrg_pdump_disable_ccb
+ * 
+ * @brief Stop capturing the subscribers removed when user_count is lowered.
+ *        May block for a pdump_rcu grace period; the caller must be offline on pdump_rcu.
+ * 
+ * @param to_remove
+ *      number of subscribers removed
+ * @param current_count
+ *      subscriber count before the drop
+ * @return
+ *      SUCCESS on success, ERROR if the range exceeds the capture slots.
+ */
+STATUS fastrg_pdump_disable_ccb(FastRG_t *fastrg_ccb, U16 to_remove, U16 current_count);
+
+/**
  * @fn fastrg_pdump_capture_cleanup
  * @brief Force-stop any active capture and free all state. Call at shutdown.
  */
