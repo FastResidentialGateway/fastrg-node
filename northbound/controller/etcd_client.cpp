@@ -739,9 +739,9 @@ public:
             }
 
             // Step 3b: HSI configs — enqueue for the control-plane loop, and
-            // collect the ccb_ids present in etcd for the sweep below.
+            // collect the user ids present in etcd for the sweep below.
             int hsi_total = 0;
-            std::vector<int> present_ccb_ids;
+            std::vector<std::string> hsi_user_ids;
             if (hsi_response.error_code() == 0) {
                 for (size_t i = 0; i < hsi_response.keys().size(); ++i) {
                     std::string value = hsi_response.value(i).as_string();
@@ -749,14 +749,7 @@ public:
                     if (!extract_ids_from_hsi_key(hsi_response.key(i), &node_id, &user_id))
                         continue;
                     hsi_total++;
-
-                    /* The watchdog may read incorrect(old) user_count(e.g. 
-                    control plane just adjusts user_count) but we don't need 
-                    to add lock here because next reconcile cycle(60 seconds 
-                    later) will rebuild the user_count. */
-                    int ccb_id = parse_user_id(user_id.c_str(), fastrg_ccb->user_count);
-                    if (ccb_id >= 0)
-                        present_ccb_ids.push_back(ccb_id);
+                    hsi_user_ids.push_back(user_id);
 
                     /* Use value(i).modified_index() to ensure each subscriber's 
                     revision is unique. */
@@ -774,65 +767,92 @@ public:
                 if (sweep) {
                     sweep->from_reconcile = TRUE;
                     sweep->event_data.sweep.reconcile_revision = hsi_response.index();
-                    sweep->event_data.sweep.count = (int)present_ccb_ids.size();
-                    if (sweep->event_data.sweep.count > 0) {
+                    if (!hsi_user_ids.empty()) {
+                        std::vector<const char *> ids;
+                        for (const std::string& id : hsi_user_ids)
+                            ids.push_back(id.c_str());
                         sweep->event_data.sweep.present_ccb_ids =
-                            (int *)malloc(sizeof(int) * sweep->event_data.sweep.count);
+                            (int *)malloc(sizeof(int) * ids.size());
                         if (!sweep->event_data.sweep.present_ccb_ids) {
                             etcd_event_free(sweep);
                             sweep = nullptr;
+                        } else {
+                            sweep->event_data.sweep.count = etcd_build_present_ccb_ids(fastrg_ccb,
+                                ids.data(), (int)ids.size(), sweep->event_data.sweep.present_ccb_ids);
                         }
                     }
-                    if (sweep) {
-                        for (int i = 0; i < sweep->event_data.sweep.count; ++i)
-                            sweep->event_data.sweep.present_ccb_ids[i] = present_ccb_ids[(size_t)i];
+                    if (sweep)
                         enqueue_etcd_event(sweep);
-                    }
                 }
             }
 
             // Step 3c: DNS static records — one set event per subscriber, so a
-            // user whose key is gone (or never existed) is cleared too.
+            // user whose key is gone (or never existed) is cleared too; a user
+            // whose value cannot be read keeps its records.
             // Key format: configs/{nodeId}/dns/{userId}  value: JSON array of records
             {
                 std::string dns_base_prefix = "configs/" + node_uuid_ + "/dns/";
                 auto dns_response = client_->ls(dns_base_prefix).get();
                 if (dns_response.error_code() == 0) {
-                    std::vector<bool> seen(fastrg_ccb->user_count, false);
+                    // One read: the control loop may change user_count mid-pass.
+                    const int uc = fastrg_ccb->user_count;
+                    struct DnsKey {
+                        std::string key;
+                        std::string user_id;
+                        std::string value;
+                        int64_t revision;
+                        std::vector<dns_record_config_t> records;
+                    };
+                    std::vector<DnsKey> dns_keys;
+                    std::vector<BOOL> parsed;
                     int dns_total = 0;
 
                     for (size_t i = 0; i < dns_response.keys().size(); ++i) {
-                        std::string key = dns_response.key(i);
-                        std::string dns_node_id, dns_user_id;
-                        if (!extract_ids_from_dns_key(key, &dns_node_id, &dns_user_id))
+                        DnsKey k;
+                        std::string dns_node_id;
+                        k.key = dns_response.key(i);
+                        if (!extract_ids_from_dns_key(k.key, &dns_node_id, &k.user_id))
                             continue;
-                        int ccb_id = parse_user_id(dns_user_id.c_str(), fastrg_ccb->user_count);
-                        if (ccb_id < 0)
-                            continue;
-                        std::string dns_value = dns_response.value(i).as_string();
-
-                        config_snapshot_watch_update(SNAPSHOT_KIND_DNS,
-                            dns_user_id.c_str(), dns_value.c_str());
-
+                        k.value = dns_response.value(i).as_string();
+                        k.revision = dns_response.value(i).modified_index();
+                        BOOL ok = FALSE;
                         try {
-                            std::vector<dns_record_config_t> records;
-                            if (!parse_dns_records(dns_value, &records))
-                                continue;
-                            if (enqueue_dns_set(node_uuid_, dns_user_id, records,
-                                    dns_response.value(i).modified_index(), TRUE))
-                                dns_total++;
-                            seen[ccb_id] = true;
-                        } catch (const std::exception& e) {
-                            FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
-                                "Sync: failed to parse DNS records for key %s: %s",
-                                key.c_str(), e.what());
+                            ok = parse_dns_records(k.value, &k.records) ? TRUE : FALSE;
+                        } catch (const std::exception&) {
+                            ok = FALSE;
                         }
+                        dns_keys.push_back(std::move(k));
+                        parsed.push_back(ok);
+                    }
+
+                    std::vector<const char *> user_ids;
+                    for (const DnsKey& k : dns_keys)
+                        user_ids.push_back(k.user_id.c_str());
+                    std::vector<etcd_dns_key_action_t> actions(dns_keys.size(), ETCD_DNS_KEY_SKIP);
+                    std::vector<BOOL> clear((size_t)uc, FALSE);
+                    etcd_plan_dns_reconcile(user_ids.data(), parsed.data(), (int)dns_keys.size(),
+                        uc, actions.data(), clear.data());
+
+                    for (size_t i = 0; i < dns_keys.size(); ++i) {
+                        const DnsKey& k = dns_keys[i];
+                        if (actions[i] == ETCD_DNS_KEY_SKIP)
+                            continue;
+                        config_snapshot_watch_update(SNAPSHOT_KIND_DNS,
+                            k.user_id.c_str(), k.value.c_str());
+                        if (actions[i] == ETCD_DNS_KEY_KEEP) {
+                            FastRG_LOG(WARN, fastrg_ccb->fp, NULL, NULL,
+                                "Sync: unreadable DNS records for key %s, keeping the current records",
+                                k.key.c_str());
+                            continue;
+                        }
+                        if (enqueue_dns_set(node_uuid_, k.user_id, k.records, k.revision, TRUE))
+                            dns_total++;
                     }
 
                     // Whatever etcd had no key for is cleared by an empty set.
                     const std::vector<dns_record_config_t> empty_set;
-                    for (int ccb_id = 0; ccb_id < fastrg_ccb->user_count; ++ccb_id) {
-                        if (seen[ccb_id])
+                    for (int ccb_id = 0; ccb_id < uc; ++ccb_id) {
+                        if (clear[(size_t)ccb_id] == FALSE)
                             continue;
                         if (enqueue_dns_set(node_uuid_, std::to_string(ccb_id + 1), empty_set,
                                 dns_response.index(), TRUE))

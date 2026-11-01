@@ -360,6 +360,22 @@ static void hsi_set_subscriber_last_revision(FastRG_t *fastrg_ccb, int ccb_id, S
     fastrg_ccb->hsi_subscriber_last_revision[ccb_id] = revision;
 }
 
+static S64 etcd_get_dns_subscriber_last_revision(const FastRG_t *fastrg_ccb, int ccb_id)
+{
+    if (fastrg_ccb->dns_subscriber_last_revision == NULL || ccb_id < 0 ||
+            ccb_id >= (int)fastrg_ccb->max_user_count)
+        return 0;
+    return fastrg_ccb->dns_subscriber_last_revision[ccb_id];
+}
+
+static void etcd_set_dns_subscriber_last_revision(FastRG_t *fastrg_ccb, int ccb_id, S64 revision)
+{
+    if (fastrg_ccb->dns_subscriber_last_revision == NULL || ccb_id < 0 ||
+            ccb_id >= (int)fastrg_ccb->max_user_count)
+        return;
+    fastrg_ccb->dns_subscriber_last_revision[ccb_id] = revision;
+}
+
 BOOL is_hsi_etcd_revision_newest(S64 subscriber_last_revision, const etcd_event_t *ev)
 {
     if (ev == NULL)
@@ -701,11 +717,59 @@ static void etcd_reconcile_sweep(FastRG_t *fastrg_ccb, const int *present, int c
         FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
             "Reconcile sweep: user %d active locally but absent from etcd, removing",
             ccb_id + 1);
-        remove_hsi_config(fastrg_ccb, ccb_id);
-        /* Record the revision of the delete event so it doesn't get overridden 
-        if there is an older event comes. */
-        hsi_set_subscriber_last_revision(fastrg_ccb, ccb_id, reconcile_revision);
+        if (remove_hsi_config(fastrg_ccb, ccb_id) == SUCCESS) {
+            /* Record the revision of the delete event so it doesn't get overridden
+            if there is an older event comes. */
+            hsi_set_subscriber_last_revision(fastrg_ccb, ccb_id, reconcile_revision);
+        }
     }
+}
+
+int etcd_build_present_ccb_ids(const FastRG_t *fastrg_ccb, const char *const *user_ids,
+    int user_id_count, int *present_out)
+{
+    int count = 0;
+
+    if (fastrg_ccb == NULL || user_ids == NULL || present_out == NULL)
+        return 0;
+
+    for(int i=0; i<user_id_count; i++) {
+        /* Not user_count: the list is every id in etcd; the sweep applies the count. */
+        int ccb_id = parse_user_id(user_ids[i], fastrg_ccb->max_user_count);
+        if (ccb_id >= 0)
+            present_out[count++] = ccb_id;
+    }
+    return count;
+}
+
+void etcd_plan_dns_reconcile(const char *const *user_ids, const BOOL *parsed, int key_count,
+    int user_count, etcd_dns_key_action_t *key_actions, BOOL *clear)
+{
+    if (key_count > 0 && (user_ids == NULL || parsed == NULL || key_actions == NULL))
+        return;
+    if (user_count > 0 && clear == NULL)
+        return;
+
+    for(int ccb_id=0; ccb_id<user_count; ccb_id++)
+        clear[ccb_id] = TRUE;
+
+    for(int i=0; i<key_count; i++) {
+        int ccb_id = parse_user_id(user_ids[i], user_count);
+        if (ccb_id < 0) {
+            key_actions[i] = ETCD_DNS_KEY_SKIP;
+            continue;
+        }
+        /* A user with a key is never cleared, even when its value is unreadable. */
+        clear[ccb_id] = FALSE;
+        key_actions[i] = (parsed[i] == TRUE) ? ETCD_DNS_KEY_SET : ETCD_DNS_KEY_KEEP;
+    }
+}
+
+BOOL etcd_is_reconcile_hsi_outside_count(const FastRG_t *fastrg_ccb, const etcd_event_t *ev)
+{
+    if (fastrg_ccb == NULL || ev == NULL || ev->from_reconcile == FALSE)
+        return FALSE;
+    return (parse_user_id(ev->user_id, fastrg_ccb->user_count) < 0) ? TRUE : FALSE;
 }
 
 void etcd_event_dispatch(FastRG_t *fastrg_ccb, etcd_event_t *ev)
@@ -718,6 +782,14 @@ void etcd_event_dispatch(FastRG_t *fastrg_ccb, etcd_event_t *ev)
             const hsi_config_t *cfg =
                 (ev->action == HSI_ACTION_DELETE) ? NULL : &ev->event_data.hsi.config;
             int gate_ccb_id = parse_user_id(ev->user_id, fastrg_ccb->user_count);
+
+            /* An etcd key beyond the count is reported by live events, not every reconcile. */
+            if (etcd_is_reconcile_hsi_outside_count(fastrg_ccb, ev) == TRUE) {
+                FastRG_LOG(DBG, fastrg_ccb->fp, NULL, NULL,
+                    "Reconcile: HSI user %s is outside the subscriber count %u, skipping",
+                    ev->user_id, fastrg_ccb->user_count);
+                break;
+            }
 
             /* Sometimes reconcile events may arrive in delay. We must check if the event is 
              * still relevant. */
@@ -787,8 +859,18 @@ void etcd_event_dispatch(FastRG_t *fastrg_ccb, etcd_event_t *ev)
                     "DNS record set: invalid user %s", ev->user_id);
                 break;
             }
-            apply_dns_record_set(fastrg_ccb, dns_ccb_id, ev->event_data.dns_set.records,
-                ev->event_data.dns_set.count);
+            S64 dns_last_revision = etcd_get_dns_subscriber_last_revision(fastrg_ccb, dns_ccb_id);
+            /* Live events always apply; a reconcile older than the applied set is stale. */
+            if (ev->from_reconcile == TRUE && ev->revision < dns_last_revision) {
+                FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
+                    "Reconcile: DNS user %s revision %" PRId64 " is older than the applied "
+                    "%" PRId64 ", skipping stale reconcile", ev->user_id, ev->revision,
+                    dns_last_revision);
+                break;
+            }
+            if (apply_dns_record_set(fastrg_ccb, dns_ccb_id, ev->event_data.dns_set.records,
+                    ev->event_data.dns_set.count) == SUCCESS)
+                etcd_set_dns_subscriber_last_revision(fastrg_ccb, dns_ccb_id, ev->revision);
             break;
 
         case ETCD_EVENT_HSI_SWEEP:

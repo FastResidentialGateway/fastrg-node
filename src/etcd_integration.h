@@ -262,6 +262,66 @@ STATUS etcd_integration_republish_config_status(FastRG_t *fastrg_ccb, U32 *out_e
  */
 int parse_user_id(const char *user_id_str, int max_count);
 
+/* What a DNS reconcile pass does with one etcd DNS key. */
+typedef enum {
+    ETCD_DNS_KEY_SKIP = 0,  /* not a user below the count snapshot */
+    ETCD_DNS_KEY_SET,       /* send the key's records as the user's whole set */
+    ETCD_DNS_KEY_KEEP       /* unreadable value: leave the user's records as they are */
+} etcd_dns_key_action_t;
+
+/**
+ * @fn etcd_build_present_ccb_ids
+ *
+ * @brief Map the user ids of the etcd HSI keys to the ccb ids the sweep keeps
+ * @param fastrg_ccb
+ *      FastRG context
+ * @param user_ids
+ *      user id string of each etcd HSI key
+ * @param user_id_count
+ *      number of entries in user_ids
+ * @param present_out
+ *      receives the ccb ids; must hold user_id_count entries
+ * @return
+ *      number of ccb ids written to present_out
+ */
+int etcd_build_present_ccb_ids(const FastRG_t *fastrg_ccb, const char *const *user_ids,
+    int user_id_count, int *present_out);
+
+/**
+ * @fn etcd_plan_dns_reconcile
+ *
+ * @brief Decide which DNS keys a reconcile pass sends and which users it clears
+ * @param user_ids
+ *      user id string of each etcd DNS key
+ * @param parsed
+ *      per key, TRUE when its value parsed into a record list
+ * @param key_count
+ *      number of keys
+ * @param user_count
+ *      subscriber count snapshot that bounds the whole pass
+ * @param key_actions
+ *      out: key_count entries, what to do with each key
+ * @param clear
+ *      out: user_count entries, TRUE for a user etcd has no key for
+ * @return
+ *      void
+ */
+void etcd_plan_dns_reconcile(const char *const *user_ids, const BOOL *parsed, int key_count,
+    int user_count, etcd_dns_key_action_t *key_actions, BOOL *clear);
+
+/**
+ * @fn etcd_is_reconcile_hsi_outside_count
+ *
+ * @brief Check if a reconcile HSI event is for a user id outside the subscriber count
+ * @param fastrg_ccb
+ *      FastRG context
+ * @param ev
+ *      HSI event about to be dispatched
+ * @return
+ *      TRUE for a reconcile event whose user id is not within user_count
+ */
+BOOL etcd_is_reconcile_hsi_outside_count(const FastRG_t *fastrg_ccb, const etcd_event_t *ev);
+
 #ifdef __cplusplus
 }
 #endif

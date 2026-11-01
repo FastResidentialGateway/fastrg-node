@@ -2,3 +2,5 @@ test_controller
 test_controller_server
 test_etcd_client
 test_kafka_producer
+test_etcd_cas
+test_kafka_retry

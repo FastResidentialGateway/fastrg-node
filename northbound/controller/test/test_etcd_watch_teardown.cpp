@@ -1,5 +1,6 @@
 #include "../etcd_client.h"
 #include "../../../src/fastrg.h"
+#include "../../../src/etcd_integration.h"
 
 #include <sanitizer/asan_interface.h>
 
@@ -61,6 +62,29 @@ STATUS fastrg_gen_etcd_event(FastRG_t *fastrg_ccb, etcd_event_t *ev)
     return SUCCESS;
 }
 
+// The reconcile pass's planners, also from src/etcd_integration.c; these plan
+// nothing.
+int etcd_build_present_ccb_ids(const FastRG_t *fastrg_ccb, const char *const *user_ids,
+    int user_id_count, int *present_out)
+{
+    (void)fastrg_ccb;
+    (void)user_ids;
+    (void)user_id_count;
+    (void)present_out;
+    return 0;
+}
+
+void etcd_plan_dns_reconcile(const char *const *user_ids, const BOOL *parsed, int key_count,
+    int user_count, etcd_dns_key_action_t *key_actions, BOOL *clear)
+{
+    (void)user_ids;
+    (void)parsed;
+    for (int i = 0; i < key_count; i++)
+        key_actions[i] = ETCD_DNS_KEY_SKIP;
+    for (int i = 0; i < user_count; i++)
+        clear[i] = FALSE;
+}
+
 // Keep going after a report so every iteration is counted (needs
 // -fsanitize-recover=address); leaks in the gRPC/etcd libraries are out of scope.
 const char *__asan_default_options(void)
@@ -108,7 +132,7 @@ static void count_asan_report(const char *report)
     asan_reports++;
 }
 
-static void sync_request_callback(const char *node_id, void *user_data)
+static void teardown_sync_request_callback(const char *node_id, void *user_data)
 {
     (void)node_id;
     (void)user_data;
@@ -132,7 +156,7 @@ static int test_etcd_client_cleanup(int iterations)
         }
         // start_watch also returns success when etcd is down (it falls back to
         // background reconnects); only a reachable etcd means the watchers exist.
-        if (etcd_client_start_watch(TEST_NODE_UUID, sync_request_callback) != ETCD_SUCCESS ||
+        if (etcd_client_start_watch(TEST_NODE_UUID, teardown_sync_request_callback) != ETCD_SUCCESS ||
                 !etcd_client_is_connected()) {
             fprintf(stderr, "FAIL: iteration %d: watchers did not start (is etcd up on %s?)\n",
                 i, ETCD_ENDPOINTS);

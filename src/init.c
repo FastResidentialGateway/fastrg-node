@@ -734,12 +734,18 @@ STATUS sys_init(FastRG_t *fastrg_ccb, struct fastrg_config *fastrg_cfg)
         goto err;
     }
 
-    /* One applied-revision slot per subscriber, same fixed-max lifetime as the
-     * stats rows below. */
+    /* One applied-revision slot per subscriber for HSI and for DNS, same
+     * fixed-max lifetime as the stats rows below. */
     fastrg_ccb->hsi_subscriber_last_revision =
         fastrg_calloc(S64, fastrg_ccb->max_user_count, sizeof(S64), 0);
     if (fastrg_ccb->hsi_subscriber_last_revision == NULL) {
         FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Cannot allocate hsi_subscriber_last_revision");
+        goto err;
+    }
+    fastrg_ccb->dns_subscriber_last_revision =
+        fastrg_calloc(S64, fastrg_ccb->max_user_count, sizeof(S64), 0);
+    if (fastrg_ccb->dns_subscriber_last_revision == NULL) {
+        FastRG_LOG(ERR, fastrg_ccb->fp, NULL, NULL, "Cannot allocate dns_subscriber_last_revision");
         goto err;
     }
 
@@ -777,6 +783,10 @@ err:
     if (fastrg_ccb->hsi_subscriber_last_revision != NULL) {
         fastrg_mfree(fastrg_ccb->hsi_subscriber_last_revision);
         fastrg_ccb->hsi_subscriber_last_revision = NULL;
+    }
+    if (fastrg_ccb->dns_subscriber_last_revision != NULL) {
+        fastrg_mfree(fastrg_ccb->dns_subscriber_last_revision);
+        fastrg_ccb->dns_subscriber_last_revision = NULL;
     }
     cleanup_ring(fastrg_ccb);
     cleanup_mem();
@@ -837,6 +847,10 @@ void sys_cleanup(FastRG_t *fastrg_ccb)
     if (fastrg_ccb->hsi_subscriber_last_revision != NULL) {
         fastrg_mfree(fastrg_ccb->hsi_subscriber_last_revision);
         fastrg_ccb->hsi_subscriber_last_revision = NULL;
+    }
+    if (fastrg_ccb->dns_subscriber_last_revision != NULL) {
+        fastrg_mfree(fastrg_ccb->dns_subscriber_last_revision);
+        fastrg_ccb->dns_subscriber_last_revision = NULL;
     }
 
     cleanup_ring(fastrg_ccb);

@@ -6,6 +6,7 @@
 
 #include "../kafka_producer_wal.h"
 #include "../../../src/fastrg.h"
+#include "../../../src/etcd_integration.h"
 
 // Unit tests for the pure functions kafka_producer.cpp exports through
 // kafka_producer_wal.h: the WAL's serialize/parse pair and the event
@@ -36,6 +37,29 @@ STATUS fastrg_gen_etcd_event(FastRG_t *fastrg_ccb, etcd_event_t *ev)
     (void)fastrg_ccb;
     etcd_event_free(ev);
     return SUCCESS;
+}
+
+// The reconcile pass's planners, also from src/etcd_integration.c; these plan
+// nothing.
+int etcd_build_present_ccb_ids(const FastRG_t *fastrg_ccb, const char *const *user_ids,
+    int user_id_count, int *present_out)
+{
+    (void)fastrg_ccb;
+    (void)user_ids;
+    (void)user_id_count;
+    (void)present_out;
+    return 0;
+}
+
+void etcd_plan_dns_reconcile(const char *const *user_ids, const BOOL *parsed, int key_count,
+    int user_count, etcd_dns_key_action_t *key_actions, BOOL *clear)
+{
+    (void)user_ids;
+    (void)parsed;
+    for (int i = 0; i < key_count; i++)
+        key_actions[i] = ETCD_DNS_KEY_SKIP;
+    for (int i = 0; i < user_count; i++)
+        clear[i] = FALSE;
 }
 }
 

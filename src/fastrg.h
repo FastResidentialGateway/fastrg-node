@@ -170,6 +170,9 @@ typedef struct FastRG {
     /* Per subscriber, the revision of the etcd event that last applied or
      * removed its HSI config; 0 = no etcd event ever touched it. */
     S64                     *hsi_subscriber_last_revision;
+    /* Per subscriber, the revision of the etcd event that last set its DNS
+     * records; 0 = no etcd event ever set them. */
+    S64                     *dns_subscriber_last_revision;
     struct lcore_usage_counter *lcore_usage;  /* per-lcore busy/total cycle counters, index by lcore_id */
     char                    *metrics_ip_port; /* Prometheus /metrics HTTP listen addr, e.g. "0.0.0.0:9101" */
     pthread_t               metrics_thread;   /* joinable Prometheus HTTP server thread */
