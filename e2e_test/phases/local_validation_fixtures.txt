@@ -1883,3 +1883,132 @@ err
 # expect-status: 1
 ---
 
+==== fixture: pdump_reply_verdict_new
+# expect-output: new
+# expect-status: 0
+---
+{"status": "capture started", "pcap_file": "/var/log/fastrg/pdump-1793397660.pcap"}
+==== fixture: pdump_reply_verdict_same_session
+# args: /var/log/fastrg/pdump-1793397660.pcap
+# expect-output: same
+# expect-status: 0
+---
+{"status": "capture started", "pcap_file": "/var/log/fastrg/pdump-1793397660.pcap"}
+==== fixture: pdump_reply_verdict_new_session
+# args: /var/log/fastrg/pdump-1793397660.pcap
+# expect-output: new
+# expect-status: 0
+---
+{"status": "capture started", "pcap_file": "/var/log/fastrg/pdump-1793397675.pcap"}
+==== fixture: pdump_reply_verdict_stopped
+# expect-output: stopped
+# expect-status: 0
+---
+{"status": "capture stopped", "pcap_file": ""}
+==== fixture: pdump_reply_verdict_idle
+# expect-output: idle
+# expect-status: 0
+---
+{"error": "ERROR:\n  Code: InvalidArgument\n  Message: no capture is running"}
+==== fixture: pdump_reply_verdict_other_error
+# expect-output: error
+# expect-status: 0
+---
+{"error": "ERROR:\n  Code: InvalidArgument\n  Message: subscriber 3 does not exist"}
+==== fixture: pdump_reply_verdict_empty_input
+# expect-output: err
+# expect-status: 1
+---
+==== fixture: pdump_reply_verdict_not_json
+# expect-output: err
+# expect-status: 1
+---
+Failed to dial target host "192.168.10.211:50052": context deadline exceeded
+==== fixture: pdump_fd_state_open
+# args: /var/log/fastrg/pdump-1793397660.pcap
+# expect-output: open
+# expect-status: 0
+---
+total 0
+lr-x------ 1 root root 64 Oct 30 15:40 0 -> /dev/null
+l-wx------ 1 root root 64 Oct 30 15:40 1 -> /var/log/fastrg.20261030-154012.log
+l-wx------ 1 root root 64 Oct 30 15:40 2 -> /var/log/fastrg.20261030-154012.log
+lrwx------ 1 root root 64 Oct 30 15:40 7 -> /var/log/fastrg/fastrg.log
+lrwx------ 1 root root 64 Oct 30 15:40 9 -> socket:[123456]
+l-wx------ 1 root root 64 Oct 30 15:41 41 -> /var/log/fastrg/pdump-1793397660.pcap
+==== fixture: pdump_fd_state_closed
+# args: /var/log/fastrg/pdump-1793397660.pcap
+# expect-output: closed
+# expect-status: 0
+---
+total 0
+lr-x------ 1 root root 64 Oct 30 15:40 0 -> /dev/null
+l-wx------ 1 root root 64 Oct 30 15:40 1 -> /var/log/fastrg.20261030-154012.log
+l-wx------ 1 root root 64 Oct 30 15:40 2 -> /var/log/fastrg.20261030-154012.log
+lrwx------ 1 root root 64 Oct 30 15:40 7 -> /var/log/fastrg/fastrg.log
+lrwx------ 1 root root 64 Oct 30 15:40 9 -> socket:[123456]
+==== fixture: pdump_fd_state_other_capture_open
+# args: /var/log/fastrg/pdump-1793397660.pcap
+# expect-output: closed
+# expect-status: 0
+---
+total 0
+lr-x------ 1 root root 64 Oct 30 15:40 0 -> /dev/null
+l-wx------ 1 root root 64 Oct 30 15:40 1 -> /var/log/fastrg.20261030-154012.log
+lrwx------ 1 root root 64 Oct 30 15:40 7 -> /var/log/fastrg/fastrg.log
+l-wx------ 1 root root 64 Oct 30 15:42 41 -> /var/log/fastrg/pdump-1793397675.pcap
+==== fixture: pdump_fd_state_deleted_while_open
+# args: /var/log/fastrg/pdump-1793397660.pcap
+# expect-output: open
+# expect-status: 0
+---
+total 0
+lr-x------ 1 root root 64 Oct 30 15:40 0 -> /dev/null
+lrwx------ 1 root root 64 Oct 30 15:40 7 -> /var/log/fastrg/fastrg.log
+l-wx------ 1 root root 64 Oct 30 15:41 41 -> /var/log/fastrg/pdump-1793397660.pcap (deleted)
+==== fixture: pdump_fd_state_empty_input
+# args: /var/log/fastrg/pdump-1793397660.pcap
+# expect-output: err
+# expect-status: 1
+---
+==== fixture: pdump_fd_state_no_descriptors
+# args: /var/log/fastrg/pdump-1793397660.pcap
+# expect-output: err
+# expect-status: 1
+---
+total 0
+==== fixture: pdump_log_written_good
+# args: /var/log/fastrg/pdump-1793397660.pcap
+# expect-output: written
+# expect-status: 0
+---
+FastRG[INFO][2026-10-30 15:41:05]: src/etcd_integration.c:595> Removing 1 CCBs (current: 2, target: 1)
+FastRG[INFO][2026-10-30 15:41:05]: src/pdump_capture.c:461> pdump capture written to /var/log/fastrg/pdump-1793397660.pcap
+FastRG[INFO][2026-10-30 15:41:05]: src/etcd_integration.c:603> Successfully removed 1 CCBs, new user_count: 1
+==== fixture: pdump_log_written_absent
+# args: /var/log/fastrg/pdump-1793397660.pcap
+# expect-output: absent
+# expect-status: 0
+---
+FastRG[INFO][2026-10-30 15:41:05]: src/etcd_integration.c:595> Removing 1 CCBs (current: 2, target: 1)
+FastRG[INFO][2026-10-30 15:41:05]: src/etcd_integration.c:603> Successfully removed 1 CCBs, new user_count: 1
+FastRG[INFO][2026-10-30 15:41:07]: src/pdump_capture.c:681> pdump stop dir=0 subscriber=0
+==== fixture: pdump_log_written_other_file
+# args: /var/log/fastrg/pdump-1793397660.pcap
+# expect-output: absent
+# expect-status: 0
+---
+FastRG[INFO][2026-10-30 15:41:05]: src/etcd_integration.c:595> Removing 1 CCBs (current: 2, target: 1)
+FastRG[INFO][2026-10-30 15:41:09]: src/pdump_capture.c:461> pdump capture written to /var/log/fastrg/pdump-1793397668.pcap
+==== fixture: pdump_log_written_start_line_only
+# args: /var/log/fastrg/pdump-1793397660.pcap
+# expect-output: absent
+# expect-status: 0
+---
+FastRG[INFO][2026-10-30 15:41:00]: src/pdump_capture.c:619> pdump start dir=0 subscriber=0 filter=(none) -> /var/log/fastrg/pdump-1793397660.pcap
+FastRG[INFO][2026-10-30 15:41:05]: src/etcd_integration.c:595> Removing 1 CCBs (current: 2, target: 1)
+==== fixture: pdump_log_written_empty_input
+# args: /var/log/fastrg/pdump-1793397660.pcap
+# expect-output: err
+# expect-status: 1
+---

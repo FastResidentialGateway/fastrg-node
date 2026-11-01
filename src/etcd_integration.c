@@ -14,6 +14,7 @@
 #include "pppd/pppd.h"
 #include "dhcpd/dhcpd.h"
 #include "northbound.h"
+#include "pdump_capture.h"
 
 STATUS etcd_integration_init(FastRG_t *fastrg_ccb)
 {
@@ -616,6 +617,7 @@ STATUS user_count_changed_callback(const char *node_id,
                 dhcpd_disable_ccb(fastrg_ccb, to_remove, current_count);
                 fastrg_disable_subscriber_stats(fastrg_ccb, to_remove, current_count);
                 fastrg_disable_pppoes_stats(fastrg_ccb, to_remove, current_count);
+                fastrg_pdump_disable_ccb(fastrg_ccb, to_remove, current_count);
                 FastRG_LOG(INFO, fastrg_ccb->fp, NULL, NULL,
                     "Successfully removed %u CCBs, new user_count: %d", to_remove, fastrg_ccb->user_count);
             }
