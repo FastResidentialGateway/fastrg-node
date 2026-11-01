@@ -11,6 +11,10 @@ CFLAGS = $(INCLUDE) -Wall -g $(shell pkg-config --cflags libdpdk) -DALLOW_EXPERI
 
 LDFLAGS = $(shell pkg-config --static --libs libdpdk) -lutils -lconfig -luuid -Wl,--start-group -lstdc++ $(shell pkg-config --libs grpc++ protobuf jsoncpp) -letcd-cpp-api $(shell pkg-config --libs rdkafka) -lgrpc_unsecure -lgrpc++_unsecure -laddress_sorting -lpthread -Wl,--end-group
 
+# Route the HSI apply-result report to the recorder in etcd_integration_test.c,
+# so the tests can see which events would be reported over Kafka.
+LDFLAGS += -Wl,--wrap=kafka_report_config_apply_result
+
 # Coverage build, driven by the top-level `make coverage` target (which
 # exports COVERAGE=1): the ../src and ../northbound objects are
 # gcov-instrumented there, so the link needs --coverage to pull in libgcov.

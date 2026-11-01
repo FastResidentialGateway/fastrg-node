@@ -1674,3 +1674,212 @@ read: ok
 # expect-output: unreadable
 # expect-status: 1
 ---
+==== fixture: etcd_gateway_value_found
+# args: configs/n1/dns/3
+# expect-output: {"records":[]}
+# expect-status: 0
+---
+{"header":{"cluster_id":"1","member_id":"2","revision":"9","raft_term":"3"},"kvs":[{"key":"Y29uZmlncy9uMS9kbnMvMw==","create_revision":"8","mod_revision":"9","version":"2","value":"eyJyZWNvcmRzIjpbXX0="}],"count":"1"}
+==== fixture: etcd_gateway_value_absent
+# args: configs/n1/dns/3
+# expect-output:
+# expect-status: 0
+---
+{"header":{"cluster_id":"1","member_id":"2","revision":"9","raft_term":"3"}}
+==== fixture: etcd_gateway_value_error_reply
+# args: configs/n1/dns/3
+# expect-output: err
+# expect-status: 1
+---
+{"error":"etcdserver: request timed out","code":14,"message":"etcdserver: request timed out"}
+==== fixture: etcd_gateway_value_unanswered
+# args: configs/n1/dns/3
+# expect-output: err
+# expect-status: 1
+---
+err
+==== fixture: etcd_gateway_value_other_key
+# args: configs/n1/dns/3
+# expect-output: err
+# expect-status: 1
+---
+{"header":{"cluster_id":"1","member_id":"2","revision":"9","raft_term":"3"},"kvs":[{"key":"Y29uZmlncy9uMS9kbnMvMzA=","create_revision":"8","mod_revision":"9","version":"2","value":"eyJyZWNvcmRzIjpbXX0="}],"count":"1"}
+==== fixture: snapshot_entry_value_present
+# args: dns/3
+# expect-output: {"records":[]}
+# expect-status: 0
+---
+{"entries":[{"key":"dns/2","value":"{\"records\":[{\"domain\":\"www.fastrg.org\"}]}","exists":true,"dirty":false},{"key":"dns/3","value":"{\"records\":[]}","exists":true,"dirty":false}]}
+==== fixture: snapshot_entry_value_deleted
+# args: dns/3
+# expect-output:
+# expect-status: 0
+---
+{"entries":[{"key":"dns/3","value":"{\"records\":[]}","exists":false,"dirty":true}]}
+==== fixture: snapshot_entry_value_absent
+# args: dns/3
+# expect-output:
+# expect-status: 0
+---
+{"entries":[{"key":"dns/30","value":"{\"records\":[]}","exists":true,"dirty":false}]}
+==== fixture: snapshot_entry_value_unreadable
+# args: dns/3
+# expect-output: err
+# expect-status: 1
+---
+cat: /etc/fastrg/config_snapshot.json: No such file or directory
+==== fixture: dns_static_records_sorted
+# expect-output: a.fastrg.test 192.0.2.1 60;b.fastrg.test 192.0.2.2 30
+# expect-status: 0
+---
+{"user_id": 3, "total_entries": 2, "entries": [{"domain": "b.fastrg.test", "ip": "192.0.2.2", "ttl": 30}, {"domain": "a.fastrg.test", "ip": "192.0.2.1", "ttl": 60}]}
+==== fixture: dns_static_records_empty
+# expect-output:
+# expect-status: 0
+---
+{"user_id": 3, "total_entries": 0, "entries": []}
+==== fixture: dns_static_records_unanswered
+# expect-output: err
+# expect-status: 1
+---
+
+==== fixture: dns_static_records_error_reply
+# expect-output: err
+# expect-status: 1
+---
+{"error":"Failed to dial target host \"192.168.10.211:50052\": connection refused"}
+==== fixture: dns_envelope_error_count_match
+# args: n1 3
+# expect-output: 1
+# expect-status: 0
+---
+Processing HSI event: configs/n1/hsi/2
+Invalid DNS records envelope: configs/n1/dns/3
+FastRG[INFO][2026-10-09 10:32:04]: src/etcd_integration.c:662> DNS record event: user=2
+==== fixture: dns_envelope_error_count_mid_line
+# args: n1 3
+# expect-output: 1
+# expect-status: 0
+---
+FastRG[DBG][2026-10-09 10:32:04]: src/pppd/fsm.c:682> pppd> SessInvalid DNS records envelope: configs/n1/dns/3
+==== fixture: dns_envelope_error_count_other_key
+# args: n1 3
+# expect-output: 0
+# expect-status: 0
+---
+Invalid DNS records envelope: configs/n1/dns/30
+Invalid DNS records envelope: configs/n2/dns/3
+==== fixture: dns_envelope_error_count_unread
+# args: n1 3
+# expect-output: err
+# expect-status: 1
+---
+err
+==== fixture: reconcile_match_count_two_passes
+# args: 1
+# expect-output: 2
+# expect-status: 0
+---
+FastRG[INFO][2026-10-09 10:32:04]: src/etcd_integration.c:823> Reconcile: HSI user 1 already matches local state, reconciling PPPoE only
+FastRG[INFO][2026-10-09 10:32:04]: src/etcd_integration.c:823> Reconcile: HSI user 2 already matches local state, reconciling PPPoE only
+FastRG[INFO][2026-10-09 10:33:04]: src/etcd_integration.c:823> Reconcile: HSI user 1 already matches local state, reconciling PPPoE only
+==== fixture: reconcile_match_count_other_user
+# args: 1
+# expect-output: 0
+# expect-status: 0
+---
+FastRG[INFO][2026-10-09 10:32:04]: src/etcd_integration.c:823> Reconcile: HSI user 11 already matches local state, reconciling PPPoE only
+FastRG[INFO][2026-10-09 10:32:04]: src/etcd_integration.c:823> Reconcile: HSI user 21 already matches local state, reconciling PPPoE only
+==== fixture: reconcile_match_count_unread
+# args: 1
+# expect-output: err
+# expect-status: 1
+---
+err
+==== fixture: reconcile_outside_count_ok
+# args: 3 2
+# expect-output: ok
+# expect-status: 0
+---
+FastRG[INFO][2026-10-09 10:32:04]: src/etcd_integration.c:823> Reconcile: HSI user 1 already matches local state, reconciling PPPoE only
+FastRG[INFO][2026-10-09 10:32:04]: src/etcd_integration.c:823> Reconcile: HSI user 2 already matches local state, reconciling PPPoE only
+FastRG[DBG][2026-10-09 10:32:04]: src/etcd_integration.c:788> Reconcile: HSI user 3 is outside the subscriber count 2, skipping
+==== fixture: reconcile_outside_count_invalid_user
+# args: 3 2
+# expect-output: reported:invalid_user_id
+# expect-status: 1
+---
+FastRG[INFO][2026-10-09 10:32:04]: src/etcd_integration.c:823> Reconcile: HSI user 1 already matches local state, reconciling PPPoE only
+FastRG[INFO][2026-10-09 10:32:04]: src/etcd_integration.c:823> Reconcile: HSI user 2 already matches local state, reconciling PPPoE only
+FastRG[ERR][2026-10-09 10:32:04]: src/etcd_integration.c:413> Invalid user_id: 3 (valid range: 1~2)
+FastRG[ERR][2026-10-09 10:32:04]: src/etcd_integration.c:841> HSI update apply failed for user 3 (reported via Kafka)
+==== fixture: reconcile_outside_count_apply_failed
+# args: 3 2
+# expect-output: reported:apply_failed
+# expect-status: 1
+---
+FastRG[INFO][2026-10-09 10:32:04]: src/etcd_integration.c:823> Reconcile: HSI user 1 already matches local state, reconciling PPPoE only
+FastRG[INFO][2026-10-09 10:32:04]: src/etcd_integration.c:823> Reconcile: HSI user 2 already matches local state, reconciling PPPoE only
+FastRG[DBG][2026-10-09 10:32:04]: src/etcd_integration.c:788> Reconcile: HSI user 3 is outside the subscriber count 2, skipping
+FastRG[ERR][2026-10-09 10:32:04]: src/etcd_integration.c:841> HSI update apply failed for user 3 (reported via Kafka)
+==== fixture: reconcile_outside_count_no_reconcile
+# args: 3 2
+# expect-output: no_reconcile
+# expect-status: 1
+---
+FastRG[INFO][2026-10-09 10:32:04]: src/etcd_integration.c:823> Reconcile: HSI user 1 already matches local state, reconciling PPPoE only
+FastRG[DBG][2026-10-09 10:32:04]: src/etcd_integration.c:788> Reconcile: HSI user 3 is outside the subscriber count 2, skipping
+==== fixture: reconcile_outside_count_not_skipped
+# args: 3 2
+# expect-output: not_skipped
+# expect-status: 1
+---
+FastRG[INFO][2026-10-09 10:32:04]: src/etcd_integration.c:823> Reconcile: HSI user 1 already matches local state, reconciling PPPoE only
+FastRG[INFO][2026-10-09 10:32:04]: src/etcd_integration.c:823> Reconcile: HSI user 2 already matches local state, reconciling PPPoE only
+==== fixture: reconcile_outside_count_other_user_invalid
+# args: 3 2
+# expect-output: ok
+# expect-status: 0
+---
+FastRG[ERR][2026-10-09 10:32:01]: src/etcd_integration.c:413> Invalid user_id: 30 (valid range: 1~2)
+FastRG[INFO][2026-10-09 10:32:04]: src/etcd_integration.c:823> Reconcile: HSI user 1 already matches local state, reconciling PPPoE only
+FastRG[INFO][2026-10-09 10:32:04]: src/etcd_integration.c:823> Reconcile: HSI user 2 already matches local state, reconciling PPPoE only
+FastRG[DBG][2026-10-09 10:32:04]: src/etcd_integration.c:788> Reconcile: HSI user 3 is outside the subscriber count 2, skipping
+==== fixture: reconcile_outside_count_unread
+# args: 3 2
+# expect-output: err
+# expect-status: 1
+---
+err
+==== fixture: etcd_connection_up_mapped
+# args: 192.168.10.212 2378
+# expect-output: up
+# expect-status: 0
+---
+0      0      [::ffff:192.168.10.211]:22           [::ffff:192.168.10.104]:51220
+0      0      [::ffff:192.168.10.211]:45344        [::ffff:192.168.10.212]:2378
+==== fixture: etcd_connection_up_v4
+# args: 192.168.10.212 2378
+# expect-output: up
+# expect-status: 0
+---
+0      0      192.168.10.211:45344                 192.168.10.212:2378
+==== fixture: etcd_connection_up_other_port
+# args: 192.168.10.212 2378
+# expect-output: down
+# expect-status: 1
+---
+0      0      [::ffff:192.168.10.211]:45344        [::ffff:192.168.10.212]:23780
+0      0      192.168.10.211:41000                 192.168.10.212:50051
+==== fixture: etcd_connection_up_local_side
+# args: 192.168.10.212 2378
+# expect-output: down
+# expect-status: 1
+---
+0      0      192.168.10.212:2378                  192.168.10.104:51220
+==== fixture: etcd_connection_up_none
+# args: 192.168.10.212 2378
+# expect-output: down
+# expect-status: 1
+---
+
