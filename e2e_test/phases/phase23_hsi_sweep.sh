@@ -35,25 +35,6 @@ _P23_RC_DNS_ORIGINAL=""
 # Predicates (registered with local correctness validation below)
 # ---------------------------------------------------------------------------
 
-# The value an etcd HTTP range reply holds for KEY. Prints nothing when the key
-# is absent, and "err" when BODY is not a range reply about KEY (a failed call,
-# an error reply, a reply about another key), so a read that never happened is
-# never taken for an absent key.
-e2e_etcd_gateway_value() {
-    local _body="${1-}" _key="${2-}" _value=""
-
-    if [[ -z "$_key" ]] || ! _value=$(printf '%s' "$_body" | jq -ej --arg k "$_key" '
-            if type != "object" or (.header | type) != "object" then error("not a range reply")
-            elif (.kvs // []) | length == 0 then ""
-            elif (.kvs | length) == 1 and (.kvs[0].key | @base64d) == $k
-                then (.kvs[0].value // "") | @base64d
-            else error("reply is about another key") end' 2>/dev/null); then
-        printf 'err'
-        return 1
-    fi
-    printf '%s' "$_value"
-}
-
 # The value config_snapshot.json holds for KEY (e.g. "dns/3"). Prints nothing
 # when the entry is absent or marked deleted, and "err" when BODY is not a
 # snapshot file.
@@ -150,29 +131,6 @@ e2e_reconcile_outside_count_verdict() {
     printf 'ok'
 }
 
-# Whether `ss -Hnt state established` lists a connection to HOST:PORT. gRPC
-# opens dual-stack sockets, so the peer may read [::ffff:HOST]:PORT.
-#
-# Prints up | down.
-e2e_etcd_connection_up() {
-    local _body="${1-}" _host="${2-}" _port="${3-}"
-
-    if awk -v v4="${_host}:${_port}" -v mapped="[::ffff:${_host}]:${_port}" \
-            '$4 == v4 || $4 == mapped { found = 1 } END { exit !found }' <<< "$_body"; then
-        printf 'up'
-        return 0
-    fi
-    printf 'down'
-    return 1
-}
-
-local_validation_register etcd_gateway_value e2e_etcd_gateway_value \
-    etcd_gateway_value_found \
-    etcd_gateway_value_absent \
-    etcd_gateway_value_error_reply \
-    etcd_gateway_value_unanswered \
-    etcd_gateway_value_other_key
-
 local_validation_register snapshot_entry_value e2e_snapshot_entry_value \
     snapshot_entry_value_present \
     snapshot_entry_value_deleted \
@@ -204,13 +162,6 @@ local_validation_register reconcile_outside_count_verdict e2e_reconcile_outside_
     reconcile_outside_count_not_skipped \
     reconcile_outside_count_other_user_invalid \
     reconcile_outside_count_unread
-
-local_validation_register etcd_connection_up e2e_etcd_connection_up \
-    etcd_connection_up_mapped \
-    etcd_connection_up_v4 \
-    etcd_connection_up_other_port \
-    etcd_connection_up_local_side \
-    etcd_connection_up_none
 
 _p23_block_etcd() {
     # Idempotent installation: discard a stale rule from an interrupted run.
@@ -310,63 +261,6 @@ _p23_wait_etcd_path_down() {
         _p23_etcd_path_is_down && return 0
     done
     return 1
-}
-
-# Base URL of etcd's HTTP API. Reads and writes that have to work while the
-# node is cut off from etcd go from the runner: the block covers every process
-# on the node, etcdctl included.
-_p23_etcd_http_url() {
-    case "${ETCD_ENDPOINT}" in
-        http://*|https://*) printf '%s' "${ETCD_ENDPOINT%/}" ;;
-        *) printf 'http://%s' "${ETCD_ENDPOINT}" ;;
-    esac
-}
-
-# One POST to etcd's HTTP API from the runner. Prints the reply, or "err" when
-# no 200 reply came back.
-_p23_etcd_http_post() {
-    local _path="$1" _request="$2" _reply="" _code=""
-
-    _reply=$(mktemp 2>/dev/null) || { printf 'err'; return 0; }
-    _code=$(curl -sS --max-time 10 -o "$_reply" -w '%{http_code}' -X POST \
-        -H 'Content-Type: application/json' --data-binary "$_request" \
-        "$(_p23_etcd_http_url)${_path}" 2>/dev/null || true)
-    if [[ "$_code" == "200" ]]; then
-        cat "$_reply"
-    else
-        printf 'err'
-    fi
-    rm -f "$_reply"
-    return 0
-}
-
-# KEY's value read from the runner. Same contract as etcdctl_get_value: empty
-# for an absent key, non-zero (printing "err") when etcd could not be asked.
-_p23_etcd_http_get() {
-    local _request=""
-
-    _request=$(jq -nc --arg k "$1" '{key: ($k | @base64)}') || { printf 'err'; return 1; }
-    e2e_etcd_gateway_value "$(_p23_etcd_http_post /v3/kv/range "$_request")" "$1"
-}
-
-# Write KEY=VALUE from the runner and read it back. Non-zero unless etcd now
-# holds exactly VALUE.
-_p23_etcd_http_put() {
-    local _key="$1" _value="$2" _request="" _now=""
-
-    _request=$(jq -nc --arg k "$_key" --arg v "$_value" \
-        '{key: ($k | @base64), value: ($v | @base64)}') || return 1
-    [[ "$(_p23_etcd_http_post /v3/kv/put "$_request")" != "err" ]] || return 1
-    _now=$(_p23_etcd_http_get "$_key") || return 1
-    [[ "$_now" == "$_value" ]]
-}
-
-# Condition: KEY is absent from etcd, asked from the runner.
-_p23_etcd_http_key_absent() {
-    local _value=""
-
-    _value=$(_p23_etcd_http_get "$1") || return 2
-    [[ -z "$_value" ]]
 }
 
 # Every config key etcd holds for this node, sorted onto one line. Non-zero
@@ -480,7 +374,7 @@ _p23_fixture_issues() {
 # Put back the readable dns/3 value Step 101b replaced, if it is still out.
 _p23_restore_dns_value() {
     [[ -n "${_P23_RC_DNS_ORIGINAL}" ]] || return 0
-    _p23_etcd_http_put "configs/${NODE_UUID}/dns/${_P23_UID}" "${_P23_RC_DNS_ORIGINAL}" || return 1
+    e2e_etcd_http_put "configs/${NODE_UUID}/dns/${_P23_UID}" "${_P23_RC_DNS_ORIGINAL}" || return 1
     _P23_RC_DNS_ORIGINAL=""
 }
 
@@ -497,8 +391,8 @@ _p23_reconcile_cleanup() {
 
     _p23_restore_dns_value || \
         warn "Cleanup(phase23): could not put the readable value back into ${_dns_key}."
-    _hsi=$(_p23_etcd_http_get "$_hsi_key" || true)
-    _dns=$(_p23_etcd_http_get "$_dns_key" || true)
+    _hsi=$(e2e_etcd_http_get "$_hsi_key" || true)
+    _dns=$(e2e_etcd_http_get "$_dns_key" || true)
     if [[ -n "$_hsi" || -n "$_dns" ]]; then
         # The controller refuses a user id above the count, so raise it first.
         _p23_set_count "${_P23_UID}" || \
@@ -609,10 +503,10 @@ _p23_reconcile_checks() {
         fi
     fi
     if [[ $_seed_ok -eq 1 ]]; then
-        _original=$(_p23_etcd_http_get "$_dns_key" || true)
+        _original=$(e2e_etcd_http_get "$_dns_key" || true)
         if [[ -z "$_original" || "$_original" == "err" ]]; then
             _seed_ok=0
-            _issue_seed="${_dns_key} read '${_original:-absent}' through $(_p23_etcd_http_url)"
+            _issue_seed="${_dns_key} read '${_original:-absent}' through $(e2e_etcd_http_url)"
         fi
     fi
     if [[ $_seed_ok -eq 1 ]]; then
@@ -651,9 +545,9 @@ _p23_reconcile_checks() {
         if [[ -z "$_out_mark" ]]; then
             _ok_b=0
             _issue_b="node log ${_P23_NODE_STDOUT_LOG} could not be read"
-        elif ! _p23_etcd_http_put "$_dns_key" "$_P23_BAD_DNS_VALUE"; then
+        elif ! e2e_etcd_http_put "$_dns_key" "$_P23_BAD_DNS_VALUE"; then
             _ok_b=0
-            _issue_b="could not write the unreadable value through $(_p23_etcd_http_url)"
+            _issue_b="could not write the unreadable value through $(e2e_etcd_http_url)"
         else
             _seen=$(_p23_snapshot_value "$_snapshot_key" || true)
             if [[ "$_seen" != "$_original" ]]; then
@@ -720,7 +614,7 @@ _p23_reconcile_checks() {
     if [[ $_ok_b -eq 1 ]]; then
         _control_mark=$(_p23_log_mark "$_P23_NODE_STDOUT_LOG")
         _rc=0
-        if [[ -z "$_control_mark" ]] || ! _p23_etcd_http_put "$_dns_key" "$_P23_BAD_DNS_VALUE"; then
+        if [[ -z "$_control_mark" ]] || ! e2e_etcd_http_put "$_dns_key" "$_P23_BAD_DNS_VALUE"; then
             _rc=2
         else
             _e2e_wait_for "Step 101b: watch rejects the unreadable value" 10 1 \
@@ -764,7 +658,7 @@ _p23_reconcile_checks() {
             _ok_c=0
             _issue_c="subscriber count ${_P23_CANONICAL_COUNT} did not converge"
         else
-            _seen=$(_p23_etcd_http_get "$_hsi_key" || true)
+            _seen=$(e2e_etcd_http_get "$_hsi_key" || true)
             if [[ -z "$_seen" || "$_seen" == "err" ]]; then
                 _ok_c=0
                 _issue_c="${_hsi_key} read '${_seen:-absent}' after lowering the count"
@@ -958,12 +852,12 @@ phase23_hsi_sweep() {
     if [[ $_step95_ok -eq 1 ]]; then
         _rc=0
         _e2e_wait_for "Step 99: waiting for etcd hsi/3 to disappear" 15 2 \
-            _p23_etcd_http_key_absent "configs/${NODE_UUID}/hsi/3" || _rc=$?
+            e2e_etcd_http_key_absent "configs/${NODE_UUID}/hsi/3" || _rc=$?
         _local_vlan=$(_p23_hsi_field 3 vlan_id)
         _local_account=$(_p23_hsi_field 3 account)
         if [[ "$_rc" -ge 2 ]]; then
             _step95_ok=0
-            _issue95="etcd could not be read from the runner ($(_p23_etcd_http_url)) to confirm hsi/3 is gone"
+            _issue95="etcd could not be read from the runner ($(e2e_etcd_http_url)) to confirm hsi/3 is gone"
         elif [[ "$_rc" -ne 0 || "$_local_vlan" != "210" || -z "$_local_account" ]]; then
             _step95_ok=0
             _issue95="stale state not established (etcd_key=$([[ "$_rc" -eq 0 ]] && printf absent || printf present), local_vlan='${_local_vlan:-empty}', local_account='${_local_account:-empty}')"

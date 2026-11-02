@@ -19,8 +19,13 @@
 # out through the controller.
 #
 # Step 183a then takes the same path the other way round: a record removed
-# through the controller while the node is cut off in both directions is one
-# the node never hears about, so it can only go away once the node is back.
+# through the controller once the node's etcd connection is gone is one the
+# node never hears about, so only the reconcile its reconnect runs can take it
+# away.
+#
+# Step 183b then cuts the node off silently, etcd's replies dropped too: its
+# connection has to outlive the first minute, and once the 210s block is
+# lifted the node has to come back on a new one. It adds about 5.5 minutes.
 #
 # Step 184 then restarts the node with the block up again: with etcd out of
 # reach the local snapshot is the only place the subscriber's static DNS
@@ -60,6 +65,8 @@ _P40_SWEEP_IP="192.0.2.78"
 : "${_P40_GW:=}"
 : "${_P40_BROKERS:=}"
 : "${_P40_KAFKA_BASELINE:=-1}"
+# The node's app log (LogPath), where Step 183a reads the reconcile pass.
+: "${_P40_LOG_PATH:=}"
 # 1 while Step 184 has the node down and has not seen it come back.
 : "${_P40_NODE_STOPPED:=0}"
 
@@ -75,6 +82,14 @@ _P40_DIRTY_WAIT_SECS=300
 # How long the node may take to drop a record it never saw removed: it has to
 # reconnect first, and the reconcile that clears it runs on that reconnect.
 _P40_SWEEP_WAIT_SECS=300
+
+# Step 183b's silent outage. By its end etcd has dropped its idle end of the
+# connection (~170s) and the node has started reconnecting (<= 195s).
+_P40_SILENT_BLOCK_SECS=210
+# When Step 183b checks that the connection outlived the block going up.
+_P40_SILENT_HOLD_SECS=60
+# How long the node may take to come back on a new etcd connection.
+_P40_SILENT_SWITCH_SECS=100
 
 # Filled in by _p40_wait_dirty_clear: the last two readings and the wait.
 _P40_DIRTY_HSI=""
@@ -137,6 +152,43 @@ local_validation_register session_redial_verdict e2e_session_redial_verdict \
     redial_verdict_unreadable \
     redial_verdict_session_absent \
     redial_verdict_no_session_before
+
+# What took DOMAIN out of USER's static records, read from a node app log
+# window: "reconcile" when a reconcile pass for USER is logged before the
+# removal, "watch" when the removal comes first.
+#
+# Prints reconcile | watch | absent | err; "err" for a window never read.
+e2e_dns_removal_source() {
+    local _body="${1-}" _uid="${2-}" _domain="${3-}" _source=""
+
+    if [[ "$_body" == "err" || -z "$_uid" || -z "$_domain" ]]; then
+        printf 'err'
+        return 1
+    fi
+    _source=$(awk -v removed="User ${_uid}: DNS static record removed: ${_domain}" \
+            -v pass="Reconcile: HSI user ${_uid} already matches local state," '
+        index($0, pass) { reconciled = 1 }
+        {
+            i = index($0, removed)
+            if (i > 0 && substr($0, i) == removed) {
+                found = 1
+                print (reconciled ? "reconcile" : "watch")
+                exit
+            }
+        }
+        END { if (!found) print "absent" }' <<< "$_body")
+    printf '%s' "$_source"
+    [[ "$_source" == "reconcile" ]]
+}
+
+local_validation_register dns_removal_source e2e_dns_removal_source \
+    dns_removal_source_reconcile \
+    dns_removal_source_watch \
+    dns_removal_source_reconcile_after \
+    dns_removal_source_other_user_pass \
+    dns_removal_source_longer_domain \
+    dns_removal_source_absent \
+    dns_removal_source_unread
 
 # One config write straight at the node. Wrapped so the drills below can take
 # a single RPC away without touching the steps.
@@ -331,6 +383,30 @@ _p40_dns_domains() {
     fastrg_grpc get_dns_static "$1" | jq -r '.entries[]?.domain' 2>/dev/null || true
 }
 
+# Line count of the node app log, where a later window starts. Prints nothing
+# when the log could not be read.
+_p40_log_mark() {
+    local _lines=""
+
+    _lines=$(ssh_node "wc -l < '${_P40_LOG_PATH}'" 2>/dev/null | tr -d '[:space:]' || true)
+    [[ "$_lines" =~ ^[0-9]+$ ]] && printf '%s' "$_lines"
+    return 0
+}
+
+# What the node app log gained after MARK. "err" when it could not be read or
+# is now shorter than the mark, so an unread window never passes for empty.
+_p40_log_window() {
+    local _mark="$1" _window=""
+
+    if [[ ! "$_mark" =~ ^[0-9]+$ ]] || ! _window=$(ssh_node \
+            "[ -r '${_P40_LOG_PATH}' ] && [ \"\$(wc -l < '${_P40_LOG_PATH}')\" -ge ${_mark} ] && tail -n +$(( _mark + 1 )) '${_P40_LOG_PATH}'" \
+            2>/dev/null); then
+        printf 'err'
+        return 0
+    fi
+    printf '%s' "$_window"
+}
+
 # Port forward entries the node holds for a subscriber, "<eport> <dip> <iport>"
 # per line — read out of the same table the DNAT path looks the rule up in.
 _p40_port_fwd_rows() {
@@ -462,6 +538,8 @@ phase40_offline_cli_writes() {
     local _etcd_hsi="" _etcd_dns="" _conntrack="" _dig_off="" _dig_on=""
     local _stopped=0 _recovered=0 _started_at=0 _elapsed=0 _reported=0
     local _seen=0 _gone=0 _stop_mark="" _stop_crash="pass"
+    local _down_waited="" _log_mark="" _source=""
+    local _s0="" _a_sport="" _held=0 _blocked_at=0 _left=0 _switched="" _sport_now="" _other=""
 
     bold "═══════════════════════════════════════════════════════"
     bold " Phase 40 — Offline node CLI config writes (Steps 176-184)"
@@ -884,15 +962,16 @@ phase40_offline_cli_writes() {
     #             is back on etcd
     #
     # The record is added through the controller while the node is watching,
-    # then removed with the node cut off in both directions, so neither the
-    # node's own requests nor anything etcd pushes can reach it. The reading
-    # taken while the block is up is what says the removal really was missed;
-    # blocking only what the node sends leaves the pushed watch event getting
-    # through, which is no test at all.
+    # then removed only once the node's etcd connection is gone, so no watch
+    # can carry the removal. etcd is read from the runner while the block is
+    # up: an etcdctl on the node is behind the block too. Once the block is
+    # lifted the app log has to show a reconcile pass before the removal.
     # ------------------------------------------------------------------
     info "Step 183a: adding ${_P40_SWEEP_DOMAIN} through the controller..."
     _issue=""
     _seen=0
+    _down_waited=""
+    _log_mark=""
     _P40_SWEEP_LEFT=1
     fastrg_grpc add_dns_record "${USER_ID}" "${_P40_SWEEP_DOMAIN}" "${_P40_SWEEP_IP}" \
         "${_P40_DNS_TTL}" >/dev/null 2>&1 || true
@@ -907,12 +986,28 @@ phase40_offline_cli_writes() {
     [[ $_seen -eq 1 ]] || \
         _issue="${_P40_SWEEP_DOMAIN} never reached the node while it was watching etcd (records: ${_domains:-none})"
 
+    _P40_LOG_PATH=$(ssh_node "grep 'LogPath' /etc/fastrg/config.cfg 2>/dev/null" 2>/dev/null | \
+        awk -F'"' '{print $2}' || true)
+    [[ -n "$_P40_LOG_PATH" ]] || \
+        _issue="${_issue:+${_issue}; }cannot read LogPath from the node config"
+
     if [[ -z "$_issue" ]]; then
-        info "Step 183a: removing ${_P40_SWEEP_DOMAIN} through the controller with the node cut off from etcd..."
-        e2e_block_node_etcd both
+        info "Step 183a: blocking node->etcd and waiting for the node's etcd connection to drop..."
+        if ! e2e_block_node_etcd; then
+            _issue="the node->etcd block could not be installed"
+        elif ! _down_waited=$(e2e_wait_node_etcd_down 90); then
+            _issue="the node still held an etcd connection ${_down_waited}s after the block went up, so its watch could still carry the removal"
+        fi
+    fi
+
+    if [[ -z "$_issue" ]]; then
+        info "Step 183a: the node's etcd connection dropped ${_down_waited}s after the block; removing ${_P40_SWEEP_DOMAIN} through the controller..."
         fastrg_grpc remove_dns_record "${USER_ID}" "${_P40_SWEEP_DOMAIN}" >/dev/null 2>&1 || true
-        _etcd_dns=$(etcdctl_get_value "configs/${NODE_UUID}/dns/${USER_ID}" 2>/dev/null || true)
-        if printf '%s' "$_etcd_dns" | jq -e ".records[]? | select(.domain == \"${_P40_SWEEP_DOMAIN}\")" >/dev/null 2>&1; then
+        if ! _etcd_dns=$(e2e_etcd_http_get "configs/${NODE_UUID}/dns/${USER_ID}"); then
+            _issue="etcd could not be read from the runner ($(e2e_etcd_http_url)) to confirm the removal"
+        elif ! printf '%s' "$_etcd_dns" | jq -e '.records[]? | select(.domain == "www.fastrg.org")' >/dev/null 2>&1; then
+            _issue="dns/${USER_ID} read from the runner does not list the fixture's www.fastrg.org, so it proves nothing: '${_etcd_dns:0:160}'"
+        elif printf '%s' "$_etcd_dns" | jq -e ".records[]? | select(.domain == \"${_P40_SWEEP_DOMAIN}\")" >/dev/null 2>&1; then
             _issue="the controller left ${_P40_SWEEP_DOMAIN} in etcd, so the node has nothing to catch up with"
         fi
         _domains=$(_p40_dns_domains "${USER_ID}")
@@ -920,7 +1015,12 @@ phase40_offline_cli_writes() {
             "${_P40_SWEEP_DOMAIN},www.fastrg.org" "-" || true)
         [[ "$_verdict" == "ok" ]] || \
             _issue="${_issue:+${_issue}; }verdict '${_verdict}' while the node was cut off from etcd, so the wait below would prove nothing (records: ${_domains//$'\n'/, })"
+        _log_mark=$(_p40_log_mark)
+        [[ -n "$_log_mark" ]] || \
+            _issue="${_issue:+${_issue}; }node log ${_P40_LOG_PATH} could not be read"
+    fi
 
+    if e2e_node_etcd_blocked; then
         info "Step 183a: restoring node->etcd connectivity..."
         e2e_unblock_node_etcd
     fi
@@ -947,6 +1047,10 @@ phase40_offline_cli_writes() {
         done
         if [[ $_gone -eq 1 ]]; then
             _P40_SWEEP_LEFT=0
+            _source=$(e2e_dns_removal_source "$(_p40_log_window "$_log_mark")" \
+                "${USER_ID}" "${_P40_SWEEP_DOMAIN}" || true)
+            [[ "$_source" == "reconcile" ]] || \
+                _issue="${_P40_SWEEP_DOMAIN} is gone, but ${_P40_LOG_PATH} from the unblock on says '${_source}', not a reconcile pass before the removal"
         else
             _issue="verdict '${_verdict}' ${_waited}s after the reconnect (records: ${_domains//$'\n'/, })"
         fi
@@ -954,9 +1058,83 @@ phase40_offline_cli_writes() {
 
     if [[ -z "$_issue" ]]; then
         pass "Step 183a: a DNS removal missed while etcd was unreachable is applied on reconnect" \
-            "${_P40_SWEEP_DOMAIN} was still on the node while it was cut off and gone ${_waited}s after the reconnect"
+            "the node's etcd connection dropped ${_down_waited}s after the block; ${_P40_SWEEP_DOMAIN} removed then stayed on the node while it was cut off and was gone ${_waited}s after the unblock, behind a reconcile pass"
     else
         fail "Step 183a: a DNS removal missed while etcd was unreachable is applied on reconnect" "$_issue"
+    fi
+
+    # ------------------------------------------------------------------
+    # Step 183b — a silent etcd outage holds the node's connection until
+    #             lifted, then the node reconnects
+    #
+    # "both" drops etcd's replies, the reset included, so the node sees no
+    # error on its connection. Nothing may be written to etcd meanwhile:
+    # etcd gives up on the connection in time only while it is idle.
+    # ------------------------------------------------------------------
+    info "Step 183b: reading the node's etcd connection before a silent outage..."
+    _issue=""
+    _s0=""
+    _a_sport=""
+    _held=0
+    _blocked_at=0
+    _switched=""
+    _sport_now=""
+    _s0=$(_e2e_node_etcd_sport) || true
+    if [[ ! "$_s0" =~ ^[0-9]+$ ]]; then
+        _issue="no established node->etcd connection before the block ('${_s0}'), so there is none to follow"
+    else
+        _other=$(_e2e_node_etcd_sport "sport != :${_s0}") || true
+        [[ ! "$_other" =~ ^[0-9]+$ ]] || \
+            info "Step 183b: another node->etcd connection, from port ${_other}, is open too"
+        info "Step 183b: blocking node->etcd both ways for ${_P40_SILENT_BLOCK_SECS}s; the connection is from port ${_s0}..."
+        if e2e_block_node_etcd both; then
+            _blocked_at=$(date +%s)
+        else
+            _issue="the node->etcd block could not be installed"
+        fi
+    fi
+
+    if [[ -z "$_issue" ]]; then
+        _left=$(( _blocked_at + _P40_SILENT_HOLD_SECS - $(date +%s) ))
+        [[ "$_left" -le 0 ]] || sleep "$_left"
+        _a_sport=$(_e2e_node_etcd_sport "sport = :${_s0}") || true
+        _held=$(( $(date +%s) - _blocked_at ))
+        if [[ "$_a_sport" == "$_s0" ]]; then
+            info "Step 183b: the connection from port ${_s0} is still established ${_held}s into the block"
+        else
+            _issue="silent partition did not hold: the connection from port ${_s0} reads '${_a_sport}' ${_held}s into the two-way block"
+        fi
+    fi
+
+    if [[ -z "$_issue" ]]; then
+        _left=$(( _blocked_at + _P40_SILENT_BLOCK_SECS - $(date +%s) ))
+        [[ "$_left" -le 0 ]] || sleep "$_left"
+        info "Step 183b: lifting the block $(( $(date +%s) - _blocked_at ))s after it went up..."
+        e2e_unblock_node_etcd
+        if _switched=$(e2e_wait_node_etcd_conn_changed "$_s0" "$_P40_SILENT_SWITCH_SECS"); then
+            _sport_now=$(_e2e_node_etcd_sport) || true
+            _other=$(_e2e_node_etcd_sport "sport != :${_sport_now}") || true
+            [[ ! "$_other" =~ ^[0-9]+$ ]] || \
+                info "Step 183b: another node->etcd connection, from port ${_other}, is open too"
+        else
+            _sport_now=$(_e2e_node_etcd_sport) || true
+            _issue="the node was not on a new etcd connection ${_switched}s after the block was lifted (port now '${_sport_now}', before the block ${_s0})"
+            _switched=""
+        fi
+    fi
+
+    # Whichever way the step went, Step 184 starts with the node on etcd.
+    e2e_unblock_node_etcd
+    if [[ -z "$_switched" ]] && \
+            ! _waited=$(e2e_wait_node_etcd_conn_changed "" "$_P40_SILENT_SWITCH_SECS"); then
+        _issue="${_issue:+${_issue}; }no node->etcd connection ${_waited}s after the block was lifted"
+    fi
+
+    if [[ -z "$_issue" ]]; then
+        pass "Step 183b: a silent etcd outage holds the node's connection until lifted, then the node reconnects" \
+            "port ${_s0} still established ${_held}s into the two-way block; ${_switched}s after the ${_P40_SILENT_BLOCK_SECS}s block was lifted the node was on port ${_sport_now} and ${_s0} was gone"
+    else
+        fail "Step 183b: a silent etcd outage holds the node's connection until lifted, then the node reconnects" "$_issue"
     fi
 
     # ------------------------------------------------------------------

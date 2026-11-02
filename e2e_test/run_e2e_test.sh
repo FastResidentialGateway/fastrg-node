@@ -957,6 +957,8 @@ source "${_E2E_PHASES_DIR}/rss_probe_lib.sh"
 source "${_E2E_PHASES_DIR}/progress_lib.sh"
 # The node->etcd block every offline phase shares — not a phase either.
 source "${_E2E_PHASES_DIR}/etcd_block_lib.sh"
+# etcd reads and writes from the runner while that block is up — not a phase.
+source "${_E2E_PHASES_DIR}/etcd_http_lib.sh"
 # The crash check every SIGTERM stop of the node shares — not a phase either.
 source "${_E2E_PHASES_DIR}/node_shutdown_lib.sh"
 # Data-plane mode reading and the EnableDDP switch; uses node_shutdown_lib.sh.
